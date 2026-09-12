@@ -38,8 +38,9 @@ fn native_offline_funding_preflight_v23() -> Result<()> {
     scalar[0] = 7;
     let spend = xmr_crypto::XmrSpendShare::from_canonical_bytes(scalar)?.public_share()?;
     for network_tag in [1, 2] {
+        // The independent sweep-fee parser requires principal above the fee.
         let mut owner =
-            config.start_selected_v23(spend, 100, 10_000, network_tag, None, [0x79; 32])?;
+            config.start_selected_v23(spend, 1_000_000, 10_000, network_tag, None, [0x79; 32])?;
         owner.require_alive()?;
         assert_ne!(owner.hash(), [0; 32]);
     }
