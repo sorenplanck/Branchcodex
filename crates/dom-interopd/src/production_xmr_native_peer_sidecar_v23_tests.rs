@@ -249,6 +249,7 @@ fn executable_digest_v24(path: &Path) -> Result<[u8; 32]> {
 fn stopped_sidecar_directory_guard_rejects_link_and_permissive_cache_v24() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir()?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     require_private_directory_v24(root.path())?;
     let link = root.path().join("cache-link");
     std::os::unix::fs::symlink(root.path(), &link)?;
@@ -274,11 +275,13 @@ fn sidecar_readiness_cannot_reuse_another_hello_nonce_v24() -> Result<()> {
 
 #[test]
 fn sidecar_drop_preserves_cache_until_private_parent_cleanup_v24() -> Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let parent = tempfile::tempdir()?;
+    std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700))?;
     let child = tempfile::Builder::new()
         .prefix("xmr-peer-v23-")
         .tempdir_in(parent.path())?;
+    std::fs::set_permissions(child.path(), std::fs::Permissions::from_mode(0o700))?;
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(child.path().join("cache"))?;
