@@ -2,7 +2,10 @@
 
 #[path = "reservation_public_audit_v23.rs"]
 mod public_audit_v23;
-pub use public_audit_v23::reservation_context_digest_for_graph_v23;
+pub use public_audit_v23::{
+    reservation_context_digest_for_claim_v23, reservation_context_digest_for_funding_v23,
+    reservation_context_digest_for_graph_v23,
+};
 
 use crate::{
     AdaptorError, ContractKindV1, CounterpartyBucket, ParticipantId, ParticipantRosterV1,

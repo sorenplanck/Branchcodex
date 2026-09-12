@@ -7,6 +7,19 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Compile production library, CLI and integration targets
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+      run: cargo test --locked -p dom-interopd --no-default-features --features production --lib --tests --profile crypto-test --no-run
+    - name: Verify Funding and Claim reservation audit purposes
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+        RUST_TEST_THREADS: '1'
+      run: cargo test --locked -p dom-adaptor --lib --profile crypto-test reservation_binding::public_audit_v23::tests -- --nocapture --test-threads=1
     - uses: actions/checkout@v4
       with:
         repository: eigenwallet/core
@@ -22,10 +35,25 @@ runs:
       run: |
         set -euo pipefail
         python3 scripts/install-sidecar-into-eigenwallet.py "$XMR_TEST_WORKSPACE"
-        cargo build --manifest-path "$XMR_TEST_WORKSPACE/Cargo.toml" -p dom-xmr-sidecar --bin dom-xmr-sidecar --example offline_native_funding_v23
-        chmod go-w "$XMR_TEST_WORKSPACE/target/debug/dom-xmr-sidecar" "$XMR_TEST_WORKSPACE/target/debug/examples/offline_native_funding_v23"
-        echo "DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/debug/dom-xmr-sidecar" >> "$GITHUB_ENV"
-        echo "DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/debug/examples/offline_native_funding_v23" >> "$GITHUB_ENV"
+        # The parent Rust tests already use crypto-test, but a child executable
+        # does not inherit that profile. Previously both GPL crypto producers
+        # ran unoptimized debug code throughout every native graph. Configure
+        # the external workspace explicitly without modifying its pinned code.
+        # Keep debug assertions and overflow checks in the tools and dependencies.
+        cargo build --manifest-path "$XMR_TEST_WORKSPACE/Cargo.toml" \
+          --profile crypto-test \
+          --config 'profile.crypto-test.inherits="dev"' \
+          --config 'profile.crypto-test.opt-level=2' \
+          --config 'profile.crypto-test.debug=1' \
+          --config 'profile.crypto-test.debug-assertions=true' \
+          --config 'profile.crypto-test.overflow-checks=true' \
+          --config 'profile.crypto-test.lto=false' \
+          --config 'profile.crypto-test.codegen-units=16' \
+          --config 'profile.crypto-test.incremental=false' \
+          -p dom-xmr-sidecar --bin dom-xmr-sidecar --example offline_native_funding_v23
+        chmod go-w "$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar" "$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23"
+        echo "DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar" >> "$GITHUB_ENV"
+        echo "DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23" >> "$GITHUB_ENV"
     - name: Verify custody paths and real offline helper startup
       shell: bash
       working-directory: ${{ inputs.dom-path }}

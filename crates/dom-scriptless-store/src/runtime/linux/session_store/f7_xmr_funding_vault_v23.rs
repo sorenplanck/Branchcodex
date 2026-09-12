@@ -313,7 +313,7 @@ impl ContractsSessionStoreV1 {
             .kernels
             .first()
             .ok_or(SessionStoreError::Quarantined)?;
-        let context = dom_adaptor::reservation_context_digest_for_graph_v23(
+        let context = dom_adaptor::reservation_context_digest_for_funding_v23(
             dom_adaptor::SessionContextInputsV1 {
                 chain_id: *origin.chain.as_bytes(),
                 session_id: origin.session,

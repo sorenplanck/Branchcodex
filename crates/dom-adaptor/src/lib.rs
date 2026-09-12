@@ -499,6 +499,7 @@ pub use partial_commitment_pop::{
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use reservation_binding::{
+    reservation_context_digest_for_claim_v23, reservation_context_digest_for_funding_v23,
     reservation_context_digest_for_graph_v23, DurableReservationLookupV1,
     FreshReservationRequestV1, LocalReservationPresenceV12, PreparedFreshReservationV1,
     ReservationContextBindingV1, ReservationLookupCustodyV1,

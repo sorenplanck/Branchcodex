@@ -4240,6 +4240,19 @@ fn sync_parent(path: &Path) -> Result<()> {
         .map_err(|_| BitcoinActuatorErrorV1::InvalidStorageAuthority)
 }
 
+// A subprocess spawn can briefly inherit another test's flock descriptor
+// before exec closes it. Serialize the tests that spawn or reopen authorities;
+// production still refuses concurrent owners immediately, without retries.
+#[cfg(test)]
+static TEST_AUTHORITY_LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn test_authority_lifecycle() -> std::sync::MutexGuard<'static, ()> {
+    TEST_AUTHORITY_LIFECYCLE
+        .lock()
+        .expect("authority lifecycle test mutex poisoned")
+}
+
 #[cfg(test)]
 mod provisioning_tests {
     use std::error::Error;
@@ -4288,6 +4301,7 @@ mod provisioning_tests {
 
     #[test]
     fn creation_crash_child() -> TestResult {
+        let _serial = test_authority_lifecycle();
         let Some(path) = std::env::var_os("DOM_BTC_ACTUATOR_TEST_CRASH_PATH") else {
             return Ok(());
         };
@@ -4298,6 +4312,7 @@ mod provisioning_tests {
 
     #[test]
     fn subprocess_creation_boundaries_resume_only_through_explicit_api() -> TestResult {
+        let _serial = test_authority_lifecycle();
         for boundary in [
             "after-lock-fsync",
             "after-database-fsync",
@@ -4339,6 +4354,7 @@ mod provisioning_tests {
 
     #[test]
     fn retained_database_lock_owner_and_schema_are_fail_closed() -> TestResult {
+        let _serial = test_authority_lifecycle();
         let directory = owner_directory()?;
         let path = directory.path().join("actuator.sqlite");
         let mut store = DurableBitcoinActuatorV1::create(&path, [0xb1; 32])?;
@@ -4415,6 +4431,7 @@ mod provisioning_tests {
 
     #[test]
     fn sidecar_near_misses_are_not_creation_authority() -> TestResult {
+        let _serial = test_authority_lifecycle();
         let pristine = pristine_journal();
         assert_resume_rejects_journal(&pristine[..511])?;
 
@@ -4462,6 +4479,7 @@ mod provisioning_tests {
 
     #[test]
     fn resume_refuses_any_economic_state() -> TestResult {
+        let _serial = test_authority_lifecycle();
         let directory = owner_directory()?;
         let path = directory.path().join("actuator.sqlite");
         let mut store = DurableBitcoinActuatorV1::create(&path, [0xc1; 32])?;
@@ -4708,6 +4726,7 @@ mod fresh_time_tests {
 
     #[test]
     fn funding_reconciliation_uses_post_rpc_time_without_prelookup_mutation() -> TestResult {
+        let _serial = test_authority_lifecycle();
         let deployment = funding_deployment()?;
         let directory = tempfile::tempdir()?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -4730,18 +4749,24 @@ mod fresh_time_tests {
 
     #[test]
     fn funding_takeover_uses_post_rpc_time_without_refencing_expired_lease() -> TestResult {
+        let _serial = test_authority_lifecycle();
         let deployment = funding_deployment()?;
         let directory = tempfile::tempdir()?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
         let path = directory.path().join("funding-takeover.sqlite");
         let old_scope = funding_scope(&deployment, 1)?;
         let mut store = DurableBitcoinActuatorV1::create(&path, [0x19; 32])?;
-        store.acquire_lease(100, 50)?;
+        assert_eq!(store.acquire_lease(100, 50)?.expires_at_ms(), 150);
         plant_funding(&mut store, &old_scope, 101)?;
         drop(store);
 
-        let mut store = DurableBitcoinActuatorV1::open_existing(&path, [0x1a; 32])?;
-        assert_eq!(store.acquire_lease(151, 50)?.fence_epoch(), 2);
+        let mut store = DurableBitcoinActuatorV1::open_existing(&path, [0x1a; 32])
+            .map_err(|error| format!("takeover reopen original authority: {error}"))?;
+        let takeover = store
+            .acquire_lease(151, 50)
+            .map_err(|error| format!("takeover acquire expired durable lease: {error}"))?;
+        assert_eq!(takeover.fence_epoch(), 2);
+        assert_eq!(takeover.expires_at_ms(), 201);
         let new_scope = funding_scope(&deployment, 2)?;
         let before = store.funding_operation(old_scope.effect_id())?;
         let clock_before = retained_clock(&store)?;

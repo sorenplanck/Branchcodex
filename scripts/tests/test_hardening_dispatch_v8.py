@@ -1,6 +1,7 @@
 """Exercise literal CI dispatch and isolated oracle inputs through real processes."""
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -12,6 +13,45 @@ import test_interop_hardening as runner
 
 
 class HardeningDispatchTests(unittest.TestCase):
+    def test_gpl_children_are_optimized_without_disabling_debug_safety(self):
+        action = (Path(__file__).resolve().parents[2]
+                  / ".github/actions/xmr-test-tools/action.yml").read_text()
+        tools_step = action.split("- name: Build pinned offline tools", 1)[1].split("- name:", 1)[0]
+        self.assertIn("--profile crypto-test", tools_step)
+        for setting in (
+            'inherits="dev"', "opt-level=2", "debug=1", "debug-assertions=true",
+            "overflow-checks=true", "lto=false", "codegen-units=16", "incremental=false",
+        ):
+            self.assertIn(f"--config 'profile.crypto-test.{setting}'", tools_step)
+        self.assertNotIn("target/debug/", tools_step)
+        self.assertIn("DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar", tools_step)
+        self.assertIn("DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23", tools_step)
+        self.assertIn("--bin dom-xmr-sidecar --example offline_native_funding_v23", tools_step)
+
+
+    def test_f7_regtest_and_boundaries_are_mandatory_in_heavy_gate(self):
+        workflow = (Path(__file__).resolve().parents[2]
+                    / ".github/workflows/heavy-tests.yml").read_text()
+        jobs = dict(re.findall(r"^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+                               workflow, re.MULTILINE | re.DOTALL))
+        live = jobs["live-composed-route"]
+        self.assertNotIn("continue-on-error:", live)
+        steps = re.split(r"^      - ", live, flags=re.MULTILINE)
+        f7 = [step for step in steps if "--test f7_bitcoin_regtest" in step]
+        self.assertEqual(len(f7), 1)
+        self.assertNotRegex(f7[0], r"(?m)^        if:")
+        command = next(line.strip().removeprefix("run: ") for line in f7[0].splitlines()
+                       if line.strip().startswith("run: "))
+        self.assertEqual(command.split(), [
+            "cargo", "test", "--locked", "-p", "f5-e2e", "--test", "f7_bitcoin_regtest",
+            "--", "--include-ignored", "--nocapture", "--test-threads=1",
+        ])
+        gate = jobs["heavy-gate"]
+        dependencies = re.search(r"^    needs: \[([^\]]+)\]$", gate, re.MULTILINE)
+        self.assertIsNotNone(dependencies)
+        self.assertIn("live-composed-route", [name.strip() for name in dependencies[1].split(",")])
+        self.assertIn("${{ needs.live-composed-route.result }}", gate)
+
     def test_production_keeps_all_targets_and_continues_after_a_failed_target(self):
         root = Path(".")
         for mode in ("components", "full", "runtime", "v6"):

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use adapter_btc::timelock::{
     bind_and_validate_funding_anchors, BitcoinFinalityPolicyV1, BitcoinFundingAnchorV1,
-    ChainTimingBoundsV1, DomFundingAnchorV1, M8FundingAnchorsV1, M8TimingPolicyV1,
+    ChainTimingBoundsV1, DomFundingAnchorV1, M8FundingAnchorsV1, M8TimingPolicyV1, TimelockError,
     TimelockOffsetV1,
 };
 use adapter_btc::types::BitcoinNetworkV1;
@@ -291,7 +291,12 @@ fn real_bitcoin_timing_policy(terms_hash: [u8; 32]) -> M8TimingPolicyV1 {
     M8TimingPolicyV1 {
         settlement_terms_hash: terms_hash,
         first_refund: TimelockOffsetV1::BtcBlocks { delta_blocks: 10 },
-        second_refund: TimelockOffsetV1::DomBlocks { delta_blocks: 200 },
+        // The BTC funding anchor carries 10 * 600 seconds of MTP uncertainty,
+        // followed by at most 10 * 600 seconds for the CSV delay. Including
+        // the unchanged 1,800-second safety margin requires 13,800 seconds.
+        // 240 DOM blocks at the minimum 60 seconds give 14,400 seconds; the
+        // old 200-block fixture gave only 12,000 and was correctly refused.
+        second_refund: TimelockOffsetV1::DomBlocks { delta_blocks: 240 },
         safety_margin_seconds: 1_800,
         dom_bounds: bounds,
         btc_bounds: bounds,
@@ -304,6 +309,48 @@ fn real_bitcoin_timing_policy(terms_hash: [u8; 32]) -> M8TimingPolicyV1 {
             policy_id: [0x75; 32],
             version: 1,
         },
+    }
+}
+
+#[test]
+fn regtest_timing_fixture_covers_mtp_uncertainty_before_dom_refund() {
+    // Arithmetic-only synthetic anchors, not verified chain evidence. The
+    // ignored regtest above independently verifies actual Bitcoin funding.
+    let policy = real_bitcoin_timing_policy([0x73; 32]);
+    assert_eq!(
+        policy.second_refund,
+        TimelockOffsetV1::DomBlocks { delta_blocks: 240 }
+    );
+    for (delta_blocks, accepted) in [(200, false), (229, false), (230, true), (240, true)] {
+        let candidate = M8TimingPolicyV1 {
+            second_refund: TimelockOffsetV1::DomBlocks { delta_blocks },
+            ..policy
+        };
+        let anchors = M8FundingAnchorsV1 {
+            settlement_terms_hash: candidate.settlement_terms_hash,
+            policy_digest: candidate.policy_digest().expect("candidate policy digest"),
+            dom: DomFundingAnchorV1 {
+                funding_txid: [0x76; 32],
+                block_hash: [0x77; 32],
+                height: 50,
+                block_time_seconds: 1_700_000_000,
+            },
+            bitcoin: BitcoinFundingAnchorV1 {
+                funding_txid: [0x78; 32],
+                block_hash: [0x79; 32],
+                height: 102,
+                median_time_past: 1_700_000_000,
+            },
+        };
+        let result = bind_and_validate_funding_anchors(&candidate, &anchors);
+        if accepted {
+            assert!(result.is_ok(), "safe DOM delay {delta_blocks}: {result:?}");
+        } else {
+            assert!(
+                matches!(result, Err(TimelockError::UnsafeCrossChainWindow)),
+                "unsafe DOM delay {delta_blocks}: {result:?}"
+            );
+        }
     }
 }
 

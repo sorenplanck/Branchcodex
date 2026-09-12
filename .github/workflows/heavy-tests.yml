@@ -260,16 +260,10 @@ jobs:
           cast chain-id --rpc-url http://127.0.0.1:8547
           cargo test --locked -p f5-e2e --test composed_route_live -- --ignored --nocapture --test-threads=1
 
-      # Known-stale component test, run last and non-blocking: its explicit
-      # DOM fixture uses a 200-block second-refund window, which
-      # composed_route_live.rs documents as violating its own conservative
-      # bound and being refused by bind_and_validate_funding_anchors with
-      # UnsafeCrossChainWindow — "that refusal is the validator working."
-      # Kept visible here so the day the fixture is recalibrated the step
-      # turns green on its own; continue-on-error until then.
-      - name: F7 Bitcoin regtest anchor leg (known UnsafeCrossChainWindow refusal)
-        continue-on-error: true
-        run: cargo test --locked -p f5-e2e --test f7_bitcoin_regtest -- --ignored --nocapture --test-threads=1
+      # Both the real regtest anchor leg and its conservative-window
+      # boundary regression are mandatory; neither failure may be masked.
+      - name: F7 Bitcoin regtest anchor leg and safety-window boundaries
+        run: cargo test --locked -p f5-e2e --test f7_bitcoin_regtest -- --include-ignored --nocapture --test-threads=1
 
   bp-soak:
     name: "DSC-F4 collaborative Bulletproof soak (10 000 cases)"
