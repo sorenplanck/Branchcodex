@@ -5,7 +5,8 @@
 #   * integration-heavy — the `env-blocked-wsl` `#[ignore]` suite of
 #     dom-integration-tests (two/three node, reorg, IBD, late join, mempool
 #     relay, wallet flow) plus the dom-pow fast/light equivalence test that
-#     builds a second ~2 GB RandomX dataset.
+#     builds a second ~2 GB RandomX dataset. The two are independent, so
+#     they run as parallel matrix legs instead of back-to-back.
 #   * interop-full — scripts/test_interop_hardening.py in `--mode full`:
 #     the components graph PLUS bitcoin-regtest (real Bitcoin Core),
 #     `FOUNDRY_PROFILE=deep forge test` and the Anvil cross-chain gate.
@@ -15,15 +16,39 @@
 #     Core regtest node (composed_route_live), and the F7 regtest anchor
 #     leg (f7_bitcoin_regtest). They spawn their own bitcoind; this job
 #     provides bitcoind/bitcoin-cli/cast on PATH, a live Anvil on :8547
-#     and the forge artifact they read.
+#     and the forge artifact they read. The btc-actuator daemon suite is
+#     independent of the composed route, so it runs as its own matrix leg.
 #   * bp-soak — the DSC-F4 collaborative Bulletproof soak at its full
 #     10 000-case requirement (seconds per case locally; hours of CPU).
+#     Sharded into the test's own disjoint batches: each case is seeded
+#     from its GLOBAL case index, so batch n covers exactly indices
+#     [n*1000, (n+1)*1000) and ten 1000-case batches execute precisely the
+#     same 10 000 cases (same seeds, same values) as one monolithic run —
+#     in a tenth of the wall clock.
 #
 # Deliberately NOT here: `#[ignore]`d subprocess crash helpers (only their
 # parent tests may invoke them), golden-vector printers ("run only when
 # re-freezing on purpose"), fixture-gated XMR replay tests
 # (DOM_XMR_REPLAY_FIXTURE_V23), and the Sepolia workflows that spend real
 # testnet funds — those stay operator-dispatched in f3/f4-sepolia.yml.
+#
+# Optimization pass (same tests, same commands, same profiles, same gate):
+#   - independent suites split into parallel matrix legs (see above);
+#     every `cargo test` line is byte-identical to the serial version.
+#   - apt installs are guarded: ubuntu-latest preinstalls build-essential,
+#     pkg-config, clang, cmake and python3, so the step only pays for
+#     apt-get when a tool is actually missing.
+#   - the preinstalled-SDK reclaim removes paths in parallel.
+#   - pinned Bitcoin Core binaries, pinned forge dependencies and the
+#     eigenwallet GPL tool build are cached (exact-keyed on their pins;
+#     the installers still run and still verify versions on a hit).
+#   - dom-xmr-native gains the cargo/target caches every other job here
+#     already had.
+#   - actions bumped to the same majors ci.yml uses (Node 24 runtimes).
+# Deliberately NOT changed: CARGO_BUILD_JOBS=2 / RUST_TEST_THREADS=1 on
+# crypto-test invocations (the profile documents that pin), opt-levels,
+# --test-threads=1 on port-binding suites, and the serial evidence graph
+# inside test_interop_hardening.py (its report is ordered by design).
 
 name: heavy-tests
 
@@ -60,49 +85,69 @@ env:
 
 jobs:
   integration-heavy:
-    name: "env-blocked integration suite + 2 GB RandomX dataset"
+    name: "env-blocked integration — ${{ matrix.part }}"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'integration-heavy' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      # Independent suites: one leg failing must not cancel the other's
+      # evidence.
+      fail-fast: false
+      matrix:
+        part: [multi-node, randomx-dataset]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      # Same reclaim as ci.yml build-test: the workspace test binaries plus
-      # the RandomX dataset exhaust the runner's ~14 GB free disk otherwise.
+      # Same reclaim as ci.yml build-test. Only the multi-node leg links the
+      # workspace-wide test binaries that exhaust the runner's ~14 GB free
+      # disk; the dataset leg builds dom-pow alone (the 2 GB dataset lives in
+      # RAM), so it skips the docker prune and keeps only the cheap parallel
+      # path removals.
       - name: Free disk space
         run: |
           echo "Disk before cleanup:"; df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-            /usr/local/lib/node_modules
-          sudo docker image prune -af || true
+          for path in /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/local/lib/node_modules; do
+            sudo rm -rf "$path" &
+          done
+          if [ "${{ matrix.part }}" = "multi-node" ]; then
+            sudo docker image prune -af >/dev/null 2>&1 &
+          fi
+          wait
           echo "Disk after cleanup:"; df -h /
 
       - uses: dtolnay/rust-toolchain@stable
         id: rust
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-heavy-integration-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-heavy-integration-${{ matrix.part }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-heavy-integration-${{ steps.rust.outputs.cachekey }}-
+            cargo-heavy-integration-${{ matrix.part }}-${{ steps.rust.outputs.cachekey }}-
+            cargo-heavy-integration-
 
-      - name: Install Linux build tooling
+      # Preinstalled on ubuntu-latest; apt only runs if the image ever drops
+      # a tool.
+      - name: Ensure Linux build tooling
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
+          if ! command -v cc >/dev/null || ! command -v pkg-config >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential pkg-config
+          fi
 
       # The env-blocked-wsl multi-node suite. Same regtest fast-mining
       # environment the release-blocker-integration-tests job proves out,
       # serial because the nodes bind real local ports.
       - name: dom-integration-tests — full `#[ignore]` suite
+        if: ${{ matrix.part == 'multi-node' }}
         env:
           DOM_NETWORK: regtest
           DOM_REGTEST_FAST_MINING: "1"
@@ -113,6 +158,7 @@ jobs:
       # Builds the second ~2 GB RandomX dataset and pins fast mode to the
       # frozen consensus vector — minutes of CPU, well beyond an 8 GB WSL.
       - name: dom-pow — fast/light dataset equivalence (2 GB dataset)
+        if: ${{ matrix.part == 'randomx-dataset' }}
         run: cargo test --locked -p dom-pow --test miner_light_equivalence -- --ignored --nocapture
 
   interop-full:
@@ -121,16 +167,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-            /usr/local/lib/node_modules
+          for path in /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/local/lib/node_modules; do
+            sudo rm -rf "$path" &
+          done
+          wait
           df -h /
 
       - name: Verify frozen consensus sources
@@ -144,13 +193,45 @@ jobs:
             . -> target
             programs/dom-solana-escrow -> target
 
-      - name: Build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+      # The pinned GPL tool build is deterministic for a given action pin
+      # and sidecar source; restoring its target lets cargo skip the large
+      # unchanged dependency tree (the sidecar itself always recompiles
+      # after the installer copies it in).
+      - name: Cache eigenwallet GPL tool build
+        uses: actions/cache@v6
+        with:
+          path: .ci-eigenwallet/target
+          key: xmr-eigenwallet-${{ hashFiles('.github/actions/xmr-test-tools/action.yml', 'scripts/install-sidecar-into-eigenwallet.py', 'external-gpl/dom-xmr-sidecar/**') }}
+          restore-keys: |
+            xmr-eigenwallet-
+
+      # Preinstalled on ubuntu-latest; apt only runs if the image ever drops
+      # a tool.
+      - name: Ensure build prerequisites
+        run: |
+          missing=0
+          for tool in cc clang cmake pkg-config python3; do
+            command -v "$tool" >/dev/null || missing=1
+          done
+          if [ "$missing" = 1 ]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential clang cmake pkg-config python3
+          fi
 
       # The `full` extras over `components`: bitcoin-regtest needs a real
       # pinned Bitcoin Core; evm-deep and evm-anvil need forge/anvil/cast
       # plus the pinned Solidity dependencies (vendoring is intentionally
-      # absent — same audited tags ci.yml installs).
+      # absent — same audited tags ci.yml installs). Both installs are
+      # cached exact-keyed on their pins; the installer still runs on a hit
+      # and still verifies the installed version.
+      - name: Cache pinned Bitcoin Core
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/bin/bitcoind
+            ~/.local/bin/bitcoin-cli
+          key: bitcoin-core-${{ hashFiles('scripts/f5-install-bitcoin-core.sh') }}
+
       - name: Install pinned Bitcoin Core
         run: |
           BITCOIN_PREFIX="$HOME/.local" bash scripts/f5-install-bitcoin-core.sh
@@ -160,11 +241,17 @@ jobs:
         with:
           version: 1.7.1
 
+      - name: Cache pinned Solidity dependencies
+        uses: actions/cache@v6
+        with:
+          path: contracts/lib
+          key: forge-deps-openzeppelin-v5.1.0-forge-std-v1.9.6
+
       - name: Install pinned Solidity dependencies
         working-directory: contracts
         run: |
-          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
-          forge install foundry-rs/forge-std@v1.9.6 --no-git
+          [ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          [ -d lib/forge-std ] || forge install foundry-rs/forge-std@v1.9.6 --no-git
 
       - uses: ./.github/actions/xmr-test-tools
 
@@ -179,45 +266,73 @@ jobs:
 
       - name: Retain actual outcomes including failures
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: interop-hardening-full-${{ github.sha }}
           path: artifacts/interop-hardening/
           if-no-files-found: error
 
   live-composed-route:
-    name: "f5-e2e LIVE — anvil + Bitcoin Core composed route"
+    name: "f5-e2e LIVE — ${{ matrix.part }}"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'live-composed-route' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      # Independent suites: one leg failing must not cancel the other's
+      # evidence.
+      fail-fast: false
+      matrix:
+        part: [btc-actuator, composed-route]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-            /usr/local/lib/node_modules
+          for path in /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/local/lib/node_modules; do
+            sudo rm -rf "$path" &
+          done
+          wait
           df -h /
 
       - uses: dtolnay/rust-toolchain@stable
         id: rust
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-heavy-live-route-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-heavy-live-route-${{ matrix.part }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-heavy-live-route-${{ steps.rust.outputs.cachekey }}-
+            cargo-heavy-live-route-${{ matrix.part }}-${{ steps.rust.outputs.cachekey }}-
+            cargo-heavy-live-route-
 
-      - name: System dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+      # Preinstalled on ubuntu-latest; apt only runs if the image ever drops
+      # a tool.
+      - name: Ensure system dependencies
+        run: |
+          missing=0
+          for tool in cc clang pkg-config; do
+            command -v "$tool" >/dev/null || missing=1
+          done
+          if [ "$missing" = 1 ]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential clang pkg-config
+          fi
+
+      - name: Cache pinned Bitcoin Core
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/bin/bitcoind
+            ~/.local/bin/bitcoin-cli
+          key: bitcoin-core-${{ hashFiles('scripts/f5-install-bitcoin-core.sh') }}
 
       - name: Install pinned Bitcoin Core
         run: |
@@ -225,27 +340,38 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - uses: foundry-rs/foundry-toolchain@v1
+        if: ${{ matrix.part == 'composed-route' }}
         with:
           version: 1.7.1
+
+      - name: Cache pinned Solidity dependencies
+        if: ${{ matrix.part == 'composed-route' }}
+        uses: actions/cache@v6
+        with:
+          path: contracts/lib
+          key: forge-deps-openzeppelin-v5.1.0-forge-std-v1.9.6
 
       # composed_route_live reads the ConditionLockV2 creation bytecode from
       # contracts/out/, so the artifact must exist before the test runs.
       - name: Build the forge artifact the test reads
+        if: ${{ matrix.part == 'composed-route' }}
         working-directory: contracts
         run: |
-          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
-          forge install foundry-rs/forge-std@v1.9.6 --no-git
+          [ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          [ -d lib/forge-std ] || forge install foundry-rs/forge-std@v1.9.6 --no-git
           forge build
 
       # Owns its throwaway bitcoind; ignored only because it needs the
       # installed Bitcoin Core on PATH.
       - name: btc-actuator — Bitcoin Core regtest daemon suite
+        if: ${{ matrix.part == 'btc-actuator' }}
         run: cargo test --locked -p btc-actuator --test bitcoin_core_regtest -- --ignored --nocapture --test-threads=1
 
       # The composed route needs a live Anvil at :8547 (the test's default
       # COMPOSED_EVM_RPC); it spawns its own bitcoind. Bounded readiness
       # poll, and the trap stops the node whatever the tests did.
       - name: Composed cross-chain route — LIVE on both chains
+        if: ${{ matrix.part == 'composed-route' }}
         run: |
           set -euo pipefail
           anvil --port 8547 --silent &
@@ -268,24 +394,33 @@ jobs:
       # Kept visible here so the day the fixture is recalibrated the step
       # turns green on its own; continue-on-error until then.
       - name: F7 Bitcoin regtest anchor leg (known UnsafeCrossChainWindow refusal)
+        if: ${{ matrix.part == 'composed-route' }}
         continue-on-error: true
         run: cargo test --locked -p f5-e2e --test f7_bitcoin_regtest -- --ignored --nocapture --test-threads=1
 
   bp-soak:
-    name: "DSC-F4 collaborative Bulletproof soak (10 000 cases)"
+    name: "DSC-F4 Bulletproof soak — batch ${{ matrix.batch }} of 0–9 (1000 disjoint cases)"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'bp-soak' }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    strategy:
+      # Every batch's evidence line matters; a failing case in one batch
+      # must not cancel the others.
+      fail-fast: false
+      matrix:
+        batch: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         id: rust
 
+      # One shared key across the batches: the release build is identical,
+      # so the first batch to finish saves it and every later run restores.
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -295,17 +430,30 @@ jobs:
           restore-keys: |
             cargo-heavy-bp-soak-${{ steps.rust.outputs.cachekey }}-
 
-      - name: Install Linux build tooling
+      # Preinstalled on ubuntu-latest; apt only runs if the image ever drops
+      # a tool.
+      - name: Ensure Linux build tooling
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
+          if ! command -v cc >/dev/null || ! command -v pkg-config >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential pkg-config
+          fi
 
       # The soak test's own note: "set DSC_F4_SOAK_CASES=10000 for the full
       # requirement". Release profile: the cases are constant-factor crypto,
       # not timing-semantic, and 10 000 debug cases would blow the budget.
-      - name: Run the full soak requirement
+      #
+      # Sharded by the test's own batch design: each case is seeded from its
+      # global index (Prng::for_case(seed, batch*1000 + offset)), so batch n
+      # runs exactly indices [n*1000, (n+1)*1000) and the ten legs together
+      # execute the identical 10 000 cases — same seeds, same values, no
+      # overlap, no gap — that one DSC_F4_SOAK_CASES=10000 run executes.
+      # Each leg's evidence line states its own index_range so the batches
+      # accumulate without double-counting.
+      - name: Run soak batch ${{ matrix.batch }} of the 10 000-case requirement
         env:
-          DSC_F4_SOAK_CASES: "10000"
+          DSC_F4_SOAK_CASES: "1000"
+          DSC_F4_SOAK_BATCH: "${{ matrix.batch }}"
         run: cargo test --locked --release -p dom-adaptor --test collaborative_bp_soak -- --ignored --nocapture
 
   dom-xmr-native:
@@ -314,11 +462,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: dom
 
       - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dom/target
+          key: cargo-heavy-xmr-native-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('dom/Cargo.lock') }}
+          restore-keys: |
+            cargo-heavy-xmr-native-${{ steps.rust.outputs.cachekey }}-
+
+      # Same pinned GPL tool cache as interop-full (hashFiles hashes file
+      # contents, so the dom/ prefix yields the same key).
+      - name: Cache eigenwallet GPL tool build
+        uses: actions/cache@v6
+        with:
+          path: .ci-eigenwallet/target
+          key: xmr-eigenwallet-${{ hashFiles('dom/.github/actions/xmr-test-tools/action.yml', 'dom/scripts/install-sidecar-into-eigenwallet.py', 'dom/external-gpl/dom-xmr-sidecar/**') }}
+          restore-keys: |
+            xmr-eigenwallet-
 
       - uses: ./dom/.github/actions/xmr-test-tools
         with:
@@ -355,7 +525,7 @@ jobs:
 
       - name: Upload failed synthetic XMR journals
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dom-xmr-failed-fixture-${{ github.sha }}-${{ github.run_attempt }}
           path: |
@@ -371,7 +541,8 @@ jobs:
     if: always()
     steps:
       # skipped is acceptable (a dispatch may select one suite); failure and
-      # cancellation are not.
+      # cancellation are not. A matrix job's result aggregates its legs, so
+      # every batch/part must pass for its suite to count as success.
       - name: Require every selected suite to pass
         run: |
           for r in "${{ needs.integration-heavy.result }}" \

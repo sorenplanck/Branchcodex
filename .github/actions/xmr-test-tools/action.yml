@@ -7,12 +7,16 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v4
+    # clean: false keeps a cache-restored .ci-eigenwallet/target across the
+    # checkout (the default `git clean -ffdx` would delete it); the pinned
+    # ref still fully determines every tracked file.
+    - uses: actions/checkout@v7
       with:
         repository: eigenwallet/core
         ref: 0e17c7f7cd8f0657af176c8852aa4c9949586051
         path: .ci-eigenwallet
         persist-credentials: false
+        clean: false
     - name: Build pinned offline tools
       shell: bash
       working-directory: ${{ inputs.dom-path }}
