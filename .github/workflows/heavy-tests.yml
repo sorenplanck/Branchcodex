@@ -232,6 +232,10 @@ jobs:
       - name: F7 Bitcoin regtest anchor leg
         run: cargo test --locked -p f5-e2e --test f7_bitcoin_regtest -- --ignored --nocapture --test-threads=1
 
+      # Also owns its throwaway bitcoind; ignored for the same PATH reason.
+      - name: btc-actuator — Bitcoin Core regtest daemon suite
+        run: cargo test --locked -p btc-actuator --test bitcoin_core_regtest -- --ignored --nocapture --test-threads=1
+
       # The composed route needs a live Anvil at :8547 (the test's default
       # COMPOSED_EVM_RPC); it spawns its own bitcoind. Bounded readiness
       # poll, and the trap stops the node whatever the tests did.
