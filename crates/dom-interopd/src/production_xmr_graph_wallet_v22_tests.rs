@@ -207,23 +207,29 @@ fn v23_native_claim_six_messages_and_presignature_with_real_output_scan(
             .with_funding_fee_cap_v23(10_000)?
             .with_claim_payout_v23()?,
         |secrets, signed, terms, actors, work, roles| {
-            let mut funding = config.start(
-                secrets.combined_spend_public_key_v23()?,
-                u64::try_from(terms[0].counterparty_leg.amount)?,
-                u64::try_from(terms[0].fee_limit.counterparty_max)?,
-            )?;
+            let mut funding = config
+                .start(
+                    secrets.combined_spend_public_key_v23()?,
+                    u64::try_from(terms[0].counterparty_leg.amount)?,
+                    u64::try_from(terms[0].fee_limit.counterparty_max)?,
+                )
+                .map_err(|error| format!("native claim funding observer startup: {error}"))?;
+            eprintln!("native claim: real GPL funding observer ready");
             let refund_hash =
                 dom_adaptor::canonical_template_v1(signed.produced[0].graph().refund_template())?.1;
-            let native = secrets.initialize_custody(
-                &terms[0],
-                refund_hash,
-                funding.hash(),
-                funding.destination(),
-                actors,
-                work,
-            )?;
+            let native = secrets
+                .initialize_custody(
+                    &terms[0],
+                    refund_hash,
+                    funding.hash(),
+                    funding.destination(),
+                    actors,
+                    work,
+                )
+                .map_err(|error| format!("native claim initialize custody: {error}"))?;
             let (signed, native) =
-                native_funding_v23::custody_and_funding_for_claim(signed, native, roles, work)?;
+                native_funding_v23::custody_and_funding_for_claim(signed, native, roles, work)
+                    .map_err(|error| format!("native claim custody and funding: {error}"))?;
             native_observation_v23::run_claim(signed, native, work, &mut funding)
         },
     )
@@ -799,7 +805,12 @@ where
                                 &terms,
                                 downstream_claim
                                     .ok_or("missing actual downstream Claim template")?,
-                            )?;
+                            )
+                            .map_err(|error| format!("native graph claim role binding: {error}"))?;
+                            eprintln!(
+                                "native graph: both claim roles bound after {:?}",
+                                started.elapsed()
+                            );
                             // Read the same encrypted wallets after both session
                             // owners dropped, before handing control to the next
                             // runtime phase. Both sets of durable payout pins must
@@ -915,6 +926,13 @@ where
             "native graph: failed fixture retained at {}",
             retained.display()
         );
+        // Explicit CI opt-in, synthetic test identities only. Preserve the
+        // exact journals for read-only diagnosis after the ephemeral runner exits.
+        if let Some(marker) = std::env::var_os("DOM_XMR_FAILED_FIXTURE_MARKER_V23") {
+            if let Err(error) = std::fs::write(marker, format!("{}\n", retained.display())) {
+                eprintln!("native graph: failed to record retained fixture location: {error}");
+            }
+        }
     }
     result
 }

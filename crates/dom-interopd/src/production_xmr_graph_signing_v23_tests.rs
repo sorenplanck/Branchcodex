@@ -252,32 +252,48 @@ pub(super) fn sign_three_real_edges(
     let mut retained_keys = Vec::new();
     for (actor, graph) in formed.into_iter().enumerate() {
         let cancel_session = stores[actor]
-            .resume_xmr_graph_signing_session_v23(bindings[actor][0].session_id(), Edge::Cancel)?;
-        let refund_session =
-            stores[actor].resume_xmr_graph_signing_session_v23(parent, Edge::RefundAdaptor)?;
-        let compensation_session = stores[actor].resume_xmr_graph_signing_session_v23(
-            bindings[actor][2].session_id(),
-            Edge::Compensation,
-        )?;
+            .resume_xmr_graph_signing_session_v23(bindings[actor][0].session_id(), Edge::Cancel)
+            .map_err(|error| format!("graph completion cancel-session actor={actor}: {error}"))?;
+        let refund_session = stores[actor]
+            .resume_xmr_graph_signing_session_v23(parent, Edge::RefundAdaptor)
+            .map_err(|error| format!("graph completion refund-session actor={actor}: {error}"))?;
+        let compensation_session = stores[actor]
+            .resume_xmr_graph_signing_session_v23(
+                bindings[actor][2].session_id(),
+                Edge::Compensation,
+            )
+            .map_err(|error| {
+                format!("graph completion compensation-session actor={actor}: {error}")
+            })?;
         let cancel = produce_completed_xmr_ordinary_round_v12(
             &cancel_session,
             &graph.templates,
             &graph.keys,
             XmrOrdinaryRecoveryKindV12::Cancel,
-        )?;
+        )
+        .map_err(|error| format!("graph completion cancel-signature actor={actor}: {error}"))?;
         let compensation = produce_completed_xmr_ordinary_round_v12(
             &compensation_session,
             &graph.templates,
             &graph.keys,
             XmrOrdinaryRecoveryKindV12::Compensation,
-        )?;
+        )
+        .map_err(|error| {
+            format!("graph completion compensation-signature actor={actor}: {error}")
+        })?;
         let refund = ProductionCompletedXmrRefundRoundV12::from_store_session(
             &refund_session,
             &graph.templates,
             &graph.keys,
-        )?;
-        produced.push(refund.complete_graph(graph.templates, cancel, compensation)?);
+        )
+        .map_err(|error| format!("graph completion refund-presignature actor={actor}: {error}"))?;
+        produced.push(
+            refund
+                .complete_graph(graph.templates, cancel, compensation)
+                .map_err(|error| format!("graph completion verify actor={actor}: {error}"))?,
+        );
         retained_keys.push(graph.keys);
+        eprintln!("graph completion actor={actor} verified");
     }
     drop(signers);
     drop(identities);
@@ -313,7 +329,11 @@ pub(super) fn sign_three_real_edges(
                     format!("graph signing reopen-vault actor={actor} edge={index}: {error}")
                 })?;
             let before = store.load_session(target)?;
-            let ingress = store.prepare_xmr_graph_signing_ingress_v23(target, edge)?;
+            let ingress = store
+                .prepare_xmr_graph_signing_ingress_v23(target, edge)
+                .map_err(|error| {
+                    format!("graph signing reopen-ingress actor={actor} edge={index}: {error}")
+                })?;
             for bytes in &messages[index] {
                 store
                     .accept_xmr_graph_signing_ingress_v23(&ingress, bytes)
@@ -332,6 +352,7 @@ pub(super) fn sign_three_real_edges(
             assert!(before.irreversible().any_signing_share_sent);
             assert!(!before.irreversible().adaptor_secret_exposed);
             drop(vault);
+            eprintln!("graph signing durable replay actor={actor} edge={index} verified");
         }
         reopened.push(store);
     }

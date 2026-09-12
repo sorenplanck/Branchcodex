@@ -323,11 +323,40 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "2"
           RUST_TEST_THREADS: "1"
+          DOM_XMR_FAILED_FIXTURE_MARKER_V23: ${{ runner.temp }}/dom-xmr-failed-fixture-path.txt
         run: |
           cargo test --locked -p dom-interopd --no-default-features --features production \
             --lib --profile crypto-test \
             production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan \
             -- --exact --nocapture
+
+      # These are generated offline test identities, never operator wallets.
+      # Tar retains private modes; artifact ZIP alone does not preserve them.
+      - name: Preserve failed synthetic XMR journals
+        if: failure()
+        shell: bash
+        run: |
+          marker="$RUNNER_TEMP/dom-xmr-failed-fixture-path.txt"
+          if [[ ! -f "$marker" ]]; then
+            echo "No retained native fixture was produced."
+            exit 0
+          fi
+          IFS= read -r fixture < "$marker"
+          [[ "$fixture" == /tmp/.tmp* && -d "$fixture" && ! -L "$fixture" ]]
+          [[ "$(realpath -- "$fixture")" == "$fixture" ]]
+          [[ "$(stat -c '%u:%a' -- "$fixture")" == "$(id -u):700" ]]
+          tar -czf "$RUNNER_TEMP/dom-xmr-failed-fixture.tar.gz" -C "$fixture" .
+
+      - name: Upload failed synthetic XMR journals
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-xmr-failed-fixture-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dom-xmr-failed-fixture.tar.gz
+            ${{ runner.temp }}/dom-xmr-failed-fixture-path.txt
+          if-no-files-found: warn
+          retention-days: 7
 
   heavy-gate:
     name: heavy suites gate

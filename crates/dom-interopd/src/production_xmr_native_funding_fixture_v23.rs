@@ -21,6 +21,14 @@ pub(super) mod native_claim_v23;
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
+fn custody_stage<T, E: std::fmt::Display>(
+    actor: usize,
+    stage: &str,
+    result: core::result::Result<T, E>,
+) -> Result<T> {
+    result.map_err(|error| format!("native custody actor={actor} {stage}: {error}").into())
+}
+
 pub(crate) fn custody_and_funding(
     signed: SignedNativeGraphFixtureV23,
     native: NativeXmrCustodyFixtureV23,
@@ -40,7 +48,13 @@ pub(super) fn custody_and_funding_for_claim(
 ) -> Result<(SignedNativeGraphFixtureV23, NativeXmrCustodyFixtureV23)> {
     let chain = signed.chain;
     let session = signed.wallets[0].0.session_id();
-    let root = |actor: usize| -> Result<Dir> { Ok(Dir::from_std_file(File::open(work[actor])?)) };
+    let root = |actor: usize| -> Result<Dir> {
+        Ok(Dir::from_std_file(custody_stage(
+            actor,
+            "open archive parent",
+            File::open(work[actor]),
+        )?))
+    };
     let mut identities = Vec::new();
     let mut custody = Vec::new();
     let mut public_substitutes = Vec::new();
@@ -50,15 +64,26 @@ pub(super) fn custody_and_funding_for_claim(
     // It is not an RPC observation and cannot authorize a network broadcast.
     let now = 1_000_010;
     let context = DomTransactionValidationContextV1::new(
-        signed.stores[0].load_session(session)?.chain().tip_height,
+        custody_stage(
+            0,
+            "load initial session",
+            signed.stores[0].load_session(session),
+        )?
+        .chain()
+        .tip_height,
         *chain.as_bytes(),
         now,
     );
     for actor in 0..2 {
+        eprintln!("native custody actor={actor}: checking prefunding refusal");
         let store = &signed.stores[actor];
         let produced = &signed.produced[actor];
         let role = &roles[actor];
-        let before = store.load_session(session)?;
+        let before = custody_stage(
+            actor,
+            "load prefunding session",
+            store.load_session(session),
+        )?;
         assert!(store
             .begin_f7_funding_signing_v20(chain, session, context)
             .is_err());
@@ -66,49 +91,92 @@ pub(super) fn custody_and_funding_for_claim(
             .1
             .take_funding_share_v23(store)
             .is_err());
-        assert_eq!(before.as_bytes(), store.load_session(session)?.as_bytes());
-        let identity = ContractsTransportIdentityStoreV1::open_production(
-            Arc::new(Dir::from_std_file(File::open(
-                work[actor].join("identity-parent"),
-            )?)),
-            "identity",
-            &ContractsIdentityPassphraseV1::new(b"test-passphrase-v13".to_vec())?,
+        assert_eq!(
+            before.as_bytes(),
+            custody_stage(actor, "reload refused session", store.load_session(session))?.as_bytes()
+        );
+        let identity_parent = custody_stage(
+            actor,
+            "open identity parent",
+            File::open(work[actor].join("identity-parent")),
         )?;
-        let permit = store.prepare_xmr_graph_custody_provisioning_v23(
-            role,
-            produced,
-            [0xe1 + actor as u8; 32],
+        let passphrase = custody_stage(
+            actor,
+            "prepare identity passphrase",
+            ContractsIdentityPassphraseV1::new(b"test-passphrase-v13".to_vec()),
+        )?;
+        let identity = custody_stage(
+            actor,
+            "open transport identity",
+            ContractsTransportIdentityStoreV1::open_production(
+                Arc::new(Dir::from_std_file(identity_parent)),
+                "identity",
+                &passphrase,
+            ),
+        )?;
+        eprintln!("native custody actor={actor}: preparing authenticated graph permit");
+        let permit = custody_stage(
+            actor,
+            "prepare graph custody permit",
+            store.prepare_xmr_graph_custody_provisioning_v23(
+                role,
+                produced,
+                [0xe1 + actor as u8; 32],
+            ),
         )?;
         assert_eq!(permit.state(), XmrGraphCustodyProvisioningStateV23::Started);
-        let stale_started = store.prepare_xmr_graph_custody_provisioning_v23(
-            role,
-            produced,
-            [0xe1 + actor as u8; 32],
+        let stale_started = custody_stage(
+            actor,
+            "prepare second Started permit",
+            store.prepare_xmr_graph_custody_provisioning_v23(
+                role,
+                produced,
+                [0xe1 + actor as u8; 32],
+            ),
         )?;
         let private = if permit.scope().role == XmrRecoveryCustodyRoleV11::PrivateRefundOwner {
-            Some(native.complete_private_refund(actor, produced.graph())?)
+            Some(custody_stage(
+                actor,
+                "complete private refund",
+                native.complete_private_refund(actor, produced.graph()),
+            )?)
         } else {
             None
         };
-        let (archive, permit) = store.create_xmr_graph_custody_archive_v23(
-            permit,
-            root(actor)?,
-            "native-xmr-recovery-v23",
-            produced.graph(),
-            XmrRecoverySealKeyV11::from_bytes(zeroize::Zeroizing::new([0xf1 + actor as u8; 32]))?,
-            private.as_ref(),
+        eprintln!("native custody actor={actor}: creating encrypted archive");
+        let archive_key = custody_stage(
+            actor,
+            "prepare archive seal key",
+            XmrRecoverySealKeyV11::from_bytes(zeroize::Zeroizing::new([0xf1 + actor as u8; 32])),
+        )?;
+        let (archive, permit) = custody_stage(
+            actor,
+            "create encrypted graph archive",
+            store.create_xmr_graph_custody_archive_v23(
+                permit,
+                root(actor)?,
+                "native-xmr-recovery-v23",
+                produced.graph(),
+                archive_key,
+                private.as_ref(),
+            ),
         )?;
         drop(private);
         let (cancel_session, compensation_session) = produced.ordinary_sessions();
-        let rounds = store.audit_xmr_ordinary_recovery_rounds_v11(
-            role,
-            produced.graph(),
-            produced.economic().policy(),
-            &archive,
-            XmrOrdinaryRecoveryRoundSessionsV11 {
-                cancel_session,
-                compensation_session,
-            },
+        eprintln!("native custody actor={actor}: auditing ordinary recovery rounds");
+        let rounds = custody_stage(
+            actor,
+            "audit ordinary recovery rounds",
+            store.audit_xmr_ordinary_recovery_rounds_v11(
+                role,
+                produced.graph(),
+                produced.economic().policy(),
+                &archive,
+                XmrOrdinaryRecoveryRoundSessionsV11 {
+                    cancel_session,
+                    compensation_session,
+                },
+            ),
         )?;
         let prepare_gate = || {
             store.prepare_or_resume_xmr_bounded_f7_gate_v23(
@@ -132,7 +200,11 @@ pub(super) fn custody_and_funding_for_claim(
             prepare_gate().is_err(),
             "Started custody must not authorize F7"
         );
-        store.mark_xmr_graph_custody_ready_v23(permit, &archive)?;
+        custody_stage(
+            actor,
+            "mark graph custody Ready",
+            store.mark_xmr_graph_custody_ready_v23(permit, &archive),
+        )?;
         assert!(
             store
                 .create_xmr_graph_custody_archive_v23(
@@ -140,18 +212,27 @@ pub(super) fn custody_and_funding_for_claim(
                     root(actor)?,
                     "forbidden-ready-replacement-v23",
                     produced.graph(),
-                    XmrRecoverySealKeyV11::from_bytes(zeroize::Zeroizing::new(
-                        [0xf1 + actor as u8; 32]
-                    ))?,
+                    custody_stage(
+                        actor,
+                        "prepare stale-permit seal key",
+                        XmrRecoverySealKeyV11::from_bytes(zeroize::Zeroizing::new(
+                            [0xf1 + actor as u8; 32]
+                        ))
+                    )?,
                     None,
                 )
                 .is_err(),
             "stale Started permit must not create after Ready"
         );
         assert!(!work[actor].join("forbidden-ready-replacement-v23").exists());
-        archive.revalidate()?;
-        let gate = prepare_gate()?;
-        let readiness = store.verify_xmr_refund_readiness_v23(&gate, &archive)?;
+        custody_stage(actor, "revalidate Ready archive", archive.revalidate())?;
+        eprintln!("native custody actor={actor}: preparing bounded F7 gate");
+        let gate = custody_stage(actor, "prepare Ready F7 gate", prepare_gate())?;
+        let readiness = custody_stage(
+            actor,
+            "verify refund readiness",
+            store.verify_xmr_refund_readiness_v23(&gate, &archive),
+        )?;
         assert_eq!(readiness.chain_id(), chain.as_bytes());
         assert_eq!(readiness.session_id(), &session);
         assert_eq!(readiness.graph_digest(), produced.graph().graph_digest());
@@ -162,13 +243,22 @@ pub(super) fn custody_and_funding_for_claim(
                 scope.role = XmrRecoveryCustodyRoleV11::PublicCounterparty;
                 // A valid encrypted public archive with the SAME id and graph
                 // must not satisfy the local U owner's authenticated Ready.
-                let substitute = XmrRecoveryCustodyV11::create(
-                    root(actor)?,
-                    "public-substitute-for-private-custody-v23",
-                    scope,
-                    produced.graph(),
-                    XmrRecoverySealKeyV11::from_bytes(zeroize::Zeroizing::new([0xc7; 32]))?,
-                    None,
+                let substitute_key = custody_stage(
+                    actor,
+                    "prepare public substitute key",
+                    XmrRecoverySealKeyV11::from_bytes(zeroize::Zeroizing::new([0xc7; 32])),
+                )?;
+                let substitute = custody_stage(
+                    actor,
+                    "create public substitute archive",
+                    XmrRecoveryCustodyV11::create(
+                        root(actor)?,
+                        "public-substitute-for-private-custody-v23",
+                        scope,
+                        produced.graph(),
+                        substitute_key,
+                        None,
+                    ),
                 )?;
                 assert!(store
                     .validate_xmr_recovery_attachment_v12(&gate, &substitute)
@@ -203,8 +293,13 @@ pub(super) fn custody_and_funding_for_claim(
         ordinary.push(rounds);
         gates.push(gate);
         identities.push(identity);
+        eprintln!(
+            "native custody actor={actor}: encrypted archive Ready and refusal checks passed"
+        );
     }
-    native = native.reopen(work)?;
+    native = native
+        .reopen(work)
+        .map_err(|error| format!("native custody: reopen both private T/U owners: {error}"))?;
     eprintln!("native lifecycle: both encrypted archives Ready; private T/U reopened; funding still refused");
     for position in 0..2 {
         let mut selected = None;
