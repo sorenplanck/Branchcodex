@@ -14,7 +14,7 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +40,8 @@ const CLAIM_FEE_SAT: u64 = 2_000;
 struct RegtestNode {
     directory: PathBuf,
     rpc_port: u16,
+    child: Child,
+    retain_on_failure: bool,
 }
 
 impl RegtestNode {
@@ -48,39 +50,83 @@ impl RegtestNode {
         require_program("bitcoin-cli")?;
         let directory = unique_directory("f7-bitcoin-regtest")?;
         let rpc_port = ephemeral_port()?;
-        let status = Command::new("bitcoind")
+        let log = std::fs::File::create(directory.join("process.log"))
+            .map_err(|error| format!("create Bitcoin Core startup log: {error}"))?;
+        let stderr = log.try_clone().map_err(|error| error.to_string())?;
+        // Keep the real process handle: -daemon only waits for the parent,
+        // and a missing cookie does not prove the old node has exited.
+        // These tests mine and submit through RPC; no P2P listener is needed.
+        let child = Command::new("bitcoind")
             .args([
                 "-regtest",
                 &format!("-datadir={}", directory.display()),
                 &format!("-rpcport={rpc_port}"),
+                "-rpcbind=127.0.0.1",
+                "-server=1",
+                "-daemon=0",
+                "-printtoconsole=1",
+                "-listen=0",
+                "-discover=0",
+                "-dnsseed=0",
+                "-connect=0",
                 "-fallbackfee=0.0001",
                 "-txindex=1",
-                "-daemon",
             ])
-            .status()
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr))
+            .spawn()
             .map_err(|error| format!("start bitcoind: {error}"))?;
-        if !status.success() {
-            return Err("bitcoind failed to start".to_string());
-        }
-        let node = Self {
+        let mut node = Self {
             directory,
             rpc_port,
+            child,
+            retain_on_failure: true,
         };
         let deadline = Instant::now() + Duration::from_secs(30);
+        let mut last_rpc_error = String::new();
         while Instant::now() < deadline {
-            if node.cli(&["getblockchaininfo"]).is_ok() {
-                node.cli(&["createwallet", "f7"])
-                    .or_else(|_| node.cli(&["loadwallet", "f7"]))?;
-                return Ok(node);
+            if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(2) {
+                break;
+            }
+            if let Some(status) = node.child.try_wait().map_err(|error| error.to_string())? {
+                return Err(node.startup_error(&format!(
+                    "Bitcoin Core exited before RPC readiness: {status}"
+                )));
+            }
+            match node.cli(&["getblockchaininfo"]) {
+                Ok(_) => {
+                    node.cli(&["createwallet", "f7"])
+                        .or_else(|_| node.cli(&["loadwallet", "f7"]))?;
+                    node.retain_on_failure = false;
+                    return Ok(node);
+                }
+                Err(error) => last_rpc_error = error,
             }
             thread::sleep(Duration::from_millis(100));
         }
-        Err("Bitcoin Core RPC did not become ready".to_string())
+        Err(node.startup_error(&format!(
+            "Bitcoin Core RPC did not become ready: {last_rpc_error}"
+        )))
+    }
+
+    fn startup_error(&self, reason: &str) -> String {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        if let Ok(file) = std::fs::File::open(self.directory.join("process.log")) {
+            let _ = file.take(16 * 1024).read_to_end(&mut bytes);
+        }
+        format!(
+            "{reason}; retained node directory: {}; startup output: {}",
+            self.directory.display(),
+            String::from_utf8_lossy(&bytes)
+        )
     }
 
     fn cli(&self, arguments: &[&str]) -> Result<String, String> {
         let output = Command::new("bitcoin-cli")
             .arg("-regtest")
+            .arg("-rpcconnect=127.0.0.1")
+            .arg("-rpcclienttimeout=2")
             .arg(format!("-datadir={}", self.directory.display()))
             .arg(format!("-rpcport={}", self.rpc_port))
             .args(arguments)
@@ -92,6 +138,8 @@ impl RegtestNode {
     fn wallet(&self, arguments: &[&str]) -> Result<String, String> {
         let output = Command::new("bitcoin-cli")
             .arg("-regtest")
+            .arg("-rpcconnect=127.0.0.1")
+            .arg("-rpcclienttimeout=2")
             .arg(format!("-datadir={}", self.directory.display()))
             .arg(format!("-rpcport={}", self.rpc_port))
             .arg("-rpcwallet=f7")
@@ -104,20 +152,37 @@ impl RegtestNode {
 
 impl Drop for RegtestNode {
     fn drop(&mut self) {
-        let _ = self.cli(&["stop"]);
-        for _ in 0..50 {
-            let cookie = self.directory.join("regtest/.cookie");
-            if !cookie.exists() {
-                break;
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.cli(&["stop"]);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if self.child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
             }
-            thread::sleep(Duration::from_millis(100));
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+            }
         }
-        if is_safe_test_path(&self.directory) {
+        // Never remove a datadir while its actual process may still own it.
+        if self.child.wait().is_err() {
+            eprintln!(
+                "Bitcoin Core could not be reaped; retained {}",
+                self.directory.display()
+            );
+            return;
+        }
+        if self.retain_on_failure || thread::panicking() {
+            eprintln!(
+                "Bitcoin Core failed fixture retained at {}",
+                self.directory.display()
+            );
+        } else if is_safe_test_path(&self.directory) {
             let _ = std::fs::remove_dir_all(&self.directory);
         }
     }
 }
-
 #[test]
 #[ignore = "requires the installed Bitcoin Core binary and starts a real regtest node"]
 fn confirmed_exact_bitcoin_claim_is_the_only_f7_secret_extraction_authority() {
@@ -403,6 +468,12 @@ fn unique_directory(prefix: &str) -> Result<PathBuf, String> {
         .as_nanos();
     let path = std::env::temp_dir().join(format!("{prefix}-{}-{timestamp}", std::process::id()));
     std::fs::create_dir(&path).map_err(|error| format!("create regtest directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("protect regtest directory: {error}"))?;
+    }
     Ok(path)
 }
 

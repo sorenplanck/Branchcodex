@@ -13,6 +13,20 @@ import test_interop_hardening as runner
 
 
 class HardeningDispatchTests(unittest.TestCase):
+    def test_real_bitcoin_fixtures_own_and_reap_rpc_only_processes(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in ("composed_route_live.rs", "f7_bitcoin_regtest.rs"):
+            source = (root / "crates/f5-e2e/tests" / name).read_text()
+            fixture = source.split("struct RegtestNode {", 1)[1].split("fn canonical_ancestry", 1)[0]
+            for required in ("child: Child", '"-daemon=0"', '"-server=1"', '"-listen=0"',
+                             '"-rpcbind=127.0.0.1"', '"-rpcclienttimeout=2"',
+                             ".try_wait()", ".kill()", ".wait()", "process.log", "retain_on_failure"):
+                self.assertIn(required, fixture, name)
+            self.assertNotIn('"-daemon"', fixture, name)
+            self.assertNotIn(".cookie", fixture, name)
+            self.assertLess(fixture.index("self.child.wait()"), fixture.index("remove_dir_all"))
+
+
     def test_crypto_caches_survive_test_failure_but_never_skip_test_execution(self):
         root = Path(__file__).resolve().parents[2]
         action = (root / ".github/actions/xmr-test-tools/action.yml").read_text()

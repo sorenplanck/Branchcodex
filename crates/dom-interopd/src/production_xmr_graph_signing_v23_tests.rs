@@ -16,8 +16,50 @@ use dom_actuator::{
 };
 use dom_adaptor::{canonical_template_v1, AcceptedSigningSessionV1};
 use dom_scriptless_crypto::XmrOrdinaryRecoveryKindV12;
-use dom_scriptless_store::{ContractsSessionStoreV1, XmrGraphRecoverySigningEdgeV23 as Edge};
+use dom_scriptless_store::{
+    AcceptedContractsSigningSessionV1, ContractsSessionStoreV1, SessionRecordV1,
+    XmrGraphRecoverySigningEdgeV23 as Edge,
+};
 use std::rc::Rc;
+
+/// One fully audited prefix, consumed once at the next signing turn. This is
+/// local to this serial fixture, not a Store cache or a persisted authority.
+struct AuditedNativeGraphTurnV23 {
+    accepted: AcceptedContractsSigningSessionV1,
+    head: SessionRecordV1,
+}
+
+impl AuditedNativeGraphTurnV23 {
+    fn read(
+        store: &ContractsSessionStoreV1,
+        target: [u8; 32],
+        edge: Edge,
+        prefix: usize,
+    ) -> Result<Self, TestError> {
+        // Keep the production full transport, graph ancestry and semantic
+        // replay audit for both actors at EVERY accepted prefix.
+        let accepted = store.resume_xmr_graph_signing_session_v23(target, edge)?;
+        let head = store.load_session(target)?;
+        assert_eq!(accepted.session_id(), &target);
+        assert_eq!(accepted.accepted_signing_messages().count(), prefix);
+        assert!(!head.irreversible().funding_authorized);
+        assert!(!head.irreversible().adaptor_secret_exposed);
+        assert_eq!(head.irreversible().any_signing_share_sent, prefix >= 5);
+        Ok(Self { accepted, head })
+    }
+
+    fn consume(
+        self,
+        store: &ContractsSessionStoreV1,
+        target: [u8; 32],
+        prefix: usize,
+    ) -> Result<AcceptedContractsSigningSessionV1, TestError> {
+        assert_eq!(self.accepted.session_id(), &target);
+        assert_eq!(self.accepted.accepted_signing_messages().count(), prefix);
+        assert_eq!(store.load_session(target)?.as_bytes(), self.head.as_bytes());
+        Ok(self.accepted)
+    }
+}
 
 /// Owners retained across the signing/reopen boundary for native lifecycle tests.
 /// This component fixture does not stand in for daemon F6 authentication.
@@ -38,6 +80,7 @@ pub(super) fn sign_three_real_edges(
     wallets: [(DomSessionBindingV1, DomXmrGraphSigningSharesV22); 2],
     formed: [PreparedXmrGraphV23; 2],
 ) -> Result<SignedNativeGraphFixtureV23, TestError> {
+    let started = std::time::Instant::now();
     let chain = *offers[0].native.trusted_chain_id();
     let parent = *offers[0].native.session_id();
     let route = offers[0].route_id;
@@ -177,6 +220,7 @@ pub(super) fn sign_three_real_edges(
     }
     let mut messages: [Vec<Vec<u8>>; 3] = std::array::from_fn(|_| Vec::new());
     for (index, edge) in edges.into_iter().enumerate() {
+        let round_started = std::time::Instant::now();
         let target = bindings[0][index].session_id();
         assert_eq!(target, bindings[1][index].session_id());
         let ingress = [
@@ -191,20 +235,46 @@ pub(super) fn sign_three_real_edges(
                     format!("graph signing prepare-ingress actor=1 edge={index}: {error}")
                 })?,
         ];
+        let mut turns = [None, None];
+        let mut audited_prefixes = [[0u8; 7]; 2];
+        for actor in 0..2 {
+            turns[actor] = Some(
+                AuditedNativeGraphTurnV23::read(&stores[actor], target, edge, 0).map_err(
+                    |error| {
+                        format!("graph signing initial-audit actor={actor} edge={index}: {error}")
+                    },
+                )?,
+            );
+            audited_prefixes[actor][0] += 1;
+        }
+        let roster: [[u8; 32]; 2] = std::array::from_fn(|position| {
+            *turns[0].as_ref().unwrap().accepted.roster().entries()[position].participant_id()
+        });
+        for actor in 0..2 {
+            let entries = turns[actor].as_ref().unwrap().accepted.roster().entries();
+            assert_eq!(entries.len(), 2);
+            for (entry, participant) in entries.iter().zip(roster) {
+                assert_eq!(entry.participant_id(), &participant);
+            }
+        }
         for position in 0..6 {
-            let accepted = stores[0]
-                .resume_xmr_graph_signing_session_v23(target, edge)
-                .map_err(|error| {
-                    format!("graph signing resume-order edge={index} position={position}: {error}")
-                })?;
-            let sender_id = accepted.roster().entries()[position % 2].participant_id();
+            let turn_started = std::time::Instant::now();
+            let sender_id = &roster[position % 2];
             let sender = bindings
                 .iter()
                 .position(|entry| &entry[index].participant().participant_id() == sender_id)
                 .ok_or("missing wallet signer")?;
             let peer = sender ^ 1;
-            let accepted = stores[sender].resume_xmr_graph_signing_session_v23(target, edge).map_err(|error| format!("graph signing resume-sender actor={sender} edge={index} position={position}: {error}"))?;
-            assert_eq!(accepted.accepted_signing_messages().count(), position);
+            // Nothing mutates either Store between the preceding two audits
+            // and this consume. Reuse that exact prefix instead of performing
+            // two more full audits merely to select a sender and read it again.
+            // The production signer/request/ingress gates still reauthenticate
+            // their own authorities; all stale handles are discarded below.
+            let accepted = turns[sender]
+                .take()
+                .ok_or("missing fully audited native graph turn")?
+                .consume(&stores[sender], target, position)?;
+            drop(turns[peer].take());
             let request = match prepare_next_xmr_graph_recovery_edge_v23(
                 &stores[sender],
                 bindings[sender][index],
@@ -233,18 +303,29 @@ pub(super) fn sign_three_real_edges(
             stores[peer].accept_xmr_graph_signing_ingress_v23(&ingress[peer], &bytes)
                 .map_err(|error| format!("graph signing peer-accept actor={peer} edge={index} position={position}: {error}"))?;
             for actor in 0..2 {
-                let accepted = stores[actor].resume_xmr_graph_signing_session_v23(target, edge).map_err(|error| format!("graph signing audit-accepted actor={actor} edge={index} position={position}: {error}"))?;
-                assert_eq!(accepted.accepted_signing_messages().count(), position + 1);
-                let head = stores[actor].load_session(target)?;
-                assert!(!head.irreversible().funding_authorized);
-                assert!(!head.irreversible().adaptor_secret_exposed);
-                assert_eq!(head.irreversible().any_signing_share_sent, position >= 4);
+                assert!(turns[actor].is_none());
+                turns[actor] = Some(AuditedNativeGraphTurnV23::read(
+                    &stores[actor], target, edge, position + 1,
+                ).map_err(|error| format!("graph signing audit-accepted actor={actor} edge={index} position={position}: {error}"))?);
+                audited_prefixes[actor][position + 1] += 1;
             }
             messages[index].push(bytes);
-            eprintln!("graph signing edge={index} position={position} accepted and audited by both stores");
+            eprintln!("graph signing edge={index} position={position} accepted and audited by both stores; turn={:?}", turn_started.elapsed());
         }
+        assert_eq!(
+            audited_prefixes, [[1; 7]; 2],
+            "every prefix must receive a full independent audit from each Store"
+        );
+        drop(turns);
+        eprintln!(
+            "graph signing edge={index} completed with 14 full prefix audits after {:?}",
+            round_started.elapsed()
+        );
     }
-    eprintln!("graph signing all three six-envelope rounds accepted");
+    eprintln!(
+        "graph signing all three six-envelope rounds accepted after {:?}",
+        started.elapsed()
+    );
     // Reconstruct both plain signatures and the U adaptor pre-signature from
     // the actual six-envelope journals, then complete the native graph verifier.
     // No U secret is adapted and no funding authority is requested.
@@ -302,8 +383,14 @@ pub(super) fn sign_three_real_edges(
     // handles and replay all 18 signed bytes against unchanged durable heads.
     let mut reopened = Vec::new();
     for actor in 0..2 {
+        let reopen_started = std::time::Instant::now();
         let store = open_store(actor, "final-reopen")?;
+        eprintln!(
+            "graph signing durable reopen actor={actor} opened after {:?}",
+            reopen_started.elapsed()
+        );
         for (index, edge) in edges.into_iter().enumerate() {
+            let replay_started = std::time::Instant::now();
             let target = bindings[actor][index].session_id();
             let permit = store
                 .prepare_xmr_graph_resource_v23(
@@ -352,7 +439,10 @@ pub(super) fn sign_three_real_edges(
             assert!(before.irreversible().any_signing_share_sent);
             assert!(!before.irreversible().adaptor_secret_exposed);
             drop(vault);
-            eprintln!("graph signing durable replay actor={actor} edge={index} verified");
+            eprintln!(
+                "graph signing durable replay actor={actor} edge={index} verified after {:?}",
+                replay_started.elapsed()
+            );
         }
         reopened.push(store);
     }
