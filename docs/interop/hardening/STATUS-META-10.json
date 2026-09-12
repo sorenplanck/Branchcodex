@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "delivery_version": 6,
+  "goal": "interoperability excellence under declared assumptions (10/10)",
+  "goal_achieved": false,
+  "base_branch": "mainnetswap",
+  "base_commit": "7d9d41a1fd4a67ed25bf437846c739ee18f5cb36",
+  "local_branch": "interop/security-hardening-20260908",
+  "previous_zip_sha256": "11a04e565b31623369cf012ab3c0b48e0f62f981cf6260cc31d9539586c4c767",
+  "validation": {
+    "python_oracle": {
+      "status": "passed",
+      "test_methods": 50,
+      "bip340_vectors": 19,
+      "bip341_default_vectors": 1,
+      "production_swaps": 0,
+      "rust_generated_frames": "not_executed_here; generated and independently verified by components/full runner",
+      "rust_generated_route_trace": "not_executed_here; routing/components/full require the real Rust-produced trace",
+      "rust_generated_time_evidence": "not_executed_here; runtime/components/full export and independently verify real Rust-produced evidence",
+      "rust_generated_driver_claim": "not_executed_here; v6/components/full verify the actual Rust-exported final signature",
+      "synthetic_route_accounting_cases": 48
+    },
+    "rust": {
+      "status": "blocked",
+      "compiled": false,
+      "tests_executed": false
+    },
+    "independent_audit": {
+      "status": "not_performed"
+    }
+  },
+  "implemented_v2": [
+    {
+      "area": "C05 prerequisite",
+      "implementation": "M.8 terms/network/funding/CSV binding before new and cached signing transitions",
+      "tests": "written_not_executed"
+    },
+    {
+      "area": "C02 recovery",
+      "implementation": "atomic observations, durable feed identity and revisions, late-event replay, explicit deep reorg, optimistic scan consistency, safe scan checkpoint",
+      "tests": "written_not_executed"
+    },
+    {
+      "area": "C11 independent verification",
+      "implementation": "standalone public-data Bitcoin key-path claim verifier with exact payout and fee",
+      "tests": "passed_public_vectors_and_synthetic_fixtures"
+    }
+  ],
+  "route_evidence": [
+    {
+      "route": "BTC->DOM->BTC",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_still_requires_exactly_one_EVM_and_one_Bitcoin",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "BTC->DOM->EVM",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "new_Bitcoin_plans_refused_missing_authenticated_scope_and_root_M8_driver",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "BTC->DOM->XMR",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "BTC->DOM->SOL",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "EVM->DOM->BTC",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "new_Bitcoin_plans_refused_missing_authenticated_scope_and_root_M8_driver",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "EVM->DOM->EVM",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_still_requires_exactly_one_EVM_and_one_Bitcoin",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "EVM->DOM->XMR",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "EVM->DOM->SOL",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "XMR->DOM->BTC",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "XMR->DOM->EVM",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "XMR->DOM->XMR",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "XMR->DOM->SOL",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "SOL->DOM->BTC",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "SOL->DOM->EVM",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "SOL->DOM->XMR",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    },
+    {
+      "route": "SOL->DOM->SOL",
+      "router": "implemented_not_Rust_tested_here",
+      "root_lifecycle": "blocked",
+      "reason": "root_signer_F6_and_provisioning_generalization_missing",
+      "production_swaps_executed": 0
+    }
+  ],
+  "remaining_packages": [
+    "Generalize root credential loading, chain services and F6 to use the V6 per-leg authority store; connect SOL source and compatible XMR role plan",
+    "C05 bilateral DOM readiness and root F7/transport ownership for the new V6 exchange driver; install authenticated materialization scope and recovery in root",
+    "C06 production authority feed operation, deadline/fault campaign and end-to-end funding validation (runtime refresh now connected)",
+    "C08 contextual DLEQ integration campaign",
+    "C09 complete asset/RPC/signer/XMR trust boundaries",
+    "C11 complete real-binary route and crash/reorg/fee campaign",
+    "C12 independent deployment/build/recovery evidence"
+  ],
+  "remaining_10_10": [
+    "formal verification linked to actual implementation",
+    "independent verification of complete economic outcomes beyond partial BTC/route/time checks",
+    "complete adversarial trust-boundary testing",
+    "extreme daemon recovery campaign",
+    "cross-leg privacy experiments",
+    "independent cryptographic and distributed-execution audits",
+    "reproducible independent operation"
+  ],
+  "priority": "complete real-binary lifecycle for all sixteen BTC/EVM/XMR/SOL pairs via DOM; preserve authenticated readiness and recovery",
+  "details": "EVOLUCAO-V6.md",
+  "implemented_v3": [
+    {
+      "area": "C05 authenticated participant component",
+      "implementation": "Bounded signed V3 nonce/partial frames, peer verification before mutation, retained local F7/signer bridge and opaque completed-round handoff",
+      "tests": "written_not_executed_in_Rust"
+    },
+    {
+      "area": "C05/C11 claim recovery",
+      "implementation": "Atomic operation/transcript re-fencing; extraction context reconstruction from durable verified transcript and canonical claim without adaptor scalar",
+      "tests": "written_not_executed_in_Rust"
+    },
+    {
+      "area": "C05 production child",
+      "implementation": "Exact funding/session comparison and participant extraction through retained canonical Core evidence collector",
+      "tests": "Rust_not_compiled"
+    },
+    {
+      "area": "C11 independent verification",
+      "implementation": "Python V3 frame signature/scope/transcript verifier; runner exports real Rust fixture for cross-check when Rust is available",
+      "tests": "five_additional_synthetic_Python_tests_passed"
+    }
+  ],
+  "root_integration": {
+    "new_router_connected": true,
+    "evm_public_source_connected": true,
+    "multi_leg_factory_connected": false,
+    "all_routes_operational": false,
+    "reason": "root remains EVM+BTC; all fresh Bitcoin plans fail closed; SOL/XMR and same-family bootstrap not generalized",
+    "authenticated_time_refresh_connected": true,
+    "monero_v5_factory_hardened": true,
+    "per_leg_bitcoin_authority_storage": "implemented for zero/one/two Bitcoin legs; legacy root wrapper now uses generalized implementation",
+    "bitcoin_exchange_driver": "implemented as real Unix socket component with retained local signing bridge; root readiness/transport ownership not connected"
+  },
+  "implemented_v4": [
+    {
+      "area": "route composition",
+      "implementation": "Authenticated two-leg topology and per-leg router; current EVM+BTC root uses it",
+      "tests": "Rust_written_not_executed"
+    },
+    {
+      "area": "counterparty composition",
+      "implementation": "Two-resource-set factory reuses concrete EVM/BTC/SOL/XMR children and retains both refund owners; path/hardlink alias preflight",
+      "root_connected": false,
+      "fresh_materialization": false
+    },
+    {
+      "area": "C07 recovery",
+      "implementation": "Late-txid exact EVM lock source sharing retained refund adapter, canonical re-verification, connected to root",
+      "tests": "Rust_written_not_executed"
+    },
+    {
+      "area": "C05 scope and startup",
+      "implementation": "Bitcoin extraction handoff bound to leg and settlement; root installs BTC extraction capability only for upstream BTC",
+      "tests": "Rust_written_not_executed"
+    },
+    {
+      "area": "C11 recovery and independent verification",
+      "implementation": "Real SQLite coordinator reopen and router reconciliation cases for both legs of sixteen pairs; independent Python checker of Rust-exported traces",
+      "tests": "eight_Python_self_tests_passed; Rust_and_cross_check_not_executed"
+    }
+  ],
+  "implemented_v5": [
+    {
+      "area": "C06 concrete runtime",
+      "implementation": "Capability-relative signed refresh inbox connected before fresh funding install, pristine refencing and preinstalled-plan revalidation; retained authority verifies signatures, scope, ancestry and durable sequence",
+      "root_connected": true,
+      "tests": "Rust_written_not_executed"
+    },
+    {
+      "area": "C06/C11 publication and independent verification",
+      "implementation": "Atomic owner-only refresh publisher with fsync, lock, replay/rollback protection and independent Python BIP340/public-scope verifier",
+      "tests": "13_new_Python_methods_passed; Rust_cross_check_not_executed"
+    },
+    {
+      "area": "C09 Monero observation",
+      "implementation": "Order-independent strict-majority quorum, exact txid and block membership, genesis rereads, conservative confirmation depth, bounded parallel observations and distinct endpoint ports",
+      "factory_connected": true,
+      "root_connected": false,
+      "tests": "Rust_written_not_executed"
+    },
+    {
+      "area": "C09 Monero transport",
+      "implementation": "Parsed loopback URLs, credentials/paths/query rejection, no redirects or proxies, bounded JSON and finite per-request timeouts",
+      "tests": "Rust_local_HTTP_tests_written_not_executed"
+    },
+    {
+      "area": "C09 recovery error taxonomy",
+      "implementation": "Exact explicit miss is absence; mismatched successful response is Rejected; actuator propagates BroadcastRejected through child Refused while retaining SendAttempted and exact bytes",
+      "tests": "Rust_HTTP_and_durable_reopen_tests_written_not_executed"
+    }
+  ],
+  "implemented_v6": [
+    {
+      "area": "two-leg authority prerequisite",
+      "implementation": "Position-bound Bitcoin credentials, independent nonce vaults for zero/one/two Bitcoin legs, 2\u20134-store creation/reopen ordering, generalized ownership and legacy V1 path/digest compatibility",
+      "root_integration": "legacy root uses generalized internals with one Bitcoin; new per-leg credential entrypoint awaits generalized root loader",
+      "tests": "Rust_written_not_executed"
+    },
+    {
+      "area": "Bitcoin post-anchor exchange",
+      "implementation": "Complete two-phase driver over real bounded Unix streams, fresh local authorization per operation, existing durable nonce/partial replay and opaque completed-round handoff",
+      "root_readiness_connected": false,
+      "tests": "Rust_real_cryptography_socket_and_reopen_tests_written_not_executed"
+    },
+    {
+      "area": "independent Bitcoin economic check",
+      "implementation": "Verify final driver claim BIP340 signature, exact prevout, principal, payout and fee in Python; runner refuses missing Rust export",
+      "tests": "four_Python_methods_passed; Rust_cross_check_not_executed"
+    },
+    {
+      "area": "independent route accounting",
+      "implementation": "Pinned two-leg/four-lock checker for all sixteen ordered pairs, per-asset conservation, terminal exclusivity, exact recipient, event replay and residual surplus",
+      "tests": "ten_Python_methods_passed_including_48_synthetic_cases",
+      "consensus_verification": false
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+[package]
+name = "dom-scriptless-store"
+license.workspace = true
+description = "Independent durable store and nonce-safety boundary for DOM Contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[features]
+default = []
+evidence-only = []
+
+[dependencies]
+dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
+dom-scriptless-consensus = { path = "../dom-scriptless-consensus" }
+dom-adaptor.workspace = true
+dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
+rand_core = "=0.6.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+adapter-btc = { path = "../adapters/btc", default-features = false }
+cap-std = { version = "=4.0.2", default-features = false }
+cap-fs-ext = { version = "=4.0.2", default-features = false, features = ["std"] }
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-crypto.workspace = true
+dom-final-claim-binding = { path = "../dom-final-claim-binding" }
+# Already in this crate's graph transitively: f7-anchor-authority (below)
+# depends on it, and it brings reqwest/serde/serde_json/hex. The direct edge
+# names what the FinalClaim V2 surface actually consumes and adds nothing new.
+dom-scriptless-chain-adapter.workspace = true
+dom-serialization.workspace = true
+kaystra-core = { path = "../kaystra-core", default-features = false }
+xmr-refund-policy = { path = "../adapters/xmr-refund-policy" }
+xmr-setup-profile = { path = "../adapters/xmr-setup-profile" }
+xmr-remote-sweep-wire = { path = "../adapters/xmr-remote-sweep-wire" }
+f7-anchor-authority = { path = "../f7-anchor-authority" }  # absorption of 2026-08-25: the cross-repository edge (OQ-S14 root) is now intra-workspace
+nix = { version = "=0.31.3", default-features = false, features = ["fs", "feature"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+# The receiver-lane tests assemble one observation capability through
+# `dom_adaptor::evidence_only_verified_claim_observation_v1`. That seam runs the
+# production proof path verbatim — it is the chain scanner it stands in for, not
+# the `t*G == T` proof. The feature is enabled only here, in dev-dependencies,
+# so no shipped feature and no normal dependency table can reach it.
+dom-adaptor = { workspace = true, features = ["evidence-only"] }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+static_assertions = "=1.1.0"
+
+[lints]
+workspace = true

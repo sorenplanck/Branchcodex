@@ -1,0 +1,48 @@
+[package]
+name        = "dom-wallet2"
+description = "DOM protocol — wallet v2 persistent store (StoredOutput source of truth, status-only reconciliation). Coexists with dom-wallet v1."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+# Security & serialization (store types since 3A).
+zeroize.workspace   = true
+serde.workspace     = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# At-rest persistence (3C): the shared, audited encrypted-file envelope + KDF.
+# Same crate v1 uses (extracted in PR #71) — single source for the on-disk
+# crypto that guards the blinding factors.
+dom-wallet-crypto.workspace = true
+
+# Keychain derivation (this step): the shared BIP-39/BIP-32 derivation (#76),
+# so coinbase/receive blindings are byte-identical to v1.
+dom-wallet-keys.workspace = true
+# Pedersen commitments / blinding factors (output matching during restore).
+dom-crypto.workspace = true
+# Block reward by height (coinbase candidate value during restore).
+dom-core.workspace = true
+# Interactive slate crypto (send/receive/finalize) — pure, shared with v1 (#68).
+dom-slate.workspace = true
+# The Slate wire type + DomSerialize (slate_hash = blake2b of slate bytes).
+dom-tx.workspace          = true
+dom-serialization.workspace = true
+# The finalized Transaction type returned by finalize.
+dom-consensus.workspace = true
+# Blocking HTTP client for the RpcChainSource (same lib v1 uses). The
+# ChainSource trait is synchronous, so reqwest::blocking fits.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# Hex decoding of commitments / hashes from the JSON response.
+hex.workspace = true
+fs2 = "=0.4.3"
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+# dom-shield XDIFF (v1<->v2 blinding byte-identity) reference path + secret wrappers.
+dom-wallet-keys.workspace = true
+zeroize.workspace = true

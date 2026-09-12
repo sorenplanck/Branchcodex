@@ -1,0 +1,35 @@
+name: interop-hardening
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+concurrency:
+  group: interop-hardening-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  components:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify frozen consensus sources
+        run: bash scripts/check-consensus-unchanged.sh
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            programs/dom-solana-escrow -> target
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+      - name: Execute changed components and production graph
+        run: python3 scripts/test_interop_hardening.py --mode components
+      - name: Retain actual outcomes including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-hardening-${{ github.sha }}
+          path: artifacts/interop-hardening/
+          if-no-files-found: error

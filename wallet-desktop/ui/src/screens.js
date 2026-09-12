@@ -1,0 +1,1342 @@
+// Screen renderers. Each returns an element and wires its own events.
+import {
+  api, el, copy, toast, nomsToDom, domToNoms,
+  pickSaveFile, pickFolder, saveTextViaDialog, savePrefs, humanizeError,
+  minerWalletDisplay, clearMinerWalletSettings, normalizeSeedPeers, events,
+} from "./api.js";
+import {
+  getLogLines, clearLogs, subscribeLogs, logsToText,
+} from "./logbuffer.js";
+
+// Shared, in-memory settings object (single source of truth for node config).
+// Sensitive values (passwords/phrases) are NEVER stored here.
+export const settings = { current: null };
+
+// Register the auto-backup failure listener ONCE at boot (never silent). The
+// backend emits "auto-backup-failed" { target, severity, reason } when a backup
+// write fails: a LOCAL failure is a strong error (red toast), an EXTERNAL one is
+// usually just "destination unavailable" (neutral warning toast). A backup
+// failure never affects the wallet itself — the vault save always succeeded.
+let autoBackupListenerStarted = false;
+export async function startAutoBackupNotifications() {
+  if (autoBackupListenerStarted) return;
+  autoBackupListenerStarted = true;
+  await events.listen("auto-backup-failed", (e) => {
+    const p = e.payload || {};
+    const reason = p.reason || "auto-backup failed";
+    toast(reason, p.severity === "error");
+  });
+}
+
+// Register the wallet-rescan listeners ONCE at boot (never silent). The backend
+// emits "wallet-rescan-failed" { reason } on the ok→failed EDGE of the 8s
+// background sync loop (never per tick, so no toast spam while the node is
+// busy/unreachable) and "wallet-rescan-recovered" { tip } when a later cycle
+// succeeds again. A rescan failure never loses funds — it only means the
+// balance is stale until the next successful cycle.
+let rescanListenerStarted = false;
+export async function startRescanNotifications() {
+  if (rescanListenerStarted) return;
+  rescanListenerStarted = true;
+  await events.listen("wallet-rescan-failed", (e) => {
+    const p = e.payload || {};
+    const reason = p.reason || "unknown error";
+    toast(`Wallet sync failed: ${reason} — balance may be stale`, true);
+  });
+  await events.listen("wallet-rescan-recovered", () => {
+    toast("Wallet sync recovered", false);
+  });
+}
+
+// Short UI toast messages.
+const MSG = {
+  walletCreated: "Wallet created",
+  walletRestored: "Wallet restored",
+  walletOpened: "Wallet opened",
+  nodeStarting: "Node starting…",
+  nodeStopping: "Node stopping…",
+  nodeRestarting: "Node restarting…",
+  applyingMining: "Applying mining (restarting node)…",
+  settingsApplied: "Settings applied — node restarting",
+  logsSaved: "Logs saved",
+};
+function t(key) {
+  return MSG[key] || key;
+}
+
+function cpuLimit() {
+  return Math.max(1, Number(navigator.hardwareConcurrency || 1));
+}
+
+function normalizeMinerThreads(value) {
+  const n = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(n, cpuLimit());
+}
+
+function normalizeMinerThrottleMs(value) {
+  const n = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(n) || n < 0) return 10;
+  return n;
+}
+
+
+async function applyMiningEnabled(enabled) {
+  settings.current.mine = !!enabled;
+  settings.current.miner_threads = normalizeMinerThreads(settings.current.miner_threads);
+  settings.current.miner_throttle_ms = normalizeMinerThrottleMs(settings.current.miner_throttle_ms);
+  savePrefs(settings.current);
+  // Persist the choice next to the open managed wallet so reopening it by
+  // name restores the same mining state (no-op for non-managed wallets).
+  try { await api.managedSettingsSave(settings.current); } catch {}
+  await api.nodeRestart(settings.current);
+}
+
+// ── Login by name (primary screen when wallets are registered) ───────────────
+// The user types the friendly name of a registered wallet ("Carteira 1") plus
+// the password; the backend resolves the vault location from the local registry
+// and unlocks. No folder picker in this normal flow (the path lives only in the
+// backend). Secondary actions cover the less-common cases.
+export function renderLogin(go, onReady) {
+  const node = el(`
+    <div>
+      <h1 class="tc">DOM Wallet</h1>
+      <p class="sub tc">Unlock your wallet by name.</p>
+      <div class="card">
+        <label>Wallet name</label>
+        <input type="text" id="name" list="walletNames" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" autofocus />
+        <datalist id="walletNames"></datalist>
+        <label>Password</label>
+        <input type="password" id="pw" placeholder="Your wallet password" />
+        <div class="btn-row"><button class="btn w-full" id="unlock">Unlock</button></div>
+        <div class="err-text" id="err"></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bLocate">Locate existing wallet</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bCreate">Create wallet</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestore">Restore wallet</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestoreBackup">Restore from backup file</button></div>
+      </div>
+      <div class="warn-box">The wallet name only remembers where your encrypted wallet is stored. Your recovery phrase recovers mined coins; received coins and change need the encrypted backup file — export one from the Backup screen. Keep both.</div>
+    </div>`);
+
+  // Populate the name suggestions from the non-sensitive registry list.
+  api.walletRegistryList().then((list) => {
+    const dl = node.querySelector("#walletNames");
+    dl.replaceChildren();
+    for (const w of list || []) {
+      const opt = document.createElement("option");
+      opt.value = String(w.name || "");
+      dl.appendChild(opt);
+    }
+  }).catch(() => {});
+
+  const submit = async () => {
+    const err = node.querySelector("#err"); err.textContent = "";
+    const name = node.querySelector("#name").value.trim();
+    const pw = node.querySelector("#pw").value;
+    if (!name) { err.textContent = "Enter the wallet name."; return; }
+    const btn = node.querySelector("#unlock"); btn.disabled = true;
+    try {
+      // Managed wallets return their own saved node settings (data dir, ports,
+      // mining choice); adopting them here makes the node follow the wallet.
+      const managed = await api.walletOpenByName(name, pw);
+      if (managed) {
+        settings.current = { ...settings.current, ...managed };
+        savePrefs(settings.current);
+        // Re-apply the saved auto-backup config to the freshly reopened wallet so
+        // it backs up again without a trip to Settings. Best-effort: the strong
+        // password was already validated when it was first enabled.
+        try { await api.setAutoBackup(settings.current); } catch {}
+      }
+      toast(t("walletOpened"));
+      onReady();
+    } catch (e) {
+      err.textContent = humanizeError(e);
+    } finally { btn.disabled = false; }
+  };
+  node.querySelector("#unlock").onclick = submit;
+  node.querySelector("#pw").onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  node.querySelector("#name").onkeydown = (e) => { if (e.key === "Enter") node.querySelector("#pw").focus(); };
+  node.querySelector("#bLocate").onclick = () => go("open");
+  node.querySelector("#bCreate").onclick = () => go("create");
+  node.querySelector("#bRestore").onclick = () => go("restore");
+  node.querySelector("#bRestoreBackup").onclick = () => go("restoreBackup");
+  return node;
+}
+
+// ── Onboarding: welcome ──────────────────────────────────────────────────────
+export function renderWelcome(go) {
+  const node = el(`
+    <div>
+      <h1 class="tc">DOM Wallet</h1>
+      <p class="sub tc">Official desktop wallet with an integrated DOM node.</p>
+      <div class="card">
+        <button class="btn w-full" id="bCreate">Create new wallet</button>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestore">Restore from recovery phrase</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestoreBackup">Restore from backup file (.dombak)</button></div>
+        <p class="muted mt4">Two ways to recover: your <strong>recovery phrase</strong> brings back mined coins; a <strong>backup file</strong> brings back everything — including change and received funds.</p>
+        <div class="btn-row"><button class="btn ghost w-full" id="bOpen">Open existing wallet</button></div>
+      </div>
+      <p class="muted tc">Privacy by design · Sovereign by choice</p>
+    </div>`);
+  node.querySelector("#bCreate").onclick = () => go("create");
+  node.querySelector("#bRestore").onclick = () => go("restore");
+  node.querySelector("#bRestoreBackup").onclick = () => go("restoreBackup");
+  node.querySelector("#bOpen").onclick = () => go("open");
+  return node;
+}
+
+// ── Onboarding: create (generate seed → confirm → set password) ──────────────
+// Managed flow: the user supplies ONLY a name, a password and the mining
+// toggle. The app creates the wallet directory, the encrypted vault and the
+// per-wallet node (data dir, config, conflict-free local ports) in storage it
+// manages itself — there is no folder picker and the renderer never sees a
+// filesystem path.
+export function renderCreate(go, onReady) {
+  const node = el(`
+    <div>
+      <h1>Create wallet</h1>
+      <p class="sub">A new 24-word recovery phrase will be generated. Write it down — it recovers your mined coins. Received coins and change also need an encrypted backup you can export later from the Backup screen. Keep both for full recovery.</p>
+      <div class="card">
+        <label>Wallet name</label>
+        <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
+        <p class="muted mt4" id="nameHint">A friendly name; you will log in with it. The wallet and its node are stored automatically by the app.</p>
+        <label>Password</label>
+        <input type="password" id="pw" placeholder="Encrypts the wallet on disk" />
+        <label>Confirm password</label>
+        <input type="password" id="pw2" placeholder="Type the password again" />
+        <div class="check"><input type="checkbox" id="mine" /><label>Enable mining on this wallet's node</label></div>
+        <p class="muted mt4">Mining is optional and off by default. Rewards go to an app-managed miner wallet and are swept to this wallet automatically. You can change this later in Settings.</p>
+        <details class="mt4">
+          <summary class="muted">Advanced</summary>
+          <label>Network</label>
+          <select id="net">
+            <option value="testnet">Testnet</option>
+            <option value="mainnet">Mainnet</option>
+            <option value="regtest">Regtest (local dev)</option>
+          </select>
+        </details>
+        <div class="btn-row">
+          <button class="btn ghost" id="back">Back</button>
+          <button class="btn" id="next" disabled>Generate phrase</button>
+        </div>
+        <div class="err-text" id="err"></div>
+      </div>
+    </div>`);
+
+  // M2: the network is chosen here, at creation, and baked into the wallet.
+  // It cannot be changed afterwards (Settings shows it read-only).
+  const netEl = node.querySelector("#net");
+  netEl.value = settings.current.network;
+  const nameEl = node.querySelector("#name");
+  const errEl = node.querySelector("#err");
+
+  const refresh = () => {
+    node.querySelector("#next").disabled =
+      !(nameEl.value.trim() && node.querySelector("#pw").value.length >= 8);
+  };
+  nameEl.oninput = refresh;
+  node.querySelector("#pw").oninput = refresh;
+  // Duplicate-name warning as soon as the user leaves the field.
+  nameEl.onblur = async () => {
+    const name = nameEl.value.trim();
+    if (!name) return;
+    try {
+      if (await api.walletNameTaken(name)) {
+        errEl.textContent = `A wallet named “${name}” already exists. Choose another name.`;
+      } else if (errEl.textContent.includes("already exists")) {
+        errEl.textContent = "";
+      }
+    } catch {}
+  };
+  node.querySelector("#back").onclick = () => go("start");
+  node.querySelector("#next").onclick = async () => {
+    const pw = node.querySelector("#pw").value;
+    const pw2 = node.querySelector("#pw2").value;
+    const name = nameEl.value.trim();
+    const mine = node.querySelector("#mine").checked;
+    if (!name) { errEl.textContent = "Enter a name for this wallet."; return; }
+    if (pw !== pw2) { errEl.textContent = "Passwords do not match."; return; }
+    if (pw.length < 8) { errEl.textContent = "Use at least 8 characters."; return; }
+    errEl.textContent = "";
+    const btn = node.querySelector("#next"); btn.disabled = true;
+    try {
+      // The backend creates wallet + node layout, registers the name, and
+      // returns the one-time phrase plus this wallet's node settings.
+      const created = await api.walletCreateManaged(name, pw, mine, netEl.value);
+      settings.current = { ...settings.current, ...created.settings };
+      savePrefs(settings.current);
+      showSeedConfirm(node, created.phrase, onReady);
+    } catch (e) {
+      errEl.textContent = humanizeError(e);
+      btn.disabled = false;
+    }
+  };
+  return node;
+}
+
+// Force the user to view, then re-type-confirm a few random words.
+function showSeedConfirm(container, phrase, onReady) {
+  const words = phrase.trim().split(/\s+/);
+  const grid = words.map((w, i) =>
+    `<div class="seed-word"><span class="i">${i + 1}</span>${w}</div>`).join("");
+
+  container.innerHTML = "";
+  container.appendChild(el(`
+    <div>
+      <h1>Your recovery phrase</h1>
+      <div class="warn-box">Write these ${words.length} words on paper, in order. Anyone with this phrase can take your funds. It will not be shown again.</div>
+      <div class="warn-box warn-box-err">Never share your recovery phrase. Anyone with these words can access your funds. No one from DOM will ever ask for it.</div>
+      <div class="card seed-card"><div class="seed-grid">${grid}</div>
+        <div class="btn-row"><button class="btn" id="wrote">I wrote down my phrase</button></div>
+      </div>
+    </div>`));
+
+  container.querySelector("#wrote").onclick = () => {
+    // Ask the user to confirm 3 random positions.
+    const idxs = pickThree(words.length);
+    container.innerHTML = "";
+    container.appendChild(el(`
+      <div>
+        <h1>Confirm your phrase</h1>
+        <p class="sub">Type the requested words to confirm you saved them.</p>
+        <div class="card">
+          ${idxs.map((i) => `
+            <label>Word #${i + 1}</label>
+            <input type="text" data-idx="${i}" autocomplete="off" spellcheck="false" />`).join("")}
+          <div class="btn-row"><button class="btn" id="confirm">Confirm and open wallet</button></div>
+          <div class="err-text" id="cerr"></div>
+        </div>
+      </div>`));
+    container.querySelector("#confirm").onclick = () => {
+      const inputs = [...container.querySelectorAll("input[data-idx]")];
+      const ok = inputs.every((inp) =>
+        inp.value.trim().toLowerCase() === words[+inp.dataset.idx].toLowerCase());
+      if (!ok) { container.querySelector("#cerr").textContent = "Words do not match. Check your written copy."; return; }
+      toast(t("walletCreated"));
+      // L7: best-effort scrub of the phrase from the renderer. JS cannot
+      // zeroize, but dropping the words and clearing the typed inputs lets the
+      // GC reclaim the strings and removes them from the DOM.
+      for (let i = 0; i < words.length; i++) words[i] = "";
+      inputs.forEach((inp) => { inp.value = ""; });
+      onReady();
+    };
+  };
+}
+
+function pickThree(n) {
+  const s = new Set();
+  while (s.size < Math.min(3, n)) s.add(Math.floor(Math.random() * n));
+  return [...s].sort((a, b) => a - b);
+}
+
+// ── Onboarding: restore ──────────────────────────────────────────────────────
+// Managed flow: like create, the app owns all storage — no folder picker.
+export function renderRestore(go, onReady) {
+  const node = el(`
+    <div>
+      <h1>Restore wallet</h1>
+      <p class="sub">Enter your BIP-39 recovery phrase and set a new password. The app stores the wallet and its node automatically.</p>
+      <div class="card">
+        <label>Wallet name</label>
+        <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
+        <p class="muted mt4">A friendly name for login by name. Your recovery phrase is never saved to this name. It recovers mined coins; received coins and change need the encrypted backup file — export one from the Backup screen. Keep both.</p>
+        <label>Recovery phrase</label>
+        <textarea id="phrase" placeholder="word1 word2 word3 ..."></textarea>
+        <label>New password</label>
+        <input type="password" id="pw" />
+        <label>Confirm password</label>
+        <input type="password" id="pw2" />
+        <div class="check"><input type="checkbox" id="mine" /><label>Enable mining on this wallet's node</label></div>
+        <details class="mt4">
+          <summary class="muted">Advanced</summary>
+          <label>Network</label>
+          <select id="net">
+            <option value="testnet">Testnet</option>
+            <option value="mainnet">Mainnet</option>
+            <option value="regtest">Regtest (local dev)</option>
+          </select>
+        </details>
+        <div class="btn-row">
+          <button class="btn ghost" id="back">Back</button>
+          <button class="btn" id="go">Restore</button>
+        </div>
+        <div class="err-text" id="err"></div>
+      </div>
+    </div>`);
+  // M2: network is chosen at restore time and baked into the wallet.
+  const netEl = node.querySelector("#net");
+  netEl.value = settings.current.network;
+  node.querySelector("#back").onclick = () => go("start");
+  node.querySelector("#go").onclick = async () => {
+    const err = node.querySelector("#err");
+    const name = node.querySelector("#name").value.trim();
+    const phrase = node.querySelector("#phrase").value.trim();
+    const pw = node.querySelector("#pw").value;
+    const pw2 = node.querySelector("#pw2").value;
+    const mine = node.querySelector("#mine").checked;
+    if (!name) { err.textContent = "Enter a name for this wallet."; return; }
+    if (!phrase) { err.textContent = "Enter your recovery phrase."; return; }
+    if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
+    // L1: confirm the password so a typo can't lock the restored wallet.
+    if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
+    const btn = node.querySelector("#go"); btn.disabled = true;
+    try {
+      // Auto-registered by the backend under `name`; the phrase is never stored.
+      const restored = await api.walletRestoreManaged(name, pw, phrase, mine, netEl.value);
+      settings.current = { ...settings.current, ...restored };
+      savePrefs(settings.current);
+      node.querySelector("#phrase").value = "";
+      toast(t("walletRestored"));
+      onReady();
+    } catch (e) { err.textContent = humanizeError(e); }
+    finally { btn.disabled = false; }
+  };
+  return node;
+}
+
+// ── Onboarding: restore from an encrypted backup file (.dombak) ───────────────
+// The disaster path: with only the backup file + its passphrase, restore the
+// WHOLE wallet (incl. change/received funds the recovery phrase can't rebuild)
+// into a brand-new vault. Non-destructive: never overwrites an existing wallet.
+export function renderRestoreBackup(go, onReady) {
+  const node = el(`
+    <div>
+      <h1>Restore from backup file</h1>
+      <p class="sub">Recover your whole wallet from an encrypted <code>.dombak</code> backup — including change and received funds. You'll pick the backup file, then choose where to save the restored wallet.</p>
+      <div class="card">
+        <label>Backup passphrase</label>
+        <input type="password" id="bpass" placeholder="The passphrase you set when exporting the backup" autocomplete="off" />
+        <label>New password for the restored wallet</label>
+        <input type="password" id="pw" placeholder="Encrypts the restored wallet on disk" autocomplete="new-password" />
+        <label>Confirm new password</label>
+        <input type="password" id="pw2" placeholder="Type the new password again" autocomplete="new-password" />
+        <label>Network</label>
+        <select id="net">
+          <option value="testnet">Testnet</option>
+          <option value="mainnet">Mainnet</option>
+          <option value="regtest">Regtest (local dev)</option>
+        </select>
+        <p class="muted mt4">Choose the network this backup was created on. A mismatch is refused safely, without writing anything.</p>
+        <div class="btn-row">
+          <button class="btn ghost" id="back">Back</button>
+          <button class="btn" id="go">Choose backup &amp; restore…</button>
+        </div>
+        <div class="err-text" id="err"></div>
+        <p class="muted mt4" id="status"></p>
+      </div>
+    </div>`);
+
+  const netEl = node.querySelector("#net");
+  netEl.value = settings.current.network;
+  const bpassEl = node.querySelector("#bpass");
+  const pwEl = node.querySelector("#pw");
+  const pw2El = node.querySelector("#pw2");
+  const err = node.querySelector("#err");
+  const statusEl = node.querySelector("#status");
+
+  // Friendly, secret-free messages for the two backup-specific failures, falling
+  // back to the shared humanizeError (which also sanitizes any secret) otherwise.
+  const backupErrorText = (e) => {
+    const raw = String(e && e.message ? e.message : e ?? "");
+    if (/chain id does not match/i.test(raw)) {
+      return "This backup is for a different network. Select the network the backup was created on.";
+    }
+    if (/decryption failed/i.test(raw)) {
+      return "Incorrect backup passphrase.";
+    }
+    return humanizeError(e);
+  };
+
+  node.querySelector("#back").onclick = () => go("start");
+  node.querySelector("#go").onclick = async () => {
+    err.textContent = "";
+    statusEl.textContent = "";
+    const bpass = bpassEl.value;
+    const pw = pwEl.value;
+    const pw2 = pw2El.value;
+    // Validate BEFORE any call (these keep the fields so the user can fix them).
+    if (!bpass) { err.textContent = "Enter the backup passphrase."; return; }
+    if (pw.length < 8) { err.textContent = "Use at least 8 characters for the new password."; return; }
+    if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
+    const btn = node.querySelector("#go");
+    btn.disabled = true;
+    statusEl.textContent = "Pick the backup file, then choose where to save the restored wallet…";
+    try {
+      const summary = await api.importBackup(bpass, pw, netEl.value);
+      if (!summary) {
+        // The user cancelled the file picker or the save dialog — clean state,
+        // no spurious error, fields preserved.
+        statusEl.textContent = "";
+        btn.disabled = false;
+        return;
+      }
+      // Open the freshly restored vault with its new password, then align the
+      // node to the restored wallet's network so it starts on the right chain.
+      await api.walletOpen(summary.vault_path, pw, null, false);
+      settings.current = { ...settings.current, network: summary.network };
+      savePrefs(settings.current);
+      // Secrets already handed to the backend — scrub the inputs.
+      bpassEl.value = ""; pwEl.value = ""; pw2El.value = "";
+      toast(`Restored ${summary.outputs} output(s) on ${summary.network}`);
+      onReady();
+    } catch (e) {
+      // Keep the password fields so the user can correct a wrong passphrase or
+      // a wrong network without retyping everything.
+      statusEl.textContent = "";
+      err.textContent = backupErrorText(e);
+      btn.disabled = false;
+    }
+  };
+  return node;
+}
+
+// ── Onboarding: open existing ────────────────────────────────────────────────
+export function renderOpen(go, onReady) {
+  const node = el(`
+    <div>
+      <h1>Locate existing wallet</h1>
+      <p class="sub">Find your wallet folder once. If you remember it, next time you only need its name and password.</p>
+      <div class="card">
+        <label>Wallet folder (.dom directory)</label>
+        <div class="copyable"><code id="path">— choose —</code><button class="btn ghost" id="pick">Choose</button></div>
+        <label>Password</label>
+        <input type="password" id="pw" />
+        <label>Wallet name</label>
+        <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
+        <div class="check"><input type="checkbox" id="remember" checked /><label>Remember this wallet for login by name</label></div>
+        <p class="muted mt4">The name only remembers where your encrypted wallet is stored. Your recovery phrase recovers mined coins; received coins and change need the encrypted backup file — export one from the Backup screen. Keep both.</p>
+        <div class="btn-row">
+          <button class="btn ghost" id="back">Back</button>
+          <button class="btn" id="go">Open</button>
+        </div>
+        <div class="err-text" id="err"></div>
+      </div>
+    </div>`);
+  let path = null;
+  node.querySelector("#pick").onclick = async () => {
+    const p = await pickFolder("Open DOM wallet");
+    if (p) { path = p; node.querySelector("#path").textContent = p; }
+  };
+  node.querySelector("#back").onclick = () => go("start");
+  node.querySelector("#go").onclick = async () => {
+    const err = node.querySelector("#err");
+    if (!path) { err.textContent = "Choose a wallet."; return; }
+    const remember = node.querySelector("#remember").checked;
+    const name = node.querySelector("#name").value.trim();
+    if (remember && !name) { err.textContent = "Enter a name to remember this wallet, or uncheck “Remember”."; return; }
+    try {
+      await api.walletOpen(path, node.querySelector("#pw").value, name || null, remember);
+      toast(t("walletOpened"));
+      onReady();
+    } catch (e) { err.textContent = humanizeError(e); }
+  };
+  return node;
+}
+
+// ── Unlock (wallet open but locked) ──────────────────────────────────────────
+export function renderUnlock(onReady) {
+  const node = el(`
+    <div>
+      <h1>Unlock</h1>
+      <div class="card">
+        <label>Password</label>
+        <input type="password" id="pw" autofocus />
+        <div class="btn-row"><button class="btn" id="go">Unlock</button></div>
+        <div class="err-text" id="err"></div>
+      </div>
+    </div>`);
+  const submit = async () => {
+    try { await api.walletUnlock(node.querySelector("#pw").value); onReady(); }
+    catch (e) { node.querySelector("#err").textContent = humanizeError(e); }
+  };
+  node.querySelector("#go").onclick = submit;
+  node.querySelector("#pw").onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  return node;
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+export function renderDashboard() {
+  const node = el(`
+    <div class="screen">
+      <h1>Dashboard</h1>
+      <p class="sub">Your balance and the state of your integrated node.</p>
+      <div class="card hidden sync-banner" id="syncBanner">
+        <span class="pill pill-bare">
+          <span class="dot busy"></span>
+          <span id="syncText" class="c-warn">Syncing…</span>
+        </span>
+        <p class="muted mt6">The node is still downloading the chain. Your balance is only reliable after sync — coins that haven't appeared yet may show up once it completes.</p>
+      </div>
+      <div class="card">
+        <div class="balance-main"><span id="balTotal">—</span><span class="unit">DOM</span></div>
+        <div class="balance-sub">
+          <div><div class="k">Spendable</div><div class="v" id="balSpend">—</div></div>
+          <div><div class="k">Pending (immature)</div><div class="v pending" id="balImm">—</div></div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="card"><div class="k stat-mini-label">Chain height</div><div class="balance-main fs26"><span id="height">—</span></div></div>
+        <div class="card"><div class="k stat-mini-label">Network</div><div class="balance-main fs26"><span id="net">—</span></div></div>
+        <div class="card"><div class="k stat-mini-label">Peers</div><div class="balance-main fs26"><span id="peers">—</span></div></div>
+      </div>
+      <div class="card">
+        <span class="pill"><span class="dot" id="nodeDot"></span><span id="nodeState">node: unknown</span></span>
+        <span class="pill ml8"><span class="dot" id="mineDot"></span><span id="mineState">mining: —</span></span>
+      </div>
+    </div>`);
+  // IBD state between reads
+  node._sync = { lastHeight: null, stableTicks: 0, synced: false };
+  refreshDashboard(node);
+  const timer = setInterval(() => refreshDashboard(node), 5000);
+  node._cleanup = () => clearInterval(timer);
+  return node;
+}
+
+async function refreshDashboard(node) {
+  let peers = 0;
+  let height;
+  try {
+    const st = await api.nodeStatus();
+    if (st.chain_height !== undefined) {
+      height = st.chain_height;
+      node.querySelector("#height").textContent = st.chain_height;
+    }
+    if (st.network) node.querySelector("#net").textContent = st.network;
+    setNodePill(node, st.state);
+  } catch {}
+  try {
+    const m = await api.nodeMetrics(settings.current.metrics_listen_addr || "127.0.0.1:33371");
+    peers = m.peer_count;
+    node.querySelector("#peers").textContent = m.peer_count;
+    const md = node.querySelector("#mineDot"); const ms = node.querySelector("#mineState");
+    md.className = "dot " + (m.mining_active ? "on" : "off");
+    ms.textContent = "mining: " + (m.mining_active ? "active" : "off");
+  } catch {}
+
+  // Sync heuristic (IBD). The node does not expose an estimated NETWORK height,
+  // so we cannot know the true tip (L3). To avoid claiming "synced" too eagerly,
+  // we keep the syncing banner until the local height has been completely stable
+  // for a long, clearly-idle window AND at least one peer is connected. A brief
+  // mid-IBD stall (a slow peer) no longer flips us to "synced". With no peers we
+  // never consider ourselves synced.
+  const STABLE_TICKS_FOR_SYNCED = 6; // ~30s at the 5s dashboard refresh
+  const s = node._sync;
+  const banner = node.querySelector("#syncBanner");
+  const syncText = node.querySelector("#syncText");
+  if (height !== undefined) {
+    if (s.lastHeight !== null && height > s.lastHeight) {
+      s.stableTicks = 0;
+      s.synced = false;
+    } else if (s.lastHeight !== null && height === s.lastHeight) {
+      s.stableTicks += 1;
+      if (s.stableTicks >= STABLE_TICKS_FOR_SYNCED && peers > 0) s.synced = true;
+    }
+    if (peers === 0) s.synced = false;
+    s.lastHeight = height;
+  }
+  if (height !== undefined && !s.synced) {
+    banner.classList.remove("hidden");
+    syncText.textContent = `Syncing… (height ${height}${peers ? `, ${peers} peers` : ", no peers yet"})`;
+  } else {
+    banner.classList.add("hidden");
+  }
+
+  // Balance: always shown, but the banner warns it may be incomplete during IBD.
+  try {
+    const bal = await api.walletBalance();
+    node.querySelector("#balTotal").textContent = nomsToDom(bal.total);
+    node.querySelector("#balSpend").textContent = nomsToDom(bal.spendable);
+    node.querySelector("#balImm").textContent = nomsToDom(bal.immature);
+  } catch { /* node may not be ready yet */ }
+}
+
+function setNodePill(node, state) {
+  const dot = node.querySelector("#nodeDot"); const lbl = node.querySelector("#nodeState");
+  if (!dot) return;
+  const map = { running: "on", stopped: "off", starting: "busy", stopping: "busy" };
+  const labels = { running: "running", stopped: "stopped", starting: "starting", stopping: "stopping" };
+  dot.className = "dot " + (map[state] || "");
+  lbl.textContent = "node: " + (labels[state] || state || "unknown");
+}
+
+// ── Pay (payer side): Send (step 1) + Finalize (step 3) ───────────────────────
+// Interactive slate flow (Mimblewimble): unlike Bitcoin, the payer acts in TWO
+// steps, with the recipient responding in between.
+export function renderPay() {
+  const node = el(`
+    <div class="screen">
+      <h1>Pay DOM</h1>
+      <p class="sub">Payment is interactive: you create a slate, the recipient responds, and you finalize. Two exchanges — unlike Bitcoin's address model.</p>
+      <div class="card">
+        <div class="btn-row mt0">
+          <button class="btn" id="tabSend">1 · Send</button>
+          <button class="btn ghost" id="tabFinal">3 · Finalize</button>
+        </div>
+      </div>
+      <div id="payBody"></div>
+    </div>`);
+
+  const body = node.querySelector("#payBody");
+  const tabSend = node.querySelector("#tabSend");
+  const tabFinal = node.querySelector("#tabFinal");
+  const show = (which) => {
+    tabSend.className = which === "send" ? "btn" : "btn ghost";
+    tabFinal.className = which === "final" ? "btn" : "btn ghost";
+    body.innerHTML = "";
+    body.appendChild(which === "send" ? paySendStep() : payFinalizeStep());
+  };
+  tabSend.onclick = () => show("send");
+  tabFinal.onclick = () => show("final");
+  show("send");
+  return node;
+}
+
+// Step 1 — SENDER creates the slate.
+function paySendStep() {
+  const node = el(`
+    <div>
+      <div class="card" id="form">
+        <h2>Step 1 · Create send slate</h2>
+        <label>Amount (DOM)</label>
+        <input type="text" id="amt" placeholder="0.00000000" />
+        <label>Fee (DOM)</label>
+        <input type="text" id="fee" value="0.00100000" />
+        <div class="btn-row"><button class="btn" id="create">Generate slate</button></div>
+        <div class="err-text" id="err"></div>
+        <p class="muted mt10" id="avail"></p>
+      </div>
+      <div class="card hidden" id="result">
+        <div class="warn-box">The payment is NOT complete yet. Send this slate to the recipient; they will respond with a slate for you to <b>Finalize</b> (step 3).</div>
+        <div class="qr-wrap">
+          <div class="qr-box" id="qr"></div>
+          <div class="flex1-min260">
+            <label>Slate (send to the recipient)</label>
+            <div class="copyable"><code id="slate"></code><button class="btn ghost" id="copySlate">Copy</button></div>
+            <div class="btn-row"><button class="btn ghost" id="saveSlate">Save as file</button></div>
+          </div>
+        </div>
+      </div>
+    </div>`);
+
+  api.walletBalance().then((b) =>
+    node.querySelector("#avail").textContent = `Spendable: ${nomsToDom(b.spendable)} DOM`).catch(() => {});
+
+  node.querySelector("#create").onclick = async () => {
+    const err = node.querySelector("#err"); err.textContent = "";
+    try {
+      const amount = domToNoms(node.querySelector("#amt").value);
+      const fee = domToNoms(node.querySelector("#fee").value);
+      if (amount <= 0n) {
+        err.textContent = "Amount must be greater than zero.";
+        return;
+      }
+      const bal = await api.walletBalance();
+      if (amount + fee > BigInt(bal.spendable)) {
+        err.textContent = "Amount + fee exceed the spendable balance."; return;
+      }
+      // M1: pass BigInt noms straight through — the api layer stringifies them,
+      // avoiding the Number() 2^53 precision loss.
+      const slateHex = await api.slateCreateSend(amount, fee);
+      await showSlateResult(node, slateHex);
+    } catch (e) { err.textContent = humanizeError(e); }
+  };
+  return node;
+}
+
+// Step 3 — SENDER finalizes the responded slate and submits it to the node.
+function payFinalizeStep() {
+  const node = el(`
+    <div>
+      <div class="card" id="form">
+        <h2>Step 3 · Finalize and broadcast</h2>
+        <p class="muted">Paste here the slate the recipient returned (their response to step 2).</p>
+        <label>Responded slate</label>
+        <textarea id="slateIn" placeholder="paste the recipient's slate (hex)…" spellcheck="false"></textarea>
+        <div class="btn-row">
+          <button class="btn ghost" id="load">Load from file</button>
+          <button class="btn" id="finalize">Finalize and send</button>
+        </div>
+        <div class="err-text" id="err"></div>
+      </div>
+    </div>`);
+
+  node.querySelector("#load").onclick = async () => {
+    const text = await loadTextFile("Load responded slate");
+    if (text) node.querySelector("#slateIn").value = text.trim();
+  };
+  node.querySelector("#finalize").onclick = async () => {
+    const err = node.querySelector("#err"); err.textContent = "";
+    const slateHex = node.querySelector("#slateIn").value.trim();
+    if (!slateHex) { err.textContent = "Paste the responded slate."; return; }
+    const btn = node.querySelector("#finalize"); btn.disabled = true;
+    try {
+      const hash = await api.slateFinalize(slateHex);
+      toast("Transaction sent to the network: " + hash.slice(0, 16) + "…");
+      node.querySelector("#slateIn").value = "";
+    } catch (e) { err.textContent = humanizeError(e); }
+    finally { btn.disabled = false; }
+  };
+  return node;
+}
+
+// ── Receive (recipient side): step 2 of the slate ────────────────────────────
+export function renderReceive() {
+  const node = el(`
+    <div class="screen">
+      <h1>Receive DOM</h1>
+      <p class="sub">Receiving is interactive: import the slate the sender gave you, respond, and return the responded slate to them. The sender finalizes (step 3) to complete it.</p>
+      <div class="card" id="form">
+        <h2>Step 2 · Respond to the sender's slate</h2>
+        <label>Slate received from the sender</label>
+        <textarea id="slateIn" placeholder="paste the slate (hex) the sender gave you…" spellcheck="false"></textarea>
+        <div class="btn-row">
+          <button class="btn ghost" id="load">Load from file</button>
+          <button class="btn" id="respond">Respond to slate</button>
+        </div>
+        <div class="err-text" id="err"></div>
+      </div>
+      <div class="card hidden" id="result">
+        <div class="warn-box">Return this slate to the sender. They will finalize and broadcast the transaction.</div>
+        <div class="qr-wrap">
+          <div class="qr-box" id="qr"></div>
+          <div class="flex1-min260">
+            <label>Responded slate (return to the sender)</label>
+            <div class="copyable"><code id="slate"></code><button class="btn ghost" id="copySlate">Copy</button></div>
+            <div class="btn-row"><button class="btn ghost" id="saveSlate">Save as file</button></div>
+          </div>
+        </div>
+      </div>
+    </div>`);
+
+  node.querySelector("#load").onclick = async () => {
+    const text = await loadTextFile("Load sender's slate");
+    if (text) node.querySelector("#slateIn").value = text.trim();
+  };
+  node.querySelector("#respond").onclick = async () => {
+    const err = node.querySelector("#err"); err.textContent = "";
+    const slateHex = node.querySelector("#slateIn").value.trim();
+    if (!slateHex) { err.textContent = "Paste the received slate."; return; }
+    const btn = node.querySelector("#respond"); btn.disabled = true;
+    try {
+      const responded = await api.slateReceive(slateHex);
+      await showSlateResult(node, responded);
+    } catch (e) { err.textContent = humanizeError(e); }
+    finally { btn.disabled = false; }
+  };
+  return node;
+}
+
+// Shared helper: fill the result card with the slate (text + QR) and wire the
+// Copy / Save buttons. The QR is only generated if the slate fits (QR has a
+// capacity limit); large slates show just the text + file.
+async function showSlateResult(node, slateHex) {
+  node.querySelector("#slate").textContent = slateHex;
+  node.querySelector("#result").classList.remove("hidden");
+  node.querySelector("#copySlate").onclick = () => copy(slateHex);
+  node.querySelector("#saveSlate").onclick = () =>
+    saveTextViaDialog("Save slate", "slate.txt", slateHex);
+  const qr = node.querySelector("#qr");
+  try {
+    const svg = await api.makeQrSvg(slateHex);
+    qr.innerHTML = svg;
+  } catch {
+    // Slate larger than the QR capacity — guide the user to text/file.
+    qr.innerHTML = `<div class="muted qr-fallback">Slate too large for a QR code. Use the copyable text or save it as a file.</div>`;
+  }
+}
+
+// Load text from a user-chosen file (to import a slate).
+// M4: the native dialog is opened in the backend; here we only pass the title.
+// Returns the text, or null if the user cancelled.
+async function loadTextFile(title) {
+  try {
+    return await api.readTextFile(title);
+  } catch (e) {
+    toast(humanizeError(e), true);
+    return null;
+  }
+}
+
+// ── History ──────────────────────────────────────────────────────────────────
+export function renderHistory() {
+  const node = el(`
+    <div class="screen">
+      <h1>History</h1>
+      <p class="sub">Transactions recorded by this wallet.</p>
+      <div class="card" id="list">
+        <p class="muted">History is read from the wallet journal. Sent transactions appear here after they are submitted; receipts and coinbase appear once the node scans the chain.</p>
+      </div>
+    </div>`);
+  return node;
+}
+
+// ── Node / Logs ──────────────────────────────────────────────────────────────
+export function renderNode() {
+  const node = el(`
+    <div class="screen">
+      <h1>Node / Logs</h1>
+      <p class="sub">Your integrated DOM node and its live output.</p>
+      <div class="card">
+        <div class="stat-grid">
+          <div class="stat"><div class="k">State</div><div class="v" id="nState">—</div></div>
+          <div class="stat"><div class="k">Height</div><div class="v" id="nHeight">—</div></div>
+          <div class="stat"><div class="k">Peers</div><div class="v" id="nPeers">—</div></div>
+          <div class="stat"><div class="k">Mempool</div><div class="v" id="nMem">—</div></div>
+          <div class="stat"><div class="k">Mining</div><div class="v" id="nMine">—</div></div>
+          <div class="stat"><div class="k">Blocks mined</div><div class="v" id="nBlocks">—</div></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="bStart">Start</button>
+          <button class="btn ghost" id="bStop">Stop</button>
+          <button class="btn ghost" id="bRestart">Restart</button>
+          <button class="btn ghost" id="bSweep">Sweep rewards</button>
+          <button class="btn" id="bStartMining">Start Mining</button>
+          <button class="btn ghost" id="bStopMining">Stop Mining</button>
+        </div>
+        <div class="warn-box">Mining can use significant CPU. Keep mining off unless you explicitly want this wallet node to mine.</div>
+        <p class="muted mt4" id="mineCfg">Mining config: —</p>
+      </div>
+      <div class="card">
+        <h2>Live logs</h2>
+        <div class="log-toolbar">
+          <select id="lvl">
+            <option value="">All levels</option>
+            <option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option><option>TRACE</option>
+          </select>
+          <input type="text" id="filter" placeholder="filter text…" />
+          <label class="check"><input type="checkbox" id="autoscroll" checked /><span>Auto-scroll</span></label>
+          <button class="btn ghost" id="save">Save logs</button>
+          <button class="btn ghost ml-auto" id="clear">Clear</button>
+        </div>
+        <div class="log-console" id="console"></div>
+      </div>
+    </div>`);
+
+  const consoleEl = node.querySelector("#console");
+  const lvlEl = node.querySelector("#lvl");
+  const filterEl = node.querySelector("#filter");
+  const autoEl = node.querySelector("#autoscroll");
+  // Cap the number of DOM nodes kept in the console (H2). The in-memory ring
+  // buffer keeps more lines for "Save logs"; the live view only needs a window.
+  const MAX_DOM_LINES = 1000;
+
+  const matches = (l) => {
+    const lvl = lvlEl.value;
+    const f = filterEl.value.toLowerCase();
+    return (!lvl || l.level === lvl) &&
+      (!f || (l.message + l.target).toLowerCase().includes(f));
+  };
+
+  // Full redraw — only on mount, filter/level change, or reset. NOT per line.
+  const fullRender = () => {
+    consoleEl.innerHTML = getLogLines().filter(matches).map(fmtLine).join("");
+    if (autoEl.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
+  };
+
+  // Incremental append, batched via requestAnimationFrame so a burst of lines
+  // costs one DOM mutation instead of one full re-render per line (H2).
+  let pending = [];
+  let raf = 0;
+  const flush = () => {
+    raf = 0;
+    const html = pending.filter(matches).map(fmtLine).join("");
+    pending = [];
+    if (!html) return;
+    consoleEl.insertAdjacentHTML("beforeend", html);
+    let extra = consoleEl.childElementCount - MAX_DOM_LINES;
+    while (extra-- > 0 && consoleEl.firstElementChild) consoleEl.firstElementChild.remove();
+    if (autoEl.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
+  };
+  const onLog = (line) => {
+    if (line == null) { fullRender(); return; } // null = reset/clear
+    pending.push(line);
+    if (!raf) raf = requestAnimationFrame(flush);
+  };
+
+  // Show the lines already captured (even if the tab is opened after the node
+  // started), then append each new line as it arrives.
+  fullRender();
+  const unsub = subscribeLogs(onLog);
+
+  lvlEl.onchange = fullRender;
+  filterEl.oninput = fullRender;
+  node.querySelector("#clear").onclick = () => { clearLogs(); }; // notifies null → fullRender
+
+  node.querySelector("#save").onclick = async () => {
+    const lvl = node.querySelector("#lvl").value;
+    const f = node.querySelector("#filter").value;
+    const text = logsToText(f, lvl);
+    if (!text) { toast("No logs to save.", true); return; }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    try {
+      const saved = await api.saveTextFile(
+        "Save node logs",
+        `dom-node-logs-${stamp}.txt`,
+        text);
+      if (saved) toast(t("logsSaved"));
+    } catch (e) { toast(humanizeError(e), true); }
+  };
+
+  node.querySelector("#bStart").onclick = async () => {
+    settings.current.mine = false;
+    savePrefs(settings.current);
+    try { await api.nodeStart(settings.current); toast(t("nodeStarting")); }
+    catch (e) { toast(humanizeError(e), true); }
+  };
+  node.querySelector("#bStop").onclick = async () => {
+    settings.current.mine = false;
+    savePrefs(settings.current);
+    try { await api.nodeStop(); toast(t("nodeStopping")); } catch (e) { toast(humanizeError(e), true); }
+  };
+  node.querySelector("#bRestart").onclick = async () => {
+    try { await api.nodeRestart(settings.current); toast(t("nodeRestarting")); }
+    catch (e) { toast(humanizeError(e), true); }
+  };
+  node.querySelector("#bSweep").onclick = async () => {
+    const btn = node.querySelector("#bSweep"); btn.disabled = true;
+    try {
+      const tx = await api.sweepMinerRewards();
+      if (tx) {
+        toast("Rewards swept to your wallet: " + tx.slice(0, 16) + "…");
+      } else {
+        toast("Nothing matured to sweep yet.");
+      }
+    } catch (e) { toast(humanizeError(e), true); }
+    finally { btn.disabled = false; }
+  };
+  node.querySelector("#bStartMining").onclick = async () => {
+    // No manual reward wallet needed: rewards go to the app-managed miner
+    // wallet under this wallet's node dir and are auto-swept to the user
+    // wallet. An explicit reward wallet in Settings remains an override.
+    if (!window.confirm("Mining can use significant CPU. Start mining?")) return;
+    try { await applyMiningEnabled(true); toast(t("applyingMining")); }
+    catch (e) {
+      settings.current.mine = false;
+      savePrefs(settings.current);
+      toast(humanizeError(e), true);
+    }
+  };
+  node.querySelector("#bStopMining").onclick = async () => {
+    try { await applyMiningEnabled(false); toast("Mining stopped."); }
+    catch (e) { toast(humanizeError(e), true); }
+  };
+
+  const labels = { running: "running", stopped: "stopped", starting: "starting", stopping: "stopping" };
+  const refresh = async () => {
+    try {
+      const st = await api.nodeStatus();
+      node.querySelector("#nState").textContent = labels[st.state] || st.state || "—";
+      if (st.chain_height !== undefined) node.querySelector("#nHeight").textContent = st.chain_height;
+      if (st.mempool_size !== undefined) node.querySelector("#nMem").textContent = st.mempool_size;
+    } catch {}
+    try {
+      const m = await api.nodeMetrics(settings.current.metrics_listen_addr || "127.0.0.1:33371");
+      node.querySelector("#nPeers").textContent = m.peer_count;
+      node.querySelector("#nMem").textContent = m.mempool_size;
+      node.querySelector("#nMine").textContent = m.mining_active ? "active" : "off";
+      node.querySelector("#nBlocks").textContent = m.blocks_mined;
+      node.querySelector("#bStartMining").disabled = m.mining_active;
+      node.querySelector("#bStopMining").disabled = !m.mining_active && !settings.current.mine;
+    } catch {}
+    node.querySelector("#mineCfg").textContent =
+      `Mining config: enabled=${!!settings.current.mine}, threads=${normalizeMinerThreads(settings.current.miner_threads)}, throttle=${normalizeMinerThrottleMs(settings.current.miner_throttle_ms)} ms`;
+  };
+  refresh();
+  const timer = setInterval(refresh, 4000);
+  node._cleanup = () => {
+    clearInterval(timer);
+    unsub();
+    if (raf) cancelAnimationFrame(raf);
+  };
+  return node;
+}
+
+function fmtLine(l) {
+  const ts = new Date(l.ts_ms).toLocaleTimeString();
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const tgt = l.target.split("::")[0];
+  return `<div class="log-line"><span class="t">${ts}</span><span class="lvl ${l.level}">${l.level}</span><span class="tgt">${esc(tgt)}</span><span class="msg">${esc(l.message)}</span></div>`;
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+// ── Backup & Recovery (encrypted full backup, .dombak) ────────────────────────
+// Export an encrypted snapshot that recovers EVERYTHING the recovery phrase alone
+// cannot rebuild (change / received-funds blindings). The backup passphrase is
+// its OWN secret, independent of the login password. Restore lives on the Welcome
+// screen (the disaster path, when no wallet is open) — added in PASSO 3.
+export function renderBackup() {
+  const node = el(`
+    <div class="screen">
+      <h1>Backup &amp; Recovery</h1>
+      <p class="sub">Export an encrypted backup file (<code>.dombak</code>) that can recover your whole wallet — including change and received funds your recovery phrase alone cannot rebuild.</p>
+      <div class="card">
+        <h2>Export backup</h2>
+        <div class="warn-box">The backup passphrase is a <strong>separate secret</strong> from your login password. You will need it — and only it — to restore this backup. If you lose it, the backup cannot be opened.</div>
+        <label>Backup passphrase</label>
+        <input type="password" id="bpass" placeholder="A strong secret, separate from your login password" autocomplete="new-password" />
+        <label>Confirm backup passphrase</label>
+        <input type="password" id="bpass2" placeholder="Type the backup passphrase again" autocomplete="new-password" />
+        <div class="btn-row"><button class="btn" id="doExport" disabled>Export Backup…</button></div>
+        <div class="err-text" id="berr"></div>
+        <p class="muted mt4" id="bstatus"></p>
+      </div>
+      <div class="card">
+        <h2>Restore from a backup file</h2>
+        <p class="muted">Restoring a <code>.dombak</code> file creates a new, separate wallet and is done from the welcome screen when no wallet is open. Lock this wallet to reach it.</p>
+      </div>
+    </div>`);
+
+  const pass = node.querySelector("#bpass");
+  const pass2 = node.querySelector("#bpass2");
+  const btn = node.querySelector("#doExport");
+  const errEl = node.querySelector("#berr");
+  const statusEl = node.querySelector("#bstatus");
+
+  const refresh = () => {
+    btn.disabled = !(pass.value.length > 0 && pass2.value.length > 0);
+  };
+  pass.oninput = refresh;
+  pass2.oninput = refresh;
+
+  // Best-effort scrub of the typed passphrase from the renderer after it has been
+  // handed to the backend. JS cannot zeroize, but clearing the inputs drops the
+  // strings from the DOM so the GC can reclaim them.
+  const clearFields = () => {
+    pass.value = "";
+    pass2.value = "";
+    refresh();
+  };
+
+  btn.onclick = async () => {
+    errEl.textContent = "";
+    statusEl.textContent = "";
+    const p1 = pass.value;
+    const p2 = pass2.value;
+    // Validate BEFORE any call (these keep the fields so the user can fix them).
+    if (!p1) { errEl.textContent = "Enter a backup passphrase."; return; }
+    if (p1 !== p2) { errEl.textContent = "The backup passphrases do not match."; return; }
+    btn.disabled = true;
+    statusEl.textContent = "Choose where to save the backup…";
+    try {
+      const saved = await api.exportBackup(p1);
+      clearFields(); // passphrase already handed to the backend — scrub the inputs
+      if (saved) {
+        toast("Backup saved");
+        statusEl.textContent = "Backup saved. Keep the file and its passphrase safe — and separate from each other.";
+      } else {
+        statusEl.textContent = "Export cancelled.";
+      }
+    } catch (e) {
+      clearFields();
+      statusEl.textContent = "";
+      errEl.textContent = humanizeError(e);
+    } finally {
+      refresh(); // re-disable until a fresh passphrase is typed
+    }
+  };
+
+  return node;
+}
+
+export function renderSettings(onApply) {
+  const s = settings.current;
+  const node = el(`
+    <div class="screen">
+      <h1>Settings</h1>
+      <p class="sub">Node network, ports and data location. Changes take effect when the node starts/restarts.</p>
+      <div class="card">
+        <label>Network</label>
+        <select id="network" disabled>
+          <option value="testnet">Testnet</option>
+          <option value="mainnet">Mainnet</option>
+          <option value="regtest">Regtest (local dev)</option>
+        </select>
+        <p class="muted mt4">The network is fixed by the open wallet and cannot be changed here. To use another network, create or restore a wallet for it.</p>
+        <label>Seed peers (host:port, comma-separated)</label>
+        <input type="text" id="seeds" placeholder="192.153.57.211:8443" />
+        <div class="row">
+          <div class="flex1"><label>P2P listen</label><input type="text" id="p2p" /></div>
+          <div class="flex1"><label>RPC listen</label><input type="text" id="rpc" /></div>
+        </div>
+        <div class="row">
+          <div class="flex1"><label>Metrics listen</label><input type="text" id="metrics" /></div>
+          <div class="flex1"><label>Log level</label>
+            <select id="log"><option>info</option><option>debug</option><option>warn</option><option>error</option><option>trace</option></select>
+          </div>
+        </div>
+        <label>Data directory</label>
+        <div class="copyable"><code id="data"></code><button class="btn ghost" id="pickData">Change</button></div>
+        <p class="muted mt4" id="storageInfo"></p>
+        <label>Miner reward wallet (.dom, optional override)</label>
+        <div class="copyable"><code id="miner"></code><button class="btn ghost" id="pickMiner">Choose</button><button class="btn ghost" id="clearMiner">Remove</button></div>
+        <p class="muted mt4">Optional: rewards normally go to an app-managed miner wallet and are swept to your wallet automatically. Your personal wallet is never used for mining and its password is never shared with the node.</p>
+        <div class="row">
+          <div class="flex1"><label>Miner threads</label><input type="number" id="minerThreads" min="1" step="1" /></div>
+          <div class="flex1"><label>Miner throttle (ms)</label><input type="number" id="minerThrottle" min="0" step="1" /></div>
+        </div>
+        <div class="check"><input type="checkbox" id="mine" /><label>Mining enabled</label></div>
+        <div class="warn-box">Mining can use significant CPU.</div>
+        <div class="btn-row"><button class="btn" id="apply">Save and apply</button></div>
+      </div>
+      <div class="card">
+        <h2>Access</h2>
+        <div class="row">
+          <div class="flex1">
+            <label>Auto-lock on inactivity</label>
+            <select id="autolock">
+              <option value="1">1 minute</option>
+              <option value="5">5 minutes</option>
+              <option value="15">15 minutes</option>
+              <option value="30">30 minutes</option>
+              <option value="0">Never</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Automatic Backup</h2>
+        <p class="muted">Keeps an encrypted backup up to date automatically, so your recovery phrase alone can restore change and received funds — not just mined coins. It refreshes only when your confirmed funds change.</p>
+        <div class="check"><input type="checkbox" id="autoBackup" /><label>Enable automatic backup</label></div>
+        <p class="muted mt4"><strong>Local backup</strong> (always on while enabled) is kept next to your wallet file. It protects against the wallet file being corrupted or deleted, but <strong>not</strong> against losing this computer.</p>
+        <label>External folder (optional — USB drive or synced cloud folder)</label>
+        <div class="copyable"><code id="autoBackupExt"></code><button class="btn ghost" id="pickAutoBackup">Choose folder</button><button class="btn ghost" id="clearAutoBackup">Remove</button></div>
+        <div class="warn-box">An external backup contains your <strong>seed</strong>, protected only by your <strong>login password</strong>. If that location is lost or compromised, your funds' safety depends on that password's strength — so a strong password is required to enable it.</div>
+        <p class="muted mt4">In-flight transactions (not yet finalized) still depend on this device's local state until they confirm; they are not covered by the confirmed-funds backup.</p>
+      </div>
+      <div class="card">
+        <h2>Security</h2>
+        <p class="muted">Showing the recovery phrase is not possible after creation — by design, DOM wallets store the seed as encrypted bytes, not as recoverable words. Your written phrase recovers mined coins; to also recover change and received funds, export an encrypted backup from the Backup screen and keep both safe. <strong>No one from DOM will ever ask for your recovery phrase.</strong></p>
+        <div class="btn-row"><button class="btn danger" id="lock">Lock wallet now</button></div>
+      </div>
+    </div>`);
+
+  node.querySelector("#network").value = s.network;
+  // Advanced, read-only: where the app keeps managed wallets on this system.
+  api.walletStorageInfo().then((info) => {
+    const parts = [];
+    if (info?.open_wallet_dir) parts.push(`This wallet: ${info.open_wallet_dir}`);
+    if (info?.wallets_dir) parts.push(`Managed wallets folder: ${info.wallets_dir}`);
+    node.querySelector("#storageInfo").textContent = parts.join(" · ");
+  }).catch(() => {});
+  node.querySelector("#seeds").value = (s.seed_peers || []).join(", ");
+  node.querySelector("#p2p").value = s.p2p_listen_addr;
+  node.querySelector("#rpc").value = s.rpc_listen_addr;
+  node.querySelector("#metrics").value = s.metrics_listen_addr || "";
+  node.querySelector("#log").value = s.log_level;
+  node.querySelector("#data").textContent = s.data_dir;
+  const renderMinerWallet = () => {
+    node.querySelector("#miner").textContent = minerWalletDisplay(s);
+  };
+  renderMinerWallet();
+  node.querySelector("#minerThreads").value = normalizeMinerThreads(s.miner_threads || 1);
+  node.querySelector("#minerThrottle").value = normalizeMinerThrottleMs(s.miner_throttle_ms ?? 10);
+  node.querySelector("#mine").checked = !!s.mine;
+  node.querySelector("#autolock").value = String(
+    typeof s.auto_lock_minutes === "number" ? s.auto_lock_minutes : 5);
+
+  node.querySelector("#pickData").onclick = async () => {
+    const dir = await window.__TAURI__.dialog.open({ directory: true, multiple: false });
+    // L11: persist immediately so the choice survives navigating away without
+    // clicking "Apply".
+    if (dir) { s.data_dir = dir; node.querySelector("#data").textContent = dir; savePrefs(s); }
+  };
+  node.querySelector("#pickMiner").onclick = async () => {
+    const f = await pickSaveFile("Choose miner wallet (.dom)");
+    if (f) { s.miner_wallet_path = f; renderMinerWallet(); savePrefs(s); }
+  };
+  node.querySelector("#clearMiner").onclick = () => {
+    clearMinerWalletSettings(s);
+    node.querySelector("#mine").checked = false;
+    renderMinerWallet();
+    savePrefs(s);
+  };
+  node.querySelector("#lock").onclick = async () => { await api.walletLock(); location.reload(); };
+
+  // ── Automatic Backup ────────────────────────────────────────────────────────
+  const renderAutoBackup = () => {
+    node.querySelector("#autoBackup").checked = !!s.auto_backup_enabled;
+    node.querySelector("#autoBackupExt").textContent =
+      s.auto_backup_external_path || "(none — local only)";
+  };
+  renderAutoBackup();
+  // Apply + persist the auto-backup config immediately. On failure (e.g. a weak
+  // login password rejected for an external destination), `rollback` restores the
+  // previous in-memory state and the reason is shown — nothing is persisted.
+  const applyAutoBackup = async (rollback) => {
+    try {
+      await api.setAutoBackup(s);
+      savePrefs(s);
+    } catch (e) {
+      if (rollback) rollback();
+      toast(humanizeError(e), true);
+    }
+    renderAutoBackup();
+  };
+  node.querySelector("#autoBackup").onchange = (e) => {
+    const prev = s.auto_backup_enabled;
+    s.auto_backup_enabled = e.target.checked;
+    applyAutoBackup(() => { s.auto_backup_enabled = prev; });
+  };
+  node.querySelector("#pickAutoBackup").onclick = async () => {
+    const dir = await pickFolder("Choose external backup folder");
+    if (!dir) return;
+    const prevPath = s.auto_backup_external_path;
+    const prevEnabled = s.auto_backup_enabled;
+    // Choosing an external destination implies enabling auto-backup; the backend
+    // gates it on a strong login password and rejects a weak one (we roll back).
+    s.auto_backup_external_path = dir;
+    s.auto_backup_enabled = true;
+    applyAutoBackup(() => {
+      s.auto_backup_external_path = prevPath;
+      s.auto_backup_enabled = prevEnabled;
+    });
+  };
+  node.querySelector("#clearAutoBackup").onclick = () => {
+    const prevPath = s.auto_backup_external_path;
+    s.auto_backup_external_path = null;
+    applyAutoBackup(() => { s.auto_backup_external_path = prevPath; });
+  };
+
+  // Auto-lock applies immediately (no node restart needed).
+  node.querySelector("#autolock").onchange = (e) => {
+    s.auto_lock_minutes = parseInt(e.target.value, 10);
+    savePrefs(s);
+    onApply(); // restart the inactivity timer with the new value
+  };
+
+  node.querySelector("#apply").onclick = async () => {
+    const wasMining = !!settings.current.mine;
+    // Network stays fixed to the open wallet (M2); the disabled select keeps it.
+    s.seed_peers = normalizeSeedPeers(node.querySelector("#seeds").value);
+    s.p2p_listen_addr = node.querySelector("#p2p").value.trim();
+    s.rpc_listen_addr = node.querySelector("#rpc").value.trim();
+    const met = node.querySelector("#metrics").value.trim();
+    s.metrics_listen_addr = met || null;
+    s.log_level = node.querySelector("#log").value;
+    s.miner_threads = normalizeMinerThreads(node.querySelector("#minerThreads").value);
+    s.miner_throttle_ms = normalizeMinerThrottleMs(node.querySelector("#minerThrottle").value);
+    s.mine = node.querySelector("#mine").checked;
+    // No manual reward wallet required: mining uses the app-managed miner
+    // wallet unless an explicit override is chosen above.
+    if (s.mine && !wasMining && !window.confirm("Mining can use significant CPU. Start mining?")) {
+      s.mine = false;
+      node.querySelector("#mine").checked = false;
+    }
+    savePrefs(s);
+    onApply();
+    // Persist next to the open managed wallet (no-op otherwise) so the choice
+    // is restored when this wallet is opened by name again.
+    try { await api.managedSettingsSave(s); } catch {}
+    try { await api.nodeRestart(s); toast(t("settingsApplied")); }
+    catch (e) {
+      const msg = humanizeError(e);
+      if (/miner reward wallet/i.test(msg)) {
+        s.mine = false;
+        node.querySelector("#mine").checked = false;
+        savePrefs(s);
+      }
+      toast(msg, true);
+    }
+  };
+  return node;
+}

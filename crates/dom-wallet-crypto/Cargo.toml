@@ -1,0 +1,34 @@
+[package]
+name        = "dom-wallet-crypto"
+description = "DOM protocol — shared wallet at-rest crypto: Argon2id+HKDF key derivation and the encrypted, atomically-written file envelope (ChaCha20Poly1305). Single audited source for dom-wallet (v1) and dom-wallet2 (v2)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+# Key derivation.
+argon2.workspace = true
+hkdf.workspace   = true
+sha2.workspace   = true
+# AEAD.
+chacha20poly1305.workspace = true
+# Randomness for per-save salt/nonce.
+rand.workspace = true
+# Secret zeroization.
+zeroize.workspace = true
+# Generic payload (de)serialization.
+serde.workspace      = true
+serde_json.workspace = true
+# Errors.
+thiserror.workspace = true
+# Same-directory, random, exclusive temporary-file authority for atomic saves.
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["process"] }
+
+[dev-dependencies]
+serde      = { workspace = true }
+proptest.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "xmr-refund-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+xmr-compensation-policy = { path = "../../xmr-compensation-policy" }
+dom-adaptor.workspace = true
+dom-crypto.workspace = true
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-serialization.workspace = true
+dom-scriptless-crypto = { path = "../../dom-scriptless-crypto" }
+kaystra-core = { path = "../../kaystra-core" }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+xmr-setup-profile = { path = "../xmr-setup-profile" }

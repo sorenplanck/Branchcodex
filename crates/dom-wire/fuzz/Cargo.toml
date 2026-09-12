@@ -1,0 +1,96 @@
+[package]
+name = "dom-wire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-wire]
+path = ".."
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[[bin]]
+name = "fuzz_wire_message"
+path = "fuzz_targets/fuzz_wire_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hello_payload"
+path = "fuzz_targets/fuzz_hello_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_headers_payload"
+path = "fuzz_targets/fuzz_headers_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_getheaders_payload"
+path = "fuzz_targets/fuzz_getheaders_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_getblockdata_payload"
+path = "fuzz_targets/fuzz_getblockdata_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_block_payload"
+path = "fuzz_targets/fuzz_block_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_addr_payload"
+path = "fuzz_targets/fuzz_addr_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_getaddr_payload"
+path = "fuzz_targets/fuzz_getaddr_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_peer_rotation"
+path = "fuzz_targets/fuzz_peer_rotation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_peer_rotation_legacy"
+path = "fuzz_targets/fuzz_peer_rotation_legacy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_peer_reputation"
+path = "fuzz_targets/fuzz_peer_reputation.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -1,0 +1,53 @@
+[package]
+name        = "dom-node"
+description = "DOM full node binary"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dom-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "dom-wallet-bootstrap"
+path = "src/bin/dom-wallet-bootstrap.rs"
+
+[dependencies]
+socket2.workspace     = true
+igd-next.workspace    = true
+natpmp.workspace      = true
+thiserror.workspace = true
+dom-core.workspace      = true
+dom-consensus.workspace = true
+dom-tx.workspace = true
+dom-crypto.workspace    = true
+dom-store.workspace     = true
+dom-chain.workspace     = true
+dom-mempool.workspace   = true
+dom-wire.workspace      = true
+dom-config.workspace    = true
+dom-wallet.workspace    = true
+dom-wallet-core-api.workspace = true
+dom-pow.workspace       = true
+tokio.workspace         = true
+tracing.workspace       = true
+tracing-subscriber.workspace = true
+serde_json.workspace    = true
+anyhow.workspace        = true
+hex.workspace           = true
+dom-serialization.workspace = true
+primitive-types.workspace = true
+k256.workspace          = true
+randomx-rs.workspace     = true
+rand.workspace          = true
+dom-rpc.workspace       = true
+dom-pmmr.workspace      = true
+futures.workspace       = true
+
+[dev-dependencies]
+tempfile = "3"
+proptest.workspace = true
+lmdb.workspace = true
+dom-slate.workspace = true

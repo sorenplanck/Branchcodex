@@ -1,0 +1,24 @@
+name: Backup Sync
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mirror to dom-wallet
+        env:
+          BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
+        run: |
+          AUTH=$(printf "x-access-token:%s" "$BACKUP_TOKEN" | base64 -w0)
+          git remote add backup https://github.com/sorenplanck/dom-wallet.git
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${AUTH}" push backup --mirror

@@ -1,0 +1,360 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dom-cli",
+    "crates/dom-core",
+    "crates/dom-consensus",
+    "crates/dom-crypto",
+    "crates/dom-serialization",
+    "crates/dom-pmmr",
+    "crates/dom-pow",
+    "crates/dom-chain",
+    "crates/dom-wire",
+    "crates/dom-tx",
+    "crates/dom-slate",
+    "crates/dom-mempool",
+    "crates/dom-store",
+    "crates/dom-config",
+    "crates/dom-node",
+    "crates/dom-wallet",
+    "crates/dom-wallet-crypto",
+    "crates/dom-wallet-keys",
+    "crates/dom-wallet-core-api",
+    "crates/dom-wallet-recovery",
+    "crates/dom-wallet2",
+    "crates/dom-rpc",
+    "crates/dom-test-vectors",
+    "crates/dom-integration-tests",
+    "crates/dom-explorer",
+    "crates/dom-faucet",
+    "crates/dom-wallet-app",
+    "crates/dom-test-runner",
+    "crates/dom-agent-runner",
+
+    # ── DOM interoperability layer ────────────────────────────────────────
+    # Injected beside the mainnet node, never into it. Every member below is
+    # additive: no pre-existing crate's source, manifest or lint regime is
+    # touched by this layer's presence.
+    #
+    # Bridges: the node is frozen, so the surfaces the laboratory lineage had
+    # added inside `dom-crypto` and `dom-consensus` live here instead.
+    "crates/dom-scriptless-bulletproof",
+    "crates/dom-scriptless-consensus",
+    "crates/dom-scriptless-primitives",
+
+    "crates/adapters/btc",
+    "crates/adapters/btc-crypto",
+    "crates/adapters/btc-secp-sys",
+    "crates/adapters/btc-vault",
+    "crates/adapters/dom-real",
+    "crates/adapters/evm",
+    "crates/btc-actuator",
+    "crates/chain-profile",
+    "crates/counterparty-api",
+    "crates/deployment-registry",
+    "crates/dom-actuator",
+    "crates/dom-interopd",
+    "crates/evm-actuator",
+    "crates/solana-actuator",
+    "crates/xmr-actuator",
+    "crates/dom-adaptor",
+    "crates/dom-final-claim-binding",
+    "crates/dom-leg",
+    "crates/dom-scriptless-chain-adapter",
+    "crates/dom-scriptless-crypto",
+    "crates/dom-scriptless-identity-store",
+    "crates/dom-scriptless-protocol",
+    "crates/dom-scriptless-store",
+    "crates/dom-scriptless-transport",
+    "crates/dom-scriptless-types",
+    "crates/dom-vault",
+    "crates/f6-engine",
+    "crates/f7-anchor-authority",
+    "crates/intent-book",
+    "crates/kaystra-core",
+    "crates/participant-binding",
+    "crates/relay",
+    "crates/relay-scriptless-wire",
+    "crates/rfq",
+    "crates/route-composer",
+    "crates/route-executor",
+    "crates/route-secret-vault",
+    "crates/route-time-anchor",
+    "crates/route-transport",
+    "crates/settlement-coordinator",
+    "crates/solver",
+    "crates/solver-inventory",
+    "crates/solver-status",
+    "crates/store",
+    "crates/uspe",
+
+    # ── F2–F7 acceptance harness ──────────────────────────────────────────
+    # The machinery that proves the layer's phases: model checkers, the
+    # end-to-end suites and the simulation and evidence adapters only they
+    # consume. Test scaffolding, never a product binary.
+    "crates/adapters/btc-evidence",
+    "crates/adapters/btc-live",
+    "crates/adapters/btc-observer",
+    "crates/adapters/btc-secp-c1a",
+    "crates/adapters/dom-sim",
+    "crates/f2-harness",
+    "crates/f2-model",
+    "crates/f3-harness",
+    "crates/f4-harness",
+    "crates/f4-model",
+    "crates/f5-e2e",
+    "crates/f6-model",
+    "crates/f7-e2e",
+    "crates/adapters/xmr-crypto",
+    "crates/adapters/xmr-dleq-sigma",
+    "crates/adapters/xmr-route-secret",
+    "crates/adapters/xmr-setup-profile",
+    "crates/adapters/xmr-dleq-nullifier-store",
+    "crates/adapters/xmr-refund-policy",
+    "crates/xmr-compensation-policy",
+    "crates/adapters/xmr-refund-adaptor",
+    "crates/adapters/xmr-secret-store",
+    "crates/adapters/xmr-evidence",
+    "crates/adapters/xmr-observer",
+    "crates/adapters/xmr-observation-store",
+    "crates/adapters/xmr-observer-pump",
+    "crates/adapters/xmr-kaystra-records",
+    "crates/adapters/xmr-kaystra-source",
+    "crates/adapters/xmr-delivery",
+    "crates/adapters/xmr-delivery-sqlite",
+    "crates/adapters/xmr-live-sidecar-api",
+    "crates/adapters/xmr-sidecar-auth",
+    "crates/adapters/xmr-spend-port",
+    "crates/adapters/xmr-raw-tx-verify",
+    "crates/adapters/xmr-remote-sweep-wire",
+    "crates/adapters/xmr-key-image-proof",
+    "crates/adapters/xmr-live-sidecar-blocking-client",
+    "crates/adapters/xmr-live-sidecar-uds-client",
+    "crates/adapters/xmr-rpc-broadcast-blocking",
+    "crates/adapters/xmr-kaystra-bridge",
+    "crates/adapters/xmr-runtime-wiring",
+    "crates/adapters/xmr-session-init",
+    "crates/f8-xmr-kaystra-e2e",
+
+    # -- Solana condition-lock leg V8 --
+    "crates/adapters/solana-escrow-wire",
+    "crates/adapters/solana-types",
+    "crates/adapters/solana-pda",
+    "crates/adapters/solana-route-secret",
+    "crates/adapters/solana-profile",
+    "crates/adapters/solana-setup-store",
+    "crates/adapters/solana-program-client",
+    "crates/adapters/solana-transaction-builder",
+    "crates/adapters/solana-runtime-wiring",
+    "crates/adapters/solana-rpc",
+    "crates/adapters/solana-rpc-pool",
+    "crates/adapters/solana-program-attestation",
+    "crates/adapters/solana-evidence",
+    "crates/adapters/solana-observer",
+    "crates/adapters/solana-observation-store",
+    "crates/adapters/solana-observer-pump",
+    "crates/adapters/solana-kaystra-bridge",
+    "crates/adapters/solana-kaystra-records",
+    "crates/adapters/solana-kaystra-source",
+    "crates/adapters/solana-counterparty",
+    "crates/adapters/solana-delivery",
+    "crates/adapters/solana-delivery-sqlite",
+    "crates/adapters/solana-live",
+    "crates/adapters/solana-session-init",
+    "crates/adapters/solana-secret-store",
+    "crates/f8-solana-model",
+    "crates/f8-solana-e2e",
+]
+
+# Tauri desktop wallet — excluded from the workspace because it needs a
+# frontend dist/ that would break `cargo build --workspace`. Built on its
+# own from wallet-desktop/ (npm run tauri build / CI).
+exclude = [
+    "wallet-desktop",
+    "programs/dom-solana-escrow",
+    # Stage 12 — locally vendored dom-wallet-v3 (own workspace); reached only
+    # through direct path dependencies in [workspace.dependencies], never as
+    # members of this workspace. (The wallet pin predates the workspace
+    # Zeroizing hardening of dom-slate/dom-tx; the vendored copy carries the
+    # minimal adaptation, applied locally and mirrored upstream by the
+    # operator.)
+    "vendor/dom-wallet-v3",
+    # Stage 12 — provisioning tool with dom-interopd `production` features; a
+    # workspace member would unify production with the default development
+    # set and trip the exclusivity guard. Built and tested from its own
+    # directory, exactly like wallet-desktop.
+    "crates/deploy-genconfig",
+]
+
+[workspace.package]
+version     = "0.2.0"
+edition     = "2021"
+rust-version = "1.75"
+authors     = ["Soren Planck <sorenplanck@tutamail.com>"]
+license     = "MIT"
+repository  = "https://github.com/sorenplanck/dom-protocol"
+
+
+# ── Lint regime carried over verbatim from the absorbed Contracts workspace.
+# `[workspace.lints]` is opt-in per member: only the seven dom-scriptless-*
+# crates declare `lints.workspace = true`, so no pre-existing member's lint
+# regime changes. Nothing is loosened — the absorbed crates keep exactly the
+# rules they had.
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+# ── Shared dependency versions ────────────────────────────────────────────────
+[workspace.dependencies]
+# Cryptography — audited crates only
+secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", rev = "264e84adf7b06fb4d028eb2fd992f33c4d8999b7", features = ["global-context", "rand-std"] }
+# Bulletproof migration (Phase 1) — standard Bulletproofs via grin's secp256k1-zkp.
+# Exact pin (no floating); coexists with Blockstream secp256k1-zkp (disjoint native symbols).
+grin_secp256k1zkp = "=0.7.15"
+randomx-rs       = "1.4.1"
+secp256k1   = { version = "0.28", features = ["global-context", "rand-std"] }
+blake2      = { version = "0.10" }
+sha2        = { version = "0.10" }
+hmac        = { version = "0.12" }
+hkdf        = { version = "0.12" }
+k256        = { version = "0.13", features = ["hash2curve", "arithmetic", "serde", "expose-field"] }
+zeroize     = { version = "1.7", features = ["derive"] }
+argon2      = { version = "0.5", features = ["zeroize"] }
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+subtle      = { version = "2.5" }
+rand_core   = { version = "0.6" }
+rand        = { version = "0.8" }
+hex         = { version = "0.4" }
+# Storage
+lmdb        = { package = "lmdb-rkv", version = "0.14" }
+# Networking
+tokio       = { version = "1.35", features = ["full"] }
+snow        = { version = "0.9", features = ["default-resolver"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+# Serialization
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = { version = "1.0" }
+bincode     = { version = "1.3" }
+# Error handling
+thiserror   = { version = "1.0" }
+anyhow      = { version = "1.0" }
+tempfile    = { version = "3.10" }
+# Logging
+tracing          = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Async
+futures          = { version = "0.3" }
+socket2          = { version = "0.6" }
+# Port mapping (spec A3). Verified before pinning: igd-next 0.17.1
+# (2026-06, 14M downloads) and natpmp 0.5.0 — no RUSTSEC advisories for
+# either; the historical UPnP CVEs were miniupnpc (C), not these crates.
+igd-next         = { version = "0.17", features = ["aio_tokio"] }
+natpmp           = { version = "0.5", features = ["tokio"] }
+primitive-types  = { version = "0.12" }
+# Internal crates
+dom-core           = { path = "crates/dom-core" }
+dom-consensus      = { path = "crates/dom-consensus" }
+dom-crypto         = { path = "crates/dom-crypto" }
+dom-serialization  = { path = "crates/dom-serialization" }
+dom-pmmr           = { path = "crates/dom-pmmr" }
+dom-pow            = { path = "crates/dom-pow" }
+dom-chain          = { path = "crates/dom-chain" }
+dom-store          = { path = "crates/dom-store" }
+dom-tx             = { path = "crates/dom-tx" }
+dom-slate          = { path = "crates/dom-slate" }
+dom-mempool        = { path = "crates/dom-mempool" }
+dom-wire           = { path = "crates/dom-wire" }
+dom-config         = { path = "crates/dom-config" }
+dom-wallet         = { path = "crates/dom-wallet" }
+dom-wallet-crypto  = { path = "crates/dom-wallet-crypto" }
+dom-wallet-keys    = { path = "crates/dom-wallet-keys" }
+dom-wallet-core-api = { path = "crates/dom-wallet-core-api" }
+dom-wallet-recovery = { path = "crates/dom-wallet-recovery" }
+dom-wallet2        = { path = "crates/dom-wallet2" }
+dom-node           = { path = "crates/dom-node" }
+dom-rpc            = { path = "crates/dom-rpc" }
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+bip39 = { version = "2.0", features = ["rand"] }
+# Property-based testing (Roadmap v2 Phase 1.1 — replay determinism, reorg fuzz).
+proptest = { version = "1" }
+
+# ── DOM interoperability layer: local members ─────────────────────────────
+counterparty-api = { path = "crates/counterparty-api" }
+route-secret-vault = { path = "crates/route-secret-vault" }
+dom-adaptor = { path = "crates/dom-adaptor" }
+dom-leg = { path = "crates/dom-leg" }
+dom-scriptless-bulletproof = { path = "crates/dom-scriptless-bulletproof" }
+dom-scriptless-chain-adapter = { path = "crates/dom-scriptless-chain-adapter" }
+dom-scriptless-consensus = { path = "crates/dom-scriptless-consensus" }
+dom-scriptless-crypto = { path = "crates/dom-scriptless-crypto" }
+dom-scriptless-identity-store = { path = "crates/dom-scriptless-identity-store" }
+dom-scriptless-primitives = { path = "crates/dom-scriptless-primitives" }
+dom-scriptless-store = { path = "crates/dom-scriptless-store" }
+dom-scriptless-transport = { path = "crates/dom-scriptless-transport" }
+store = { path = "crates/store" }
+# Stage 13 — the six wallet pins point straight at the tracked vendor copy.
+# They were git dependencies on sorenplanck/dom-wallet-v3 rev
+# 512def52945100785b9e7d6e93dbb17d78adeb3e redirected here by a [patch]
+# section; check-boundaries.sh forbids any dom-* git dependency because a git
+# dependency can carry a divergent revision, and a path into the tracked tree
+# cannot. Same source, stated directly. The rev is kept in this comment as
+# provenance of the vendored copy, not as a resolution target.
+dom-wallet-core = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core" }
+dom-wallet-core-recovery = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-recovery" }
+dom-wallet-core-protocol = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-protocol" }
+dom-wallet-core-sync = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-sync" }
+dom-wallet-domain = { path = "vendor/dom-wallet-v3/crates/dom-wallet-domain" }
+dom-wallet-remote-source = { path = "vendor/dom-wallet-v3/crates/dom-wallet-remote-source" }
+
+# Registry and wallet-edge pins the absorbed crates already used, carried
+# over verbatim from the Interop manifest.
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+cap-std = { version = "=4.0.2", default-features = false }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
+
+
+# Solana V8 host-side dependencies
+curve25519-dalek = { version = "=4.1.3", default-features = false, features = ["alloc"] }
+base64      = "=0.22.1"
+bs58        = "=0.5.1"
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
+
+[profile.release]
+opt-level       = 3
+lto             = "fat"
+codegen-units   = 1
+panic           = "abort"
+overflow-checks = true   # consensus-critical: never disable
+
+[profile.dev]
+overflow-checks = true   # enforce even in dev
+
+# Opt-in for CPU-bound native cryptographic integration tests. Keep the same
+# assertions and overflow checks as debug tests; only optimize generated code.
+# Run with --profile crypto-test -j 1 and -- --test-threads=1.
+[profile.crypto-test]
+inherits = "dev"
+opt-level = 2
+debug = 1
+debug-assertions = true
+overflow-checks = true
+lto = false
+codegen-units = 16
+incremental = false
+
+# Stage 13 — the [patch."…/dom-protocol"] section that redirected the wallet
+# pin's git references (rev 6f8a947) onto these workspace crates is gone: the
+# vendored wallet manifest now states the identical paths directly, so the
+# type universe is one without any [patch] indirection. The shared-output BP
+# guard forbids [patch] overrides because one could silently redirect the
+# cryptographic backend; stating the paths at the dependency site keeps the
+# same identities and makes redirection unrepresentable.

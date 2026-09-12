@@ -1,0 +1,10 @@
+[package]
+name = "xmr-remote-sweep-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { version = "=0.10.6", default-features = false }
+thiserror = { workspace = true }

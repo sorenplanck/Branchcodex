@@ -1,0 +1,14 @@
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/
+**/*.rs.bk
+Cargo.lock
+!/src-tauri/Cargo.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

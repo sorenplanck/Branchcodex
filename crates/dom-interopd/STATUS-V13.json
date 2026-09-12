@@ -1,0 +1,46 @@
+{
+  "schema": 13,
+  "delivery": "development-checkpoint",
+  "base_version": 12,
+  "requested_tasks": [
+    "complete bootstrap assembly and runtime custody",
+    "safe DOM compensation conditioned on XMR funding",
+    "complete final claim execution in the real runtime"
+  ],
+  "bootstrap": {
+    "public_plan_and_configuration_tools": true,
+    "native_private_share_ceremony": true,
+    "bilateral_commit_and_reveal_signatures": true,
+    "legacy_authenticated_artifact_codec_preserved": true,
+    "private_custody_mounted_in_stage10_and_retained_in_stage12": true,
+    "reopen_never_regenerates_published_shares": true,
+    "complete_empty_vault_published_atomically": true,
+    "native_tests_written": true,
+    "native_tests_executed_here": false,
+    "end_to_end_daemon_bootstrap_verified": false
+  },
+  "xmr_compensation": {
+    "new_unconditional_compensation_producer_disabled": true,
+    "prefunding_custody_creation_and_reopen_disabled": true,
+    "existing_signed_transactions_revoked": false,
+    "consensus_verifiable_xmr_funding_condition_implemented": false,
+    "safe_functional_replacement_complete": false
+  },
+  "final_claim_runtime": {
+    "dependency_review_performed": true,
+    "new_final_exposure_implementation": false,
+    "fully_integrated": false,
+    "remaining": [
+      "native final-claim exposure and 0x12 transport for the universal F7 profile",
+      "native private local-origin witness provisioning and guarded consumption",
+      "first-claim finalization before child materialization without premature exposure",
+      "post-anchor driver ownership and scheduling in the concrete root"
+    ]
+  },
+  "all_sixteen_routes_operational": false,
+  "rust_compiled_here": false,
+  "chain_swaps_executed_here": 0,
+  "request_fully_delivered": false,
+  "production_approved": false,
+  "security_score_claimed": null
+}

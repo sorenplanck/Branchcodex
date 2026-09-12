@@ -1,0 +1,39 @@
+{
+  "schema": 18,
+  "version": "v18-chaves-refund-runtime",
+  "base_v17_tree": "9a157397fd9c994902d44dd87528a7e3507248cd",
+  "request_fully_delivered": false,
+  "all_sixteen_routes_operational": false,
+  "rust_compiled_here": false,
+  "native_rust_tests_executed_here": 0,
+  "new_rust_tests_written": 7,
+  "chain_swaps_executed_here": 0,
+  "executable_included": false,
+  "execution_skipped_at_user_request": true,
+  "signed_terms_policy_version": 17,
+  "public_wallet_offer_envelope_version": 18,
+  "implemented": [
+    "Native knowledge proofs for each wallet-composed funding, claim and ordinary refund kernel key",
+    "Exact public offer, purpose, chain, session, terms and identity binding in every proof statement",
+    "Immutable Store key authority revalidates final BP, both 0x0b commitments and all three native templates",
+    "Operational signing and historical replay enforce the exact retained purpose-specific kernel key",
+    "Both production roots retain proofs before publishing and keep opaque signing shares in the bootstrap owner",
+    "Native ordinary DOM refund scheduler drives nonce commitments, reveals, partial signatures and final DSC1 0x10",
+    "Signer owns the original retained nonce vault across ticks; restart recovers exact native reservations and outbox artifacts",
+    "Bootstrap completion requires accepted native final refund history, not merely a retained transaction file",
+    "Monotonic native ingress handoffs and authenticated pending messages across same-batch phase changes",
+    "Atomic bounded V18 peer-offer importer, with hard refusal of changed or wrong-scope files"
+  ],
+  "remaining": [
+    "Complete funding signing scheduler and F7 sender issuance/consumption integration",
+    "Consumed M.8 authority handoff, universal claim producer and terminal runtime completion",
+    "XMR funding-conditioned DOM compensation enforceable outside the daemon and complete XMR execution/recovery",
+    "Automated public peer wallet-offer network exchange",
+    "User-side compilation, native tests and end-to-end execution of all sixteen routes",
+    "Formal, privacy, reproducibility and independent audit evidence from the agreed quality roadmap"
+  ],
+  "xmr_funding_enabled_by_this_change": false,
+  "bootstrap_refund_scope": "DOM with BTC, EVM or SOL counterparty; XMR requires its own authenticated recovery graph",
+  "build_command": "python3 scripts/build_daemon_v14.py --output dist/v18/dom-interopd --report-dir artifacts/daemon-v18-build",
+  "documentation": "docs/interop/hardening/V18-CHAVES-E-REFUND-NO-RUNTIME.md"
+}

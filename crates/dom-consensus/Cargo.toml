@@ -1,0 +1,27 @@
+[package]
+name        = "dom-consensus"
+description = "DOM protocol — consensus validation pipeline (RFC-0007)"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+dom-core.workspace          = true
+dom-crypto.workspace        = true
+dom-serialization.workspace = true
+dom-pmmr.workspace          = true
+dom-pow.workspace           = true
+thiserror.workspace         = true
+primitive-types.workspace   = true
+
+[dev-dependencies]
+dom-crypto = { workspace = true, features = ["test-helpers"] }
+secp256k1.workspace = true
+k256.workspace = true
+primitive-types.workspace = true
+proptest.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

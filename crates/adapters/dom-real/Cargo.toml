@@ -1,0 +1,42 @@
+[package]
+name = "adapter-dom-real"
+description = "Real DOM node source and Scriptless evidence verifier for F7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+blake2.workspace = true
+counterparty-api.workspace = true
+dom-adaptor.workspace = true
+dom-consensus.workspace = true
+dom-leg = { workspace = true, features = ["real-dom-adaptor"] }
+dom-scriptless-chain-adapter.workspace = true
+dom-scriptless-store.workspace = true
+dom-serialization.workspace = true
+dom-scriptless-crypto = { path = "../../dom-scriptless-crypto" }
+zeroize.workspace = true
+f7-anchor-authority = { path = "../../f7-anchor-authority" }
+dom-final-claim-binding = { path = "../../dom-final-claim-binding" }
+xmr-live-sidecar-uds-client = { path = "../xmr-live-sidecar-uds-client" }
+xmr-secret-store = { path = "../xmr-secret-store" }
+kaystra-core = { path = "../../kaystra-core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+dom-scriptless-primitives = { path = "../../dom-scriptless-primitives" }
+dom-scriptless-consensus = { path = "../../dom-scriptless-consensus" }
+dom-core.workspace = true
+dom-crypto = { workspace = true, features = ["test-helpers"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

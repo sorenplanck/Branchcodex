@@ -1,0 +1,10 @@
+{
+  "method": "static syntax and TOML parsing only; no compiler or tests",
+  "rust_files_checked": 100,
+  "new_parser_diagnostics": [],
+  "baseline_parser_diagnostics": "15 cfg expression diagnostics in session_store.rs also present in HEAD",
+  "toml_parsed": [
+    "Cargo.lock",
+    "crates/f7-anchor-authority/Cargo.toml"
+  ]
+}

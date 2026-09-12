@@ -1,0 +1,42 @@
+{
+  "schema": 16,
+  "version": "v16-codigo-em-desenvolvimento",
+  "request_fully_delivered": false,
+  "base_v15_tree": "2db8f56aa4a02fbe5bd24879b5fc1ca3a3325fad",
+  "rust_compiled_here": false,
+  "native_rust_tests_executed_here": 0,
+  "chain_swaps_executed_here": 0,
+  "all_sixteen_routes_operational": false,
+  "executable_included": false,
+  "implemented": [
+    "Real Stage12/composite loop schedules one native early/BP message per selected DOM leg from retained private shares",
+    "Native DSC1 signing, exact outbox replay, persisted early SharePoP reveal, encrypted BP nonce and round-two/final-proof recovery",
+    "F6 activation waits for both native BP bootstraps before releasing the route owner",
+    "Completed BP prefix is reauthenticated independently of later settlement phases on process restart",
+    "Native vault refuses fresh/old nonces after durable round two; authenticated publication-before-retirement prefixes are reconciled",
+    "Refresh of reissuable early/BP and final receiver ingress preserves incompatible linear gates on refusal",
+    "Native Store verifies early 0x12 fully; durable Relay row remains pending until canonical observation; root continues scanning and recovery",
+    "Six native Rust regressions written, including two actual participant owners, production Relay storage and restart after each bootstrap tick",
+    "Cumulative source, incremental patch, byte comparison, focused/full test runners and local release build command",
+    "Native wallet creates missing local payout openings, encrypts before authority publication, and resumes a C0-only crash prefix",
+    "Native wallet plans fee-aware funding inputs, reserves the actual DOM payer's balance through the existing actuator, and encrypts its change opening under a reservation-derived pin",
+    "Both production roots invoke wallet construction only for a mounted native private bootstrap; legacy prepared sessions retain their existing wallet recovery path",
+    "Seven additional native Rust wallet/bootstrap regressions written; the V16 focused runner includes them; not executed here"
+  ],
+  "remaining": [
+    "Bootstrap transaction templates, native refund readiness and funding signing from the retained wallet/share owners",
+    "Instantiate and schedule F7 sender, wallet-composed claim signer, M.8 consumed-authority handoff and final adaptation in universal root",
+    "Consensus/protocol-enforced XMR funding condition for DOM compensation even for broadcast outside the daemon; existing refusal remains",
+    "Complete root ownership for XMR funding/sweep/refund/revelation and compensation-backed unilateral recovery",
+    "Native full-flow early 0x12/finality/reorg/crash tests beyond the new bootstrap fixture and error classification",
+    "Compile/test this Rust source and execute all 16 routes with economic assertions"
+  ],
+  "build_command": "python3 scripts/build_daemon_v14.py --output dist/v16/dom-interopd --report-dir artifacts/daemon-v16-build",
+  "test_command": "python3 crates/dom-interopd/scripts/test_daemon_v16.py",
+  "focused_rust_tests_command": "python3 crates/dom-interopd/scripts/test_daemon_v16.py --focus-v16",
+  "base_v16_tree": "b17ee867dcc15295f87e2176a54246ed069632c8",
+  "source_review_findings": [
+    "Funding and spend kernel shares differ from early shared-output blinding shares; purpose-bound signing authorization is still needed in the native Contracts Store",
+    "The current BP amount and F6 payout both equal the full principal; the complete claim/refund template producer still needs an explicitly agreed exit-fee allocation"
+  ]
+}

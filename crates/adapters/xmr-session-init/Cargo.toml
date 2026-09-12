@@ -1,0 +1,25 @@
+[package]
+name = "xmr-session-init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dom-adaptor.workspace = true
+dom-scriptless-crypto = { path = "../../dom-scriptless-crypto" }
+rand = { workspace = true }
+thiserror = { workspace = true }
+xmr-crypto = { path = "../xmr-crypto" }
+xmr-secret-store = { path = "../xmr-secret-store" }
+xmr-setup-profile = { path = "../xmr-setup-profile" }
+xmr-dleq-nullifier-store = { path = "../xmr-dleq-nullifier-store" }
+xmr-refund-policy = { path = "../xmr-refund-policy" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+kaystra-core = { path = "../../kaystra-core" }
+xmr-refund-adaptor = { path = "../xmr-refund-adaptor" }
+tempfile = { workspace = true }

@@ -1,0 +1,34 @@
+{
+  "schema": 17,
+  "version": "v17-templates-no-runtime",
+  "base_v16_updated_tree": "4c8386f4a011240712f99cf1311bbf9cbbe9f0bb",
+  "request_fully_delivered": false,
+  "all_sixteen_routes_operational": false,
+  "rust_compiled_here": false,
+  "native_rust_tests_executed_here": 0,
+  "chain_swaps_executed_here": 0,
+  "executable_included": false,
+  "execution_skipped_at_user_request": true,
+  "implemented": [
+    "Native funding/claim/refund template compiler with canonical bounded public wallet offer codec",
+    "Explicit signed policy 17 reserves one exit fee and preserves the principal",
+    "Opaque purpose-specific signing shares composed from actual reserved wallet openings and retained collaborative share",
+    "Both production roots durably retain exact local wallet offers before publication",
+    "Stage12 schedules native bilateral DSC1 0x0b commitments after collaborative BP for policy 17",
+    "Native Store completion query reauthenticates both template commits across restart",
+    "Missing peer offer waits; malformed, wrong-scope, changed or unreadable offer refuses",
+    "Public file mailbox and atomic peer-offer importer; no automatic network exchange of wallet offers",
+    "Plain-refund F7 gate checks the new collateral amount, single exit shape and fee allocation",
+    "Early first 0x0b remains in durable inbox after native sender/sequence/BP-prefix checks until local templates are ready; no acceptance receipt is issued while waiting"
+  ],
+  "remaining": [
+    "Purpose-bound native signing-key authorization and proof-of-possession for composed kernel shares",
+    "Native refund/funding signing scheduler and full F7 sender integration",
+    "M.8 consumed-authority handoff, universal claim producer and terminal runtime completion",
+    "Protocol/consensus-enforced XMR-funded compensation condition and complete XMR execution/recovery",
+    "Automated peer wallet-offer network transport",
+    "User-side compilation, tests and end-to-end route execution"
+  ],
+  "activation": "New signed terms and matching roster policy_version=17, mounted native private bootstrap; no in-place migration of signed sessions",
+  "build_command": "python3 scripts/build_daemon_v14.py --output dist/v17/dom-interopd --report-dir artifacts/daemon-v17-build"
+}

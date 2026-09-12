@@ -1,0 +1,94 @@
+// INACTIVE REFERENCE from the supplied V22 package.
+// Not a Rust module and not a production bootstrap. Needs independent C/D
+// initialization and a distinct authenticated signing share for each round.
+//! Native XMR recovery-graph ceremony for a CrossCurveSharedSpend leg.
+//!
+//! The scripted-chain path signs one plain refund; a Monero leg instead needs
+//! the five-template recovery graph — funding, claim, cancel, adaptor refund
+//! and height-locked compensation — co-signed before funding. The three
+//! signing rounds, their DSC1 transport and the graph completion all already
+//! exist as primitives; this module is the dispatcher that drives them from
+//! the real bootstrap loop, in place of the flat `XmrRecoveryGraphRequired`
+//! refusal that kept every XMR leg out of the runtime.
+//!
+//! Compensation uses the V22 conditional kernel. Height ordering alone cannot
+//! authorize it. This scheduler still needs the two-output bootstrap owner to
+//! supply all three independently bound signing shares before it can run.
+
+use super::*;
+use crate::production_xmr_round_runtime_v12::{
+    bind_xmr_recovery_round_v12, tick_xmr_recovery_round_v12, ProductionXmrRecoveryRoundKindV12,
+    ProductionXmrRoundProgressV12,
+};
+use xmr_refund_policy::graph_builder::XmrRecoveryGraphTemplatesV12;
+
+/// The three recovery rounds, in the fixed order they are driven. Order is
+/// deliberate: both ordinary equations must be transportable before the
+/// parent adaptor refund closes, so a crash between rounds always leaves a
+/// resumable prefix rather than an armed-refund/unarmed-cancel split.
+const ROUNDS: [ProductionXmrRecoveryRoundKindV12; 3] = [
+    ProductionXmrRecoveryRoundKindV12::Cancel,
+    ProductionXmrRecoveryRoundKindV12::Compensation,
+    ProductionXmrRecoveryRoundKindV12::RefundAdaptor,
+];
+
+/// Bind whichever recovery sessions are not already durable, then reissue
+/// the operational signing ingress for the first incomplete round. Binding
+/// is idempotent through the store: an existing session is resumed, never
+/// replaced, so a crashed prefix keeps its exact transcript.
+pub(super) fn prepare_ingress<F: F6TransportPortV1>(
+    owner: &mut ProductionContractsV1<F>,
+    chain: TrustedChainIdV1,
+    graph_templates: &XmrRecoveryGraphTemplatesV12,
+    roster: dom_adaptor::ParticipantRosterV1,
+) -> Result<(), Error> {
+    for kind in ROUNDS {
+        bind_xmr_recovery_round_v12(&owner.store, chain, graph_templates, kind, roster.clone())
+            .map_err(|_| Error::XmrRecoveryGraphRequired)?;
+    }
+    Ok(())
+}
+
+/// Drive the next public edge of the first incomplete recovery round.
+///
+/// Returns `Complete` only when all three rounds report completion in the
+/// same store; the caller then forms the produced graph and its custody
+/// through the graph driver, which re-audits everything against the same
+/// physical Contracts opening. Nothing here fabricates a signature: every
+/// edge goes through the retained vault signer and the authenticated DSC1
+/// transport, exactly as the scripted-chain refund does.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step<F: F6TransportPortV1, Vault>(
+    owner: &mut ProductionContractsV1<F>,
+    identity: &dom_scriptless_identity_store::ContractsTransportIdentityStoreV1,
+    relay: &mut crate::relay_worker::DurableRelayWorkerV1<F>,
+    chain: TrustedChainIdV1,
+    graph_templates: &XmrRecoveryGraphTemplatesV12,
+    binding: DomSessionBindingV1,
+    signer: &mut dom_actuator::RetainedParticipantVaultSignerV12<Vault>,
+    expiry: relay::TimelockSpec,
+) -> Result<Step, Error>
+where
+    Vault: dom_adaptor::NonceVaultV1 + dom_adaptor::RestartArtifactRecoveryVaultV1,
+{
+    for kind in ROUNDS {
+        match tick_xmr_recovery_round_v12(
+            &owner.store,
+            identity,
+            relay,
+            chain,
+            graph_templates,
+            kind,
+            binding,
+            signer,
+            expiry,
+        )
+        .map_err(|_| Error::XmrRecoveryGraphRequired)?
+        {
+            ProductionXmrRoundProgressV12::AwaitingPeer => return Ok(Step::AwaitingPeer),
+            ProductionXmrRoundProgressV12::Staged => return Ok(Step::Staged),
+            ProductionXmrRoundProgressV12::Complete => continue,
+        }
+    }
+    Ok(Step::Complete)
+}

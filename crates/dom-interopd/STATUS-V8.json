@@ -1,0 +1,271 @@
+{
+  "delivery_version": 8,
+  "scope": "daemon, adaptador RPC XMR e runner de CI; implementação parcial",
+  "previous_zip_sha256": "53de4640fd8f7491cf07a77c946daf0fc16b80f2c9a2f6d539265206375338b4",
+  "all_sixteen_routes_operational": false,
+  "goal_10_10_achieved": false,
+  "rust_compiled_here": false,
+  "new_rust_test_methods_written": 17,
+  "new_rust_test_methods_run": 0,
+  "new_python_test_methods_passed": 8,
+  "live_swaps_executed": 0,
+  "route_count": 16,
+  "request_fully_delivered": false,
+  "legacy_evm_btc_runtime_requirement_removed": false,
+  "bootstrap_integrated_for_all_routes": false,
+  "f7_generalized": false,
+  "m8_claim_integrated_in_root": false,
+  "xmr_sweep_authority_integrated": false,
+  "xmr_upstream_revelation_integrated": false,
+  "routes": [
+    {
+      "route": "BTC->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "BTC->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": true,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "BTC_BILATERAL_M8_ROOT"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "BTC->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "BTC->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "EVM->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": true,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "BTC_BILATERAL_M8_ROOT"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "EVM->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "EVM->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "EVM->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "SOL->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "SOL->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "SOL->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "SOL->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "XMR->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "XMR->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "XMR->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    },
+    {
+      "route": "XMR->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ],
+      "service_schema_can_represent_pair": true,
+      "service_schema_in_rust_verified_here": false,
+      "root_configuration_loader_reads_v8": true
+    }
+  ],
+  "python_test_methods_in_final_suite": 119,
+  "prior_ci_static_dispatch_repaired": true
+}

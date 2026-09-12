@@ -1,0 +1,32 @@
+{
+  "schema": 15,
+  "version": "v15-codigo-em-desenvolvimento",
+  "request_fully_delivered": false,
+  "base_v14_tree": "3d68ee51b1586471376c4d4af160b7991c59ec9a",
+  "rust_compiled_here": false,
+  "native_rust_tests_executed_here": 0,
+  "chain_swaps_executed_here": 0,
+  "all_sixteen_routes_operational": false,
+  "executable_included": false,
+  "implemented": [
+    "Native F7 receiver observation with exact transaction, pre-signature, role and retained transcript binding",
+    "Durable receiver exposure marker and exact-successor recovery under the same Contracts Store opening",
+    "Same-opening 0x12 ingress with signed equivocation retention and exact replay",
+    "Receiver worker called for each DOM leg before Relay drain in the real universal root loop",
+    "Deferred claim verifier construction removes the post-funding verifier requirement during DOM child composition",
+    "Native universal observation token consumed by the installed route public-secret source with canonical revalidation",
+    "Native F7 sender finality uses the actual DOM child and existing fenced terminal/reorg checkpoints",
+    "Ten additional native Rust regression tests written for corruption, interrupted files and error classification"
+  ],
+  "remaining": [
+    "Complete bootstrap assembly: operational BP, transaction templates, refund readiness and funding signing from retained shares",
+    "Instantiate and schedule the F7 sender round and final-claim adaptation worker in the universal composition root",
+    "Functional DOM compensation with a protocol-enforced condition proving XMR funding, including broadcast outside this daemon",
+    "Complete XMR graph/funding/recovery ownership in the root; compensated XMR funding remains refused",
+    "Demonstrate receiver finality waiting, Relay redelivery, reorg and restart with native full protocol fixtures",
+    "Execute all 16 routes and compile/test the new Rust code"
+  ],
+  "build_command": "python3 scripts/build_daemon_v14.py --output dist/v15/dom-interopd --report-dir artifacts/daemon-v15-build",
+  "test_command": "python3 crates/dom-interopd/scripts/test_daemon_v15.py",
+  "focused_rust_tests_command": "cargo test --locked -p dom-scriptless-store --features evidence-only --lib v15"
+}

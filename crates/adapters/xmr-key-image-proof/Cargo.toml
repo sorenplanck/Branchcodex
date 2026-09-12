@@ -1,0 +1,14 @@
+[package]
+name = "xmr-key-image-proof"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+blake2 = { version = "=0.10.6", default-features = false }
+curve25519-dalek = { version = "4", features = ["zeroize"] }
+monero-ed25519 = { git = "https://github.com/kayabaNerve/monero-oxide", rev = "c8be5d3d1287669946a83fbfcb296ce2a8852e47" }
+rand_core = "0.6"
+zeroize = "1"

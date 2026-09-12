@@ -1,0 +1,3312 @@
+//! DOM miner loop with RandomX.
+
+use crate::node::{reconcile_mempool_after_connect, DomNode};
+use crate::task_supervisor::ShutdownToken;
+use dom_config::MinerThrottleConfig;
+use dom_consensus::block::{BlockHeader, ProofOfWork};
+use dom_consensus::{checked_accumulated_difficulty, compute_block_pmmr_roots, derive_chain_id};
+use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
+use dom_core::{
+    BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_WEIGHT,
+    WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
+};
+use dom_pow::{
+    compute_expected_target, fast_pow_hash, hash_meets_target, pow_validation_mode_for_network,
+    randomx_seed_height, target_to_compact, CompactTarget, PowValidationMode,
+};
+use dom_serialization::DomDeserialize;
+use dom_store::DomStore;
+use primitive_types::U256;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
+
+struct MiningActiveGuard {
+    metrics: Arc<crate::metrics::Metrics>,
+}
+
+impl MiningActiveGuard {
+    fn new(metrics: Arc<crate::metrics::Metrics>, template_height: u64) -> Self {
+        metrics
+            .mining_template_height
+            .store(template_height, Ordering::Relaxed);
+        metrics.mining_active.store(1, Ordering::Release);
+        Self { metrics }
+    }
+}
+
+impl Drop for MiningActiveGuard {
+    fn drop(&mut self) {
+        self.metrics.mining_active.store(0, Ordering::Release);
+        self.metrics
+            .mining_template_height
+            .store(0, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MiningEligibility {
+    local_height: u64,
+    best_known_peer_height: u64,
+    ibd_active: bool,
+}
+
+impl MiningEligibility {
+    fn paused_for_sync(self) -> bool {
+        self.ibd_active || self.best_known_peer_height > self.local_height
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MiningAttempt {
+    Mined(u64),
+    StaleTemplate {
+        old_parent: Hash256,
+        new_parent: Hash256,
+    },
+    PausedForSync {
+        local_height: u64,
+        best_known_peer_height: u64,
+    },
+    Shutdown,
+}
+
+struct ProvisionalCoinbase {
+    wallet: Option<Arc<tokio::sync::Mutex<dom_wallet::WalletDir>>>,
+    commitment: [u8; 33],
+    cleanup_required: bool,
+}
+
+impl ProvisionalCoinbase {
+    fn new(
+        wallet: Option<Arc<tokio::sync::Mutex<dom_wallet::WalletDir>>>,
+        coinbase: &CoinbaseTransaction,
+    ) -> Self {
+        Self {
+            wallet,
+            commitment: *coinbase.output.commitment.as_bytes(),
+            cleanup_required: true,
+        }
+    }
+
+    fn preserve(&mut self) {
+        self.cleanup_required = false;
+    }
+
+    async fn cleanup(&mut self) {
+        if !self.cleanup_required {
+            return;
+        }
+        self.cleanup_required = false;
+        if let Some(wallet) = &self.wallet {
+            wallet
+                .lock()
+                .await
+                .wallet_mut()
+                .forget_output(&self.commitment);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalizedBlock {
+    height: u64,
+    canonical: bool,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub fn block_reward(height: u64) -> u64 {
+    let epoch = height / dom_core::HALVING_INTERVAL;
+    if epoch >= dom_core::HALVING_EPOCHS as u64 {
+        return 0;
+    }
+    match usize::try_from(epoch) {
+        Ok(idx) => dom_core::BLOCK_REWARD_TABLE[idx],
+        Err(_) => 0,
+    }
+}
+
+/// Compute the canonical chain_id from the node's network configuration.
+fn chain_id_for(config: &dom_config::NodeConfig) -> Result<[u8; 32], DomError> {
+    let genesis_hash = dom_core::startup_genesis_hash_for_network_magic(config.network.magic())?;
+    Ok(*derive_chain_id(config.network.magic(), &genesis_hash).as_bytes())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiningMode {
+    MainnetLikeRandomX,
+    TestnetConfiguredRandomX,
+    RegtestRandomXLight,
+    RegtestFastDevOnly,
+}
+
+impl MiningMode {
+    fn from_network_and_pow_mode(
+        network: dom_config::Network,
+        pow_mode: PowValidationMode,
+    ) -> Result<Self, DomError> {
+        match (network, pow_mode) {
+            (dom_config::Network::Mainnet, PowValidationMode::RandomX) => {
+                Ok(Self::MainnetLikeRandomX)
+            }
+            (dom_config::Network::Testnet, PowValidationMode::RandomX) => {
+                Ok(Self::TestnetConfiguredRandomX)
+            }
+            (dom_config::Network::Regtest, PowValidationMode::RandomX) => {
+                Ok(Self::RegtestRandomXLight)
+            }
+            (dom_config::Network::Regtest, PowValidationMode::FastDevOnly) => {
+                Ok(Self::RegtestFastDevOnly)
+            }
+            (network, PowValidationMode::FastDevOnly) => Err(DomError::Invalid(format!(
+                "FastDevOnly mining mode is only allowed on regtest, got {network:?}"
+            ))),
+        }
+    }
+
+    fn for_network(network: dom_config::Network) -> Result<Self, DomError> {
+        Self::from_network_and_pow_mode(network, pow_validation_mode_for_network(network.magic())?)
+    }
+
+    fn pow_mode(self) -> PowValidationMode {
+        match self {
+            Self::MainnetLikeRandomX
+            | Self::TestnetConfiguredRandomX
+            | Self::RegtestRandomXLight => PowValidationMode::RandomX,
+            Self::RegtestFastDevOnly => PowValidationMode::FastDevOnly,
+        }
+    }
+
+    fn light_vm(self) -> bool {
+        matches!(self, Self::RegtestRandomXLight | Self::RegtestFastDevOnly)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MinerThrottle {
+    enabled: bool,
+    yield_every_nonces: u64,
+    sleep_micros: u64,
+}
+
+impl MinerThrottle {
+    fn from_config(config: &MinerThrottleConfig) -> Self {
+        Self {
+            enabled: config.enabled && config.yield_every_nonces > 0,
+            yield_every_nonces: config.yield_every_nonces,
+            sleep_micros: config.sleep_micros,
+        }
+    }
+
+    fn after_nonce(self, nonce: u64) {
+        if !self.enabled || !nonce.is_multiple_of(self.yield_every_nonces) {
+            return;
+        }
+        if self.sleep_micros == 0 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(Duration::from_micros(self.sleep_micros));
+        }
+    }
+
+    fn describe(self) -> String {
+        if !self.enabled {
+            return "disabled".into();
+        }
+        if self.sleep_micros == 0 {
+            format!("yield every {} nonces", self.yield_every_nonces)
+        } else {
+            format!(
+                "sleep {}us every {} nonces",
+                self.sleep_micros, self.yield_every_nonces
+            )
+        }
+    }
+}
+
+/// Build a cryptographically valid coinbase transaction.
+///
+/// Generates a fresh random blinding factor for every block. The blinding
+/// factor is used as both the output blinding and the kernel signing key
+/// (Mimblewimble: excess = r*G, signature proves knowledge of r).
+///
+/// The blinding is discarded after signing — the coinbase is consensus-valid
+/// but unspendable. A wallet-integrated miner would persist the blinding.
+fn build_real_coinbase(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+) -> Result<CoinbaseTransaction, DomError> {
+    build_coinbase_with_blinding(height, total_tx_fees, chain_id, None, None)
+}
+
+/// Build a Wallet V3 coinbase whose value and blinding are recoverable from the
+/// seed-derived recovery root and canonical block output.
+pub fn build_seed_recoverable_coinbase(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+    root: &dom_crypto::recovery::RecoveryRoot,
+    chain: dom_crypto::recovery::RecoveryChainContext,
+    account: u32,
+    derivation_index: u64,
+) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::keys::SecretKey;
+    use dom_crypto::pedersen::Commitment;
+    use dom_crypto::schnorr_sign;
+
+    if chain.chain_id != *chain_id {
+        return Err(DomError::Invalid(
+            "coinbase recovery chain id does not match signing chain id".into(),
+        ));
+    }
+    let explicit_value = dom_core::block_reward(height)
+        .noms()
+        .checked_add(total_tx_fees)
+        .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
+    let material = dom_tx::build_recoverable_output(
+        root,
+        chain,
+        explicit_value,
+        account,
+        derivation_index,
+        dom_crypto::recovery::OutputRecoveryDomain::Coinbase,
+    )
+    .map_err(|error| DomError::Internal(format!("recoverable coinbase output: {error}")))?;
+    let excess = Commitment::commit(0, &material.blinding);
+    let mut data = Vec::with_capacity(9);
+    data.push(KERNEL_FEAT_COINBASE);
+    data.extend_from_slice(&explicit_value.to_le_bytes());
+    let kernel_message = blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data);
+    let key = SecretKey::from_bytes(material.blinding.as_bytes())
+        .map_err(|error| DomError::Internal(format!("coinbase blinding as key: {error}")))?;
+    let signature = schnorr_sign(&key, kernel_message.as_bytes(), chain_id)
+        .map_err(|error| DomError::Internal(format!("coinbase sign failed: {error}")))?;
+    Ok(CoinbaseTransaction {
+        output: material.output,
+        kernel: CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value,
+            excess,
+            excess_signature: signature.to_bytes(),
+        },
+        offset: [0u8; 32],
+    })
+}
+
+/// Build a byte-reproducible coinbase at an arbitrary height.
+///
+/// **TEST-INFRASTRUCTURE API. Not part of the stable public surface.**
+///
+/// Exposed as `pub` so the deterministic-replay regression test (in the
+/// `dom-integration-tests` crate, which compiles `dom-node` as a normal
+/// dependency and so cannot reach a `#[cfg(test)]` item) can build byte-identical
+/// chains past genesis and pin a frozen canonical-state digest. Never call this
+/// from production code: real blocks are mined via `mine_one_block`, whose
+/// coinbase comes from the wallet or from [`build_real_coinbase`] (a fresh random
+/// blinding per block).
+///
+/// This is a thin deterministic wrapper, not a new coinbase path: it only
+/// derives a deterministic `(blinding, nonce)` pair — from `TAG_GENESIS_BLINDING`
+/// keyed by height, following the same deterministic pattern as the canonical
+/// `dom_chain::build_canonical_genesis` authority. It then hands them to the
+/// normal `build_coinbase_with_blinding` constructor. It adds no validation logic,
+/// changes no consensus rule, and every block it produces is fully
+/// consensus-valid (and rejected by `connect_block` if it were not).
+///
+/// Marked `#[doc(hidden)]` to keep this out of generated rustdoc despite needing
+/// `pub` visibility.
+#[doc(hidden)]
+pub fn build_deterministic_coinbase(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::pedersen::BlindingFactor;
+
+    let mut blind_seed = b"dom:replay-coinbase:blinding:".to_vec();
+    blind_seed.extend_from_slice(&height.0.to_le_bytes());
+    let blinding_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, &blind_seed);
+    let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
+        .map_err(|e| DomError::Internal(format!("deterministic coinbase blinding: {e}")))?;
+
+    let mut nonce_seed = b"dom:replay-coinbase:bp-nonce:".to_vec();
+    nonce_seed.extend_from_slice(&height.0.to_le_bytes());
+    let nonce = *blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, &nonce_seed).as_bytes();
+
+    build_coinbase_with_blinding(height, total_tx_fees, chain_id, Some(blinding), Some(nonce))
+}
+
+fn build_coinbase_with_blinding(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+    blinding_override: Option<dom_crypto::pedersen::BlindingFactor>,
+    bulletproof_nonce: Option<[u8; 32]>,
+) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::keys::SecretKey;
+    use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_crypto::schnorr_sign;
+
+    let reward = dom_core::block_reward(height).noms();
+    let explicit_value = reward
+        .checked_add(total_tx_fees)
+        .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
+
+    // Either use the provided blinding (genesis) or generate fresh (normal blocks).
+    let blinding = match blinding_override {
+        Some(b) => b,
+        None => BlindingFactor::random(),
+    };
+
+    // Output commitment: C = value*H + r*G
+    let output_commitment = Commitment::commit(explicit_value, &blinding);
+
+    // Range proof: proves value in [0, MAX_PROVABLE_VALUE]. Yields proof bytes.
+    // Both paths produce the final 739-byte bounded aggregate Bulletproof:
+    //   - GENESIS uses a DETERMINISTIC nonce (`Some(nonce)`) so the genesis block
+    //     is byte-reproducible across nodes.
+    //   - normal blocks use fresh random nonces (bp2_prove).
+    let range_proof_bytes: Vec<u8> = match bulletproof_nonce {
+        Some(nonce) => {
+            dom_crypto::range_proof_prove_bytes_with_nonce(explicit_value, &blinding, &nonce)
+                .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
+                .0
+        }
+        None => {
+            dom_crypto::range_proof_prove_bytes(explicit_value, &blinding)
+                .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
+                .0
+        }
+    };
+
+    // Kernel excess = r*G (Mimblewimble: coinbase creates value, excess is blinding only)
+    let excess = Commitment::commit(0, &blinding);
+
+    // Kernel message: TAG_KERNEL_MSG_COINBASE || features || explicit_value_le8
+    let kernel_message = {
+        let mut data = Vec::with_capacity(9);
+        data.push(KERNEL_FEAT_COINBASE);
+        data.extend_from_slice(&explicit_value.to_le_bytes());
+        blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data)
+    };
+
+    // Sign with blinding as secret key — proves ownership of the excess point
+    let sk = SecretKey::from_bytes(blinding.as_bytes())
+        .map_err(|e| DomError::Internal(format!("coinbase blinding as key: {e}")))?;
+    let signature = schnorr_sign(&sk, kernel_message.as_bytes(), chain_id)
+        .map_err(|e| DomError::Internal(format!("coinbase sign failed: {e}")))?;
+
+    Ok(CoinbaseTransaction {
+        output: TransactionOutput {
+            commitment: output_commitment,
+            proof: range_proof_bytes,
+        },
+        kernel: CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value,
+            excess,
+            excess_signature: signature.to_bytes(),
+        },
+        offset: [0u8; 32],
+    })
+}
+
+async fn current_mining_eligibility(node: &DomNode) -> MiningEligibility {
+    let local_height = node.chain.lock().await.tip_height.0;
+    let best_known_peer_height = {
+        let peers = node.peers.lock().await;
+        best_known_connected_peer_height(&peers)
+    };
+    node.metrics
+        .best_known_peer_height
+        .store(best_known_peer_height, Ordering::Relaxed);
+    MiningEligibility {
+        local_height,
+        best_known_peer_height,
+        ibd_active: node.ibd_active_sessions.load(Ordering::Acquire) > 0,
+    }
+}
+
+fn best_known_connected_peer_height(peers: &dom_wire::manager::PeerManager) -> u64 {
+    peers
+        .peers
+        .values()
+        .filter(|peer| peer.state == dom_wire::peer::PeerState::Connected)
+        .map(|peer| peer.best_height)
+        .max()
+        .unwrap_or(0)
+}
+
+fn classify_template_snapshot(
+    parent: Hash256,
+    current_tip: Hash256,
+    eligibility: MiningEligibility,
+) -> Option<MiningAttempt> {
+    if current_tip != parent {
+        return Some(MiningAttempt::StaleTemplate {
+            old_parent: parent,
+            new_parent: current_tip,
+        });
+    }
+    eligibility
+        .paused_for_sync()
+        .then_some(MiningAttempt::PausedForSync {
+            local_height: eligibility.local_height,
+            best_known_peer_height: eligibility.best_known_peer_height,
+        })
+}
+
+async fn classify_template_state(node: &DomNode, parent: Hash256) -> Option<MiningAttempt> {
+    let current_tip = node.chain.lock().await.tip_hash;
+    let eligibility = current_mining_eligibility(node).await;
+    classify_template_snapshot(parent, current_tip, eligibility)
+}
+
+fn set_paused_for_sync(metrics: &crate::metrics::Metrics, paused: bool) {
+    metrics
+        .mining_paused_for_sync
+        .store(u64::from(paused), Ordering::Release);
+    if paused {
+        metrics.mining_active.store(0, Ordering::Release);
+        metrics.mining_template_height.store(0, Ordering::Relaxed);
+    }
+}
+
+pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<(), DomError> {
+    info!("Miner started");
+    {
+        if shutdown.is_shutdown() {
+            return Ok(());
+        }
+        let chain = node.chain.lock().await;
+        if chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO {
+            drop(chain);
+            if let Err(e) = create_genesis_block(node.clone()).await {
+                warn!("Genesis creation failed: {e}");
+                return Err(e);
+            }
+        }
+    }
+
+    // Public networks get one bounded peer-discovery window before the first
+    // template. This closes the startup race where the miner could begin at
+    // h=1 just before a configured peer's Hello announces a much higher tip.
+    // It is deliberately one-shot: a synchronized node that later loses all
+    // peers may continue under the existing peer-optional solo-mining policy.
+    if node.config.network != dom_config::Network::Regtest {
+        tokio::select! {
+            _ = shutdown.wait() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
+    }
+
+    // Fail closed if the configured network cannot derive the canonical chain
+    // identity used by wallet coinbase signatures.
+    let _ = chain_id_for(&node.config)?;
+    let mut pause_logged = false;
+    loop {
+        if shutdown.is_shutdown() {
+            return Ok(());
+        }
+        let eligibility = current_mining_eligibility(&node).await;
+        if eligibility.paused_for_sync() {
+            set_paused_for_sync(&node.metrics, true);
+            if !pause_logged {
+                info!(
+                    "mining paused for synchronization: local_height={} best_known_peer_height={} ibd_active={}",
+                    eligibility.local_height,
+                    eligibility.best_known_peer_height,
+                    eligibility.ibd_active
+                );
+                pause_logged = true;
+            }
+            tokio::select! {
+                _ = shutdown.wait() => return Ok(()),
+                _ = node.state_events.notified() => continue,
+            }
+        }
+        set_paused_for_sync(&node.metrics, false);
+        if pause_logged {
+            info!(
+                "restarting miner at height {}",
+                eligibility.local_height.saturating_add(1)
+            );
+            pause_logged = false;
+        }
+        match mine_one_attempt(node.clone(), shutdown.clone()).await {
+            Ok(MiningAttempt::Mined(h)) => info!("Block {} mined successfully", h),
+            Ok(MiningAttempt::StaleTemplate {
+                old_parent,
+                new_parent,
+            }) => {
+                info!(
+                    "mining template invalidated: canonical tip changed old_parent={} new_parent={}",
+                    old_parent, new_parent
+                );
+                let next_height = node.chain.lock().await.tip_height.0.saturating_add(1);
+                info!("restarting miner at height {next_height}");
+            }
+            Ok(MiningAttempt::PausedForSync { .. }) => {
+                set_paused_for_sync(&node.metrics, true);
+            }
+            Ok(MiningAttempt::Shutdown) => return Ok(()),
+            Err(e) => {
+                warn!("Mining failed: {e}");
+                tokio::select! {
+                    _ = shutdown.wait() => return Ok(()),
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
+                }
+            }
+        }
+    }
+}
+
+async fn finalize_mined_block(
+    node: &Arc<DomNode>,
+    block: Block,
+) -> Result<FinalizedBlock, DomError> {
+    let new_height = block.header.height.0;
+
+    let connect_outcome = {
+        let mut chain = node.chain.lock().await;
+        chain
+            .connect_block(&block, Timestamp(now_secs()))
+            .map_err(|e| DomError::Internal(format!("connect_block: {e}")))?
+    };
+
+    // Miner just produced a fresh block. BestChain is the normal path.
+    // SideChain is a natural race in PoW (another peer relayed faster, or
+    // two miners found blocks simultaneously) — debug-level, not anomalous.
+    // AlreadyHave on a freshly-mined block is very unusual (nonce collision?
+    // duplicate state?) but not crash-worthy — log and skip relay.
+    //
+    // Audit (2026-05-23, first auditor): SideChain should not be warn-level
+    // because it pollutes logs under normal pool/solo miner concurrency.
+    match &connect_outcome {
+        dom_chain::ConnectResult::BestChain => { /* normal path */ }
+        dom_chain::ConnectResult::Reorg(_) => {
+            tracing::debug!(
+                "Miner block at height {} triggered a heavier known-tip reorg",
+                new_height
+            );
+        }
+        dom_chain::ConnectResult::SideChain => {
+            tracing::debug!(
+                "Miner block at height {} accepted as SideChain (race with relayed block)",
+                new_height
+            );
+        }
+        dom_chain::ConnectResult::AlreadyHave => {
+            tracing::debug!(
+                "Miner block at height {} was AlreadyHave (unusual but benign)",
+                new_height
+            );
+            // Don't relay — peers already have it (somehow).
+            return Ok(FinalizedBlock {
+                height: new_height,
+                canonical: false,
+            });
+        }
+    }
+    let canonical = matches!(
+        &connect_outcome,
+        dom_chain::ConnectResult::BestChain | dom_chain::ConnectResult::Reorg(_)
+    );
+    if canonical {
+        node.metrics.blocks_mined.fetch_add(1, Ordering::Relaxed);
+    }
+
+    reconcile_mempool_after_connect(
+        &node.chain,
+        &node.mempool,
+        &connect_outcome,
+        &block.transactions,
+    )
+    .await
+    .map_err(|e| DomError::Internal(format!("mempool reconciliation: {e}")))?;
+    DomNode::refresh_runtime_metrics(
+        &node.chain,
+        &node.mempool,
+        &node.future_block_queue,
+        &node.metrics,
+    )
+    .await;
+
+    // Scan block for wallet outputs (coinbase reward recovery).
+    if matches!(
+        &connect_outcome,
+        dom_chain::ConnectResult::BestChain | dom_chain::ConnectResult::Reorg(_)
+    ) {
+        if let Some(ref wallet_arc) = node.wallet {
+            let mut wallet_dir = wallet_arc.lock().await;
+            apply_wallet_after_mined_connect(
+                wallet_dir.wallet_mut(),
+                &connect_outcome,
+                &block.transactions,
+                new_height,
+            )?;
+        }
+    }
+
+    // Relay newly-mined block to all connected peers via broadcast channel.
+    // Only reached for BestChain or SideChain (AlreadyHave returns early above).
+    let block_bytes = {
+        use dom_serialization::DomSerialize;
+        block
+            .to_bytes()
+            .map_err(|e| DomError::Internal(format!("serialize block for relay: {e}")))?
+    };
+    let _ = node.block_relay_tx.send(block_bytes);
+    node.notify_state_changed();
+
+    Ok(FinalizedBlock {
+        height: new_height,
+        canonical,
+    })
+}
+
+fn apply_wallet_after_mined_connect(
+    wallet: &mut dom_wallet::Wallet,
+    connect_outcome: &dom_chain::ConnectResult,
+    block_transactions: &[Transaction],
+    new_height: u64,
+) -> Result<(), DomError> {
+    match connect_outcome {
+        dom_chain::ConnectResult::BestChain => wallet
+            .apply_canonical_block(block_transactions, new_height)
+            .map_err(|e| DomError::Internal(format!("wallet canonical block apply: {e}"))),
+        dom_chain::ConnectResult::Reorg(delta) => {
+            wallet
+                .rollback_to(delta.common_ancestor_height)
+                .map_err(|e| DomError::Internal(format!("wallet mined reorg rollback: {e}")))?;
+            for block in &delta.connected_blocks {
+                wallet
+                    .apply_canonical_block_with_hash(
+                        &block.transactions,
+                        block.block_height,
+                        Some(block.block_hash),
+                    )
+                    .map_err(|e| {
+                        DomError::Internal(format!("wallet mined reorg block apply: {e}"))
+                    })?;
+            }
+            Ok(())
+        }
+        dom_chain::ConnectResult::SideChain | dom_chain::ConnectResult::AlreadyHave => Ok(()),
+    }
+}
+
+/// Create the deterministic genesis block on a fresh chain.
+///
+/// **TEST-INFRASTRUCTURE API. Not part of the stable public surface.**
+///
+/// Exposed as `pub` so integration test helpers can bootstrap genesis
+/// without spawning the full `mining_loop`. Production code paths reach
+/// genesis creation only via `mining_loop` (which calls this internally
+/// under a tip-height guard) — never call this from production code.
+///
+/// Idempotency: callers MUST guard with a check that `chain.tip_height == 0`
+/// and `chain.tip_hash == Hash256::ZERO`. Calling on an initialized chain
+/// will fail under the LMDB NO_OVERWRITE protection added in DOM-LMDB-001
+/// (commit 1b26b13).
+///
+/// Audit (2026-05-23, second auditor ACHADO 6): marked `#[doc(hidden)]`
+/// to keep this out of generated rustdoc despite needing `pub` visibility.
+#[doc(hidden)]
+pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
+    use dom_core::GENESIS_MESSAGE;
+    use dom_serialization::DomDeserialize;
+    info!("Creating genesis block...");
+    info!("Genesis message: {}", GENESIS_MESSAGE);
+    let network_magic = node.config.network.magic();
+    let genesis_chain_id = chain_id_for(&node.config)?;
+    let canonical = dom_chain::build_canonical_genesis(network_magic, &genesis_chain_id)?;
+    let genesis_hash = *canonical.hash.as_bytes();
+    let configured_hash = dom_core::configured_genesis_hash_for_network_magic(network_magic)?;
+    if canonical.hash != configured_hash {
+        return Err(DomError::Invalid(format!(
+            "canonical genesis identifier mismatch: configured {configured_hash}, constructed {}",
+            canonical.hash
+        )));
+    }
+    let genesis_header = dom_consensus::BlockHeader::from_bytes(&canonical.header_bytes)?;
+
+    let mut chain = node.chain.lock().await;
+    let header_bytes = canonical.header_bytes;
+    let genesis_body = canonical.block_bytes;
+    // Legacy Testnet and Regtest genesis blocks persist their deterministic
+    // coinbase indexes exactly as reopen reconstruction does. Mainnet V1 has an
+    // explicitly empty economic body, so its UTXO and kernel changesets are
+    // empty by construction. Both paths keep create and reopen identical.
+    let (new_utxos, spent_utxos, kernel_excesses) = match canonical.block.as_ref() {
+        Some(genesis_block) => {
+            dom_chain::genesis_canonical_changeset(genesis_block, Hash256::from_bytes(genesis_hash))
+        }
+        None => {
+            dom_chain::validate_mainnet_genesis_identity(&genesis_body)?;
+            (Vec::new(), Vec::new(), Vec::new())
+        }
+    };
+    chain.store.commit_block(
+        &genesis_hash,
+        0,
+        &header_bytes,
+        &genesis_body,
+        &new_utxos,
+        &spent_utxos,
+        &kernel_excesses,
+    )?;
+    chain.tip_hash = Hash256::from_bytes(genesis_hash);
+    chain.tip_height = dom_core::BlockHeight::GENESIS;
+    chain.tip_difficulty = genesis_header.total_difficulty;
+    // NOTE: do NOT overwrite chain.genesis_hash with the computed hash here.
+    // The chain_id used for kernel signatures is derived from the *constant*
+    // GENESIS_HASH_{MAINNET,TESTNET,REGTEST} (see chain_id_for() and
+    // Wallet::create). Overwriting chain.genesis_hash with the live
+    // computed hash makes ValidationContext.chain_id diverge from what the
+    // miner/wallet signed with, and every block fails kernel-signature
+    // verification. Pre-launch, set the constants to the real precomputed
+    // genesis hash; until then, all sites consistently use the placeholder.
+    info!(
+        "Genesis created successfully: hash={}",
+        hex::encode(genesis_hash)
+    );
+    Ok(())
+}
+
+/// Aggregate the kernel offsets of a block's transactions into the
+/// header's `total_kernel_offset`.
+///
+/// The block-level balance equation (`verify_block_balance_equation`)
+/// expects `total_kernel_offset` to be the sum of every transaction's
+/// `offset` as a secp256k1 scalar mod n. The coinbase contributes no
+/// offset (its excess is `r·G` only), so it is excluded.
+///
+/// This MUST use the same scalar arithmetic the consensus validator
+/// uses — it mirrors the reference `aggregate_tx_offsets` exactly:
+/// start at `Scalar::ZERO`, add each canonical `tx.offset`, skip any
+/// non-canonical bytes. The result is a `Scalar` reduced mod n, so it
+/// is always `< n` and satisfies `validate_kernel_offset_canonical` by
+/// construction. An empty tx set (coinbase-only block) yields `[0u8; 32]`.
+fn aggregate_block_kernel_offset(transactions: &[Transaction]) -> [u8; 32] {
+    use k256::{elliptic_curve::PrimeField, Scalar};
+    let mut total = Scalar::ZERO;
+    for tx in transactions {
+        let fb = k256::FieldBytes::from(tx.offset);
+        let s_ct = Scalar::from_repr(fb);
+        if s_ct.is_some().into() {
+            total += s_ct.unwrap();
+        }
+    }
+    total.to_repr().into()
+}
+
+fn resolve_mining_randomx_seed(
+    store: &DomStore,
+    candidate_height: u64,
+) -> Result<[u8; 32], DomError> {
+    let seed_height = randomx_seed_height(candidate_height);
+    match store.get_hash_at_height(seed_height)? {
+        Some(hash) => {
+            let header_bytes = store.get_block_header(&hash)?.ok_or_else(|| {
+                DomError::Internal(format!(
+                    "RandomX seed height {seed_height} points to missing header {}",
+                    hex::encode(hash)
+                ))
+            })?;
+            let header = BlockHeader::from_bytes(&header_bytes).map_err(|error| {
+                DomError::Internal(format!(
+                    "RandomX seed header at height {seed_height} is malformed: {error}"
+                ))
+            })?;
+            if header.height.0 != seed_height {
+                return Err(DomError::Internal(format!(
+                    "RandomX seed height index mismatch: key {seed_height}, header {}",
+                    header.height.0
+                )));
+            }
+            Ok(hash)
+        }
+        None if seed_height == 0 => Ok([0u8; 32]),
+        None => Err(DomError::Internal(format!(
+            "RandomX seed block at height {seed_height} missing from committed store \
+             (needed for mining block at height {candidate_height})"
+        ))),
+    }
+}
+
+pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
+    match mine_one_attempt(node.clone(), node.shutdown_token()).await? {
+        MiningAttempt::Mined(height) => Ok(height),
+        MiningAttempt::StaleTemplate {
+            old_parent,
+            new_parent,
+        } => Err(DomError::Internal(format!(
+            "mining template became stale: {old_parent} -> {new_parent}"
+        ))),
+        MiningAttempt::PausedForSync {
+            local_height,
+            best_known_peer_height,
+        } => Err(DomError::PolicyRejected(format!(
+            "mining paused for synchronization: local={local_height} peer={best_known_peer_height}"
+        ))),
+        MiningAttempt::Shutdown => Err(DomError::Internal("mining shutdown requested".into())),
+    }
+}
+
+async fn mine_one_attempt(
+    node: Arc<DomNode>,
+    shutdown: ShutdownToken,
+) -> Result<MiningAttempt, DomError> {
+    if shutdown.is_shutdown() {
+        return Ok(MiningAttempt::Shutdown);
+    }
+    let eligibility = current_mining_eligibility(&node).await;
+    if eligibility.paused_for_sync() {
+        return Ok(MiningAttempt::PausedForSync {
+            local_height: eligibility.local_height,
+            best_known_peer_height: eligibility.best_known_peer_height,
+        });
+    }
+    let (tip_hash, tip_height, tip_difficulty, parent_ts) = {
+        use dom_serialization::DomDeserialize;
+        let chain = node.chain.lock().await;
+        // Parent timestamp for the strict-progression invariant: consensus
+        // (validate_parent_timestamp_progression in dom-consensus/src/block.rs)
+        // requires child.timestamp > parent.timestamp STRICTLY, on every
+        // network. now_secs() has second resolution, so two blocks mined within
+        // the same wall-clock second would receive equal timestamps and the
+        // second would be rejected by connect_block. Read the parent timestamp
+        // here so the mined block can be forced strictly past it (see
+        // block_timestamp below).
+        //
+        // Genesis / empty chain edge case: when the tip is the genesis sentinel
+        // (height 0 && Hash256::ZERO) or the parent header is absent from the
+        // store, there is no real parent — fall back to 0 and preserve the
+        // existing now_secs() behaviour for the first block.
+        let parent_ts = if chain.tip_height.0 == 0 && chain.tip_hash == Hash256::ZERO {
+            0
+        } else {
+            chain
+                .store
+                .get_block_header(chain.tip_hash.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|bytes| BlockHeader::from_bytes(&bytes).ok())
+                .map(|header| header.timestamp.0)
+                .unwrap_or(0)
+        };
+        (
+            chain.tip_hash,
+            chain.tip_height,
+            chain.tip_difficulty,
+            parent_ts,
+        )
+    };
+
+    let new_height = tip_height.0 + 1;
+    // Force the timestamp strictly past the parent's so the consensus
+    // invariant child.timestamp > parent.timestamp always holds, even when
+    // several blocks are mined within the same wall-clock second (regtest fast
+    // mining). For genesis / empty chain parent_ts == 0, so this collapses back
+    // to now_secs(). Computed BEFORE compute_expected_target so the target is
+    // derived from the exact timestamp that ends up in the block — every later
+    // use (mine_blocking, the BlockHeader below) reuses this one value rather
+    // than re-reading now_secs().
+    let block_timestamp = Timestamp(now_secs().max(parent_ts + 1));
+    let target = compute_expected_target(
+        node.config.network.magic(),
+        block_timestamp,
+        BlockHeight(new_height),
+    )?;
+    let block_diff = dom_pow::target_to_difficulty_for_network_height(
+        node.config.network.magic(),
+        BlockHeight(new_height),
+        &target,
+    )?;
+    let new_total_diff = checked_accumulated_difficulty(tip_difficulty, block_diff)?;
+    let mining_mode = MiningMode::for_network(node.config.network)?;
+    let throttle = MinerThrottle::from_config(&node.config.miner_throttle);
+
+    info!(
+        "Mining block {} | target: {}... | mode: {:?} | throttle: {}",
+        new_height,
+        hex::encode(&target[0..4]),
+        mining_mode,
+        throttle.describe()
+    );
+
+    let seed_hash = {
+        let chain = node.chain.lock().await;
+        resolve_mining_randomx_seed(&chain.store, new_height)?
+    };
+
+    // ── Mempool inclusion (DOM-PMMR-002 Phase C) ──────────────────────────────
+    //
+    // Snapshot the highest-fee mempool entries that fit under the
+    // block-weight budget once, before mining starts. The mempool lock
+    // is dropped before the wallet or chain locks are acquired, so the
+    // ordering is monotonic and dead-lock free.
+    //
+    // The coinbase always claims 1 output (WEIGHT_OUTPUT) and 1 coinbase
+    // kernel (WEIGHT_COINBASE_KERNEL); reserve those before passing the
+    // tx-weight budget to `select_for_block`. A future block-template
+    // refactor would add per-tx weight tightening (e.g. dropping
+    // marginal-fee txs that no longer fit after the coinbase grows) —
+    // for now the coinbase weight is constant and the conservative
+    // budget below mirrors what validate_block enforces.
+    let tx_weight_budget = MAX_BLOCK_WEIGHT
+        .saturating_sub(WEIGHT_OUTPUT)
+        .saturating_sub(WEIGHT_COINBASE_KERNEL);
+    let selected_txs: Vec<Transaction> = {
+        let mempool = node.mempool.lock().await;
+        mempool
+            .select_for_block(tx_weight_budget)
+            .into_iter()
+            .map(|e| e.tx.clone())
+            .collect()
+    };
+    let total_tx_fees: u64 = selected_txs.iter().try_fold(0u64, |acc, tx| {
+        let fee = tx.total_fee()?;
+        acc.checked_add(fee)
+            .ok_or_else(|| DomError::Invalid("mempool fee sum overflow".into()))
+    })?;
+    if !selected_txs.is_empty() {
+        info!(
+            "Block {}: including {} mempool transaction(s), total fees = {} noms",
+            new_height,
+            selected_txs.len(),
+            total_tx_fees
+        );
+    }
+
+    // Build coinbase reflecting tx fees so explicit_value == reward + fees.
+    let coinbase = if let Some(ref wallet_arc) = node.wallet {
+        // Wallet-integrated mining: deterministic blinding, output recorded
+        let mut wallet_dir = wallet_arc.lock().await;
+        wallet_dir
+            .wallet_mut()
+            .build_coinbase(BlockHeight(new_height), total_tx_fees)
+            .map_err(|e| DomError::Internal(format!("wallet coinbase: {e}")))?
+    } else if node.config.network == dom_config::Network::Regtest {
+        // Regtest only: dev/test mining without a wallet. The blinding is
+        // discarded so the reward is NOT spendable — acceptable for the
+        // ephemeral, throwaway chains regtest is used for (DOM-SEC-004).
+        warn!(
+            "Regtest mining without wallet — rewards will NOT be spendable (dev only, DOM-SEC-004)"
+        );
+        build_real_coinbase(
+            BlockHeight(new_height),
+            total_tx_fees,
+            &chain_id_for(&node.config)?,
+        )?
+    } else {
+        // Public networks (testnet/mainnet): fail closed before mining. Mining
+        // here without a wallet would burn the reward into a permanently
+        // unspendable coinbase (the blinding factor is discarded), so refuse
+        // rather than silently destroy an honest operator's rewards.
+        return Err(DomError::Invalid(
+            "mining on a public network (testnet/mainnet) requires a configured wallet; \
+             refusing to mine and burn unspendable coinbase rewards (DOM-SEC-004)"
+                .into(),
+        ));
+    };
+
+    let mut provisional = ProvisionalCoinbase::new(node.wallet.clone(), &coinbase);
+
+    let attempt_result: Result<(MiningAttempt, bool), DomError> = async {
+        // PMMR roots over coinbase + selected mempool txs. Single source
+        // of truth: `compute_block_pmmr_roots` is the same helper that
+        // `validate_pmmr_roots` runs during block acceptance, so the miner
+        // cannot drift on iteration order.
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &selected_txs)?;
+
+        // Aggregate kernel offset over the included transactions (coinbase
+        // contributes none). The consensus balance equation requires the
+        // header's total_kernel_offset to equal this sum; a coinbase-only
+        // block yields [0u8; 32], preserving prior behaviour.
+        let total_kernel_offset = aggregate_block_kernel_offset(&selected_txs);
+
+        // Production-like networks mine with FLAG_FULL_MEM (~2 GB dataset +
+        // ~256 MB cache shared by the active workers). The externally-owned
+        // stop flag lets chain, peer and shutdown events interrupt the search.
+        let light_vm = mining_mode.light_vm();
+        let pow_mode = mining_mode.pow_mode();
+        let threads = node.config.miner_threads.max(1);
+        let block_version = block_template_version(node.config.network.magic(), new_height);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let mining_hashes = node.metrics.mining_hashes.clone();
+        let mut mining_task = tokio::task::spawn_blocking(move || {
+            mine_blocking_cancellable(
+                new_height,
+                block_version,
+                tip_hash,
+                block_timestamp,
+                target,
+                new_total_diff,
+                seed_hash,
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset,
+                light_vm,
+                pow_mode,
+                threads,
+                throttle,
+                worker_stop,
+                mining_hashes,
+            )
+        });
+        let active_guard = MiningActiveGuard::new(node.metrics.clone(), new_height);
+
+        let mut interruption: Option<MiningAttempt> = None;
+        let mut cancellation_poll = tokio::time::interval(Duration::from_millis(100));
+        // Skip: after coordinator starvation, one current cancellation check is
+        // sufficient; replaying missed polls cannot improve responsiveness.
+        cancellation_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let work_result = loop {
+            tokio::select! {
+                joined = &mut mining_task => {
+                    break joined.map_err(|error| {
+                        DomError::Internal(format!("mining coordinator join: {error}"))
+                    })?;
+                }
+                _ = shutdown.wait() => {
+                    stop.store(true, Ordering::Release);
+                    interruption = Some(MiningAttempt::Shutdown);
+                    break mining_task.await.map_err(|error| {
+                        DomError::Internal(format!("mining coordinator join after shutdown: {error}"))
+                    })?;
+                }
+                _ = node.state_events.notified() => {
+                    if let Some(reason) = classify_template_state(&node, tip_hash).await {
+                        stop.store(true, Ordering::Release);
+                        interruption = Some(reason);
+                        break mining_task.await.map_err(|error| {
+                            DomError::Internal(format!("mining coordinator join after state change: {error}"))
+                        })?;
+                    }
+                }
+                _ = cancellation_poll.tick() => {
+                    if let Some(reason) = classify_template_state(&node, tip_hash).await {
+                        stop.store(true, Ordering::Release);
+                        interruption = Some(reason);
+                        break mining_task.await.map_err(|error| {
+                            DomError::Internal(format!("mining coordinator join after state poll: {error}"))
+                        })?;
+                    }
+                }
+            }
+        };
+        // The coordinator has returned only after joining every RandomX worker.
+        drop(active_guard);
+
+        if let Some(interruption) = interruption {
+            if matches!(interruption, MiningAttempt::StaleTemplate { .. }) {
+                node.metrics
+                    .stale_templates_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok((interruption, false));
+        }
+
+        let (header, stats) = match work_result? {
+            MiningWork::Mined(header, stats) => (header, stats),
+            MiningWork::Cancelled(stats) => {
+                tracing::debug!(
+                    "Block {new_height}: {} worker(s) joined after cancellation",
+                    stats.joined_workers
+                );
+                return Err(DomError::Internal(
+                    "nonce search cancelled without a classified state change".into(),
+                ));
+            }
+        };
+        tracing::debug!(
+            "Block {new_height}: nonce found with {} worker(s); {} joined",
+            stats.workers,
+            stats.joined_workers
+        );
+
+        // Close the race where a valid nonce arrives just after a canonical
+        // tip notification: a known-obsolete candidate never reaches
+        // connect_block.
+        let current_tip = node.chain.lock().await.tip_hash;
+        let eligibility = current_mining_eligibility(&node).await;
+        if let Some(reason) = classify_template_snapshot(tip_hash, current_tip, eligibility) {
+            if matches!(reason, MiningAttempt::StaleTemplate { .. }) {
+                node.metrics
+                    .stale_templates_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok((reason, false));
+        }
+        let block = Block {
+            header,
+            coinbase,
+            transactions: selected_txs,
+        };
+        let finalized = finalize_mined_block(&node, block).await?;
+        Ok((MiningAttempt::Mined(finalized.height), finalized.canonical))
+    }
+    .await;
+
+    match attempt_result {
+        Ok((attempt, true)) => {
+            provisional.preserve();
+            Ok(attempt)
+        }
+        Ok((attempt, false)) => {
+            provisional.cleanup().await;
+            Ok(attempt)
+        }
+        Err(error) => {
+            provisional.cleanup().await;
+            Err(error)
+        }
+    }
+}
+
+/// Outcome statistics of a mining run — for operator logs and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MiningStats {
+    /// Nonce-search workers actually spawned. The deterministic FastDevOnly
+    /// path searches nothing and always reports 1.
+    workers: usize,
+    /// Workers whose thread/inline search has terminated before return.
+    joined_workers: usize,
+}
+
+#[derive(Debug)]
+// Keep the mined header inline: this short-lived worker result is consumed
+// immediately, and boxing it would add an allocation to every successful block.
+#[allow(clippy::large_enum_variant)]
+enum MiningWork {
+    Mined(BlockHeader, MiningStats),
+    Cancelled(MiningStats),
+}
+
+/// Immutable inputs of one worker's strided nonce search.
+struct NonceSearch {
+    /// Header with everything but the nonce/randomx_hash filled in.
+    template: BlockHeader,
+    target: [u8; 32],
+    seed_hash: [u8; 32],
+    /// `true` = deterministic dev hashing (no RandomX VM).
+    fast_mode: bool,
+    worker_id: usize,
+    /// Total worker count; also the nonce stride.
+    workers: usize,
+    throttle: MinerThrottle,
+}
+
+/// Build the per-worker RandomX VM (None in FastDevOnly mode).
+///
+/// Called inside each worker thread: `dom_pow::MinerVm` shares the heavy
+/// RandomX state through the seed-keyed pools in `dom_pow::randomx_pool`, so
+/// N workers cost one ~2 GB dataset (full-mem) or one ~256 MB cache (light)
+/// total — the pool is also what makes the dataset survive across block
+/// templates, rebuilt only on RFC-0011 seed rotation.
+fn build_worker_vm(
+    light_vm: bool,
+    fast_mode: bool,
+    seed_hash: &[u8; 32],
+) -> Result<Option<dom_pow::MinerVm>, DomError> {
+    if fast_mode {
+        return Ok(None); // deterministic dev hashing: no VM
+    }
+    let vm = if light_vm {
+        // Cache-only VM. No dataset is allocated (regtest stays light).
+        dom_pow::MinerVm::new_light(seed_hash)?
+    } else {
+        dom_pow::MinerVm::new(seed_hash)?
+    };
+    Ok(Some(vm))
+}
+
+/// One worker's nonce search: starts at `worker_id` and strides by `workers`
+/// so the workers partition the nonce space without coordination. Returns
+/// `Ok(None)` when another worker won (stop flag set).
+fn search_nonces(
+    params: NonceSearch,
+    vm: Option<&dom_pow::MinerVm>,
+    stop: &std::sync::atomic::AtomicBool,
+    total_hashes: &std::sync::atomic::AtomicU64,
+    mining_hashes: &std::sync::atomic::AtomicU64,
+) -> Result<Option<BlockHeader>, DomError> {
+    use std::sync::atomic::Ordering;
+
+    // Heartbeat: blocks can take minutes to hours under low-effort targets +
+    // light VM. Without a periodic log, "stuck" miners are indistinguishable
+    // from "still hashing" — worker 0 logs every HEARTBEAT_NONCES of its own
+    // iterations with the aggregate hash-rate so operators (and tests) see
+    // continuous progress.
+    const HEARTBEAT_NONCES: u64 = 5_000;
+    let mining_start = std::time::Instant::now();
+    let mut last_heartbeat = mining_start;
+    let mut last_total = 0u64;
+
+    let mut header = params.template.clone();
+    let new_height = header.height.0;
+    let mut nonce = params.worker_id as u64;
+    let stride = params.workers as u64;
+    let mut iterations = 0u64;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        header.pow.nonce = nonce;
+        let preimage = header.pow_preimage();
+        let hash = if params.fast_mode {
+            fast_pow_hash(&params.seed_hash, &preimage)
+        } else {
+            vm.expect("vm").hash(&preimage)?
+        };
+        total_hashes.fetch_add(1, Ordering::Relaxed);
+        mining_hashes.fetch_add(1, Ordering::Relaxed);
+        if hash_meets_target(&hash, &params.target) {
+            header.pow.randomx_hash = Hash256::from_bytes(hash);
+            return Ok(Some(header));
+        }
+        nonce = nonce.wrapping_add(stride);
+        iterations = iterations.wrapping_add(1);
+        // Throttle on the worker-local iteration count, not the global nonce:
+        // strided nonces of worker i>0 may never be multiples of the
+        // configured yield interval.
+        params.throttle.after_nonce(iterations);
+        if params.worker_id == 0 && iterations.is_multiple_of(HEARTBEAT_NONCES) {
+            let now = std::time::Instant::now();
+            let window = now.duration_since(last_heartbeat).as_secs_f64();
+            let total = total_hashes.load(Ordering::Relaxed);
+            let hps = if window > 0.0 {
+                total.saturating_sub(last_total) as f64 / window
+            } else {
+                0.0
+            };
+            info!(
+                "⛏ minerando h={} | nonces={} | {:.1} H/s | workers={} | total={:.1}s | throttle={}",
+                new_height,
+                total,
+                hps,
+                params.workers,
+                mining_start.elapsed().as_secs_f64(),
+                params.throttle.describe()
+            );
+            last_heartbeat = now;
+            last_total = total;
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn mine_blocking(
+    new_height: u64,
+    tip_hash: Hash256,
+    block_timestamp: Timestamp,
+    target: [u8; 32],
+    new_total_diff: U256,
+    seed_hash: [u8; 32],
+    output_root: Hash256,
+    kernel_root: Hash256,
+    rangeproof_root: Hash256,
+    total_kernel_offset: [u8; 32],
+    light_vm: bool,
+    pow_mode: PowValidationMode,
+    threads: usize,
+    throttle: MinerThrottle,
+) -> Result<(BlockHeader, MiningStats), DomError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mining_hashes = Arc::new(AtomicU64::new(0));
+    match mine_blocking_cancellable(
+        new_height,
+        dom_core::required_block_version(new_height),
+        tip_hash,
+        block_timestamp,
+        target,
+        new_total_diff,
+        seed_hash,
+        output_root,
+        kernel_root,
+        rangeproof_root,
+        total_kernel_offset,
+        light_vm,
+        pow_mode,
+        threads,
+        throttle,
+        stop,
+        mining_hashes,
+    )? {
+        MiningWork::Mined(header, stats) => Ok((header, stats)),
+        MiningWork::Cancelled(_) => Err(DomError::Internal(
+            "nonce search cancelled without a result".into(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mine_blocking_cancellable(
+    new_height: u64,
+    block_version: u32,
+    tip_hash: Hash256,
+    block_timestamp: Timestamp,
+    target: [u8; 32],
+    new_total_diff: U256,
+    seed_hash: [u8; 32],
+    output_root: Hash256,
+    kernel_root: Hash256,
+    rangeproof_root: Hash256,
+    total_kernel_offset: [u8; 32],
+    light_vm: bool,
+    pow_mode: PowValidationMode,
+    threads: usize,
+    throttle: MinerThrottle,
+    stop: Arc<AtomicBool>,
+    mining_hashes: Arc<AtomicU64>,
+) -> Result<MiningWork, DomError> {
+    // Mainnet / Testnet mining runs RandomX fast mode via `dom_pow::MinerVm`
+    // (~2 GB dataset shared by all workers, pooled per seed and rebuilt only
+    // on RFC-0011 seed rotation — see `dom_pow::randomx_pool`). Regtest opts
+    // out via `light_vm = true` and uses cache-only VMs (~256 MB shared).
+    // Regtest still performs real PoW against `REGTEST_TARGET_COMPACT` unless
+    // explicit FastDevOnly hashing is enabled for tests. All paths check the
+    // same consensus target supplied by `compute_expected_target`, and fast
+    // mode hashes byte-identically to the light-mode validation path.
+    let fast_mode = matches!(pow_mode, PowValidationMode::FastDevOnly);
+    // FastDevOnly finds its nonce deterministically without searching, so
+    // extra workers add nothing and would only make the winning nonce racy
+    // for tests — force the single inline worker.
+    let workers = if fast_mode { 1 } else { threads.max(1) };
+    info!(
+        "Starting miner h={new_height}: configured_threads={threads} workers={workers} throttle={}",
+        throttle.describe()
+    );
+    let template = BlockHeader {
+        version: block_version,
+        prev_hash: tip_hash,
+        height: BlockHeight(new_height),
+        timestamp: block_timestamp,
+        output_root,
+        kernel_root,
+        rangeproof_root,
+        total_kernel_offset,
+        target: CompactTarget(target_to_compact(&target)),
+        total_difficulty: new_total_diff,
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
+
+    if workers == 1 {
+        // Single worker: search inline on this thread, exactly the historical
+        // behavior — no extra spawn, no cross-thread RandomX handles.
+        let total_hashes = AtomicU64::new(0);
+        let vm = build_worker_vm(light_vm, fast_mode, &seed_hash)?;
+        let header = search_nonces(
+            NonceSearch {
+                template,
+                target,
+                seed_hash,
+                fast_mode,
+                worker_id: 0,
+                workers: 1,
+                throttle,
+            },
+            vm.as_ref(),
+            &stop,
+            &total_hashes,
+            &mining_hashes,
+        )?;
+        let stats = MiningStats {
+            workers: 1,
+            joined_workers: 1,
+        };
+        return Ok(match header {
+            Some(header) => MiningWork::Mined(header, stats),
+            None => MiningWork::Cancelled(stats),
+        });
+    }
+
+    // Multi-worker: N strided searchers over one shared cache/dataset, first
+    // valid header wins and stops the rest.
+    let total_hashes = Arc::new(AtomicU64::new(0));
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<BlockHeader, DomError>>();
+    let mut handles = Vec::with_capacity(workers);
+    for worker_id in 0..workers {
+        let stop_w = Arc::clone(&stop);
+        let hashes_w = Arc::clone(&total_hashes);
+        let mining_hashes_w = Arc::clone(&mining_hashes);
+        let tx_w = result_tx.clone();
+        let params = NonceSearch {
+            template: template.clone(),
+            target,
+            seed_hash,
+            fast_mode,
+            worker_id,
+            workers,
+            throttle,
+        };
+        let spawned = std::thread::Builder::new()
+            .name(format!("miner-{new_height}-w{worker_id}"))
+            .spawn(move || {
+                info!("⛏ h={new_height} worker #{worker_id}/{workers} iniciado");
+                // VM built inside the worker thread: first worker on a fresh
+                // seed pays the pooled dataset build, the rest block on the
+                // pool mutex and then attach to the shared dataset.
+                let outcome =
+                    build_worker_vm(light_vm, fast_mode, &params.seed_hash).and_then(|vm| {
+                        search_nonces(params, vm.as_ref(), &stop_w, &hashes_w, &mining_hashes_w)
+                    });
+                match outcome {
+                    Ok(Some(header)) => {
+                        stop_w.store(true, Ordering::Relaxed);
+                        let _ = tx_w.send(Ok(header));
+                    }
+                    Ok(None) => {} // another worker won
+                    Err(e) => {
+                        stop_w.store(true, Ordering::Release);
+                        let _ = tx_w.send(Err(e));
+                    }
+                }
+            });
+        match spawned {
+            Ok(handle) => handles.push(handle),
+            Err(e) => {
+                // Don't leak already-running workers on spawn failure.
+                stop.store(true, Ordering::Relaxed);
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                return Err(DomError::Internal(format!(
+                    "spawn miner worker {worker_id}: {e}"
+                )));
+            }
+        }
+    }
+    // Drop our sender so recv() unblocks with an error if every worker exits
+    // without producing a result (e.g. all VMs failed to build).
+    drop(result_tx);
+
+    let mut winner: Option<BlockHeader> = None;
+    let mut last_err: Option<DomError> = None;
+    while let Ok(msg) = result_rx.recv() {
+        match msg {
+            Ok(header) => {
+                winner = Some(header);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let mut join_failed = false;
+    for handle in handles {
+        if handle.join().is_err() {
+            join_failed = true;
+        }
+    }
+    if join_failed {
+        return Err(DomError::Internal("miner worker panicked".into()));
+    }
+    let stats = MiningStats {
+        workers,
+        joined_workers: workers,
+    };
+    match winner {
+        Some(header) => Ok(MiningWork::Mined(header, stats)),
+        None if stop.load(Ordering::Acquire) && last_err.is_none() => {
+            Ok(MiningWork::Cancelled(stats))
+        }
+        None => Err(last_err.unwrap_or_else(|| {
+            DomError::Internal("all miner workers exited without a result".into())
+        })),
+    }
+}
+
+fn block_template_version(network_magic: u32, next_height: u64) -> u32 {
+    dom_core::required_block_version_for_network(network_magic, next_height)
+}
+
+/// Test-only helper: recompute a hash on an independently constructed light
+/// VM, bypassing `dom_pow`'s pools — used to prove the mining paths produce
+/// real RandomX output rather than shared-state garbage.
+#[cfg(test)]
+fn randomx_hash(vm: &randomx_rs::RandomXVM, preimage: &[u8]) -> Result<[u8; 32], DomError> {
+    let v = vm
+        .calculate_hash(preimage)
+        .map_err(|e| DomError::Internal(format!("rx hash: {e}")))?;
+    if v.len() != 32 {
+        return Err(DomError::Internal("hash len != 32".into()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&v);
+    Ok(arr)
+}
+
+#[cfg(test)]
+mod block_version_tests {
+    use super::block_template_version;
+    use dom_core::{
+        BLOCK_VERSION_LEGACY, BLOCK_VERSION_V3, MAINNET_V3_ACTIVATION_HEIGHT,
+        NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+    };
+
+    #[test]
+    fn miner_switches_automatically_at_mainnet_v3_activation() {
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_MAINNET, MAINNET_V3_ACTIVATION_HEIGHT - 1),
+            BLOCK_VERSION_LEGACY
+        );
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_MAINNET, MAINNET_V3_ACTIVATION_HEIGHT),
+            BLOCK_VERSION_V3
+        );
+    }
+
+    #[test]
+    fn regtest_genesis_remains_legacy_and_first_mined_block_is_v3() {
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_REGTEST, 0),
+            BLOCK_VERSION_LEGACY
+        );
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_REGTEST, 1),
+            BLOCK_VERSION_V3
+        );
+    }
+}
+
+#[cfg(test)]
+mod kernel_offset_tests {
+    //! Block-level kernel-offset aggregation (DOM block-assembly).
+    //!
+    //! `aggregate_block_kernel_offset` must reproduce the consensus
+    //! validator's scalar arithmetic exactly: sum of each tx offset as a
+    //! secp256k1 scalar mod n, coinbase excluded.
+
+    use super::aggregate_block_kernel_offset;
+    use dom_consensus::Transaction;
+
+    /// A bare transaction carrying only an offset — the aggregator reads
+    /// nothing else.
+    fn tx_with_offset(offset: [u8; 32]) -> Transaction {
+        Transaction {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            kernels: Vec::new(),
+            offset,
+        }
+    }
+
+    /// A big-endian 32-byte scalar repr of a small integer `v`.
+    fn scalar_repr(v: u8) -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[31] = v;
+        b
+    }
+
+    #[test]
+    fn empty_block_offset_is_zero() {
+        assert_eq!(aggregate_block_kernel_offset(&[]), [0u8; 32]);
+    }
+
+    #[test]
+    fn sum_of_two_known_offsets_matches_expected() {
+        // scalar(2) + scalar(3) == scalar(5), in big-endian repr.
+        let txs = vec![
+            tx_with_offset(scalar_repr(2)),
+            tx_with_offset(scalar_repr(3)),
+        ];
+        assert_eq!(aggregate_block_kernel_offset(&txs), scalar_repr(5));
+    }
+}
+
+#[cfg(test)]
+mod stale_template_ibd_tests {
+    use super::{
+        best_known_connected_peer_height, classify_template_snapshot, mine_blocking_cancellable,
+        set_paused_for_sync, MinerThrottle, MiningActiveGuard, MiningAttempt, MiningEligibility,
+        MiningWork, ProvisionalCoinbase,
+    };
+    use crate::metrics::Metrics;
+    use dom_config::MinerThrottleConfig;
+    use dom_core::{Hash256, Timestamp};
+    use dom_pow::PowValidationMode;
+    use dom_wallet::{Network, WalletDir};
+    use dom_wire::manager::PeerManager;
+    use dom_wire::peer::{PeerInfo, PeerState};
+    use primitive_types::U256;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn eligibility(local_height: u64, peer_height: u64, ibd_active: bool) -> MiningEligibility {
+        MiningEligibility {
+            local_height,
+            best_known_peer_height: peer_height,
+            ibd_active,
+        }
+    }
+
+    fn peer(port: u16, height: u64) -> PeerInfo {
+        let mut peer = PeerInfo::new(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), true);
+        peer.state = PeerState::Connected;
+        peer.best_height = height;
+        peer.best_hash = [height as u8; 32];
+        peer
+    }
+
+    fn fresh_test_dir(label: &str) -> PathBuf {
+        let unique = format!(
+            "dom-miner-runtime-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn start_cancellable_fast_worker(
+        parent: Hash256,
+    ) -> (
+        Arc<AtomicBool>,
+        Arc<AtomicU64>,
+        std::thread::JoinHandle<Result<MiningWork, dom_core::DomError>>,
+    ) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let hashes = Arc::new(AtomicU64::new(0));
+        let worker_stop = stop.clone();
+        let worker_hashes = hashes.clone();
+        let handle = std::thread::spawn(move || {
+            mine_blocking_cancellable(
+                11,
+                dom_core::BLOCK_VERSION_V3,
+                parent,
+                Timestamp(1_700_000_000),
+                [0u8; 32], // no non-zero hash can satisfy this target
+                U256::one(),
+                [0u8; 32],
+                Hash256::ZERO,
+                Hash256::ZERO,
+                Hash256::ZERO,
+                [0u8; 32],
+                true,
+                PowValidationMode::FastDevOnly,
+                4,
+                MinerThrottle::from_config(&MinerThrottleConfig::default()),
+                worker_stop,
+                worker_hashes,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while hashes.load(Ordering::Acquire) == 0 {
+            assert!(Instant::now() < deadline, "worker did not become active");
+            std::thread::yield_now();
+        }
+        (stop, hashes, handle)
+    }
+
+    #[test]
+    fn miner_does_not_start_while_peer_is_ahead() {
+        let state = eligibility(0, 10, false);
+        let metrics = Metrics::new();
+        set_paused_for_sync(&metrics, state.paused_for_sync());
+
+        assert!(state.paused_for_sync());
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.mining_paused_for_sync.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn miner_starts_when_local_reaches_best_peer_height() {
+        let state = eligibility(10, 10, false);
+        let metrics = Arc::new(Metrics::new());
+        set_paused_for_sync(&metrics, state.paused_for_sync());
+        assert!(!state.paused_for_sync());
+
+        let active = MiningActiveGuard::new(metrics.clone(), state.local_height + 1);
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 1);
+        assert_eq!(metrics.mining_template_height.load(Ordering::Acquire), 11);
+        drop(active);
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn canonical_tip_change_cancels_old_template() {
+        let old_parent = Hash256::from_bytes([0x11; 32]);
+        let new_parent = Hash256::from_bytes([0x22; 32]);
+        let (stop, _hashes, handle) = start_cancellable_fast_worker(old_parent);
+
+        let reason = classify_template_snapshot(old_parent, new_parent, eligibility(10, 10, false))
+            .expect("changed canonical parent must invalidate template");
+        assert!(matches!(
+            reason,
+            MiningAttempt::StaleTemplate {
+                old_parent: old,
+                new_parent: new,
+            } if old == old_parent && new == new_parent
+        ));
+        stop.store(true, Ordering::Release);
+        let work = handle
+            .join()
+            .expect("coordinator joins")
+            .expect("worker result");
+        match work {
+            MiningWork::Cancelled(stats) => {
+                assert_eq!(stats.workers, 1);
+                assert_eq!(stats.joined_workers, stats.workers);
+            }
+            MiningWork::Mined(_, _) => panic!("impossible target must not produce a nonce"),
+        }
+        assert_eq!(10 + 1, 11, "replacement template height");
+        assert_eq!(new_parent, Hash256::from_bytes([0x22; 32]));
+    }
+
+    #[tokio::test]
+    async fn stale_template_coinbase_is_removed() {
+        let dir = fresh_test_dir("stale-coinbase");
+        let wallet = Arc::new(tokio::sync::Mutex::new(
+            WalletDir::create(
+                &dir,
+                "pw",
+                Network::Regtest,
+                &Hash256::from_bytes([0x42; 32]),
+            )
+            .expect("wallet dir"),
+        ));
+        let coinbase = wallet
+            .lock()
+            .await
+            .wallet_mut()
+            .build_coinbase(dom_core::BlockHeight(11), 0)
+            .expect("coinbase");
+        let commitment = *coinbase.output.commitment.as_bytes();
+        let mut provisional = ProvisionalCoinbase::new(Some(wallet.clone()), &coinbase);
+
+        provisional.cleanup().await;
+        provisional.cleanup().await; // exact-once cleanup is idempotent
+        assert!(!wallet
+            .lock()
+            .await
+            .wallet()
+            .outputs()
+            .any(|output| output.commitment == commitment));
+
+        drop(provisional);
+        drop(wallet);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn accepted_coinbase_is_not_removed() {
+        let dir = fresh_test_dir("accepted-coinbase");
+        let wallet = Arc::new(tokio::sync::Mutex::new(
+            WalletDir::create(
+                &dir,
+                "pw",
+                Network::Regtest,
+                &Hash256::from_bytes([0x43; 32]),
+            )
+            .expect("wallet dir"),
+        ));
+        let coinbase = wallet
+            .lock()
+            .await
+            .wallet_mut()
+            .build_coinbase(dom_core::BlockHeight(11), 0)
+            .expect("coinbase");
+        let commitment = *coinbase.output.commitment.as_bytes();
+        let mut provisional = ProvisionalCoinbase::new(Some(wallet.clone()), &coinbase);
+
+        provisional.preserve();
+        provisional.cleanup().await;
+        assert!(wallet
+            .lock()
+            .await
+            .wallet()
+            .outputs()
+            .any(|output| output.commitment == commitment));
+
+        wallet.lock().await.wallet_mut().forget_output(&commitment);
+        drop(provisional);
+        drop(wallet);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn nonce_found_after_tip_change_is_not_submitted() {
+        let old_parent = Hash256::from_bytes([0x51; 32]);
+        let new_parent = Hash256::from_bytes([0x52; 32]);
+        let post_nonce =
+            classify_template_snapshot(old_parent, new_parent, eligibility(11, 11, false));
+        assert!(matches!(
+            post_nonce,
+            Some(MiningAttempt::StaleTemplate { .. })
+        ));
+    }
+
+    #[test]
+    fn shutdown_joins_all_mining_workers() {
+        let parent = Hash256::from_bytes([0x61; 32]);
+        let (stop, _hashes, handle) = start_cancellable_fast_worker(parent);
+        let metrics = Arc::new(Metrics::new());
+        let active = MiningActiveGuard::new(metrics.clone(), 11);
+
+        stop.store(true, Ordering::Release);
+        let work = handle
+            .join()
+            .expect("coordinator joins")
+            .expect("worker result");
+        drop(active);
+        match work {
+            MiningWork::Cancelled(stats) => assert_eq!(stats.joined_workers, stats.workers),
+            MiningWork::Mined(_, _) => panic!("shutdown worker unexpectedly mined"),
+        }
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn peer_height_change_without_tip_change_pauses_mining() {
+        let parent = Hash256::from_bytes([0x71; 32]);
+        let reason = classify_template_snapshot(parent, parent, eligibility(10, 12, false));
+        assert!(matches!(
+            reason,
+            Some(MiningAttempt::PausedForSync {
+                local_height: 10,
+                best_known_peer_height: 12,
+            })
+        ));
+    }
+
+    #[test]
+    fn peer_height_regression_does_not_lower_safety_reference_incorrectly() {
+        let mut peers = PeerManager::new(8, 2);
+        peers.register_peer(peer(32001, 20)).expect("high peer");
+        peers.register_peer(peer(32002, 7)).expect("low peer");
+        assert_eq!(best_known_connected_peer_height(&peers), 20);
+
+        peers.peers.get_mut("127.0.0.1:32002").unwrap().best_height = 3;
+        assert_eq!(best_known_connected_peer_height(&peers), 20);
+    }
+
+    #[test]
+    fn stale_template_is_not_reported_as_mining_failure() {
+        let old_parent = Hash256::from_bytes([0x81; 32]);
+        let new_parent = Hash256::from_bytes([0x82; 32]);
+        let outcome =
+            classify_template_snapshot(old_parent, new_parent, eligibility(10, 10, false));
+        assert!(matches!(outcome, Some(MiningAttempt::StaleTemplate { .. })));
+    }
+}
+
+#[cfg(test)]
+mod genesis_determinism_tests {
+    //! Roadmap v2 Phase 6.3 — Bootstrap recoverability proofs.
+    //!
+    //! The protocol's "wipe the data_dir and rebuild from genesis"
+    //! recovery story is only useful if the rebuilt genesis is
+    //! byte-identical to the one that any other node would build from
+    //! the same constants. These tests pin that property at the
+    //! coinbase + PMMR-root layer, without going through RandomX
+    //! (which is what makes the full chain_persistence integration
+    //! test slow — see RB-PMMR-001 deferred validation gaps).
+    //!
+    //! Coverage:
+    //!   1. `dom_chain::build_canonical_genesis` is deterministic across N calls.
+    //!   2. The three PMMR roots over the genesis coinbase are
+    //!      deterministic across N calls.
+    //!   3. Different legacy-network chain_ids produce different coinbases
+    //!      (sanity: Testnet and Regtest genesis must not collide).
+
+    use super::{
+        apply_wallet_after_mined_connect, build_real_coinbase, build_seed_recoverable_coinbase,
+        finalize_mined_block, mine_blocking, resolve_mining_randomx_seed, MinerThrottle,
+    };
+    use crate::node::DomNode;
+    use dom_chain::{ConnectResult, ReorgBlockDelta, ReorgDelta};
+    use dom_config::{MinerThrottleConfig, NodeConfig};
+    use dom_consensus::block::validate_pow_for_network;
+    use dom_consensus::block::{BlockHeader, ProofOfWork};
+    use dom_consensus::compute_block_pmmr_roots;
+    use dom_consensus::{Block, CoinbaseTransaction, Transaction};
+    use dom_core::{
+        BlockHeight, Hash256, Timestamp, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+        NETWORK_MAGIC_TESTNET,
+    };
+    use dom_crypto::pedersen::Commitment;
+    use dom_crypto::BlindingFactor;
+    use dom_pow::{
+        compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
+        randomx_seed_height, target_to_compact, target_to_difficulty, PowValidationMode,
+        REGTEST_TARGET_COMPACT,
+    };
+    use dom_serialization::DomSerialize;
+    use dom_wallet::{Network, OwnedOutput, WalletDir};
+    use lmdb::{Transaction as LmdbTransaction, WriteFlags};
+    use primitive_types::U256;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
+    fn chain_id_testnet() -> [u8; 32] {
+        use dom_consensus::derive_chain_id;
+        use dom_core::Hash256;
+        *derive_chain_id(
+            dom_core::NETWORK_MAGIC_TESTNET,
+            &Hash256::from_bytes(dom_core::GENESIS_HASH_TESTNET),
+        )
+        .as_bytes()
+    }
+
+    fn chain_id_regtest() -> [u8; 32] {
+        use dom_consensus::derive_chain_id;
+        use dom_core::Hash256;
+        *derive_chain_id(
+            dom_core::NETWORK_MAGIC_REGTEST,
+            &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        )
+        .as_bytes()
+    }
+
+    fn canonical_genesis_coinbase(network_magic: u32, chain_id: &[u8; 32]) -> CoinbaseTransaction {
+        dom_chain::build_canonical_genesis(network_magic, chain_id)
+            .expect("canonical genesis")
+            .block
+            .expect("legacy genesis block")
+            .coinbase
+    }
+
+    fn fresh_test_dir(label: &str) -> PathBuf {
+        let unique = format!(
+            "dom-miner-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn regtest_config(data_dir: &std::path::Path) -> NodeConfig {
+        let mut config = NodeConfig::regtest();
+        config.data_dir = data_dir.to_string_lossy().into_owned();
+        config.wallet_path = None;
+        config.wallet_password = None;
+        config.mine = false;
+        config
+    }
+
+    fn init_test_node(config: NodeConfig) -> DomNode {
+        // Windows CI reserves LMDB map size more strictly than Linux/macOS.
+        // These miner fixtures are tiny, so tests use a small explicit map
+        // size while production `DomNode::init` keeps the 16 GiB default.
+        DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE).expect("node init")
+    }
+
+    fn disabled_throttle() -> MinerThrottle {
+        MinerThrottle::from_config(&MinerThrottleConfig::default())
+    }
+
+    fn put_raw_height_mapping(node: &DomNode, height: u64, value: &[u8]) {
+        let chain = node.chain.blocking_lock();
+        let key = height.to_le_bytes();
+        let mut txn = chain.store.env.begin_rw_txn().expect("rw txn");
+        txn.put(chain.store.db_height, &key, &value, WriteFlags::empty())
+            .expect("put height mapping");
+        txn.commit().expect("commit height mapping");
+    }
+
+    fn put_raw_seed_header(node: &DomNode, hash: &[u8; 32], bytes: &[u8]) {
+        let chain = node.chain.blocking_lock();
+        chain
+            .store
+            .store_known_block(hash, bytes, &[0u8; 4])
+            .expect("store seed header");
+    }
+
+    fn put_seed_header(node: &DomNode, height: u64, hash: &[u8; 32]) {
+        let header = BlockHeader {
+            version: dom_core::required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
+            prev_hash: Hash256::from_bytes([0x01; 32]),
+            height: BlockHeight(height),
+            timestamp: Timestamp(1_704_067_200 + height),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: dom_pow::CompactTarget(REGTEST_TARGET_COMPACT),
+            total_difficulty: U256::one(),
+            pow: ProofOfWork {
+                nonce: 0,
+                randomx_hash: Hash256::ZERO,
+            },
+        };
+        let bytes = header.to_bytes().expect("seed header bytes");
+        put_raw_seed_header(node, hash, &bytes);
+    }
+
+    fn describe_height_mapping(node: &DomNode, height: u64) -> String {
+        let chain = node.chain.blocking_lock();
+        match chain.store.get_hash_at_height(height) {
+            Ok(Some(hash)) => format!("Some({})", hex::encode(hash)),
+            Ok(None) => "None".to_string(),
+            Err(err) => format!("Err({err})"),
+        }
+    }
+
+    fn current_tip_height(node: &DomNode) -> u64 {
+        node.chain.blocking_lock().tip_height.0
+    }
+
+    fn raw_seed_hash(tag: u8) -> [u8; 32] {
+        let mut hash = [0u8; 32];
+        hash[0] = tag;
+        hash[31] = tag ^ 0x5a;
+        hash
+    }
+
+    #[test]
+    fn mined_reorg_wallet_apply_rolls_back_and_applies_connected_blocks() {
+        let dir = fresh_test_dir("wallet-mined-reorg-apply");
+        let mut wd = WalletDir::create(
+            &dir,
+            "pw",
+            Network::Regtest,
+            &Hash256::from_bytes([0x42; 32]),
+        )
+        .expect("wallet dir");
+
+        let stale_blinding = BlindingFactor::random();
+        let stale_commitment = Commitment::commit(123, &stale_blinding);
+        let stale_commitment_bytes = *stale_commitment.as_bytes();
+        wd.wallet_mut().add_output(
+            OwnedOutput::new(
+                stale_commitment_bytes,
+                123,
+                *stale_blinding.as_bytes(),
+                3,
+                true,
+            )
+            .with_block_hash([0xA3; 32]),
+        );
+
+        let coinbase = wd
+            .wallet_mut()
+            .build_coinbase(BlockHeight(2), 0)
+            .expect("coinbase");
+        let canonical_commitment = *coinbase.output.commitment.as_bytes();
+        assert!(wd.wallet_mut().forget_output(&canonical_commitment));
+
+        let connected_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![coinbase.output],
+            kernels: vec![],
+            offset: [0u8; 32],
+        };
+        let canonical_hash = [0xB2; 32];
+        let delta = ReorgDelta {
+            common_ancestor_height: 1,
+            connected_blocks: vec![ReorgBlockDelta {
+                block_hash: canonical_hash,
+                block_height: 2,
+                transactions: vec![connected_tx],
+            }],
+            ..Default::default()
+        };
+
+        apply_wallet_after_mined_connect(wd.wallet_mut(), &ConnectResult::Reorg(delta), &[], 2)
+            .expect("wallet mined reorg apply");
+
+        assert!(
+            wd.wallet()
+                .outputs()
+                .all(|output| output.commitment != stale_commitment_bytes),
+            "rollback must remove outputs above the common ancestor"
+        );
+        let recovered = wd
+            .wallet()
+            .outputs()
+            .find(|output| output.commitment == canonical_commitment)
+            .expect("connected reorg block must be applied to wallet");
+        assert_eq!(recovered.block_height, 2);
+        assert_eq!(recovered.block_hash, Some(canonical_hash));
+
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mine_fast_test_header(
+        seed_hash: [u8; 32],
+        prev_hash: Hash256,
+        height: BlockHeight,
+        timestamp: Timestamp,
+        output_root: Hash256,
+        kernel_root: Hash256,
+        rangeproof_root: Hash256,
+        total_kernel_offset: [u8; 32],
+        total_difficulty: U256,
+    ) -> BlockHeader {
+        let target =
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+        let mut nonce = 0u64;
+        loop {
+            let mut header = BlockHeader {
+                version: dom_core::required_block_version_for_network(
+                    NETWORK_MAGIC_REGTEST,
+                    height.0,
+                ),
+                prev_hash,
+                height,
+                timestamp,
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset,
+                target: dom_pow::CompactTarget(target_to_compact(&target)),
+                total_difficulty,
+                pow: ProofOfWork {
+                    nonce,
+                    randomx_hash: Hash256::ZERO,
+                },
+            };
+            let hash = fast_pow_hash(&seed_hash, &header.pow_preimage());
+            if hash_meets_target(&hash, &target) {
+                header.pow.randomx_hash = Hash256::from_bytes(hash);
+                return header;
+            }
+            nonce = nonce.wrapping_add(1);
+        }
+    }
+
+    #[test]
+    fn randomx_mining_seed_reachability_fails_closed_after_prefix_confirmation() {
+        const CANDIDATE_HEIGHT: u64 = 2048;
+        const SEED_HEIGHT: u64 = 1984;
+
+        assert_eq!(randomx_seed_height(0), 0);
+        assert_eq!(randomx_seed_height(CANDIDATE_HEIGHT), SEED_HEIGHT);
+
+        let epoch_zero_dir = fresh_test_dir("randomx-seed-epoch-zero");
+        let epoch_zero_node = init_test_node(regtest_config(&epoch_zero_dir));
+        let epoch_zero_seed = {
+            let chain = epoch_zero_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, 1).expect("epoch-zero seed")
+        };
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=epoch-zero candidate_height=1 epoch=0 seed_height=0 seed_lookup={} selected_seed={} tip_height={} canonical_height_index_state={} mining_result=not-run validator_result=bootstrap-zero-accepted",
+            describe_height_mapping(&epoch_zero_node, 0),
+            hex::encode(epoch_zero_seed),
+            current_tip_height(&epoch_zero_node),
+            describe_height_mapping(&epoch_zero_node, 0),
+        );
+        assert_eq!(epoch_zero_seed, [0u8; 32]);
+        crate::test_dir::remove_test_dir(&epoch_zero_dir);
+
+        let normal_dir = fresh_test_dir("randomx-seed-normal-epoch-one");
+        let normal_node = init_test_node(regtest_config(&normal_dir));
+        let expected_seed = raw_seed_hash(0x71);
+        put_raw_height_mapping(&normal_node, SEED_HEIGHT, &expected_seed);
+        put_seed_header(&normal_node, SEED_HEIGHT, &expected_seed);
+        let selected_seed = {
+            let chain = normal_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+                .expect("normal epoch-one seed")
+        };
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=normal-epoch-one candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed={} tip_height={} canonical_height_index_state={} mining_result=not-run validator_result=seed-bytes-match",
+            describe_height_mapping(&normal_node, SEED_HEIGHT),
+            hex::encode(selected_seed),
+            current_tip_height(&normal_node),
+            describe_height_mapping(&normal_node, SEED_HEIGHT),
+        );
+        assert_eq!(selected_seed, expected_seed);
+        crate::test_dir::remove_test_dir(&normal_dir);
+
+        let missing_dir = fresh_test_dir("randomx-seed-missing-epoch-one");
+        let missing_node = init_test_node(regtest_config(&missing_dir));
+        let missing_result = {
+            let chain = missing_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        let missing_error = missing_result.expect_err("missing epoch-one seed must fail closed");
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=missing-epoch-one candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed=blocked tip_height={} canonical_height_index_state={} mining_result=blocked-before-hashing validator_result=not-reached error={}",
+            describe_height_mapping(&missing_node, SEED_HEIGHT),
+            current_tip_height(&missing_node),
+            describe_height_mapping(&missing_node, SEED_HEIGHT),
+            missing_error,
+        );
+        assert!(
+            missing_error
+                .to_string()
+                .contains("missing from committed store"),
+            "missing seed error should identify the missing committed seed block"
+        );
+        crate::test_dir::remove_test_dir(&missing_dir);
+
+        let corrupt_dir = fresh_test_dir("randomx-seed-corrupt-height-entry");
+        let corrupt_node = init_test_node(regtest_config(&corrupt_dir));
+        put_raw_height_mapping(&corrupt_node, SEED_HEIGHT, &[0x99u8; 31]);
+        let corrupt_result = {
+            let chain = corrupt_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        let corrupt_error = corrupt_result.expect_err("corrupt height index must propagate");
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=store-read-error candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed=blocked tip_height={} canonical_height_index_state={} mining_result=blocked-before-hashing validator_result=not-reached error={}",
+            describe_height_mapping(&corrupt_node, SEED_HEIGHT),
+            current_tip_height(&corrupt_node),
+            describe_height_mapping(&corrupt_node, SEED_HEIGHT),
+            corrupt_error,
+        );
+        assert!(
+            corrupt_error.to_string().contains("corrupt height index"),
+            "DomStore read error must not be suppressed"
+        );
+        crate::test_dir::remove_test_dir(&corrupt_dir);
+
+        let dangling_dir = fresh_test_dir("randomx-seed-dangling-height");
+        let dangling_node = init_test_node(regtest_config(&dangling_dir));
+        let dangling_hash = raw_seed_hash(0x52);
+        put_raw_height_mapping(&dangling_node, SEED_HEIGHT, &dangling_hash);
+        let dangling_result = {
+            let chain = dangling_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        let dangling_header_lookup = {
+            let chain = dangling_node.chain.blocking_lock();
+            chain
+                .store
+                .get_block_header(&dangling_hash)
+                .expect("dangling header lookup")
+                .is_some()
+        };
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=dangling-height-mapping candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed=blocked tip_height={} canonical_height_index_state={} mining_result=blocked-before-hashing validator_result=seed-pointer-used-header-present={} error={}",
+            describe_height_mapping(&dangling_node, SEED_HEIGHT),
+            current_tip_height(&dangling_node),
+            describe_height_mapping(&dangling_node, SEED_HEIGHT),
+            dangling_header_lookup,
+            dangling_result.as_ref().expect_err("dangling seed must fail closed"),
+        );
+        assert!(
+            !dangling_header_lookup,
+            "test fixture must leave the mapped seed hash dangling"
+        );
+        assert!(
+            dangling_result
+                .expect_err("dangling seed must fail closed")
+                .to_string()
+                .contains("points to missing header"),
+            "dangling height mapping must identify the absent seed header"
+        );
+        crate::test_dir::remove_test_dir(&dangling_dir);
+
+        let malformed_dir = fresh_test_dir("randomx-seed-malformed-header");
+        let malformed_node = init_test_node(regtest_config(&malformed_dir));
+        let malformed_hash = raw_seed_hash(0x53);
+        put_raw_height_mapping(&malformed_node, SEED_HEIGHT, &malformed_hash);
+        put_raw_seed_header(&malformed_node, &malformed_hash, &[0xa5; 17]);
+        let malformed_result = {
+            let chain = malformed_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        assert!(
+            malformed_result
+                .expect_err("malformed seed header must fail closed")
+                .to_string()
+                .contains("is malformed"),
+            "malformed persisted seed header must be rejected before hashing"
+        );
+        crate::test_dir::remove_test_dir(&malformed_dir);
+
+        let mismatched_dir = fresh_test_dir("randomx-seed-height-mismatch");
+        let mismatched_node = init_test_node(regtest_config(&mismatched_dir));
+        let mismatched_hash = raw_seed_hash(0x54);
+        put_raw_height_mapping(&mismatched_node, SEED_HEIGHT, &mismatched_hash);
+        put_seed_header(&mismatched_node, SEED_HEIGHT - 1, &mismatched_hash);
+        let mismatched_result = {
+            let chain = mismatched_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        assert!(
+            mismatched_result
+                .expect_err("mismatched seed height must fail closed")
+                .to_string()
+                .contains("height index mismatch"),
+            "persisted seed header height must match its canonical index key"
+        );
+        crate::test_dir::remove_test_dir(&mismatched_dir);
+    }
+
+    /// Building the genesis coinbase N times for the same chain_id
+    /// MUST produce byte-identical commitment, excess, and signature.
+    /// A divergence here means a node restarted with the data_dir
+    /// wiped would compute a different genesis hash than its peers —
+    /// silent fork at height 0.
+    /// FROZEN GENESIS VECTORS (testnet, Bulletproof era). Regenerates the genesis
+    /// end-to-end from the deterministic builder and pins every derived value, so
+    /// any future drift (proof, derivation, roots, or header hash) is caught.
+    ///
+    /// The genesis coinbase carries a deterministic 739-byte bounded aggregate
+    /// Bulletproof, so `rangeproof_root` and the genesis hash are pinned to that
+    /// final proof format; `output_root`/`kernel_root` are unchanged (the
+    /// Pedersen commitment and kernel excess are independent of the range-proof
+    /// backend). Recomputed after the bounded aggregate bp2 migration.
+    #[test]
+    fn genesis_testnet_frozen_vectors() {
+        // Pinned values (hex), authoritative from the deterministic builder.
+        const OUTPUT_ROOT: &str =
+            "7dcd67abf72846eadd94cee37060ecd58ac26df2a6c1f6e74a43fe9e6aab9f1d";
+        const KERNEL_ROOT: &str =
+            "69a1283a2fd4a90f0df6110caf2f74150365e31ca96cc2485cb022ceae15834b";
+        const RANGEPROOF_ROOT: &str =
+            "ac00fb8ccb323f0cfdc2f4da553ad818e289cb2614400cb6d6af4b51d18a872c";
+        const GENESIS_HASH: &str =
+            "2ab5e6c73607e8bfbbec2d4ce3ea1419cda29ae6892e7f1c24facc465cd65821";
+
+        let cid = chain_id_testnet();
+        let canonical = dom_chain::build_canonical_genesis(NETWORK_MAGIC_TESTNET, &cid)
+            .expect("canonical genesis");
+        let coinbase = &canonical.block.as_ref().expect("testnet block").coinbase;
+
+        // (1) Final range proof: exactly 739 bytes and self-verifies.
+        assert_eq!(
+            coinbase.output.proof.len(),
+            739,
+            "genesis coinbase proof must be a 739-byte Bulletproof"
+        );
+        assert!(
+            dom_crypto::range_proof_verify(
+                coinbase.output.commitment.as_bytes(),
+                &coinbase.output.proof
+            )
+            .expect("range_proof_verify"),
+            "genesis coinbase range proof must verify"
+        );
+
+        // (2) PMMR roots match the pinned vectors.
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(BlockHeight::GENESIS, coinbase, &[]).expect("roots");
+        assert_eq!(
+            hex::encode(output_root.as_bytes()),
+            OUTPUT_ROOT,
+            "output_root drift"
+        );
+        assert_eq!(
+            hex::encode(kernel_root.as_bytes()),
+            KERNEL_ROOT,
+            "kernel_root drift"
+        );
+        assert_eq!(
+            hex::encode(rangeproof_root.as_bytes()),
+            RANGEPROOF_ROOT,
+            "rangeproof_root drift"
+        );
+
+        // (3) Genesis block hash matches the pinned vector AND the source-of-truth
+        //     consensus constant GENESIS_HASH_TESTNET.
+        let genesis_hash = *canonical.hash.as_bytes();
+        assert_eq!(
+            hex::encode(genesis_hash),
+            GENESIS_HASH,
+            "genesis hash drift"
+        );
+        assert_eq!(
+            genesis_hash,
+            dom_core::GENESIS_HASH_TESTNET,
+            "genesis hash must equal the pinned GENESIS_HASH_TESTNET constant"
+        );
+
+        // (4) Byte-reproducible: rebuild and confirm identical proof + roots.
+        let cb2 = dom_chain::build_canonical_genesis(NETWORK_MAGIC_TESTNET, &cid)
+            .expect("canonical genesis rebuild")
+            .block
+            .expect("testnet block")
+            .coinbase;
+        assert_eq!(
+            cb2.output.proof, coinbase.output.proof,
+            "genesis proof not reproducible"
+        );
+        let (o2, k2, r2) =
+            compute_block_pmmr_roots(BlockHeight::GENESIS, &cb2, &[]).expect("roots rebuild");
+        assert_eq!((o2, k2, r2), (output_root, kernel_root, rangeproof_root));
+    }
+
+    #[test]
+    fn seed_recoverable_coinbase_validates_and_restores() {
+        let chain_id = chain_id_regtest();
+        let chain = dom_crypto::recovery::RecoveryChainContext {
+            network_magic: NETWORK_MAGIC_REGTEST,
+            chain_id,
+        };
+        let root = dom_crypto::recovery::derive_recovery_root(&[0x51; 64], chain).unwrap();
+        let coinbase =
+            build_seed_recoverable_coinbase(BlockHeight(1), 0, &chain_id, &root, chain, 0, 1)
+                .unwrap();
+        coinbase
+            .validate(BlockHeight(1), 0, &chain_id)
+            .expect("recoverable coinbase validates");
+        let capsule = coinbase.output.recovery_capsule().unwrap().unwrap();
+        let recovered = dom_crypto::recovery::recover_output_from_capsule(
+            &root,
+            chain,
+            coinbase.output.commitment.as_bytes(),
+            dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            dom_crypto::recovery::PublicOutputKind::Coinbase,
+            &capsule,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            recovered.value,
+            dom_core::block_reward(BlockHeight(1)).noms()
+        );
+        assert_eq!(
+            recovered.domain,
+            dom_crypto::recovery::OutputRecoveryDomain::Coinbase
+        );
+    }
+
+    #[test]
+    fn genesis_coinbase_is_deterministic_across_runs() {
+        for (network_magic, cid_fn) in [
+            (NETWORK_MAGIC_TESTNET, chain_id_testnet as fn() -> [u8; 32]),
+            (NETWORK_MAGIC_REGTEST, chain_id_regtest),
+        ] {
+            let cid = cid_fn();
+            let a = canonical_genesis_coinbase(network_magic, &cid);
+            for trial in 0..8 {
+                let b = canonical_genesis_coinbase(network_magic, &cid);
+                let a_bytes = a.to_bytes().expect("serialize a");
+                let b_bytes = b.to_bytes().expect("serialize b");
+                assert_eq!(
+                    a_bytes, b_bytes,
+                    "trial {trial}: genesis coinbase is non-deterministic on this network"
+                );
+                assert_eq!(
+                    a.output.commitment.as_bytes(),
+                    b.output.commitment.as_bytes()
+                );
+                assert_eq!(a.kernel.excess.as_bytes(), b.kernel.excess.as_bytes());
+                assert_eq!(a.kernel.excess_signature, b.kernel.excess_signature);
+            }
+        }
+    }
+
+    /// The three PMMR roots over the genesis coinbase MUST be
+    /// deterministic across N rebuilds. This is the bootstrap
+    /// invariant a "wipe and re-sync from genesis" workflow depends
+    /// on: every fresh node must produce the same output_root /
+    /// kernel_root / rangeproof_root for the genesis block.
+    #[test]
+    fn genesis_pmmr_roots_are_deterministic_across_runs() {
+        let cid = chain_id_regtest();
+        let a = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &cid);
+        let (a_or, a_kr, a_rr) =
+            compute_block_pmmr_roots(BlockHeight::GENESIS, &a, &[]).expect("compute genesis roots");
+
+        for trial in 0..8 {
+            let b = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &cid);
+            let (b_or, b_kr, b_rr) = compute_block_pmmr_roots(BlockHeight::GENESIS, &b, &[])
+                .expect("compute genesis roots #N");
+            assert_eq!(a_or, b_or, "trial {trial}: output_root drift");
+            assert_eq!(a_kr, b_kr, "trial {trial}: kernel_root drift");
+            assert_eq!(a_rr, b_rr, "trial {trial}: rangeproof_root drift");
+        }
+    }
+
+    /// Distinct legacy-network chain IDs produce distinct genesis coinbases.
+    #[test]
+    fn legacy_genesis_coinbase_differs_across_networks() {
+        let t = canonical_genesis_coinbase(NETWORK_MAGIC_TESTNET, &chain_id_testnet());
+        let r = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &chain_id_regtest());
+        assert_ne!(
+            t.kernel.excess_signature, r.kernel.excess_signature,
+            "testnet and regtest genesis signatures must differ"
+        );
+    }
+
+    #[test]
+    fn regtest_mining_uses_light_vm_only_on_regtest() {
+        assert!(super::MiningMode::from_network_and_pow_mode(
+            dom_config::Network::Regtest,
+            PowValidationMode::RandomX,
+        )
+        .unwrap()
+        .light_vm());
+        assert!(!super::MiningMode::from_network_and_pow_mode(
+            dom_config::Network::Mainnet,
+            PowValidationMode::RandomX,
+        )
+        .unwrap()
+        .light_vm());
+        assert!(!super::MiningMode::from_network_and_pow_mode(
+            dom_config::Network::Testnet,
+            PowValidationMode::RandomX,
+        )
+        .unwrap()
+        .light_vm());
+    }
+
+    #[test]
+    fn dev_mode_can_mine_fast_with_consensus_target() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let mode = super::MiningMode::from_network_and_pow_mode(
+            dom_config::Network::Regtest,
+            PowValidationMode::FastDevOnly,
+        )
+        .expect("regtest fast mode");
+        assert_eq!(mode, super::MiningMode::RegtestFastDevOnly);
+        assert!(mode.light_vm());
+        assert_eq!(mode.pow_mode(), PowValidationMode::FastDevOnly);
+
+        let timestamp = Timestamp(1_700_000_000);
+        let target =
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1)).unwrap();
+        assert_eq!(target_to_compact(&target), REGTEST_TARGET_COMPACT);
+
+        let (header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            timestamp,
+            target,
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            mode.light_vm(),
+            mode.pow_mode(),
+            1,
+            disabled_throttle(),
+        )
+        .expect("fast mining with consensus target");
+        assert_eq!(stats.workers, 1);
+
+        assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
+        assert_eq!(
+            header.target.to_target().unwrap(),
+            compute_expected_target(NETWORK_MAGIC_REGTEST, header.timestamp, header.height)
+                .unwrap()
+        );
+        assert!(validate_pow_for_network(NETWORK_MAGIC_REGTEST, &header, &[0u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn normal_mode_cannot_use_dev_target_accidentally() {
+        assert_eq!(
+            super::MiningMode::from_network_and_pow_mode(
+                dom_config::Network::Mainnet,
+                PowValidationMode::RandomX,
+            )
+            .unwrap(),
+            super::MiningMode::MainnetLikeRandomX
+        );
+        assert_eq!(
+            super::MiningMode::from_network_and_pow_mode(
+                dom_config::Network::Testnet,
+                PowValidationMode::RandomX,
+            )
+            .unwrap(),
+            super::MiningMode::TestnetConfiguredRandomX
+        );
+
+        let mainnet_timestamp = genesis_anchor(NETWORK_MAGIC_MAINNET)
+            .expect("Mainnet anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("height-one timestamp");
+        let testnet_timestamp = genesis_anchor(NETWORK_MAGIC_TESTNET)
+            .expect("Testnet anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("height-one timestamp");
+        let mainnet_target =
+            compute_expected_target(NETWORK_MAGIC_MAINNET, mainnet_timestamp, BlockHeight(1))
+                .unwrap();
+        let testnet_target =
+            compute_expected_target(NETWORK_MAGIC_TESTNET, testnet_timestamp, BlockHeight(1))
+                .unwrap();
+
+        assert_ne!(target_to_compact(&mainnet_target), REGTEST_TARGET_COMPACT);
+        assert_ne!(target_to_compact(&testnet_target), REGTEST_TARGET_COMPACT);
+    }
+
+    #[test]
+    fn fast_mining_fails_closed_on_production_like_networks() {
+        for network in [dom_config::Network::Mainnet, dom_config::Network::Testnet] {
+            let err = super::MiningMode::from_network_and_pow_mode(
+                network,
+                PowValidationMode::FastDevOnly,
+            )
+            .expect_err("production-like network must reject fast mining");
+            assert!(
+                err.to_string().contains("only allowed on regtest"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_parsing_does_not_silently_fall_back_to_easy_mining() {
+        let json = r#"{
+            "network": "Mainnet",
+            "data_dir": "./dom-data",
+            "p2p_listen_addr": "0.0.0.0:3333",
+            "max_inbound": 125,
+            "min_outbound": 8,
+            "dns_seeds": [],
+            "seed_peers": [],
+            "mine": true,
+            "miner_address": null,
+            "wallet_path": null,
+            "wallet_password": null,
+            "log_level": "info",
+            "rpc_listen_addr": null
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).expect("mainnet config parses");
+        assert_eq!(config.network, dom_config::Network::Mainnet);
+        assert_eq!(
+            super::MiningMode::from_network_and_pow_mode(
+                config.network,
+                PowValidationMode::RandomX
+            )
+            .unwrap(),
+            super::MiningMode::MainnetLikeRandomX
+        );
+
+        let invalid = json.replace("\"Mainnet\"", "\"Devtest\"");
+        assert!(
+            serde_json::from_str::<NodeConfig>(&invalid).is_err(),
+            "unknown networks must not fall back to regtest/easy mining"
+        );
+    }
+
+    #[test]
+    fn throttle_config_defaults_to_disabled_when_missing() {
+        let json = r#"{
+            "network": "Regtest",
+            "data_dir": "./dom-regtest-data",
+            "p2p_listen_addr": "127.0.0.1:33371",
+            "max_inbound": 8,
+            "min_outbound": 0,
+            "dns_seeds": [],
+            "seed_peers": [],
+            "mine": true,
+            "miner_address": null,
+            "wallet_path": null,
+            "wallet_password": null,
+            "log_level": "debug",
+            "rpc_listen_addr": null
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).expect("regtest config parses");
+        assert_eq!(config.miner_throttle, Default::default());
+        assert_eq!(
+            MinerThrottle::from_config(&config.miner_throttle),
+            disabled_throttle()
+        );
+    }
+
+    #[test]
+    fn target_calculation_unchanged_by_throttle() {
+        let timestamp = Timestamp(1_778_642_753);
+        let mut off = NodeConfig::regtest();
+        off.miner_throttle = Default::default();
+        let mut on = NodeConfig::regtest();
+        on.miner_throttle = MinerThrottleConfig {
+            enabled: true,
+            yield_every_nonces: 1,
+            sleep_micros: 1,
+        };
+
+        assert_eq!(off.network, on.network);
+        let off_target = compute_expected_target(off.network.magic(), timestamp, BlockHeight(1))
+            .expect("target off");
+        let on_target = compute_expected_target(on.network.magic(), timestamp, BlockHeight(1))
+            .expect("target on");
+        assert_eq!(off_target, on_target);
+    }
+
+    #[test]
+    fn mined_block_validity_independent_of_throttle() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let timestamp = Timestamp(1_700_000_000);
+        let target =
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1)).unwrap();
+
+        for throttle in [
+            disabled_throttle(),
+            MinerThrottle::from_config(&MinerThrottleConfig {
+                enabled: true,
+                yield_every_nonces: 1,
+                sleep_micros: 0,
+            }),
+        ] {
+            let (header, _stats) = mine_blocking(
+                1,
+                dom_core::Hash256::ZERO,
+                timestamp,
+                target,
+                primitive_types::U256::one(),
+                [0u8; 32],
+                dom_core::Hash256::ZERO,
+                dom_core::Hash256::ZERO,
+                dom_core::Hash256::ZERO,
+                [0u8; 32],
+                true,
+                PowValidationMode::FastDevOnly,
+                1,
+                throttle,
+            )
+            .expect("fast mining");
+
+            assert_eq!(header.target.to_target().unwrap(), target);
+            assert!(validate_pow_for_network(NETWORK_MAGIC_REGTEST, &header, &[0u8; 32]).is_ok());
+        }
+    }
+
+    #[test]
+    fn throttle_config_does_not_enter_consensus_serialization() {
+        let timestamp = Timestamp(1_700_000_000);
+        let mut off = NodeConfig::regtest();
+        off.miner_throttle = Default::default();
+        let mut on = NodeConfig::regtest();
+        on.miner_throttle = MinerThrottleConfig {
+            enabled: true,
+            yield_every_nonces: 17,
+            sleep_micros: 250,
+        };
+
+        let build_header = |config: &NodeConfig| {
+            let target = compute_expected_target(config.network.magic(), timestamp, BlockHeight(1))
+                .expect("target");
+            BlockHeader {
+                version: dom_core::required_block_version_for_network(config.network.magic(), 1),
+                prev_hash: Hash256::ZERO,
+                height: BlockHeight(1),
+                timestamp,
+                output_root: Hash256::ZERO,
+                kernel_root: Hash256::ZERO,
+                rangeproof_root: Hash256::ZERO,
+                total_kernel_offset: [0u8; 32],
+                target: dom_pow::CompactTarget(target_to_compact(&target)),
+                total_difficulty: primitive_types::U256::one(),
+                pow: ProofOfWork {
+                    nonce: 7,
+                    randomx_hash: Hash256::from_bytes([0x42; 32]),
+                },
+            }
+        };
+
+        let off_header = build_header(&off);
+        let on_header = build_header(&on);
+        assert_eq!(off_header, on_header);
+        assert_eq!(
+            off_header.to_bytes().expect("off header bytes"),
+            on_header.to_bytes().expect("on header bytes")
+        );
+        assert_eq!(off_header.pow_preimage(), on_header.pow_preimage());
+    }
+
+    #[test]
+    fn miner_uses_consensus_target_not_fixed_dev_target() {
+        for network_magic in [
+            NETWORK_MAGIC_MAINNET,
+            NETWORK_MAGIC_TESTNET,
+            NETWORK_MAGIC_REGTEST,
+        ] {
+            let timestamp = Timestamp(
+                dom_core::genesis_timestamp_for_network_magic(network_magic).unwrap()
+                    + dom_core::TARGET_SPACING,
+            );
+            let target = compute_expected_target(network_magic, timestamp, BlockHeight(1)).unwrap();
+            let (header, _stats) = mine_blocking(
+                1,
+                dom_core::Hash256::ZERO,
+                timestamp,
+                target,
+                primitive_types::U256::one(),
+                [0u8; 32],
+                dom_core::Hash256::ZERO,
+                dom_core::Hash256::ZERO,
+                dom_core::Hash256::ZERO,
+                [0u8; 32],
+                true,
+                PowValidationMode::FastDevOnly,
+                1,
+                disabled_throttle(),
+            )
+            .expect("fast test mining");
+
+            assert_eq!(
+                header.target.to_target().unwrap(),
+                compute_expected_target(network_magic, timestamp, BlockHeight(1)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn regtest_fast_mining_returns_a_valid_header_without_searching() {
+        use dom_core::NETWORK_MAGIC_REGTEST;
+
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let target = dom_pow::CompactTarget(REGTEST_TARGET_COMPACT)
+            .to_target()
+            .expect("regtest target");
+
+        let (header, _stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            target,
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true,
+            dom_pow::PowValidationMode::FastDevOnly,
+            1,
+            disabled_throttle(),
+        )
+        .expect("fast mining");
+
+        assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
+        assert!(validate_pow_for_network(NETWORK_MAGIC_REGTEST, &header, &[0u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn multithreaded_randomx_mining_spawns_workers_and_produces_real_hash() {
+        // Real RandomX (cache-only light VM, shared by 4 workers). The raw
+        // all-0xFF search target makes EVERY hash a winner, so each worker
+        // does exactly one RandomX hash and the test costs cache-init + 4
+        // hashes instead of the ~2^16 expected for the smallest
+        // consensus-encodable target (MAX_TARGET_BYTES) — minutes in debug
+        // builds. Consequence: `validate_pow` (which re-derives the target
+        // from the compact header field) is not applicable here; the property
+        // this test pins is the multi-worker orchestration itself — N workers
+        // spawn, partition the nonce space, share one RandomX cache across
+        // threads, and the winner's hash is REAL RandomX (recomputed below on
+        // an independent VM), not garbage from a torn/shared-state race.
+        use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+
+        let seed = [0u8; 32];
+        let trivial_target = [0xff_u8; 32];
+        let (header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            trivial_target,
+            primitive_types::U256::one(),
+            seed,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true, // light VM: cache-only RandomX, no 2 GB dataset in tests
+            PowValidationMode::RandomX,
+            4,
+            disabled_throttle(),
+        )
+        .expect("multithreaded RandomX mining");
+
+        assert_eq!(
+            stats.workers, 4,
+            "configured 4 threads must spawn 4 workers"
+        );
+        // Strided partition: worker i searches nonces i, i+4, i+8, ... — with
+        // the all-0xFF target every worker wins on its FIRST nonce, so the
+        // winner is deterministically one of {0, 1, 2, 3}.
+        assert!(
+            header.pow.nonce < 4,
+            "nonce {} outside the first stride of 4 workers",
+            header.pow.nonce
+        );
+        // The winning hash must be genuine RandomX over the shared cache:
+        // recompute it on a fresh, independent VM and require equality.
+        let flags = RandomXFlag::get_recommended_flags();
+        let cache = RandomXCache::new(flags, &seed).expect("verification cache");
+        let vm = RandomXVM::new(flags, Some(cache), None).expect("verification vm");
+        let recomputed = super::randomx_hash(&vm, &header.pow_preimage()).expect("recompute hash");
+        assert_eq!(
+            Hash256::from_bytes(recomputed),
+            header.pow.randomx_hash,
+            "worker hash must equal independently recomputed RandomX hash"
+        );
+    }
+
+    #[test]
+    fn fast_dev_mode_ignores_thread_count_and_stays_deterministic() {
+        // FastDevOnly searches nothing; requesting many threads must not
+        // make the found nonce racy (workers forced to 1).
+        let (header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            dom_core::MAX_TARGET_BYTES,
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true,
+            PowValidationMode::FastDevOnly,
+            8,
+            disabled_throttle(),
+        )
+        .expect("fast mining");
+
+        assert_eq!(stats.workers, 1, "FastDevOnly must keep a single worker");
+        assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
+    }
+
+    #[test]
+    fn zero_thread_config_clamps_to_one_worker() {
+        // All-0xFF raw target: one RandomX hash ends the search (see the
+        // multithread test above for why MAX_TARGET_BYTES is too slow here).
+        let (_header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            [0xff_u8; 32],
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true,
+            PowValidationMode::RandomX,
+            0,
+            disabled_throttle(),
+        )
+        .expect("zero-thread mining clamps to one worker");
+        assert_eq!(stats.workers, 1);
+    }
+
+    #[test]
+    fn miner_validator_still_share_compute_expected_target() {
+        use dom_core::NETWORK_MAGIC_MAINNET;
+
+        let timestamp = genesis_anchor(NETWORK_MAGIC_MAINNET)
+            .expect("Mainnet anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("height-one timestamp");
+        let target =
+            compute_expected_target(NETWORK_MAGIC_MAINNET, timestamp, BlockHeight(1)).unwrap();
+        let total_difficulty = U256::from(target_to_difficulty(&target));
+        let (header, _stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            timestamp,
+            target,
+            total_difficulty,
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true,
+            dom_pow::PowValidationMode::FastDevOnly,
+            1,
+            disabled_throttle(),
+        )
+        .expect("mine mainnet-style header");
+
+        assert_eq!(header.timestamp, timestamp);
+        assert_eq!(
+            header.target.to_target().unwrap(),
+            compute_expected_target(NETWORK_MAGIC_MAINNET, header.timestamp, header.height)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn invariant_mined_block_is_rejected_before_broadcast_when_economic_balance_is_invalid() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let dir = fresh_test_dir("pre-broadcast-invalid-balance");
+        let node = Arc::new(init_test_node(regtest_config(&dir)));
+        super::create_genesis_block(node.clone())
+            .await
+            .expect("create genesis");
+
+        let mut relay_rx = node.block_relay_tx.subscribe();
+        let coinbase =
+            build_real_coinbase(BlockHeight(1), 0, &chain_id_regtest()).expect("coinbase");
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).expect("roots");
+        let mut invalid_offset = [0u8; 32];
+        invalid_offset[31] = 1;
+        let (tip_hash, tip_difficulty) = {
+            let chain = node.chain.lock().await;
+            (chain.tip_hash, chain.tip_difficulty)
+        };
+        let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
+            .expect("anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("timestamp");
+        let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1))
+            .expect("target");
+        let header = mine_fast_test_header(
+            *tip_hash.as_bytes(),
+            tip_hash,
+            BlockHeight(1),
+            timestamp,
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            invalid_offset,
+            tip_difficulty + U256::from(target_to_difficulty(&target)),
+        );
+        let block = Block {
+            header,
+            coinbase,
+            transactions: vec![],
+        };
+
+        let err = finalize_mined_block(&node, block)
+            .await
+            .expect_err("economically invalid mined block must never reach relay");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aggregate") || msg.contains("balance"),
+            "expected economic-balance rejection, got: {msg}"
+        );
+        assert!(
+            relay_rx.try_recv().is_err(),
+            "invalid mined block must not be broadcast before local validation"
+        );
+
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn accepted_mined_block_updates_blocks_mined_and_runtime_gauges() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let dir = fresh_test_dir("metrics-accepted-mined-block");
+        let node = Arc::new(init_test_node(regtest_config(&dir)));
+        super::create_genesis_block(node.clone())
+            .await
+            .expect("create genesis");
+
+        let coinbase =
+            build_real_coinbase(BlockHeight(1), 0, &chain_id_regtest()).expect("coinbase");
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).expect("roots");
+        let (tip_hash, tip_difficulty) = {
+            let chain = node.chain.lock().await;
+            (chain.tip_hash, chain.tip_difficulty)
+        };
+        let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
+            .expect("anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("timestamp");
+        let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1))
+            .expect("target");
+        let header = mine_fast_test_header(
+            *tip_hash.as_bytes(),
+            tip_hash,
+            BlockHeight(1),
+            timestamp,
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            [0u8; 32],
+            tip_difficulty + U256::from(target_to_difficulty(&target)),
+        );
+        let block = Block {
+            header,
+            coinbase,
+            transactions: vec![],
+        };
+
+        let finalized = finalize_mined_block(&node, block)
+            .await
+            .expect("valid mined block accepted");
+
+        assert_eq!(finalized.height, 1);
+        assert!(finalized.canonical);
+        assert_eq!(node.metrics.blocks_mined.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.chain_height.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 0);
+
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    /// DOM-AUDIT-001 regression: a freshly *created* genesis node and a node
+    /// that *reopened* the same data_dir must hold byte-identical UTXO and
+    /// kernel-index databases.
+    ///
+    /// The reopen path (`ChainState::open` → `ensure_canonical_utxo_set` +
+    /// `rebuild_kernel_index_from_canonical_chain`) reconstructs the spendable
+    /// genesis coinbase from the stored block body. If `create_genesis_block`
+    /// persists a different changeset (e.g. an empty one), the created node and
+    /// the reopened node diverge on the genesis coinbase — a latent chain split
+    /// the instant that coinbase is spent. This test pins `create == reopen`.
+    #[tokio::test]
+    async fn genesis_create_persists_same_utxo_and_kernel_state_as_reopen_reconstruct() {
+        use dom_serialization::DomDeserialize;
+
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let dir = fresh_test_dir("genesis-create-equals-reopen");
+
+        // --- Create path: build genesis via the miner into a temp data_dir. ---
+        let node = Arc::new(init_test_node(regtest_config(&dir)));
+        super::create_genesis_block(node.clone())
+            .await
+            .expect("create genesis");
+
+        // Snapshot A: raw UTXO + kernel-index dumps right after create, plus the
+        // genesis coinbase commitment read straight from the persisted body (the
+        // unimpeachable source of truth for what the UTXO key must be).
+        let (utxos_a, kernels_a, coinbase_commitment) = {
+            let chain = node.chain.lock().await;
+            let utxos_a = chain.store.read_all_utxos_raw().expect("utxo dump A");
+            let kernels_a = chain
+                .store
+                .read_all_kernel_index_raw()
+                .expect("kernel dump A");
+            let body = chain
+                .store
+                .get_block_body(chain.tip_hash.as_bytes())
+                .expect("genesis body lookup")
+                .expect("genesis body present after create");
+            let genesis_block = Block::from_bytes(&body).expect("decode persisted genesis block");
+            let coinbase_commitment = genesis_block.coinbase.output.commitment.as_bytes().to_vec();
+            (utxos_a, kernels_a, coinbase_commitment)
+        };
+
+        // Release the LMDB environment before reopening the same data_dir.
+        drop(node);
+
+        // --- Reopen path: ChainState::open re-runs the canonical reconstruct. ---
+        let reopened = Arc::new(init_test_node(regtest_config(&dir)));
+        let (utxos_b, kernels_b) = {
+            let chain = reopened.chain.lock().await;
+            let utxos_b = chain.store.read_all_utxos_raw().expect("utxo dump B");
+            let kernels_b = chain
+                .store
+                .read_all_kernel_index_raw()
+                .expect("kernel dump B");
+            (utxos_b, kernels_b)
+        };
+
+        // Byte-for-byte equivalence across the full key/value space of both DBs.
+        assert_eq!(
+            utxos_a, utxos_b,
+            "UTXO database diverged between create and reopen (create != reopen)"
+        );
+        assert_eq!(
+            kernels_a, kernels_b,
+            "kernel index diverged between create and reopen (create != reopen)"
+        );
+
+        // And specifically: the spendable genesis coinbase UTXO is present in BOTH.
+        assert!(
+            utxos_a.contains_key(&coinbase_commitment),
+            "genesis coinbase UTXO missing from the freshly-created UTXO set"
+        );
+        assert!(
+            utxos_b.contains_key(&coinbase_commitment),
+            "genesis coinbase UTXO missing from the reopened/reconstructed UTXO set"
+        );
+
+        drop(reopened);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cadence_probe_tests {
+    use super::*;
+    use dom_pow::{MAX_COMPACT_TARGET, TESTNET_TARGET_COMPACT};
+    use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+    use std::io::Write;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "manual local cadence probe"]
+    fn manual_testnet_cadence_probe() {
+        let seed_hash = [0u8; 32];
+        let flags = RandomXFlag::get_recommended_flags();
+        let cache = RandomXCache::new(flags, &seed_hash).expect("cache");
+        let vm = RandomXVM::new(flags, Some(cache), None).expect("vm");
+
+        let mine_one = |compact: u32| -> (f64, u64) {
+            let target = CompactTarget(compact).to_target().expect("target");
+            let started = Instant::now();
+            let mut nonce = 0u64;
+            loop {
+                let header = BlockHeader {
+                    version: dom_core::required_block_version_for_network(
+                        dom_core::NETWORK_MAGIC_TESTNET,
+                        1,
+                    ),
+                    prev_hash: Hash256::ZERO,
+                    height: BlockHeight(1),
+                    timestamp: Timestamp(now_secs()),
+                    output_root: Hash256::ZERO,
+                    kernel_root: Hash256::ZERO,
+                    rangeproof_root: Hash256::ZERO,
+                    total_kernel_offset: [0u8; 32],
+                    target: CompactTarget(compact),
+                    total_difficulty: U256::one(),
+                    pow: ProofOfWork {
+                        nonce,
+                        randomx_hash: Hash256::ZERO,
+                    },
+                };
+                let hash = randomx_hash(&vm, &header.pow_preimage()).expect("hash");
+                if hash_meets_target(&hash, &target) {
+                    return (started.elapsed().as_secs_f64(), nonce);
+                }
+                nonce = nonce.wrapping_add(1);
+            }
+        };
+
+        for (label, compact) in [
+            ("before", MAX_COMPACT_TARGET),
+            ("after", TESTNET_TARGET_COMPACT),
+        ] {
+            let (elapsed, nonce) = mine_one(compact);
+            println!(
+                "{} compact=0x{:08x} elapsed_secs={:.3} nonce={}",
+                label, compact, elapsed, nonce
+            );
+            std::io::stdout().flush().expect("flush");
+        }
+    }
+}

@@ -1,0 +1,27 @@
+{
+  "schema": 14,
+  "version": "v14-codigo-em-desenvolvimento",
+  "request_fully_delivered": false,
+  "base_v13_tree": "c31a4400a104206fccda78635a9ff9a94144a4c8",
+  "rust_compiled_here": false,
+  "native_rust_tests_executed_here": 0,
+  "chain_swaps_executed_here": 0,
+  "all_sixteen_routes_operational": false,
+  "executable_included": false,
+  "implemented": [
+    "Native F7 sender adaptation, irreversible exposure, exact-byte recovery and node admission",
+    "Actuator operation fencing, durable admission mirror and same-owner repair without extra RPC",
+    "Native sender 0x12 identity/commit/outbox recovery",
+    "F7 completion worker revalidates selected-family anchors before adaptation",
+    "Linux production build and atomic executable publication command"
+  ],
+  "remaining": [
+    "Complete bootstrap assembly in the real daemon root",
+    "Instantiate and schedule the F7/final-claim workers from production_run_universal.rs",
+    "Universal final-claim receiver observation/ingress and finality/reorg integration",
+    "Functional DOM compensation whose enforceable condition proves XMR funding",
+    "Complete XMR funding/recovery integration and all 16 route executions"
+  ],
+  "build_command": "python3 scripts/build_daemon_v14.py",
+  "test_command": "python3 crates/dom-interopd/scripts/test_daemon_v14.py"
+}

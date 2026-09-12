@@ -1,0 +1,844 @@
+//! # dom-slate
+//!
+//! Pure interactive Mimblewimble slate crypto for the DOM Protocol: the
+//! sender build (step 1), recipient response (step 2), and sender finalize
+//! (step 3) of the slate protocol, plus the kernel/aggregation helpers they
+//! share.
+//!
+//! ## Why this crate exists
+//!
+//! The slate crypto was historically inlined in `dom-wallet::wallet` and
+//! mixed with persistence (coin reservation, pending records, the journal,
+//! disk writes). This crate is the **single source of truth** for that
+//! validated crypto, consumed by both the current `dom-wallet` (as thin
+//! wrappers) and the redesigned `dom-wallet2`. Extracting it removes the
+//! risk of two divergent copies of audited cryptography.
+//!
+//! ## Purity contract
+//!
+//! Every function here is **pure crypto**: material in, `Slate`/`Transaction`
+//! out (plus the secrets the caller must persist). Nothing in this crate
+//! touches disk, a wallet, the journal, or any persistent state. Coin
+//! selection, input reservation, and persistence are the caller's job.
+//!
+//! Randomness: the change/recipient blindings, the sender/recipient offsets,
+//! and the per-session Schnorr nonces are fresh CSPRNG output and single-use.
+//! Deterministic (RFC6979-style) nonces are unsafe in aggregate signing —
+//! nonce reuse across sessions leaks the signing key — so they are never used.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![warn(rust_2018_idioms)]
+
+use dom_consensus::transaction::{
+    Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+};
+use dom_consensus::{
+    validate_balance_equation, validate_range_proofs, validate_transaction_structure,
+};
+use dom_core::{Amount, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN};
+use dom_crypto::pedersen::Commitment;
+use dom_crypto::{
+    blake2b_256_tagged, range_proof_prove_bytes, schnorr_add_public_keys, schnorr_aggregate_sigs,
+    schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, RangeProof, SecretKey,
+};
+use dom_tx::slate::{
+    OutputCommitmentAndProof, Slate, SlateEnvelope, CURRENT_SLATE_VERSION, RECOVERY_SLATE_VERSION,
+    SLATE_PHASE_FINALIZED, SLATE_PHASE_RECEIVER_RESPONSE, SLATE_PHASE_SENDER_OFFER,
+};
+use k256::elliptic_curve::PrimeField;
+use k256::Scalar;
+use rand::RngCore;
+use thiserror::Error;
+use zeroize::Zeroizing;
+
+pub mod cover_policy;
+pub use cover_policy::{CoverLockOutcomeV1, CoverLockPolicyV1, ValidatedChainSnapshotV1};
+
+/// Errors arising from slate construction, response, or finalization.
+///
+/// `Display` strings are stable enough for callers to match on substrings
+/// (e.g. the wallet's `chain_id` mismatch test asserts the message contains
+/// `"chain_id"`).
+#[derive(Debug, Error)]
+pub enum SlateError {
+    /// The slate's wire format version is unsupported.
+    #[error("unsupported slate version {0} (expected {1})")]
+    UnsupportedVersion(u16, u16),
+
+    /// The slate's `chain_id` does not match the expected chain.
+    #[error("slate chain_id does not match expected chain_id")]
+    ChainIdMismatch,
+
+    /// The slate's network does not match the expected network.
+    #[error("slate network does not match expected network")]
+    NetworkMismatch,
+
+    /// The slate expired at the current chain height.
+    #[error("slate expired")]
+    Expired,
+
+    /// The slate phase is invalid for the requested operation.
+    #[error("unsupported slate phase {0}")]
+    UnsupportedPhase(u8),
+
+    /// A receive was attempted on a slate that already carries recipient
+    /// response fields.
+    #[error("slate already contains recipient response fields")]
+    RecipientFieldsPresent,
+
+    /// Finalization was attempted on a slate missing a recipient field.
+    #[error("slate missing recipient {0}")]
+    MissingRecipientField(&'static str),
+
+    /// The aggregate signature failed verification on the finished tx.
+    #[error("final slate aggregate signature verification failed")]
+    SignatureVerificationFailed,
+
+    /// A cryptographic or validation step failed. The string preserves the
+    /// underlying error for operator diagnostics.
+    #[error("crypto error: {0}")]
+    Crypto(String),
+}
+
+/// Step 2 over the final Wallet V3 envelope: validate and answer a sender offer.
+pub fn receiver_response(
+    envelope: SlateEnvelope,
+    expected_network_magic: u32,
+    expected_chain_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(SlateEnvelope, Zeroizing<[u8; 32]>), SlateError> {
+    validate_envelope_context(
+        &envelope,
+        expected_network_magic,
+        expected_chain_id,
+        current_height,
+    )?;
+    if envelope.phase != SLATE_PHASE_SENDER_OFFER {
+        return Err(SlateError::UnsupportedPhase(envelope.phase));
+    }
+    let response = respond_receive(envelope.body.clone(), expected_chain_id)?;
+    let mut answered = envelope;
+    answered.phase = SLATE_PHASE_RECEIVER_RESPONSE;
+    answered.body = response.slate;
+    answered
+        .validate()
+        .map_err(|e| SlateError::Crypto(format!("slate envelope invalid: {e}")))?;
+    Ok((answered, response.recipient_output_blinding))
+}
+
+/// Step 3 over the final Wallet V3 envelope: validate and finalize a response.
+pub fn finalize_envelope(
+    envelope: SlateEnvelope,
+    sender_excess_blinding: &[u8; 32],
+    sender_nonce: &[u8; 32],
+    expected_network_magic: u32,
+    expected_chain_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(SlateEnvelope, Transaction), SlateError> {
+    validate_envelope_context(
+        &envelope,
+        expected_network_magic,
+        expected_chain_id,
+        current_height,
+    )?;
+    if envelope.phase != SLATE_PHASE_RECEIVER_RESPONSE {
+        return Err(SlateError::UnsupportedPhase(envelope.phase));
+    }
+    let tx = finalize(
+        &envelope.body,
+        sender_excess_blinding,
+        sender_nonce,
+        expected_chain_id,
+    )?;
+    let mut finalized = envelope;
+    finalized.phase = SLATE_PHASE_FINALIZED;
+    finalized
+        .validate()
+        .map_err(|e| SlateError::Crypto(format!("slate envelope invalid: {e}")))?;
+    Ok((finalized, tx))
+}
+
+fn validate_envelope_context(
+    envelope: &SlateEnvelope,
+    expected_network_magic: u32,
+    expected_chain_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(), SlateError> {
+    envelope
+        .validate()
+        .map_err(|e| SlateError::Crypto(format!("slate envelope invalid: {e}")))?;
+    if envelope.network_magic != expected_network_magic {
+        return Err(SlateError::NetworkMismatch);
+    }
+    if envelope.chain_id != *expected_chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    if envelope.is_expired_at(current_height) {
+        return Err(SlateError::Expired);
+    }
+    Ok(())
+}
+
+/// Sender-side input descriptor for [`build_send`].
+///
+/// The caller (which owns coin selection and the persisted output set)
+/// supplies the input commitment and its blinding. Value/maturity decisions
+/// are the caller's; this crate only does the slate crypto.
+pub struct SlateInput {
+    /// Compressed 33-byte Pedersen commitment of the input being spent.
+    pub commitment: [u8; 33],
+    /// 32-byte blinding factor of the input being spent.
+    pub blinding: Zeroizing<[u8; 32]>,
+}
+
+/// Self-spend change material the caller must persist (the proof itself is
+/// carried inside the returned slate's `sender_change_output`).
+pub struct ChangeMaterial {
+    /// Compressed 33-byte Pedersen commitment of the change output.
+    pub commitment: [u8; 33],
+    /// Change value in noms.
+    pub value: u64,
+    /// 32-byte random blinding factor for the change output.
+    pub blinding: Zeroizing<[u8; 32]>,
+}
+
+/// Result of [`build_send`] — the public slate plus the sender secrets the
+/// caller must persist (only inside encrypted wallet state) and the optional
+/// change material.
+pub struct SenderSlate {
+    /// The step-1 slate to hand to the recipient. Contains only public data.
+    pub slate: Slate,
+    /// Sender excess blinding `x_S` for the aggregate kernel key. Secret.
+    pub excess_blinding: Zeroizing<[u8; 32]>,
+    /// Random single-use sender nonce `k_S`. Secret; discard after finalize.
+    pub nonce: Zeroizing<[u8; 32]>,
+    /// Self-spend change to register once the tx confirms. `None` for exact
+    /// spends (no change).
+    pub change: Option<ChangeMaterial>,
+}
+
+/// Result of [`respond_receive`] — the answered slate plus the recipient's
+/// output blinding the caller must persist to later spend the received output.
+pub struct ReceiveResponse {
+    /// The step-2 slate to hand back to the sender. Contains only public data.
+    pub slate: Slate,
+    /// Recipient output blinding `x_R`. Secret; never exported or journaled.
+    pub recipient_output_blinding: Zeroizing<[u8; 32]>,
+}
+
+/// Seed-derived recovery context supplied by Wallet V3 output creation.
+pub struct RecoveryBuildContext<'a> {
+    /// Opaque chain-bound recovery root.
+    pub root: &'a dom_crypto::recovery::RecoveryRoot,
+    /// Network and chain identity.
+    pub chain: dom_crypto::recovery::RecoveryChainContext,
+    /// Wallet account identifier.
+    pub account: u32,
+    /// Unique metadata index for this output.
+    pub derivation_index: u64,
+}
+
+/// Step 1: build a sender slate from selected inputs.
+///
+/// Produces the random change output (if `change_value > 0`), the sender
+/// offset, excess, and single-use nonce, and assembles the public slate. The
+/// returned [`SenderSlate`] carries the secrets the caller must persist.
+///
+/// `change_value` is computed by the caller from its coin selection
+/// (`sum(inputs) - amount - fee`); a value of `0` means no change output.
+pub fn build_send(
+    inputs: &[SlateInput],
+    change_value: u64,
+    amount: u64,
+    fee: u64,
+    chain_id: [u8; 32],
+) -> Result<SenderSlate, SlateError> {
+    build_send_with_lock_height(inputs, change_value, amount, fee, chain_id, 0)
+}
+
+/// Step 1 with an explicit absolute `lock_height` (O-03).
+///
+/// `lock_height == 0` produces exactly the historical PLAIN-kernel slate, so
+/// [`build_send`] is a thin delegation and no existing behaviour changes.
+/// A non-zero `lock_height` makes every downstream step
+/// ([`respond_receive`], [`finalize`]) sign and emit a
+/// `KERNEL_FEAT_HEIGHT_LOCKED` kernel carrying that height — see
+/// [`slate_kernel_features`].
+pub fn build_send_with_lock_height(
+    inputs: &[SlateInput],
+    change_value: u64,
+    amount: u64,
+    fee: u64,
+    chain_id: [u8; 32],
+    lock_height: u64,
+) -> Result<SenderSlate, SlateError> {
+    let (sender_change_output, change_material, change_blinding) = if change_value > 0 {
+        let change_blinding = BlindingFactor::random();
+        // Final bounded aggregate range proof for the slate output.
+        let (proof_bytes, commitment_bytes) =
+            range_proof_prove_bytes(change_value, &change_blinding)
+                .map_err(|e| SlateError::Crypto(format!("change range proof failed: {e}")))?;
+        let proof = RangeProof::from_bytes(proof_bytes)
+            .map_err(|e| SlateError::Crypto(format!("change range proof invalid: {e}")))?;
+        let change_commitment = Commitment::from_compressed_bytes(&commitment_bytes)
+            .map_err(|e| SlateError::Crypto(format!("change commitment invalid: {e}")))?;
+        (
+            Some(OutputCommitmentAndProof {
+                commitment: change_commitment,
+                proof,
+            }),
+            Some(ChangeMaterial {
+                commitment: commitment_bytes,
+                value: change_value,
+                blinding: Zeroizing::new(*change_blinding.as_bytes()),
+            }),
+            Some(change_blinding),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let sender_offset = BlindingFactor::random();
+    let excess_blinding = Zeroizing::new(sender_excess_blinding(
+        inputs.iter().map(|i| &*i.blinding),
+        change_blinding.as_ref().map(|b| b.as_bytes()),
+        sender_offset.as_bytes(),
+    )?);
+    let sender_excess_key = SecretKey::from_bytes(excess_blinding.as_ref())
+        .map_err(|e| SlateError::Crypto(format!("sender excess key invalid: {e}")))?;
+
+    // Multisignature Schnorr nonces must be fresh CSPRNG output and
+    // single-use. RFC6979-style deterministic nonces are unsafe here: if a
+    // nonce is reused across aggregate-signing sessions, the sender excess
+    // private key can be recovered. The caller persists this nonce only in
+    // encrypted wallet state and discards it after finalize.
+    let sender_nonce_key = random_secret_key();
+    let sender_nonce = Zeroizing::new(sender_nonce_key.to_be_bytes_raw());
+
+    let slate = Slate {
+        version: CURRENT_SLATE_VERSION,
+        chain_id,
+        amount,
+        fee,
+        lock_height,
+        sender_inputs: inputs
+            .iter()
+            .map(|i| Commitment::from_compressed_bytes(&i.commitment))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| SlateError::Crypto(format!("sender input commitment invalid: {e}")))?,
+        sender_change_output,
+        sender_public_excess: sender_excess_key.public_key(),
+        sender_public_nonce: sender_nonce_key.public_key(),
+        sender_offset_contribution: *sender_offset.as_bytes(),
+        recipient_output: None,
+        recipient_public_excess: None,
+        recipient_public_nonce: None,
+        sender_partial_sig: None,
+        recipient_partial_sig: None,
+        sender_change_recovery_capsule: Vec::new(),
+        recipient_recovery_capsule: Vec::new(),
+    };
+
+    Ok(SenderSlate {
+        slate,
+        excess_blinding,
+        nonce: sender_nonce,
+        change: change_material,
+    })
+}
+
+/// Build the sender phase using Slate recovery extension version 4. The sender
+/// change proof commits its capsule, so mutation fails final proof validation.
+pub fn build_send_recoverable(
+    inputs: &[SlateInput],
+    change_value: u64,
+    amount: u64,
+    fee: u64,
+    chain_id: [u8; 32],
+    recovery: RecoveryBuildContext<'_>,
+) -> Result<SenderSlate, SlateError> {
+    if recovery.chain.chain_id != chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    let mut sender = build_send(inputs, change_value, amount, fee, chain_id)?;
+    if let (Some(change), Some(output)) = (
+        sender.change.as_ref(),
+        sender.slate.sender_change_output.as_mut(),
+    ) {
+        let blinding = BlindingFactor::from_bytes(*change.blinding)
+            .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        let capsule = dom_crypto::recovery::create_recovery_capsule(
+            recovery.root,
+            recovery.chain,
+            &change.commitment,
+            dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            change.value,
+            recovery.account,
+            recovery.derivation_index,
+            dom_crypto::recovery::OutputRecoveryDomain::Change,
+            &blinding,
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        let (proof, commitment) = dom_crypto::range_proof_prove_bytes_with_extra_commit(
+            change.value,
+            &blinding,
+            capsule.as_bytes(),
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        if commitment != change.commitment {
+            return Err(SlateError::Crypto(
+                "recoverable change proof commitment mismatch".into(),
+            ));
+        }
+        output.proof =
+            RangeProof::from_bytes(proof).map_err(|error| SlateError::Crypto(error.to_string()))?;
+        sender.slate.sender_change_recovery_capsule = capsule.as_bytes().to_vec();
+    }
+    sender.slate.version = RECOVERY_SLATE_VERSION;
+    Ok(sender)
+}
+
+/// Step 2: respond to a sender-created interactive slate.
+///
+/// Rejects cross-chain slates and slates already carrying recipient fields,
+/// creates the recipient output and range proof, generates a fresh single-use
+/// recipient nonce, partially signs the aggregate kernel message, and returns
+/// the answered slate plus the recipient output blinding to persist.
+pub fn respond_receive(
+    mut slate: Slate,
+    expected_chain_id: &[u8; 32],
+) -> Result<ReceiveResponse, SlateError> {
+    validate_slate_version(&slate)?;
+    if slate.version != CURRENT_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            CURRENT_SLATE_VERSION,
+        ));
+    }
+    if slate.chain_id != *expected_chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    if slate.recipient_output.is_some()
+        || slate.recipient_public_excess.is_some()
+        || slate.recipient_public_nonce.is_some()
+        || slate.recipient_partial_sig.is_some()
+    {
+        return Err(SlateError::RecipientFieldsPresent);
+    }
+
+    Amount::from_noms(slate.amount)
+        .map_err(|e| SlateError::Crypto(format!("invalid slate amount: {e}")))?;
+    Amount::from_noms(slate.fee)
+        .map_err(|e| SlateError::Crypto(format!("invalid slate fee: {e}")))?;
+
+    let recipient_blinding = BlindingFactor::random();
+    // Final bounded aggregate range proof for the recipient output.
+    let (proof_bytes, commitment_bytes) =
+        range_proof_prove_bytes(slate.amount, &recipient_blinding)
+            .map_err(|e| SlateError::Crypto(format!("recipient range proof failed: {e}")))?;
+    let proof = RangeProof::from_bytes(proof_bytes)
+        .map_err(|e| SlateError::Crypto(format!("recipient range proof invalid: {e}")))?;
+    let recipient_output = OutputCommitmentAndProof {
+        commitment: Commitment::from_compressed_bytes(&commitment_bytes)
+            .map_err(|e| SlateError::Crypto(format!("recipient commitment invalid: {e}")))?,
+        proof,
+    };
+    let recipient_excess_key = SecretKey::from_bytes(recipient_blinding.as_bytes())
+        .map_err(|e| SlateError::Crypto(format!("recipient excess key invalid: {e}")))?;
+    let recipient_public_excess = recipient_excess_key.public_key();
+
+    // Fresh CSPRNG single-use nonce; consumed immediately for s_R, never
+    // exported or persisted (see purity contract).
+    let recipient_nonce_key = random_secret_key();
+    let recipient_public_nonce = recipient_nonce_key.public_key();
+
+    let agg_r = schnorr_add_public_keys(&[
+        slate.sender_public_nonce.clone(),
+        recipient_public_nonce.clone(),
+    ])
+    .map_err(|e| SlateError::Crypto(format!("aggregate nonce failed: {e}")))?;
+    let agg_p = schnorr_add_public_keys(&[
+        slate.sender_public_excess.clone(),
+        recipient_public_excess.clone(),
+    ])
+    .map_err(|e| SlateError::Crypto(format!("aggregate public excess failed: {e}")))?;
+    let kernel_message = slate_kernel_message(slate.fee, slate.lock_height)?;
+    let recipient_partial_sig = schnorr_partial_sign(
+        &recipient_excess_key,
+        &recipient_nonce_key,
+        &agg_r,
+        &agg_p,
+        expected_chain_id,
+        kernel_message.as_bytes(),
+    )
+    .map_err(|e| SlateError::Crypto(format!("recipient partial signature failed: {e}")))?;
+
+    slate.recipient_output = Some(recipient_output);
+    slate.recipient_public_excess = Some(recipient_public_excess);
+    slate.recipient_public_nonce = Some(recipient_public_nonce);
+    slate.recipient_partial_sig = Some(recipient_partial_sig);
+
+    Ok(ReceiveResponse {
+        slate,
+        recipient_output_blinding: Zeroizing::new(*recipient_blinding.as_bytes()),
+    })
+}
+
+/// Respond using Slate recovery extension version 4. The receiver creates and
+/// authenticates its own output recovery capsule from its seed-derived root.
+pub fn respond_receive_recoverable(
+    mut slate: Slate,
+    expected_chain_id: &[u8; 32],
+    recovery: RecoveryBuildContext<'_>,
+) -> Result<ReceiveResponse, SlateError> {
+    if slate.version != RECOVERY_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            RECOVERY_SLATE_VERSION,
+        ));
+    }
+    if recovery.chain.chain_id != *expected_chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    let sender_change_capsule = std::mem::take(&mut slate.sender_change_recovery_capsule);
+    slate.version = CURRENT_SLATE_VERSION;
+    let mut response = respond_receive(slate, expected_chain_id)?;
+    response.slate.sender_change_recovery_capsule = sender_change_capsule;
+    let recipient_blinding = BlindingFactor::from_bytes(*response.recipient_output_blinding)
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    let output = response
+        .slate
+        .recipient_output
+        .as_mut()
+        .ok_or(SlateError::MissingRecipientField("output"))?;
+    let commitment = *output.commitment.as_bytes();
+    let capsule = dom_crypto::recovery::create_recovery_capsule(
+        recovery.root,
+        recovery.chain,
+        &commitment,
+        dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+        response.slate.amount,
+        recovery.account,
+        recovery.derivation_index,
+        dom_crypto::recovery::OutputRecoveryDomain::Received,
+        &recipient_blinding,
+    )
+    .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    let (proof, proof_commitment) = dom_crypto::range_proof_prove_bytes_with_extra_commit(
+        response.slate.amount,
+        &recipient_blinding,
+        capsule.as_bytes(),
+    )
+    .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    if proof_commitment != commitment {
+        return Err(SlateError::Crypto(
+            "recoverable recipient proof commitment mismatch".into(),
+        ));
+    }
+    output.proof =
+        RangeProof::from_bytes(proof).map_err(|error| SlateError::Crypto(error.to_string()))?;
+    response.slate.recipient_recovery_capsule = capsule.as_bytes().to_vec();
+    response.slate.version = RECOVERY_SLATE_VERSION;
+    Ok(response)
+}
+
+/// Step 3: finalize a recipient-answered slate into a validated transaction.
+///
+/// Verifies the recipient response is present, recovers the sender partial
+/// signature from the supplied secrets, aggregates the final kernel
+/// signature, assembles the transaction, and validates its structure,
+/// balance equation, and aggregate signature before returning it.
+///
+/// Wallet-side ownership/anti-replay checks (matching the slate against a
+/// persisted pending sender record and its reserved inputs) are the caller's
+/// responsibility and live outside this crate.
+pub fn finalize(
+    slate: &Slate,
+    sender_excess_blinding: &[u8; 32],
+    sender_nonce: &[u8; 32],
+    chain_id: &[u8; 32],
+) -> Result<Transaction, SlateError> {
+    validate_slate_version(slate)?;
+    if slate.chain_id != *chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+
+    let recipient_output = slate
+        .recipient_output
+        .clone()
+        .ok_or(SlateError::MissingRecipientField("output"))?;
+    let recipient_public_excess = slate
+        .recipient_public_excess
+        .clone()
+        .ok_or(SlateError::MissingRecipientField("public excess"))?;
+    let recipient_public_nonce = slate
+        .recipient_public_nonce
+        .clone()
+        .ok_or(SlateError::MissingRecipientField("public nonce"))?;
+    let recipient_partial_sig = slate
+        .recipient_partial_sig
+        .clone()
+        .ok_or(SlateError::MissingRecipientField("partial signature"))?;
+
+    let agg_r = schnorr_add_public_keys(&[
+        slate.sender_public_nonce.clone(),
+        recipient_public_nonce.clone(),
+    ])
+    .map_err(|e| SlateError::Crypto(format!("aggregate nonce failed: {e}")))?;
+    let agg_p = schnorr_add_public_keys(&[
+        slate.sender_public_excess.clone(),
+        recipient_public_excess.clone(),
+    ])
+    .map_err(|e| SlateError::Crypto(format!("aggregate excess failed: {e}")))?;
+    let kernel_message = slate_kernel_message(slate.fee, slate.lock_height)?;
+
+    let sender_excess_key = SecretKey::from_bytes(sender_excess_blinding)
+        .map_err(|e| SlateError::Crypto(format!("sender excess key invalid: {e}")))?;
+    let sender_nonce_key = SecretKey::from_bytes(sender_nonce)
+        .map_err(|e| SlateError::Crypto(format!("sender nonce invalid: {e}")))?;
+    let sender_partial_sig = schnorr_partial_sign(
+        &sender_excess_key,
+        &sender_nonce_key,
+        &agg_r,
+        &agg_p,
+        chain_id,
+        kernel_message.as_bytes(),
+    )
+    .map_err(|e| SlateError::Crypto(format!("sender partial signature failed: {e}")))?;
+    let aggregate_sig =
+        schnorr_aggregate_sigs(&[sender_partial_sig, recipient_partial_sig], &agg_r)
+            .map_err(|e| SlateError::Crypto(format!("aggregate signature failed: {e}")))?;
+
+    let tx = Transaction {
+        inputs: slate
+            .sender_inputs
+            .iter()
+            .cloned()
+            .map(|commitment| TransactionInput { commitment })
+            .collect(),
+        outputs: slate_outputs_for_finalize(slate, recipient_output)?,
+        kernels: vec![TransactionKernel {
+            features: slate_kernel_features(slate.lock_height),
+            fee: Amount::from_noms(slate.fee)
+                .map_err(|e| SlateError::Crypto(format!("invalid kernel fee: {e}")))?,
+            lock_height: slate.lock_height,
+            excess: Commitment::from_compressed_bytes(&agg_p.to_compressed_bytes())
+                .map_err(|e| SlateError::Crypto(format!("kernel excess invalid: {e}")))?,
+            excess_signature: aggregate_sig.to_bytes(),
+        }],
+        offset: slate.sender_offset_contribution,
+    };
+
+    validate_transaction_structure(&tx)
+        .map_err(|e| SlateError::Crypto(format!("final slate tx structure invalid: {e}")))?;
+    validate_range_proofs(&tx)
+        .map_err(|e| SlateError::Crypto(format!("final slate range proof invalid: {e}")))?;
+    validate_balance_equation(&tx)
+        .map_err(|e| SlateError::Crypto(format!("final slate tx balance invalid: {e}")))?;
+    if !schnorr_verify(&aggregate_sig, &agg_p, chain_id, kernel_message.as_bytes())
+        .map_err(|e| SlateError::Crypto(format!("final slate signature invalid: {e}")))?
+    {
+        return Err(SlateError::SignatureVerificationFailed);
+    }
+
+    Ok(tx)
+}
+
+/// Reconstruct the sender (step-1) view of a slate by stripping all recipient
+/// response fields. Used to recompute the sender slate hash a caller can key
+/// its persisted pending record by.
+pub fn sender_phase_slate(slate: &Slate) -> Slate {
+    Slate {
+        version: slate.version,
+        chain_id: slate.chain_id,
+        amount: slate.amount,
+        fee: slate.fee,
+        lock_height: slate.lock_height,
+        sender_inputs: slate.sender_inputs.clone(),
+        sender_change_output: slate.sender_change_output.clone(),
+        sender_public_excess: slate.sender_public_excess.clone(),
+        sender_public_nonce: slate.sender_public_nonce.clone(),
+        sender_offset_contribution: slate.sender_offset_contribution,
+        recipient_output: None,
+        recipient_public_excess: None,
+        recipient_public_nonce: None,
+        sender_partial_sig: None,
+        recipient_partial_sig: None,
+        sender_change_recovery_capsule: slate.sender_change_recovery_capsule.clone(),
+        recipient_recovery_capsule: Vec::new(),
+    }
+}
+
+fn slate_outputs_for_finalize(
+    slate: &Slate,
+    recipient_output: OutputCommitmentAndProof,
+) -> Result<Vec<TransactionOutput>, SlateError> {
+    if slate.version == CURRENT_SLATE_VERSION {
+        return Ok(slate_outputs(slate, recipient_output));
+    }
+    if slate.version != RECOVERY_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            RECOVERY_SLATE_VERSION,
+        ));
+    }
+    let mut outputs = Vec::with_capacity(usize::from(slate.sender_change_output.is_some()) + 1);
+    if let Some(change) = &slate.sender_change_output {
+        let capsule = dom_crypto::recovery::RecoveryCapsule::from_bytes(
+            &slate.sender_change_recovery_capsule,
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        outputs.push(
+            TransactionOutput::with_recovery_capsule(
+                change.commitment.clone(),
+                change.proof.bytes.clone(),
+                &capsule,
+            )
+            .map_err(|error| SlateError::Crypto(error.to_string()))?,
+        );
+    }
+    let capsule =
+        dom_crypto::recovery::RecoveryCapsule::from_bytes(&slate.recipient_recovery_capsule)
+            .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    outputs.push(
+        TransactionOutput::with_recovery_capsule(
+            recipient_output.commitment,
+            recipient_output.proof.bytes,
+            &capsule,
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?,
+    );
+    Ok(outputs)
+}
+
+/// Canonical plain-kernel signing message: `blake2b_256_tagged(TAG_KERNEL_MSG,
+/// feature || fee_le || lock_height_le)`.
+///
+/// NOTE (O-03): this helper always stamps `KERNEL_FEAT_PLAIN`, so for
+/// `lock_height != 0` it produces a message no valid transaction can ever
+/// carry (consensus rejects PLAIN kernels with a non-zero lock_height).
+/// Slate signing now goes through [`slate_kernel_message`]; this function is
+/// kept byte-for-byte identical because `kav_drift_kernel_message` freezes it.
+pub fn plain_kernel_message(fee: u64, lock_height: u64) -> Result<Hash256, SlateError> {
+    Amount::from_noms(fee).map_err(|e| SlateError::Crypto(format!("invalid kernel fee: {e}")))?;
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(KERNEL_FEAT_PLAIN);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    Ok(blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data))
+}
+
+/// Kernel feature byte implied by a slate's `lock_height` (O-03).
+///
+/// This is the wallet-side mirror of the consensus invariant in
+/// `dom_consensus::validate_transaction_structure`: HEIGHT_LOCKED requires a
+/// non-zero lock_height, and every other feature requires lock_height == 0.
+pub fn slate_kernel_features(lock_height: u64) -> u8 {
+    if lock_height == 0 {
+        KERNEL_FEAT_PLAIN
+    } else {
+        KERNEL_FEAT_HEIGHT_LOCKED
+    }
+}
+
+/// Canonical slate kernel signing message, feature byte derived from
+/// `lock_height` (O-03). Byte-identical to [`plain_kernel_message`] whenever
+/// `lock_height == 0`.
+pub fn slate_kernel_message(fee: u64, lock_height: u64) -> Result<Hash256, SlateError> {
+    Amount::from_noms(fee).map_err(|e| SlateError::Crypto(format!("invalid kernel fee: {e}")))?;
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(slate_kernel_features(lock_height));
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    Ok(blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data))
+}
+
+/// Assemble the transaction outputs for a slate: the optional sender change
+/// output followed by the recipient output, in that order.
+pub fn slate_outputs(
+    slate: &Slate,
+    recipient_output: OutputCommitmentAndProof,
+) -> Vec<TransactionOutput> {
+    let mut outputs = Vec::with_capacity(usize::from(slate.sender_change_output.is_some()) + 1);
+    if let Some(change) = &slate.sender_change_output {
+        outputs.push(TransactionOutput {
+            commitment: change.commitment.clone(),
+            proof: change.proof.bytes.clone(),
+        });
+    }
+    outputs.push(TransactionOutput {
+        commitment: recipient_output.commitment,
+        proof: recipient_output.proof.bytes,
+    });
+    outputs
+}
+
+/// Compute the sender excess blinding `x_S = change - sum(inputs) - offset`
+/// over the secp256k1 scalar field. Returns an error if the result is zero
+/// (a degenerate excess that cannot key the aggregate kernel).
+pub fn sender_excess_blinding<'a, I>(
+    input_blindings: I,
+    change_blinding: Option<&[u8; 32]>,
+    sender_offset: &[u8; 32],
+) -> Result<[u8; 32], SlateError>
+where
+    I: IntoIterator<Item = &'a [u8; 32]>,
+{
+    let mut acc = Scalar::ZERO;
+
+    if let Some(change_blinding) = change_blinding {
+        acc += scalar_from_bytes(change_blinding)?;
+    }
+    for blinding in input_blindings {
+        acc -= scalar_from_bytes(blinding)?;
+    }
+    acc -= scalar_from_bytes(sender_offset)?;
+
+    if bool::from(acc.is_zero()) {
+        return Err(SlateError::Crypto(
+            "sender excess blinding unexpectedly became zero".into(),
+        ));
+    }
+
+    Ok(acc.to_repr().into())
+}
+
+fn scalar_from_bytes(bytes: &[u8; 32]) -> Result<Scalar, SlateError> {
+    let repr = k256::FieldBytes::from(*bytes);
+    let scalar = Scalar::from_repr(repr);
+    if scalar.is_some().into() {
+        Ok(scalar.unwrap())
+    } else {
+        Err(SlateError::Crypto("invalid scalar bytes".into()))
+    }
+}
+
+fn validate_slate_version(slate: &Slate) -> Result<(), SlateError> {
+    if !matches!(
+        slate.version,
+        CURRENT_SLATE_VERSION | RECOVERY_SLATE_VERSION
+    ) {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            RECOVERY_SLATE_VERSION,
+        ));
+    }
+    if slate.version == RECOVERY_SLATE_VERSION {
+        slate
+            .validate()
+            .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Generate a fresh random secp256k1 secret key via rejection sampling.
+pub fn random_secret_key() -> SecretKey {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    loop {
+        rand::thread_rng().fill_bytes(bytes.as_mut());
+        if let Ok(secret_key) = SecretKey::from_bytes(bytes.as_ref()) {
+            return secret_key;
+        }
+    }
+}

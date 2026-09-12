@@ -1,0 +1,20 @@
+[package]
+name        = "dom-serialization"
+description = "DOM protocol — canonical serialization layer (RFC-0002)"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+dom-core.workspace  = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# F4-equivalent roundtrip-invariant property tests (tests/roundtrip_proptest.rs).
+proptest.workspace = true
+dom-core.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

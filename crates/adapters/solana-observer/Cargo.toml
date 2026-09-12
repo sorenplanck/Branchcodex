@@ -1,0 +1,27 @@
+[package]
+name = "solana-observer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+solana-types = { path = "../solana-types" }
+solana-rpc = { path = "../solana-rpc" }
+solana-rpc-pool = { path = "../solana-rpc-pool" }
+solana-program-attestation = { path = "../solana-program-attestation" }
+solana-profile = { path = "../solana-profile" }
+solana-escrow-wire = { path = "../solana-escrow-wire" }
+solana-evidence = { path = "../solana-evidence" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+
+[dev-dependencies]
+rand = { workspace = true }
+tempfile = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-program-client = { path = "../solana-program-client" }
+solana-session-init = { path = "../solana-session-init" }
+solana-setup-store = { path = "../solana-setup-store" }

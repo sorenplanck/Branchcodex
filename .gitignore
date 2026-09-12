@@ -1,0 +1,84 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node data — never commit chain data or keys
+dom-testnet-data/
+dom-mainnet-data/
+*.lmdb
+*.mdb
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# OS metadata
+Thumbs.db
+desktop.ini
+
+# DOM build prompts (V5 packages — generators, not source)
+PACOTE-*-V5.zip
+pacote-*/
+000-INDICE-V5.md
+000-CHANGELOG-V5.md
+000-COMO-USAR-V5.md
+
+# Logs and build artifacts
+build.log
+test.log
+clippy*.log
+
+# Testnet data (per-node, not consensus)
+dom-testnet-data/
+*.pid
+
+# cargo-fuzz artifacts
+**/fuzz/target/
+**/fuzz/corpus/
+**/fuzz/artifacts/
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# build dirs alternativos (toolchain /tmp etc)
+/target-s2
+/target-s3
+/target-*
+
+# relatorios e notas de processo (OPSEC: fora do repo publico)
+/reports/
+*ETAPA*.md
+AUTO_BACKUP_*.md
+docs/FIX-014_*.md
+
+target/
+**/target/
+testnet/local-deploy/
+sidecar-gpl/
+
+# Internal working log — local only, never published.
+docs/interop/DOM-INTEROP-IMPLEMENTATION-LOG.md
+
+# Signed ratification packets — local only, never published.
+docs/interop/ratifications/e13-guards/
+docs/interop/ratifications/e13-executadas/
+
+# Harness agent worktrees — never part of the tree.
+.claude/worktrees/
+
+# Local hardening test reports and full command logs.
+/artifacts/interop-hardening/
+
+# Daemon validation evidence (not route authority).
+/artifacts/daemon-v7/
+/artifacts/daemon-v8/
+/artifacts/daemon-v9/

@@ -1,0 +1,18 @@
+{
+  "delivery_version": 9,
+  "status": "incomplete",
+  "request_fully_delivered": false,
+  "ordered_family_pairs_in_scope": 16,
+  "all_sixteen_routes_operational": false,
+  "legacy_evm_btc_runtime_requirement_removed": false,
+  "f7_generalized": false,
+  "bitcoin_post_anchor_driver_written": true,
+  "m8_claim_integrated_in_root": false,
+  "xmr_sweep_authority_integrated": false,
+  "xmr_upstream_revelation_integrated": false,
+  "new_rust_test_methods_written": 6,
+  "new_rust_tests_executed_here": 0,
+  "rust_compiled_here": false,
+  "chain_swaps_executed_here": 0,
+  "goal_10_10_achieved": false
+}

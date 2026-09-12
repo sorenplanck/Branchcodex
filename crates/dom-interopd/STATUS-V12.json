@@ -1,0 +1,134 @@
+{
+  "schema": 12,
+  "version": "V12",
+  "status": "development_candidate_incomplete",
+  "accepted": false,
+  "based_on_v11_tree": "807f05442f81fc71c92a145f868fb6cf66cb404d",
+  "all_sixteen_routes_operational": false,
+  "live_chain_swaps_executed_here": 0,
+  "rust_compiled_here": false,
+  "required_criteria": {
+    "complete_dom_xmr_funding_claim_refund_compensation_restart": false,
+    "selected_family_only_bootstrap_and_full_execution": false,
+    "native_anchors_f7_m8_claim_refund_revelation_used_end_to_end_by_binary": false
+  },
+  "implemented_v12": [
+    "Native single-participant DOM signer with retained wallet ownership and durable nonce restart",
+    "Private shared-output bootstrap producer with commit-before-reveal and purpose-separated vaults",
+    "Generalized native F7 Store gate, two signed readiness votes, funding custody, claim consumption and pre-signature transport",
+    "Selected-family F7 collector and DOM signing pump; composition-root construction still pending",
+    "Native XMR recovery graph producer, encrypted custody and durable cancel/refund/compensation driver",
+    "Real binary private XMR funding preparation command; exact private candidate import, durable intent and native collateral check before controlled broadcast; root construction remains blocked",
+    "Finite same-owner actuator lease renewal wired in universal runtime",
+    "SOL/XMR stale-owner rejection inside database write transactions",
+    "Stage-10 restart authenticates revision-zero origin while preserving later durable progress",
+    "Native DOM compensation route outcome, separate from XMR refund, with atomic durable journal and no generic event authorization"
+  ],
+  "remaining_blockers": [
+    "A plain pre-signed DOM compensation remains manually spendable after its height even if XMR was never funded; a daemon check cannot enforce this condition on DOM consensus",
+    "Fresh shared-output bootstrap and auxiliary signing-purpose provenance are not fully assembled by the real binary",
+    "Generalized DOM final-claim adaptation, durable exposure and final transaction broadcast are not fully integrated",
+    "Full selected XMR funding and recovery driver composition is not enabled in the root",
+    "Native Rust compilation, tests and live end-to-end route campaigns have not been run here"
+  ],
+  "route_matrix": [
+    {
+      "upstream": "BTC",
+      "center": "DOM",
+      "downstream": "BTC",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "BTC",
+      "center": "DOM",
+      "downstream": "EVM",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "BTC",
+      "center": "DOM",
+      "downstream": "SOL",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "BTC",
+      "center": "DOM",
+      "downstream": "XMR",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "EVM",
+      "center": "DOM",
+      "downstream": "BTC",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "EVM",
+      "center": "DOM",
+      "downstream": "EVM",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "EVM",
+      "center": "DOM",
+      "downstream": "SOL",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "EVM",
+      "center": "DOM",
+      "downstream": "XMR",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "SOL",
+      "center": "DOM",
+      "downstream": "BTC",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "SOL",
+      "center": "DOM",
+      "downstream": "EVM",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "SOL",
+      "center": "DOM",
+      "downstream": "SOL",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "SOL",
+      "center": "DOM",
+      "downstream": "XMR",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "XMR",
+      "center": "DOM",
+      "downstream": "BTC",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "XMR",
+      "center": "DOM",
+      "downstream": "EVM",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "XMR",
+      "center": "DOM",
+      "downstream": "SOL",
+      "live_e2e_verified_here": false
+    },
+    {
+      "upstream": "XMR",
+      "center": "DOM",
+      "downstream": "XMR",
+      "live_e2e_verified_here": false
+    }
+  ],
+  "validation_command": "python3 crates/dom-interopd/scripts/test_daemon_v12.py",
+  "offline_command": "python3 crates/dom-interopd/scripts/test_daemon_v12.py --offline"
+}

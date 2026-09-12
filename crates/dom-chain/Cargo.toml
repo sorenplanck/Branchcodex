@@ -1,0 +1,31 @@
+[package]
+name        = "dom-chain"
+description = "DOM chain state — IBD, reorganization, chain selection"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+blake2.workspace = true
+dom-core.workspace          = true
+dom-consensus.workspace     = true
+dom-serialization.workspace = true
+dom-store.workspace         = true
+dom-pow.workspace           = true
+dom-pmmr.workspace          = true
+dom-crypto.workspace        = true
+thiserror.workspace         = true
+tracing.workspace           = true
+tokio.workspace             = true
+primitive-types.workspace = true
+hex.workspace               = true
+
+[dev-dependencies]
+tempfile = "3.10"
+lmdb.workspace = true
+proptest.workspace = true
+tracing-subscriber.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

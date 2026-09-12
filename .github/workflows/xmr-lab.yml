@@ -1,0 +1,37 @@
+name: DOM XMR compatibility gates
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/adapters/xmr-**'
+      - 'crates/f8-xmr-kaystra-e2e/**'
+      - 'crates/xmr-actuator/**'
+      - 'crates/dom-interopd/**'
+      - 'crates/adapters/dom-real/**'
+      - 'crates/dom-consensus/**'
+      - 'crates/dom-scriptless-crypto/**'
+      - 'crates/dom-scriptless-store/**'
+      - 'sidecar-gpl/xmr-live-sidecar-eigenwallet/**'
+      - 'external-gpl/dom-xmr-sidecar/**'
+      - 'scripts/xmr-v6/**'
+      - 'scripts/xmr-v7-**'
+      - 'ACTIVE_COMPONENTS.json'
+      - 'SOURCE_LOCK.json'
+
+jobs:
+  xmr-lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Static package validation
+        run: python3 scripts/xmr-v7-static-validate.py .
+      - name: DOM-side gates
+        run: |
+          cargo fmt --all -- --check
+          cargo test -p xmr-crypto -p xmr-dleq-sigma -p xmr-route-secret -p xmr-setup-profile -p xmr-dleq-nullifier-store -p xmr-refund-policy -p xmr-secret-store -p xmr-evidence -p xmr-observer -p xmr-observation-store -p xmr-observer-pump -p xmr-kaystra-records -p xmr-kaystra-source -p xmr-delivery -p xmr-delivery-sqlite -p xmr-live-sidecar-api -p xmr-sidecar-auth -p xmr-spend-port -p xmr-live-sidecar-blocking-client -p xmr-live-sidecar-uds-client -p xmr-rpc-broadcast-blocking -p xmr-kaystra-bridge -p xmr-runtime-wiring -p xmr-session-init -p f8-xmr-kaystra-e2e
+          cargo test --locked -p dom-consensus --test xmr_funding_v22
+          cargo check --locked -p dom-interopd --no-default-features --features production --all-targets
+          cargo clippy -p xmr-crypto -p xmr-dleq-sigma -p xmr-route-secret -p xmr-setup-profile -p xmr-dleq-nullifier-store -p xmr-refund-policy -p xmr-secret-store -p xmr-evidence -p xmr-observer -p xmr-observation-store -p xmr-observer-pump -p xmr-kaystra-records -p xmr-kaystra-source -p xmr-delivery -p xmr-delivery-sqlite -p xmr-live-sidecar-api -p xmr-sidecar-auth -p xmr-spend-port -p xmr-live-sidecar-blocking-client -p xmr-live-sidecar-uds-client -p xmr-rpc-broadcast-blocking -p xmr-kaystra-bridge -p xmr-runtime-wiring -p xmr-session-init -p f8-xmr-kaystra-e2e --all-targets -- -D warnings

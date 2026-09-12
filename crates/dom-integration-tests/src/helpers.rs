@@ -1,0 +1,293 @@
+//! Test helpers for integration tests.
+
+use dom_config::NodeConfig;
+use std::sync::Once;
+
+static TRACING_INIT: Once = Once::new();
+
+/// Initialize tracing once per test process. Safe to call from multiple tests.
+pub fn init_tracing() {
+    TRACING_INIT.call_once(|| {
+        let filter = std::env::var("RUST_LOG")
+            .unwrap_or_else(|_| "info,dom_node=debug,dom_wire=debug".into());
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
+}
+use dom_node::node::DomNode;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+
+/// Pick an ephemeral localhost TCP port for tests.
+///
+/// This reduces port-collision flakes across repeated integration test runs.
+/// The returned port is not reserved after this function returns, so callers
+/// should bind promptly.
+pub fn free_local_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral localhost port")
+        .local_addr()
+        .expect("read ephemeral localhost addr")
+        .port()
+}
+
+/// Spawn a test node with custom config.
+///
+/// Genesis block is created automatically if the chain is empty. This
+/// mirrors production behavior: since `genesis_anchor()` uses
+/// `GENESIS_TIMESTAMP_PLACEHOLDER` (a compile-time constant), every node
+/// produces the same genesis_hash deterministically. In production, every
+/// fresh node bootstraps genesis locally on first start — no P2P sync
+/// needed for height=0. The test harness reflects that.
+pub async fn spawn_node(config: NodeConfig) -> Arc<DomNode> {
+    let node = Arc::new(DomNode::init(config).expect("node init failed"));
+    {
+        let chain = node.chain.lock().await;
+        let needs_genesis = chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO;
+        drop(chain);
+        if needs_genesis {
+            dom_node::miner::create_genesis_block(node.clone())
+                .await
+                .expect("genesis creation failed");
+        }
+    }
+    node
+}
+
+/// Wait for a node's P2P listener to be ready (port accepting connections).
+pub async fn wait_for_listener_ready(addr: &str, timeout_secs: u64) -> Result<(), String> {
+    use tokio::net::TcpStream;
+    let start = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs(timeout_secs);
+    while start.elapsed() < deadline {
+        if TcpStream::connect(addr).await.is_ok() {
+            // Give the listener a moment to fully set up
+            sleep(Duration::from_millis(200)).await;
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "listener at {} did not become ready in {}s",
+        addr, timeout_secs
+    ))
+}
+
+/// Wait for node to reach a specific height (with timeout).
+pub async fn wait_for_height(
+    node: &Arc<DomNode>,
+    target_height: u64,
+    timeout_duration: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let current_height = {
+            let chain = node.chain.lock().await;
+            chain.tip_height.0
+        };
+        if current_height >= target_height {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timeout_duration {
+            return Err(format!(
+                "timeout waiting for height {target_height}; last observed height {current_height}"
+            ));
+        }
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
+/// Wait for node's mempool to have at least N transactions.
+pub async fn wait_for_mempool_count(
+    node: &Arc<DomNode>,
+    min_count: usize,
+    timeout_duration: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let current_count = {
+            let mempool = node.mempool.lock().await;
+            mempool.len()
+        };
+        if current_count >= min_count {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timeout_duration {
+            return Err(format!(
+                "timeout waiting for {min_count} mempool tx; last observed count {current_count}"
+            ));
+        }
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
+/// Wait for node to have at least N peers connected.
+pub async fn wait_for_peer_count(
+    node: &Arc<DomNode>,
+    min_peers: usize,
+    timeout_duration: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let current_count = {
+            let peers = node.peers.lock().await;
+            peers.connected_peers().len()
+        };
+        if current_count >= min_peers {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timeout_duration {
+            return Err(format!(
+                "timeout waiting for {min_peers} peers; last observed count {current_count}"
+            ));
+        }
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
+/// Mine N blocks on a node (blocks until done).
+///
+/// If the chain is empty (no genesis), creates the genesis block first.
+/// This mirrors what `mining_loop` does automatically when `mine: true`,
+/// but lets integration tests control mining deterministically.
+pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> {
+    // Bootstrap genesis if chain is empty.
+    {
+        let chain = node.chain.lock().await;
+        let needs_genesis = chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO;
+        drop(chain);
+        if needs_genesis {
+            dom_node::miner::create_genesis_block(node.clone())
+                .await
+                .map_err(|e| format!("genesis failed: {:?}", e))?;
+        }
+    }
+    for _ in 0..count {
+        dom_node::miner::mine_one_block(node.clone())
+            .await
+            .map_err(|e| format!("mining failed: {:?}", e))?;
+    }
+    Ok(())
+}
+
+/// Create a test NodeConfig with unique data directory.
+///
+/// Defaults to `Network::Regtest` so the mining path uses the cache-only
+/// RandomX VM (no 2 GB dataset per node) and coinbase outputs mature
+/// after a single confirmation — two miners now fit on a developer
+/// laptop and spend tests no longer need to wait 1000 blocks.
+///
+/// IMPORTANT: the `mine` parameter is accepted for backwards-compat with existing
+/// tests but is FORCED to `false` internally. Auto-mining in `node.run()` spawns
+/// a tight loop that holds `chain.lock()` continuously, which deadlocks against
+/// the manual `mine_blocks()` helper. Integration tests must use deterministic
+/// manual mining via `mine_blocks()` instead — the helper now bootstraps genesis
+/// automatically on first call.
+pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
+    let unique = format!(
+        "dom-test-{}-{}-{}-{}",
+        name,
+        std::process::id(),
+        port,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let data_dir = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&data_dir).expect("create integration test data dir");
+    NodeConfig {
+        network: dom_config::Network::Regtest,
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        p2p_listen_addr: format!("127.0.0.1:{}", port),
+        max_inbound: 10,
+        min_outbound: 1,
+        dns_seeds: vec![],
+        disable_dns_seeds: false,
+        seed_peers: vec![],
+        mine: false,
+        miner_throttle: Default::default(),
+        miner_threads: 1,
+        miner_address: None,
+        wallet_path: None,
+        wallet_password: None,
+        log_level: "debug".into(),
+        rpc_listen_addr: None,
+        rpc_bearer_token: None,
+        metrics_listen_addr: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dom_core::BlockHeight;
+    use dom_wire::peer::{PeerInfo, PeerState};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[tokio::test]
+    async fn wait_for_height_wakes_on_node_state_event() {
+        let node = spawn_node(test_config("wait-height-event", free_local_port(), false)).await;
+        let waiter = {
+            let node = node.clone();
+            tokio::spawn(async move { wait_for_height(&node, 3, Duration::from_secs(5)).await })
+        };
+
+        tokio::task::yield_now().await;
+        {
+            let mut chain = node.chain.lock().await;
+            chain.tip_height = BlockHeight(3);
+        }
+        node.notify_state_changed();
+
+        waiter
+            .await
+            .expect("waiter task")
+            .expect("height waiter should observe notified state");
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_count_wakes_on_node_state_event() {
+        let node = spawn_node(test_config("wait-peer-event", free_local_port(), false)).await;
+        let waiter = {
+            let node = node.clone();
+            tokio::spawn(async move { wait_for_peer_count(&node, 1, Duration::from_secs(5)).await })
+        };
+
+        tokio::task::yield_now().await;
+        {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), free_local_port());
+            let mut peer = PeerInfo::new(addr, false);
+            peer.state = PeerState::Connected;
+            node.peers
+                .lock()
+                .await
+                .register_peer(peer)
+                .expect("register peer");
+        }
+        node.notify_state_changed();
+
+        waiter
+            .await
+            .expect("waiter task")
+            .expect("peer waiter should observe notified state");
+    }
+}

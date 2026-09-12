@@ -1,0 +1,43 @@
+[package]
+name = "dom-xmr-sidecar"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+xmr-raw-tx-verify = { path = "../xmr-raw-tx-verify" }
+chacha20poly1305 = "0.10"
+fs2 = "0.4"
+libc = "0.2"
+rustix = { version = "0.38", features = ["process"] }
+xmr-key-image-proof = { path = "../xmr-key-image-proof" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+curve25519-dalek = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+monero-address = { workspace = true }
+monero-daemon-rpc = { workspace = true }
+monero-oxide-wallet = { workspace = true }
+monero-simple-request-rpc = { workspace = true }
+monero-wallet-ng = { path = "../monero-wallet-ng" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "net"] }
+zeroize = { workspace = true }
+
+tracing = { workspace = true }
+
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+# Offline examples only; the production sidecar does not gain test inputs.
+monero-epee = { git = "https://github.com/kayabaNerve/monero-oxide.git" }
+rand = { workspace = true }
+curve25519-dalek = { workspace = true }
+
+[lints]
+workspace = true

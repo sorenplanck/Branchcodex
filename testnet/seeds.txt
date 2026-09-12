@@ -1,0 +1,6 @@
+# DOM Testnet Bootstrap Seeds
+# Formato: IP:PORTA
+# Atualizar com IP do nó principal quando estiver online
+# Exemplo: 203.0.113.42:33370
+
+64.111.92.205:33370

@@ -1,0 +1,2 @@
+# Test oracle only; no Python dependency in the shipped daemon.
+cryptography==46.0.0

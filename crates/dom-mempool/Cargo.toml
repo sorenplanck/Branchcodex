@@ -1,0 +1,23 @@
+[package]
+name        = "dom-mempool"
+description = "DOM mempool — transaction pool with fee ordering and Dandelion++ routing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dom-core.workspace          = true
+dom-consensus.workspace     = true
+dom-serialization.workspace = true
+dom-store.workspace         = true
+thiserror.workspace         = true
+tracing.workspace           = true
+dom-crypto.workspace        = true
+hex.workspace               = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

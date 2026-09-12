@@ -1,0 +1,20 @@
+[package]
+name = "dom-agent-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable Windows-first agent orchestrator for the DOM Protocol workspace (Codex CLI + dom-test-runner)."
+
+[[bin]]
+name = "dom-agent-runner"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+dom-test-runner = { path = "../dom-test-runner" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

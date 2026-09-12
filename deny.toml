@@ -1,0 +1,126 @@
+# dom-shield F1 — supply-chain detector for the DOM workspace.
+#
+# DETECTOR ONLY. This file is the policy that flags supply-chain risks; it does
+# NOT fix anything. Fixing what it reports (e.g. pinning a floating git dep) is a
+# separate, human decision. Covers the 3 F1 vectors:
+#   (1) [advisories] RUSTSEC vulnerabilities + yanked crates -> deny
+#   (2) [sources]    git dependency must be pinned by rev (catches the
+#                    secp256k1-zkp branch="master" in crates/dom-crypto/Cargo.toml)
+#   (3) [licenses]   allow-list frozen to the licenses currently present in the
+#                    tree (any NEW license type is then flagged on introduction)
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # bincode 1.3.3 — the maintainers ceased development permanently and the
+    # advisory itself declares 1.3.3 complete and not in need of updates;
+    # there is no safe upgrade to move to (2.x is a different crate surface,
+    # and the solana-*/xmr-dleq-sigma consumers pin 1.x through their own
+    # upstreams). An unmaintained notice, not a vulnerability: nothing to
+    # patch. Waiver recorded in f2-harness/tests/advisory_ignores.rs with
+    # its expiry; revisit if a RUSTSEC entry ever reports an actual
+    # soundness or security defect in 1.3.3.
+    "RUSTSEC-2025-0141",
+    # paste 1.0.15 — the author archived the repository; an unmaintained
+    # notice, not a vulnerability: no CVE and no code-path defect. `paste`
+    # is a build-time proc-macro reached only through the NAT-PMP gateway
+    # discovery stack (natpmp -> netdev -> netlink-packet-*), which pins it
+    # unconditionally, so no upgrade on our side closes it. Waiver recorded
+    # in f2-harness/tests/advisory_ignores.rs with its expiry; revisit if a
+    # RUSTSEC entry ever reports an actual defect in 1.0.15 or natpmp's
+    # stack moves off it.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Allow-list = exactly the SPDX licenses present in the workspace today
+# (discovered via `cargo deny list`). NOT an invented set: a freeze, so any
+# newly-introduced license type trips the detector for review.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# `Ubuntu-font-1.0` is the SPDX id epaint_default_fonts (egui/eframe ->
+# dom-wallet-app) declares for its bundled fonts. It replaces the prior
+# `LicenseRef-UFL-1.0`, which was the wrong identifier (no crate matched it, so
+# the real `Ubuntu-font-1.0` was rejected). fuchsia-cprng 0.1.1 remains a
+# non-failing `no-license-field` warning: it ships a BSD-3-Clause LICENSE file
+# but no SPDX field, and enters the tree ONLY target-gated (fuchsia/cloudabi) via
+# rand 0.5.6 -> grin_secp256k1zkp 0.7.15, so it never compiles on the host.
+
+[bans]
+# F1 targets git-source hygiene + advisories + licenses, not version dedup.
+# Keep version/wildcard hygiene non-failing so the supply-chain signal stays clean.
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Every git dependency MUST be pinned by an exact commit rev (no branch/tag).
+# This is the rule that fires on secp256k1-zkp { branch = "master" }.
+required-git-spec = "rev"
+# The upstream Blockstream repo is a legitimate source — but only when pinned by
+# rev (enforced by required-git-spec above). Listing it here does NOT exempt the
+# rev requirement.
+allow-git = [
+    "https://github.com/BlockstreamResearch/rust-secp256k1-zkp",
+    # The XMR leg's vendored verifier universe. The exact commit is ratified
+    # in SOURCE_LOCK.json (monero_oxide.commit) and the manifests pin it by
+    # rev, which required-git-spec above continues to enforce; this entry
+    # only names the repository as a legitimate origin.
+    "https://github.com/kayabaNerve/monero-oxide",
+]
+
+# ── DOM interoperability layer, decision D-ORQ-10 ────────────────────────────
+# (a) The absorbed crates are all `publish = false` (D-ORQ-9). The Interop
+# policy ratified as A-015/A-016 checks private crates deliberately, so the
+# same is made explicit here rather than left to a default.
+[licenses.private]
+ignore = false
+
+# (b) The two nominal exceptions of A-015/A-016, transported verbatim with
+# their justification. They are exceptions for THESE crates by name; no
+# licence is added to the allow-list above, which is not reduced either --
+# it exists for this workspace's own graph (the Tauri/egui shell).
+[[licenses.exceptions]]
+# Only the Apache-2.0 branch of this crate's dual licence is accepted.
+crate = "r-efi"
+allow = ["Apache-2.0"]
+
+[[licenses.exceptions]]
+# MPL-2.0 accepted for this crate alone; source availability noted in A-015.
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+# FINDING of the absorption, resolved with the NARROWEST mechanism available.
+# `hex_lit` (reached through bitcoin 0.32.5 <- adapter-btc) declares MITNFA.
+# The ratified A-015/A-016 allow-list PERMITS MITNFA; this workspace's own
+# list simply never needed it, because the two lists are not nested. This is
+# therefore alignment with the stricter governing policy, not a widening
+# beyond it: the strict-closure check (laboratory/scripts/
+# absorbed_licence_closure) already accepts MITNFA and stays green.
+# Granted to this crate BY NAME rather than adding MITNFA to the general
+# allow-list above, which is left untouched. Reversible by the operator.
+crate = "hex_lit"
+allow = ["MITNFA"]

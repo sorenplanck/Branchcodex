@@ -1,0 +1,55 @@
+[package]
+name = "f7-anchor-authority"
+description = "Store-free real-chain anchor authority for DOM Interop F7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+adapter-btc = { path = "../adapters/btc", default-features = false }
+bitcoin = "=0.32.5"
+dom-adaptor.workspace = true
+dom-consensus.workspace = true
+dom-crypto.workspace = true
+dom-final-claim-binding = { path = "../dom-final-claim-binding" }
+dom-scriptless-chain-adapter.workspace = true
+kaystra-core = { path = "../kaystra-core", default-features = false }
+thiserror.workspace = true
+sha2.workspace = true
+dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
+xmr-live-sidecar-api = { path = "../adapters/xmr-live-sidecar-api" }
+xmr-live-sidecar-uds-client = { path = "../adapters/xmr-live-sidecar-uds-client" }
+xmr-observer = { path = "../adapters/xmr-observer" }
+xmr-secret-store = { path = "../adapters/xmr-secret-store" }
+xmr-setup-profile = { path = "../adapters/xmr-setup-profile" }
+xmr-spend-port = { path = "../adapters/xmr-spend-port" }
+xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma" }
+xmr-crypto = { path = "../adapters/xmr-crypto" }
+adapter-evm = { path = "../adapters/evm", features = ["rpc-http"] }
+counterparty-api = { path = "../counterparty-api" }
+deployment-registry = { path = "../deployment-registry" }
+chain-profile = { path = "../chain-profile" }
+xmr-refund-policy = { path = "../adapters/xmr-refund-policy" }
+serde_json.workspace = true
+solana-rpc = { path = "../adapters/solana-rpc" }
+solana-rpc-pool = { path = "../adapters/solana-rpc-pool" }
+solana-types = { path = "../adapters/solana-types" }
+solana-profile = { path = "../adapters/solana-profile" }
+solana-observer = { path = "../adapters/solana-observer" }
+solana-escrow-wire = { path = "../adapters/solana-escrow-wire" }
+solana-evidence = { path = "../adapters/solana-evidence" }
+
+[dev-dependencies]
+static_assertions = "=1.1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

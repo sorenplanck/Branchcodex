@@ -1,0 +1,214 @@
+{
+  "delivery_version": 7,
+  "scope": "daemon only; root lockfile dependency entries updated",
+  "previous_zip_sha256": "9462782e0cf390b2be5caf35692ea0c88deffd1e1bd6f3d5828b1040d6344575",
+  "all_sixteen_routes_operational": false,
+  "goal_10_10_achieved": false,
+  "rust_compiled_here": false,
+  "new_rust_test_methods_written": 9,
+  "new_rust_test_methods_run": 0,
+  "new_python_test_methods_passed": 7,
+  "live_swaps_executed": 0,
+  "route_count": 16,
+  "routes": [
+    {
+      "route": "BTC->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT"
+      ]
+    },
+    {
+      "route": "BTC->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": true,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "BTC_BILATERAL_M8_ROOT"
+      ]
+    },
+    {
+      "route": "BTC->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ]
+    },
+    {
+      "route": "BTC->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY"
+      ]
+    },
+    {
+      "route": "EVM->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": true,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "BTC_BILATERAL_M8_ROOT"
+      ]
+    },
+    {
+      "route": "EVM->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION"
+      ]
+    },
+    {
+      "route": "EVM->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ]
+    },
+    {
+      "route": "EVM->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY"
+      ]
+    },
+    {
+      "route": "SOL->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ]
+    },
+    {
+      "route": "SOL->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ]
+    },
+    {
+      "route": "SOL->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING"
+      ]
+    },
+    {
+      "route": "SOL->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY"
+      ]
+    },
+    {
+      "route": "XMR->DOM->BTC",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "BTC_BILATERAL_M8_ROOT",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ]
+    },
+    {
+      "route": "XMR->DOM->EVM",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ]
+    },
+    {
+      "route": "XMR->DOM->SOL",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "SOL_SIGNER_ROOT_PROVISIONING",
+        "SOL_PREFUNDING_REFUND_ARMING",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ]
+    },
+    {
+      "route": "XMR->DOM->XMR",
+      "factory_variant_defined": true,
+      "root_shape_selected": false,
+      "operational": false,
+      "live_swap_tested": false,
+      "blockers": [
+        "ROOT_RESOURCE_LOADER",
+        "EXTERNAL_F7_ANCHOR_GENERALIZATION",
+        "XMR_PRODUCTIVE_SWEEP_AUTHORITY",
+        "EXTERNAL_FINAL_CLAIM_SOURCE_BINDING"
+      ]
+    }
+  ]
+}

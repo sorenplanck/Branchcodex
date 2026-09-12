@@ -1,0 +1,20 @@
+Tighten DOM mempool package-policy validation.
+
+Goal:
+- Reject any transaction whose total kernel count exceeds the per-block
+  maximum (consensus limit). Today this is caught downstream; the mempool
+  should refuse it on submission so peers do not relay invalid packages.
+
+Constraints:
+- Do not change consensus rules. The mempool check must be a strict
+  subset of what dom-consensus validators already enforce.
+- Add at least one unit test in dom-mempool covering the new refusal.
+- Add a relay-side integration test (or extend an existing one) under
+  dom-integration-tests confirming that an over-limit transaction is
+  refused both at submission and at relay reception.
+
+Output expected:
+- A small, focused diff touching only dom-mempool and possibly
+  dom-integration-tests.
+- Do not modify Cargo.lock unless strictly required.
+- Do not touch dom-pow, dom-chain, dom-store, or dom-wallet.

@@ -1,0 +1,790 @@
+name: CI
+
+# Phase 1.4 — cross-platform equivalence CI. Builds, clippies, and
+# tests the workspace on the four host matrices the protocol must
+# remain deterministic across. Windows CI remains enabled but advisory
+# while LMDB map-size/filesystem behavior on GitHub Actions Windows
+# runners is being stabilized. Do not treat this as production Windows
+# support removal.
+#
+# Optimization pass (same gates, same commands, same profiles):
+#   - clippy moved out of `build-test` into its own matrix job that runs
+#     in parallel. clippy-driver does not reuse rustc artifacts, so inside
+#     one job it was a second full compile of the workspace in series.
+#     Same hosts, same scope, same `-D warnings`.
+#   - CARGO_INCREMENTAL=0 workspace-wide (incremental artifacts are never
+#     reused across CI runs; they only inflate target/ and the cache).
+#   - debug = "line-tables-only" for dev/test: backtraces keep file:line,
+#     target/ loses the variable/type DWARF that made it several GB per
+#     host and pushed the repo past the 10 GB cache limit (evictions =>
+#     random cold builds). Jobs that already set debug = 0 keep it.
+#   - cache keys include the rustc hash so a toolchain bump does not
+#     restore an incompatible target/ before rebuilding it anyway.
+#   - PR runs cancel their own superseded runs; pushes to main/mainnetswap
+#     never cancel.
+#   - actions bumped to their Node 24 majors (Node 20 runtime removal).
+# Deliberately NOT changed: opt-level (test timing semantics), the
+# `cargo build --all-targets` step (it is the only place the non-Linux
+# legs compile dom-integration-tests test targets), the crate-tests job
+# (it is the only place doctests run — `--all-targets` skips them), the
+# test runner (nextest isolates per process; that is a semantic change),
+# and every `run:` line a repo guard may parse.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, mainnetswap]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: [main, mainnetswap]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+
+# A new push to the same PR supersedes the run in flight. Pushes to the
+# protected branches are never cancelled: every commit there gets a full run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+  # randomx-rs requires the C library to build; integration tests are
+  # excluded across the matrix because the FULL_MEM dataset (~2 GB) is
+  # far above GitHub-hosted runner budgets. Single-host validation of
+  # the heavy integration suite is tracked separately.
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  build-test:
+    name: build + test (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+            experimental: false
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+            experimental: false
+          - host: macos-arm64
+            runner: macos-latest
+            experimental: false
+          - host: macos-x86_64
+            runner: macos-15-intel
+            experimental: false
+          - host: windows-x86_64
+            runner: windows-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Reclaim ~30 GB of preinstalled SDKs this build never uses. The
+      # `cargo build --workspace --all-targets` step links the dom-integration-tests
+      # test binaries (randomx-rs + full workspace), which exhausts the
+      # GitHub-hosted runner's ~14 GB free disk and fails with
+      # "rustc-LLVM ERROR: No space left on device". Linux-only: the macOS and
+      # Windows runners don't have these paths and aren't disk-constrained here.
+      - name: Free disk space (Linux runners)
+        if: runner.os == 'Linux'
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          sudo docker image prune -af || true
+          echo "Disk after cleanup:"; df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        if: runner.os != 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-build-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-build-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Cache cargo registry only (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-build-${{ matrix.host }}-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-build-${{ matrix.host }}-registry-
+
+      # secp256k1-zkp and randomx-rs link against C — make sure
+      # build-essential / Xcode CLT / MSVC are present. On Linux runners
+      # these are preinstalled; macOS ships clang; Windows needs Visual
+      # C++ Build Tools which `windows-latest` provides by default.
+      - name: Install Linux build tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # The interoperability layer is Linux-only in substance: its custody and
+      # live-node crates are built on retained directory capabilities, rustix
+      # and Unix permission modes. The non-Linux legs therefore build the
+      # NODE's twenty-nine crates rather than the workspace. The node list is
+      # named positively because it is immutable in this branch; excluding the
+      # layer instead would rot on every crate added to it.
+      - name: Set build scope (full workspace on Linux, node crates elsewhere)
+        shell: bash
+        run: |
+          NODE="dom-agent-runner dom-chain dom-cli dom-config dom-consensus dom-core
+                dom-crypto dom-explorer dom-faucet dom-integration-tests dom-mempool
+                dom-node dom-pmmr dom-pow dom-rpc dom-serialization dom-slate dom-store
+                dom-test-runner dom-test-vectors dom-tx dom-wallet dom-wallet-app
+                dom-wallet-core-api dom-wallet-crypto dom-wallet-keys
+                dom-wallet-recovery dom-wallet2 dom-wire"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "SCOPE_BUILD=--workspace" >> "$GITHUB_ENV"
+            echo "SCOPE_TEST=--workspace --exclude dom-integration-tests --exclude dom-node" >> "$GITHUB_ENV"
+          else
+            B=""; T=""
+            for c in $NODE; do
+              B="$B -p $c"
+              case "$c" in dom-integration-tests|dom-node) ;; *) T="$T -p $c";; esac
+            done
+            echo "SCOPE_BUILD=$B" >> "$GITHUB_ENV"
+            echo "SCOPE_TEST=$T" >> "$GITHUB_ENV"
+          fi
+
+      # `shell: bash` on every step below is load-bearing, not style: the
+      # Windows runner defaults to PowerShell, where `$SCOPE_BUILD` does not
+      # expand an environment variable. It would silently become empty and the
+      # command would build the whole workspace unscoped — failing again, for a
+      # reason the log would not show.
+      #
+      # `cargo build --all-targets` stays even though `cargo test` compiles the
+      # same targets: SCOPE_TEST excludes dom-integration-tests and dom-node,
+      # so this step is the only compile check of the integration-test targets
+      # on the arm64 / macOS / Windows legs.
+      - name: cargo build
+        shell: bash
+        run: cargo build $SCOPE_BUILD --all-targets
+
+      - name: cargo test (excluding integration and dom-node)
+        shell: bash
+        run: cargo test $SCOPE_TEST --all-targets
+
+      - name: cargo test -p dom-node --all-targets (serial)
+        shell: bash
+        run: cargo test -p dom-node --all-targets -- --test-threads=1
+
+  clippy:
+    name: clippy (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+          - host: macos-arm64
+            runner: macos-latest
+          - host: macos-x86_64
+            runner: macos-15-intel
+          - host: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # clippy emits metadata only (no codegen, no linking), so target/ stays
+      # well below the build-test job's. Disk reclaim kept for the same
+      # reason as build-test: the Linux runner starts with ~14 GB free.
+      - name: Free disk space (Linux runners)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+        id: rust
+
+      - name: Cache cargo registry + target
+        if: runner.os != 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-clippy-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-clippy-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Cache cargo registry only (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-clippy-${{ matrix.host }}-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-clippy-${{ matrix.host }}-registry-
+
+      - name: Install Linux build tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # Identical scope rule to build-test. Kept in lockstep on purpose: the
+      # lint surface must equal the build surface on every host.
+      - name: Set build scope (full workspace on Linux, node crates elsewhere)
+        shell: bash
+        run: |
+          NODE="dom-agent-runner dom-chain dom-cli dom-config dom-consensus dom-core
+                dom-crypto dom-explorer dom-faucet dom-integration-tests dom-mempool
+                dom-node dom-pmmr dom-pow dom-rpc dom-serialization dom-slate dom-store
+                dom-test-runner dom-test-vectors dom-tx dom-wallet dom-wallet-app
+                dom-wallet-core-api dom-wallet-crypto dom-wallet-keys
+                dom-wallet-recovery dom-wallet2 dom-wire"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "SCOPE_BUILD=--workspace" >> "$GITHUB_ENV"
+          else
+            B=""
+            for c in $NODE; do B="$B -p $c"; done
+            echo "SCOPE_BUILD=$B" >> "$GITHUB_ENV"
+          fi
+
+      - name: cargo clippy -- -D warnings
+        shell: bash
+        run: cargo clippy $SCOPE_BUILD --all-targets -- -D warnings
+
+  supply-chain:
+    name: "supply chain: cargo deny + cargo audit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + installed tools
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-supply-chain-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-supply-chain-
+
+      - name: Install cargo-deny and cargo-audit
+        run: |
+          command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
+          command -v cargo-audit >/dev/null || cargo install --locked cargo-audit
+
+      # deny.toml is the dom-shield F1 supply-chain detector: rev-pinned git
+      # sources only, frozen license set, no yanked crates. cargo audit scans
+      # Cargo.lock against the RustSec advisory database. Both were policy-only
+      # before this job; now they gate.
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: cargo audit
+        run: cargo audit
+
+  interop-evm-contracts:
+    name: "interop: EVM custody contracts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Same release used by the local F3 evidence and gas thresholds.
+          version: 1.7.1
+
+      # Vendored dependencies are intentionally absent. Install the exact
+      # audited tags on every run so a clean checkout can reproduce the
+      # deployed custody bytecode and its adversarial suite.
+      - name: Install pinned Solidity dependencies
+        working-directory: contracts
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          forge install foundry-rs/forge-std@v1.9.6 --no-git
+
+      - name: Contract license headers are resolved
+        run: |
+          contract_scopes=(contracts/src contracts/script contracts/test)
+          test "$(find "${contract_scopes[@]}" -name '*.sol' -type f -print | wc -l)" = \
+               "$(grep -rl '^// SPDX-License-Identifier: MIT$' "${contract_scopes[@]}" --include='*.sol' | wc -l)"
+          ! grep -R -E 'TBD-A2|SPDX-License-Identifier: UNLICENSED' \
+            "${contract_scopes[@]}" --include='*.sol'
+
+      - name: forge fmt --check
+        working-directory: contracts
+        run: forge fmt --check
+
+      - name: forge build
+        working-directory: contracts
+        run: forge build
+
+      - name: forge test
+        working-directory: contracts
+        run: forge test -vvv
+
+      # Runs the Rust adapter/engine against the deployed bytecode and refuses
+      # a green result unless every named F3/F4 scenario actually executed.
+      - name: Anvil cross-chain end-to-end gate (12 F3 + 6 F4)
+        run: ./scripts/e2e_anvil.sh
+
+      # Independent implementation of the ecrecover construction used to
+      # authenticate address(t*G), separate from both Solidity and Rust.
+      # node-version stays 20: it is the Node the ecrecover evidence was
+      # produced with. The action itself now runs on the Node 24 runtime.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Independent ecrecover verification
+        run: |
+          npm install --no-audit --no-fund ethereumjs-util@7.1.5
+          node contracts/test/verify_ecrecover_trick.js | tee ecrecover.log
+          grep -q 'VERIFICADO (5/5)' ecrecover.log
+
+  interop-real-backend:
+    name: "interop: real cryptographic backend + layer guards"
+    runs-on: ubuntu-latest
+    # The interop absorption tripled this workspace. A cold-cache run of the
+    # real-backend suites alone exceeds the previous 45-minute budget, which
+    # cancelled the job after every one of its gates had already passed.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+        id: rust
+
+      # Every other build job here caches cargo; this one compiled the whole
+      # tree cold on every run. Same gates, nothing weakened.
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-interop-real-backend-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-interop-real-backend-${{ steps.rust.outputs.cachekey }}-
+
+      # G-F2 requires the full F1 regression to stay green against the REAL
+      # cryptographic backend rather than the disabled one. The suites live in
+      # dom-vault and dom-leg behind `real-dom-adaptor`, and
+      # `f2_e2e_018_the_f1_real_backend_regression_stays_wired_in_ci` reads this
+      # file and fails if either command is ever removed — so the regression
+      # cannot be dropped while the gate still claims it.
+      - name: F1 real-backend regression (vault)
+        run: cargo test -p dom-vault --features real-dom-adaptor --locked
+
+      - name: F1 real-backend regression (leg)
+        run: cargo test -p dom-leg --features real-dom-adaptor --locked
+
+      # The layer's executable guards. Each fails the build on its own finding;
+      # none of them is advisory.
+      - name: Architecture boundaries
+        run: ./scripts/check-boundaries.sh
+
+      - name: Ratification signatures
+        run: |
+          command -v minisign >/dev/null || sudo apt-get install -y minisign
+          ./scripts/check-ratification-signatures.sh
+
+      - name: F7 DOM surfaces
+        run: ./scripts/f7-validate-dom-surfaces.sh
+
+      - name: Layer guards
+        run: |
+          ./scripts/check-adaptor-two-nonce.sh
+          ./scripts/check-claim-adaptor-provenance.sh
+          ./scripts/check-hash-domains.sh
+          ./scripts/check-normative-adjudication.sh
+          ./scripts/check-policy-topology.sh
+          ./scripts/check-shared-output-bp.sh
+
+      # The one named exception to node byte-identity. This guard fails on the
+      # day the node line adopts the same fix, which is when the exception ends
+      # and byte identity must be restored. It fetches the release commit by SHA
+      # (one commit) because actions/checkout is shallow by default.
+      - name: Node-test exception (byte-identity)
+        run: ./scripts/check-node-test-exception.sh
+
+      - name: Release-surface boundary
+        run: ./scripts/check-release-surface.sh
+
+      - name: Relay fault-injection release boundary
+        run: ./scripts/check-relay-fault-surface.sh
+
+      # Feature surfaces no other job reaches. `--all-targets` builds the
+      # default feature set only, so a crate's optional surface can rot
+      # unnoticed: `mod signer_e2e` is gated on `all(test, evidence-only)`,
+      # which neither `cargo test --workspace` nor a plain clippy run compiles.
+      - name: Optional feature surfaces
+        run: |
+          cargo clippy -p dom-scriptless-store --features evidence-only --all-targets --locked -- -D warnings
+          cargo test  -p dom-scriptless-store --features evidence-only --locked
+          cargo clippy -p store --features failpoints --all-targets --locked -- -D warnings
+
+  # Kept verbatim on purpose: `cargo test -p <crate>` without `--all-targets`
+  # runs doctests, which no other job does. Not redundant with build-test.
+  release-blocker-crate-tests:
+    name: "release blockers: crate tests (linux)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-crate-tests-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-crate-tests-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo check --workspace
+        run: cargo check --workspace
+
+      - name: cargo test -p dom-consensus
+        run: cargo test -p dom-consensus
+
+      - name: cargo test -p dom-chain
+        run: cargo test -p dom-chain
+
+      - name: cargo test -p dom-store
+        run: cargo test -p dom-store
+
+      - name: cargo test -p dom-node (serial shutdown/supervisor coverage)
+        run: cargo test -p dom-node -- --test-threads=1
+
+      - name: cargo test -p dom-mempool
+        run: cargo test -p dom-mempool
+
+  release-blocker-integration-tests:
+    name: "release blockers: dom-integration-tests (linux fast mining)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DOM_NETWORK: regtest
+      DOM_REGTEST_FAST_MINING: "1"
+      RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "3"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-integration-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-integration-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo test -p dom-integration-tests
+        run: cargo test -p dom-integration-tests -- --test-threads=1
+
+      - name: cargo test -p dom-integration-tests --ignored
+        run: cargo test -p dom-integration-tests -- --ignored --test-threads=1
+
+  ibd-integration:
+    name: ibd-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DOM_NETWORK: regtest
+      DOM_REGTEST_FAST_MINING: "1"
+      RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "3"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      DOM_INTEGRATION_LOG_DIR: ${{ github.workspace }}/ibd-two-node-logs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-ibd-integration-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-ibd-integration-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo build --release -p dom-node
+        run: cargo build --release -p dom-node
+
+      - name: cargo test -p dom-integration-tests --test ibd_two_node
+        run: |
+          mkdir -p "$DOM_INTEGRATION_LOG_DIR"
+          cargo test -p dom-integration-tests --test ibd_two_node -- --nocapture --test-threads=1
+
+      - name: Upload IBD node logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ibd-integration-logs
+          path: ibd-two-node-logs
+          if-no-files-found: warn
+
+  release-blocker-gate:
+    name: release blocker gate
+    runs-on: ubuntu-latest
+    needs:
+      - fmt
+      - supply-chain
+      - build-test
+      - clippy
+      - interop-evm-contracts
+      - interop-real-backend
+      - release-blocker-crate-tests
+      - release-blocker-integration-tests
+      - ibd-integration
+    if: always()
+    steps:
+      - name: Require every release-blocker job to pass
+        run: |
+          test "${{ needs.fmt.result }}" = "success"
+          test "${{ needs.supply-chain.result }}" = "success"
+          test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.clippy.result }}" = "success"
+          test "${{ needs.interop-evm-contracts.result }}" = "success"
+          test "${{ needs.interop-real-backend.result }}" = "success"
+          test "${{ needs.release-blocker-crate-tests.result }}" = "success"
+          test "${{ needs.release-blocker-integration-tests.result }}" = "success"
+          test "${{ needs.ibd-integration.result }}" = "success"
+
+  critical-domain-coverage-report:
+    name: critical domain coverage report
+    runs-on: ubuntu-latest
+    needs: release-blocker-gate
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate critical domain coverage report
+        run: scripts/critical_domain_coverage_report.sh > critical-domain-coverage.md
+
+      - name: Upload critical domain coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: critical-domain-coverage
+          path: critical-domain-coverage.md
+
+  pmmr-vectors-cross-platform:
+    name: pinned PMMR vectors must reproduce on ${{ matrix.host }}
+    runs-on: ${{ matrix.runner }}
+    needs: build-test
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+            experimental: false
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+            experimental: false
+          - host: macos-arm64
+            runner: macos-latest
+            experimental: false
+          - host: macos-x86_64
+            runner: macos-15-intel
+            experimental: false
+          - host: windows-x86_64
+            runner: windows-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # The pinned RFC-0004 hex vectors are the cross-platform contract
+      # for the PMMR layout. If this leg fails on a runner where
+      # build-test passed, the protocol has lost cross-platform
+      # determinism on that platform.
+      - name: Run pinned PMMR vector tests
+        run: |
+          cargo test -p dom-test-vectors --lib pmmr_vectors
+
+      - name: Run hash + serialization vector tests
+        run: |
+          cargo test -p dom-test-vectors --lib hash_vectors
+          cargo test -p dom-test-vectors --lib serialization_vectors
+
+      - name: Run PMMR adversarial + reproducer suite
+        run: |
+          cargo test -p dom-pmmr --tests
+
+      - name: Print pinned PMMR vectors (cross-platform audit log)
+        run: |
+          cargo test -p dom-test-vectors --lib pmmr_vectors::tests::print_pmmr_vectors -- --nocapture
+
+      # Phase 1.4 deterministic snapshot manifest — every host
+      # produces the SAME byte sequence. The compare-snapshots job
+      # (below) downloads every host's artifact and asserts they
+      # are byte-identical. Any divergence is a consensus-class
+      # cross-platform regression.
+      - name: Generate deterministic snapshot manifest
+        shell: bash
+        run: |
+          cargo run -p dom-test-vectors --bin cross_platform_snapshot --quiet \
+            > snapshot.${{ matrix.host }}.txt
+          wc -c snapshot.${{ matrix.host }}.txt
+          head -5 snapshot.${{ matrix.host }}.txt
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshot-${{ matrix.host }}
+          path: snapshot.${{ matrix.host }}.txt
+          if-no-files-found: error
+
+  compare-snapshots:
+    name: cross-platform snapshot byte-equivalence
+    runs-on: ubuntu-latest
+    needs: pmmr-vectors-cross-platform
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download every host's snapshot
+        uses: actions/download-artifact@v8
+        with:
+          pattern: snapshot-*
+          path: snapshots
+          merge-multiple: true
+
+      # The non-experimental matrix legs (linux-x86_64, linux-arm64,
+      # macos-arm64, macos-x86_64) MUST produce a byte-identical
+      # manifest. Windows is `continue-on-error: true` in the
+      # matrix above and is therefore tolerated here too — its
+      # divergence does NOT fail the gate until the MSVC build
+      # path is green (RB-PMMR-001 deferred-validation list).
+      - name: Diff snapshots across non-experimental hosts
+        run: |
+          set -euo pipefail
+          ls -la snapshots/
+          REFERENCE=snapshots/snapshot.linux-x86_64.txt
+          if [ ! -f "$REFERENCE" ]; then
+            echo "FATAL: reference snapshot ${REFERENCE} missing — linux-x86_64 leg did not upload"
+            exit 1
+          fi
+          REQUIRED_HOSTS="linux-arm64 macos-arm64 macos-x86_64"
+          for host in $REQUIRED_HOSTS; do
+            CANDIDATE="snapshots/snapshot.${host}.txt"
+            if [ ! -f "$CANDIDATE" ]; then
+              echo "FATAL: missing snapshot for required host ${host}"
+              exit 1
+            fi
+            if ! diff -u "$REFERENCE" "$CANDIDATE"; then
+              echo "DIVERGENCE: ${host} differs from linux-x86_64 reference"
+              exit 1
+            fi
+            echo "OK: ${host} byte-identical to linux-x86_64"
+          done
+          # Advisory diff against Windows (continue-on-error).
+          if [ -f snapshots/snapshot.windows-x86_64.txt ]; then
+            if diff -u "$REFERENCE" snapshots/snapshot.windows-x86_64.txt > /dev/null; then
+              echo "BONUS: windows-x86_64 ALSO byte-identical"
+            else
+              echo "ADVISORY: windows-x86_64 diverges (expected until RB-PMMR-001 MSVC pinning):"
+              diff -u "$REFERENCE" snapshots/snapshot.windows-x86_64.txt || true
+            fi
+          fi
