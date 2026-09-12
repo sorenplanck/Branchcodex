@@ -8,6 +8,8 @@
 #[path = "production_native_daemon_export_v23_tests.rs"]
 pub(crate) mod native_daemon_export_v23;
 
+#[path = "production_f6_artifact_writer_v23.rs"]
+pub(crate) mod artifact_writer_v23;
 #[path = "production_f6_native_observation_v23.rs"]
 pub(crate) mod native_observation_v23;
 use std::collections::BTreeSet;

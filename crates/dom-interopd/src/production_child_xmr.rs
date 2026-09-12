@@ -51,6 +51,8 @@ use crate::production_child_router::{
 };
 use crate::production_inputs::AuthenticatedProductionInputsV1;
 
+#[path = "production_xmr_funding_deadline_v24.rs"]
+mod funding_deadline_v24;
 #[path = "production_xmr_funding_loss_v23.rs"]
 mod funding_loss_v23;
 
@@ -286,15 +288,91 @@ struct ProductionXmrMaterializationAuthorityV1 {
     source_scope_digest: Digest32,
 }
 
+/// A read-only face of the SAME actuator opening used by the child. It cannot
+/// obtain a lease, write a stage, publish bytes, or reopen the physical Store.
+pub(crate) struct ProductionXmrRetainedRefundReaderV24 {
+    actuator: std::rc::Rc<DurableXmrActuatorV1>,
+    setup: ValidatedXmrSetup,
+    max_fee: u64,
+    max_raw_bytes: usize,
+}
+impl ProductionXmrRetainedRefundReaderV24 {
+    pub(crate) fn new(
+        actuator: std::rc::Rc<DurableXmrActuatorV1>,
+        setup: ValidatedXmrSetup,
+        max_fee: u64,
+        max_raw_bytes: usize,
+    ) -> Result<Self, ChildAuthorityRefusalV1> {
+        if setup.settlement_id() == ZERO_DIGEST
+            || max_fee == 0
+            || max_fee >= setup.expected_amount_piconero()
+            || max_raw_bytes == 0
+            || max_raw_bytes > xmr_actuator::MAX_RAW_TX_BYTES_V1
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        Ok(Self {
+            actuator,
+            setup,
+            max_fee,
+            max_raw_bytes,
+        })
+    }
+
+    pub(crate) fn retained(&self) -> Result<Option<XmrBuiltSweepV1>, ChildAuthorityRefusalV1> {
+        let locator = XmrOperationLocatorV1 {
+            settlement_id: self.setup.settlement_id(),
+            kind: XmrOperationKindV1::Refund,
+        };
+        let view = match self.actuator.view(locator) {
+            Ok(view) => view,
+            Err(XmrActuatorErrorV1::NotFound) => return Ok(None),
+            Err(error) => return Err(map_actuator_error(error)),
+        };
+        let raw = self
+            .actuator
+            .retained(locator)
+            .map_err(map_actuator_error)?;
+        if view.locator != locator
+            || view.fencing_epoch == 0
+            || view.revision == 0
+            || raw.len() > self.max_raw_bytes
+            || xmr_actuator::custody_digest_v1(&raw).map_err(map_actuator_error)?
+                != view.custody_digest
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let verified = xmr_raw_tx_verify::verify_exact_raw_sweep_bounded_v23(
+            &raw,
+            view.tx_hash,
+            self.setup.expected_amount_piconero(),
+            self.max_fee,
+        )
+        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        if verified.sweep().key_images.as_slice() != [view.key_image] {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        // This proves only local byte custody. Fresh chain/payout/ring proof
+        // verification is still required before a remote response is signed.
+        Ok(Some(XmrBuiltSweepV1 {
+            tx_hash: view.tx_hash,
+            key_image: view.key_image,
+            raw_transaction: raw,
+            remote_custody_v23: None,
+        }))
+    }
+}
+
 /// Owner-scoped production bridge from coordinator calls to one Monero
 /// actuator over one DLEQ-authenticated shared-spend setup.
 pub(crate) struct ProductionXmrChildPortV1<B, O, C> {
-    actuator: DurableXmrActuatorV1,
+    actuator: std::rc::Rc<DurableXmrActuatorV1>,
     broadcast: B,
     observation: O,
     deployment: ResolvedMoneroDeploymentV1,
     setup: ValidatedXmrSetup,
     lease: XmrActuatorLeaseV1,
+    funding_window_v23: Option<crate::production_timer::ProductionFundingWindowV23>,
     min_confirmations: u64,
     clock: C,
     settlement_id: Digest32,
@@ -416,7 +494,7 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        actuator: DurableXmrActuatorV1,
+        actuator: impl Into<std::rc::Rc<DurableXmrActuatorV1>>,
         broadcast: B,
         observation: O,
         deployment: ResolvedMoneroDeploymentV1,
@@ -434,12 +512,13 @@ where
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         Ok(Self {
-            actuator,
+            actuator: actuator.into(),
             broadcast,
             observation,
             deployment,
             setup,
             lease,
+            funding_window_v23: None,
             min_confirmations,
             clock,
             settlement_id,
@@ -468,6 +547,17 @@ where
             self.lease.fencing_epoch(),
         )?;
         self.lease_owner_v11 = Some(owner);
+        Ok(self)
+    }
+
+    pub(crate) fn with_funding_window_v23(
+        mut self,
+        window: crate::production_timer::ProductionFundingWindowV23,
+    ) -> Result<Self, ChildAuthorityRefusalV1> {
+        if self.funding_window_v23.is_some() {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.funding_window_v23 = Some(window);
         Ok(self)
     }
 
@@ -565,7 +655,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_materializing(
-        actuator: DurableXmrActuatorV1,
+        actuator: impl Into<std::rc::Rc<DurableXmrActuatorV1>>,
         broadcast: B,
         observation: O,
         deployment: ResolvedMoneroDeploymentV1,
@@ -1041,8 +1131,31 @@ where
                 request.intent_digest(),
             )?;
             let recovery = self.resolved_recovery_v23()?;
+            let funding_deadline = if recovery.is_some() {
+                let observed_before_clock = std::time::Instant::now();
+                let now = self.clock.now_unix_ms()?;
+                let window = self
+                    .funding_window_v23
+                    .as_ref()
+                    .and_then(|window| window.deadline_for_route(request.route_id()))
+                    .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
+                Some(
+                    funding_deadline_v24::funding_deadline_v24(
+                        window,
+                        observed_before_clock,
+                        now,
+                        self.lease.deadline_unix_ms_v24(),
+                    )
+                    .ok_or(ChildAuthorityRefusalV1::Unavailable)?,
+                )
+            } else {
+                None
+            };
             if let Some(driver) = &recovery {
-                let collateral = driver.verify_funding_prerequisite()?;
+                let remaining = funding_deadline
+                    .ok_or(ChildAuthorityRefusalV1::Unavailable)?
+                    .saturating_duration_since(std::time::Instant::now());
+                let collateral = driver.verify_funding_prerequisite_bounded_v23(remaining)?;
                 if collateral.collateral().finality().terms_hash() != self.setup.terms_hash() {
                     return Err(ChildAuthorityRefusalV1::Conflict);
                 }
@@ -1053,9 +1166,13 @@ where
                 .ok_or(ChildAuthorityRefusalV1::Refused)?;
             let facts = (|| {
                 if let Some(driver) = &recovery {
+                    let mut broadcast = funding_deadline_v24::FundingDeadlineBroadcastV24::new(
+                        &mut self.broadcast,
+                        funding_deadline.ok_or(ChildAuthorityRefusalV1::Unavailable)?,
+                    );
                     authority
                         .sweep_authority
-                        .broadcast_funding_v12(driver, &mut self.broadcast)?;
+                        .broadcast_funding_v12(driver, &mut broadcast)?;
                     let funding = authority.sweep_authority.observe_verified_funding_v22()?;
                     match driver.tick_with_funding(funding)? {
                         adapter_dom_real::DomXmrRecoveryProgressV12::CollateralReady(_) => {}

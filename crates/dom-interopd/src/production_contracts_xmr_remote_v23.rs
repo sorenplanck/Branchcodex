@@ -20,7 +20,57 @@ where
     pub(super) store: Rc<ContractsSessionStoreV1>,
     pub(super) identity: Rc<ContractsTransportIdentityStoreV1>,
     pub(super) relay: Rc<RefCell<DurableRelayWorkerV1<F>>>,
-    pub(super) expiry: TimelockSpec,
+    pub(super) last_transport_time_v24: Cell<u64>,
+    pub(super) action_v24: xmr_remote_sweep_wire::RemoteSweepActionV23,
+}
+
+// Relay time is Unix time, never the economic Monero block-height deadline.
+// Same one-hour operational TTL as the bootstrap/F7 transport. Existing
+// application rows retain their first expiry in DurableRelaySenderV1; this
+// value is used only when creating an application, never to rewrite a replay.
+fn xmr_transport_expiry_v24(
+    now: u64,
+    floor: Option<u64>,
+    last: u64,
+) -> Result<TimelockSpec, ChildAuthorityRefusalV1> {
+    if now == 0 || now < last || floor.is_some_and(|floor| now < floor) {
+        return Err(ChildAuthorityRefusalV1::Unavailable);
+    }
+    Ok(TimelockSpec::TimestampSeconds {
+        value: now
+            .checked_add(3600)
+            .ok_or(ChildAuthorityRefusalV1::Unavailable)?,
+    })
+}
+
+#[cfg(test)]
+mod transport_clock_tests_v24 {
+    use super::*;
+
+    #[test]
+    fn xmr_envelope_ttl_uses_relay_timestamp_not_chain_height() {
+        assert_eq!(
+            xmr_transport_expiry_v24(1_900_000_000, Some(1_899_999_999), 1_900_000_000),
+            Ok(TimelockSpec::TimestampSeconds {
+                value: 1_900_003_600
+            })
+        );
+    }
+
+    #[test]
+    fn xmr_envelope_clock_refuses_zero_backwards_and_overflow() {
+        for (now, floor, last) in [
+            (0, None, 0),
+            (9, Some(10), 0),
+            (9, None, 10),
+            (u64::MAX, None, 0),
+        ] {
+            assert_eq!(
+                xmr_transport_expiry_v24(now, floor, last),
+                Err(ChildAuthorityRefusalV1::Unavailable)
+            );
+        }
+    }
 }
 
 impl<F> core::fmt::Debug for ProductionXmrRemoteContractsAuthorityV23<F>
@@ -36,6 +86,34 @@ impl<F> ProductionXmrRemoteContractsAuthorityV23<F>
 where
     F: F6TransportPortV1,
 {
+    fn require_action_v24(&self, bytes: &[u8]) -> Result<(), ChildAuthorityRefusalV1> {
+        let request = xmr_remote_sweep_wire::RemoteSweepRequestV23::decode_exact(bytes)
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        if request.action != self.action_v24
+            || request.session_id != self.session_id
+            || request.route_id != self.route_id
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        Ok(())
+    }
+
+    fn transport_expiry_v24(&self) -> Result<TimelockSpec, ChildAuthorityRefusalV1> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?
+            .as_secs();
+        let floor = self
+            .relay
+            .try_borrow()
+            .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?
+            .retained_timestamp_floor()
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        let expiry = xmr_transport_expiry_v24(now, floor, self.last_transport_time_v24.get())?;
+        self.last_transport_time_v24.set(now);
+        Ok(expiry)
+    }
+
     fn responder_request_and_completed_response_v23(
         &self,
         request_message_digest: [u8; 32],
@@ -50,6 +128,7 @@ where
             if accepted.message_digest() != &request_message_digest {
                 return Err(ChildAuthorityRefusalV1::Conflict);
             }
+            self.require_action_v24(accepted.payload())?;
             return Ok((accepted.payload().to_vec(), None));
         }
         let completed = self
@@ -68,6 +147,7 @@ where
             .map_err(|error| {
                 map_remote_transport_error(ProductionContractsOutboundErrorV1::Store(error))
             })?;
+        self.require_action_v24(prepared.request_payload())?;
         Ok((
             prepared.request_payload().to_vec(),
             Some(prepared.response_payload().to_vec()),
@@ -85,9 +165,11 @@ where
         request_bytes: &[u8],
         request_wire_digest: [u8; 32],
     ) -> Result<PreparedXmrRemoteSweepImportV23, ChildAuthorityRefusalV1> {
+        let expiry = self.transport_expiry_v24()?;
         let request = xmr_remote_sweep_wire::RemoteSweepRequestV23::decode_exact(request_bytes)
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        if request.session_id != self.session_id
+        if request.action != self.action_v24
+            || request.session_id != self.session_id
             || request.route_id != self.route_id
             || request
                 .digest()
@@ -157,7 +239,7 @@ where
                             self.identity.as_ref(),
                             &self.relay,
                             *prepared,
-                            self.expiry,
+                            expiry,
                         )
                         .map_err(map_remote_transport_error)?;
                     }
@@ -178,7 +260,7 @@ where
                         self.relay
                             .try_borrow_mut()
                             .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?
-                            .stage_store_outbound_dsc1(*committed, self.expiry)
+                            .stage_store_outbound_dsc1(*committed, expiry)
                             .map_err(ProductionContractsOutboundErrorV1::from)
                             .map_err(map_remote_transport_error)?;
                     }
@@ -215,7 +297,7 @@ where
                     self.identity.as_ref(),
                     &self.relay,
                     prepared,
-                    self.expiry,
+                    expiry,
                 )
                 .map_err(map_remote_transport_error)?;
                 digest
@@ -350,6 +432,7 @@ where
                     map_remote_transport_error(ProductionContractsOutboundErrorV1::Store(error))
                 })?;
             let (request, response) = prepared.into_payloads();
+            self.require_action_v24(&request)?;
             return Ok(crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteResponderPollV23::RetainedResponse {
                 request,
                 response,
@@ -373,7 +456,10 @@ where
         let request =
             xmr_remote_sweep_wire::RemoteSweepRequestV23::decode_exact(accepted.payload())
                 .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        if request.route_id != self.route_id || request.session_id != self.session_id {
+        if request.action != self.action_v24
+            || request.route_id != self.route_id
+            || request.session_id != self.session_id
+        {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         Ok(
@@ -388,6 +474,8 @@ where
         accepted: &AcceptedXmrRemoteSweepRequestV23,
         response_bytes: &[u8],
     ) -> Result<(), ChildAuthorityRefusalV1> {
+        let expiry = self.transport_expiry_v24()?;
+        self.require_action_v24(accepted.payload())?;
         if accepted.session_id() != &self.session_id
             || accepted.requester_id() != &self.remote_participant
             || accepted.signer_id() != &self.local_participant
@@ -423,7 +511,7 @@ where
             self.identity.as_ref(),
             &self.relay,
             prepared,
-            self.expiry,
+            expiry,
         )
         .map_err(map_remote_transport_error)?;
         Ok(())
@@ -433,11 +521,13 @@ where
         &mut self,
         response_bytes: &[u8],
     ) -> Result<(), ChildAuthorityRefusalV1> {
+        let expiry = self.transport_expiry_v24()?;
         let response = xmr_remote_sweep_wire::RemoteSweepResponseV23::decode_exact(response_bytes)
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
         if response.request_message_digest() == [0; 32] {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
+        self.responder_request_and_completed_response_v23(response.request_message_digest())?;
         match self
             .store
             .resume_outbound_dsc1(self.session_id)
@@ -459,7 +549,7 @@ where
                     self.identity.as_ref(),
                     &self.relay,
                     *prepared,
-                    self.expiry,
+                    expiry,
                 )
                 .map_err(map_remote_transport_error)?;
                 Ok(())
@@ -479,7 +569,7 @@ where
                 self.relay
                     .try_borrow_mut()
                     .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?
-                    .stage_store_outbound_dsc1(*committed, self.expiry)
+                    .stage_store_outbound_dsc1(*committed, expiry)
                     .map_err(ProductionContractsOutboundErrorV1::from)
                     .map_err(map_remote_transport_error)?;
                 Ok(())

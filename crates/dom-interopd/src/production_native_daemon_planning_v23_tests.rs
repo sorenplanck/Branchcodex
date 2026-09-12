@@ -3,6 +3,9 @@
 //! The final loader must authenticate the exported files again before launch.
 use super::*;
 use crate::production_config::ProductionPathReferencesV1;
+use crate::production_inputs::planning_context_v23::{
+    ProductionPreF6PlanningContextV23, ProductionPreF6PlanningInputsV23,
+};
 use deployment_registry::SignedRegistryV1;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -65,70 +68,29 @@ impl NativeDaemonPlanningContextV23 {
         let secp = SecpContext::new(&VERIFICATION_CONTEXT_SEED_V1);
         let registry_path = root.join(paths.get(ProductionPathRoleV1::RegistryStore));
         require_private_parent(registry_path.parent().ok_or("registry parent")?)?;
-        let mut store = RegistryStoreV1::create(&registry_path)?;
-        let policy = RegistryValidationPolicyV1 {
-            now_seconds: input.now_seconds,
-            expected_network_id: input.network_id,
-            minimum_epoch: input.minimum_registry_epoch,
-        };
-        store.install(
-            &input.signed_registry,
-            &input.authorities.registry,
-            &secp,
-            policy,
-        )?;
-        let registry = store
-            .load_current(&input.authorities.registry, &secp, policy)?
-            .ok_or("native planning registry missing")?;
+        let store = RegistryStoreV1::create(&registry_path)?;
         let [upstream, downstream] = &input.terms;
-        if input.rosters.network_id() != input.network_id
-            || input.rosters.route_id() != input.route_id
-        {
-            return Err("native planning roster scope".into());
-        }
-        validate_roster_terms(&input.rosters, upstream, downstream, &secp)?;
-        let time_config = RouteTimeAnchorStoreConfigV2::new(
-            &registry,
-            upstream,
-            downstream,
-            &input.authorities.time_policy,
-            &input.authorities.time_evidence,
-            &secp,
-        )?;
+        let planning_input = ProductionPreF6PlanningInputsV23 {
+            signed_registry: &input.signed_registry,
+            authorities: &input.authorities,
+            terms: [upstream, downstream],
+            signed_policy: &input.signed_policy,
+            signed_evidence: &input.signed_evidence,
+            rosters: &input.rosters,
+            route_id: input.route_id,
+            network_id: input.network_id,
+            minimum_registry_epoch: input.minimum_registry_epoch,
+            now_seconds: input.now_seconds,
+        };
+        let time_config = planning_input.time_store_config(&secp)?;
         let policy_authority_digest = time_config.policy_authority_set_digest();
         let evidence_authority_digest = time_config.evidence_authority_set_digest();
         // A distinct planning journal is not the daemon's mutable time store.
         let time_path = root.join("planning-native-time-v23.sqlite3");
         let mut time = DurableRouteTimeAnchorStoreV2::create(&time_path, time_config)?;
-        let policy_context = RouteTimePolicyVerificationContextV2::new(
-            &input.authorities.time_policy,
-            &secp,
-            &registry,
-            upstream,
-            downstream,
-        );
-        let evidence_context = RouteTimeEvidenceVerificationContextV2::new(
-            policy_context,
-            &input.authorities.time_evidence,
-        );
-        time.install_policy(&input.signed_policy, policy_context, input.now_seconds)?;
-        time.install_evidence(&input.signed_evidence, evidence_context, input.now_seconds)?;
-        let proof = time.prove_route_ladder(evidence_context, input.now_seconds)?;
-        let proof = time.consume_capability_at(proof, input.now_seconds)?;
-        let composition = ComposedBindingV2::bind(upstream.clone(), downstream.clone(), proof)?;
-        let authority = RegistryRouteAdmissionAuthorityV1::new(
-            store,
-            input.authorities.registry.clone(),
-            SecpContext::new(&VERIFICATION_CONTEXT_SEED_V1),
-            input.network_id,
-            input.minimum_registry_epoch,
-        )?;
-        let admission = authority.admit_validated_composed_route_v2(
-            input.now_seconds,
-            input.route_id,
-            &composition,
-            input.rosters.snapshots(),
-        )?;
+        let planning =
+            ProductionPreF6PlanningContextV23::prepare(store, &mut time, &planning_input, &secp)?;
+        let (admission, composition, registry) = planning.into_parts();
         let authenticated = authenticate_participant_bundle(
             &input.participants,
             ParticipantAuthenticationContextV1 {
@@ -192,7 +154,6 @@ impl NativeDaemonPlanningContextV23 {
             publish(root, paths.get(role), &bytes)?;
         }
         drop(time);
-        drop(authority);
         Ok(Self {
             admission,
             composition,

@@ -742,6 +742,9 @@ pub enum SessionStoreError {
     InvalidTransition,
     /// Funding was already authorized, consumed, or made unreachable safely.
     FundingAuthorityUnavailable,
+    /// Native refund public-message scope has not yet been observed locally.
+    /// This is retryable only before any native refund DSC1 edge is retained.
+    NativeXmrRefundTransportPendingV23,
     /// Post-anchor DOM claim-signing authority is absent, stale, or consumed.
     ClaimSigningAuthorityUnavailable,
     /// Productive M.8/F7 V1 authority is closed in a production-ratified Store.
@@ -765,6 +768,9 @@ impl fmt::Display for SessionStoreError {
             Self::SessionNotFound => "session was not found",
             Self::InvalidTransition => "session transition was rejected",
             Self::FundingAuthorityUnavailable => "funding authority is unavailable",
+            Self::NativeXmrRefundTransportPendingV23 => {
+                "native XMR refund transport is awaiting canonical public U"
+            }
             Self::ClaimSigningAuthorityUnavailable => {
                 "post-anchor DOM claim-signing authority is unavailable"
             }

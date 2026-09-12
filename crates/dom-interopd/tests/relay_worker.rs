@@ -2718,6 +2718,7 @@ fn store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence(
     )?);
     let outbound = committed_abort(store.as_ref(), &fixture, [0x84; 32])?;
     let application_id = *outbound.application_id();
+    let original_signed = outbound.signed_bytes().to_vec();
     let mut worker = DurableRelayWorkerV1::create(
         &worker_paths(temporary.path(), true),
         worker_config(true),
@@ -2739,12 +2740,22 @@ fn store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence(
         Err(RelayWorkerOutboundErrorV1::Sender(_))
     ));
     let first_attempt = relay.attempts[0].clone();
+    assert_eq!(
+        relay::RelayEnvelopeV1::decode(&first_attempt)?.expiry,
+        expiry()
+    );
     drop(worker);
     drop(store);
     drop(relay);
 
     let store = Rc::new(open_contracts_store(temporary.path(), "contracts-a")?);
     let recovered = resumed_committed(store.as_ref())?;
+    assert_eq!(recovered.signed_bytes(), original_signed);
+    // The original application already exists. Even a caller retry with a
+    // different timelock domain must neither renew its expiry nor re-sign it.
+    // This real Store fixture is Abort; native Refund admission is covered
+    // separately, as is the real multiframe sender/Relay restart regression.
+    let divergent_expiry = TimelockSpec::TimestampSeconds { value: u64::MAX };
     let mut worker = DurableRelayWorkerV1::open_existing(
         &worker_paths(temporary.path(), true),
         worker_config(true),
@@ -2754,7 +2765,7 @@ fn store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence(
         INITIATOR_RELAY_SECRET,
     )?;
     assert!(matches!(
-        worker.stage_store_outbound_dsc1(recovered, expiry())?,
+        worker.stage_store_outbound_dsc1(recovered, divergent_expiry)?,
         RouteApplicationDispositionV2::Pending(status)
             if status.application_id() == &application_id
                 && status.first_sequence() == 0
@@ -2769,12 +2780,51 @@ fn store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence(
         }
     ));
     assert_eq!(relay.attempts[0], first_attempt);
+    assert_eq!(
+        relay::RelayEnvelopeV1::decode(&relay.attempts[0])?.expiry,
+        expiry()
+    );
+    let acknowledged_stats = worker.sender_stats()?;
+    assert_eq!(acknowledged_stats.completed, 1);
+    // Crash after the exact ACK is durable, before Contracts handoff. Reopen
+    // must finish that same handoff without sending/signing a new envelope.
+    drop(worker);
+    drop(store);
+    drop(relay);
+    let store = Rc::new(open_contracts_store(temporary.path(), "contracts-a")?);
     let recovered = resumed_committed(store.as_ref())?;
+    assert_eq!(recovered.application_id(), &application_id);
+    assert_eq!(recovered.signed_bytes(), original_signed);
+    let mut worker = DurableRelayWorkerV1::open_existing(
+        &worker_paths(temporary.path(), true),
+        worker_config(true),
+        Rc::clone(&store),
+        rosters(),
+        TestF6Authority::default(),
+        INITIATOR_RELAY_SECRET,
+    )?;
     assert!(matches!(
-        worker.stage_store_outbound_dsc1(recovered, expiry())?,
+        worker.stage_store_outbound_dsc1(recovered, divergent_expiry)?,
         RouteApplicationDispositionV2::AlreadyAcked(status)
             if status.application_id() == &application_id
+                && status.first_sequence() == 0
+                && status.final_sequence() == 0
+                && status.acknowledged_frames() == 1
     ));
+    assert!(matches!(
+        store.resume_outbound_dsc1(SESSION)?,
+        OutboundDsc1RecoveryV1::None
+    ));
+    assert_eq!(worker.sender_stats()?, acknowledged_stats);
+    let mut relay = open_relay(&relay_root)?;
+    assert!(matches!(
+        worker.submit_outbound_once(&mut relay)?,
+        RelayOutboundStepV1::Idle
+    ));
+    assert!(relay.attempts.is_empty());
+    drop(worker);
+    drop(store);
+    let store = open_contracts_store(temporary.path(), "contracts-a")?;
     assert!(matches!(
         store.resume_outbound_dsc1(SESSION)?,
         OutboundDsc1RecoveryV1::None

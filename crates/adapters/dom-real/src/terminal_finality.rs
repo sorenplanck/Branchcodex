@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[path = "funding_finality_bounded_v23.rs"]
+mod funding_bounded_v23;
+pub(super) use funding_bounded_v23::FundingFinalityScanV23;
+
 const CHECKPOINT_MAGIC: &[u8; 8] = b"DOMFIN1\0";
 const CHECKPOINT_VERSION: u16 = 1;
 const CHECKPOINT_DOMAIN: &[u8] = b"DOM-INTEROP/DOM-TERMINAL-CHECKPOINT/V1\0";
@@ -429,6 +433,23 @@ impl RealDomRpcRuntimeV1 {
             return Err(RealDomError::InvalidEvidence);
         }
         let snapshot = self.canonical_terminal_snapshot(evidence)?;
+        self.funding_finality_from_snapshot_v23(
+            snapshot,
+            expected_tx_hash,
+            expected_shared_output_commitment,
+            minimum_confirmations,
+            max_reorg_depth,
+        )
+    }
+
+    fn funding_finality_from_snapshot_v23(
+        &self,
+        snapshot: CanonicalTerminalSnapshotV1,
+        expected_tx_hash: [u8; 32],
+        expected_shared_output_commitment: [u8; 33],
+        minimum_confirmations: u32,
+        max_reorg_depth: u32,
+    ) -> Result<VerifiedDomFundingFinalityV1, RealDomError> {
         let created = snapshot
             .transaction
             .transaction()

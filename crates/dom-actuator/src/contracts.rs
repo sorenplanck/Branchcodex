@@ -2,6 +2,10 @@
 
 #[path = "final_claim_v14.rs"]
 mod final_claim_v14;
+#[path = "funding_dispatch_v23.rs"]
+mod funding_dispatch_v23;
+#[path = "native_xmr_refund_v23.rs"]
+mod native_xmr_refund_v23;
 pub use final_claim_v14::{
     DomF7FinalClaimAdmissionV14, DomF7FinalClaimRequestV14, DomF7FinalClaimSubmissionV14,
 };
@@ -3294,7 +3298,10 @@ fn map_final_claim_observation_error_v2(
         | SessionStoreError::ClaimSigningAuthorityUnavailable
         | SessionStoreError::LegacyV1RecoveryOnly
         | SessionStoreError::CapacityExceeded
-        | SessionStoreError::RandomFailure => Err(DomActuatorError::ContractsAuthorityUnavailable),
+        | SessionStoreError::RandomFailure
+        | SessionStoreError::NativeXmrRefundTransportPendingV23 => {
+            Err(DomActuatorError::ContractsAuthorityUnavailable)
+        }
     }
 }
 
@@ -3316,7 +3323,10 @@ fn map_observed_final_claim_transition_error_v2(error: SessionStoreError) -> Dom
         | SessionStoreError::FundingAuthorityUnavailable
         | SessionStoreError::ClaimSigningAuthorityUnavailable
         | SessionStoreError::CapacityExceeded
-        | SessionStoreError::RandomFailure => DomActuatorError::ContractsAuthorityUnavailable,
+        | SessionStoreError::RandomFailure
+        | SessionStoreError::NativeXmrRefundTransportPendingV23 => {
+            DomActuatorError::ContractsAuthorityUnavailable
+        }
     }
 }
 

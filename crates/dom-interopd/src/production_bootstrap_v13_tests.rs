@@ -84,13 +84,15 @@ fn fixture_with_registry_configuration_v23(
     let secp = SecpContext::new(&[13; 32]);
     let (previous, mut up, mut down) = crate::route_time_test_common::mainnet_registry_and_terms();
     let mut manifest = previous.manifest().clone();
-    configure(&mut manifest, [&mut up, &mut down]);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     manifest.valid_from = now - 60;
     manifest.expires_at = now + 3600;
+    // A new scenario may explicitly negotiate a different bounded lifetime.
+    // Apply it before signing, never rewrite the signed registry afterwards.
+    configure(&mut manifest, [&mut up, &mut down]);
     let key = secp.xonly_public_key(&[91; 32]).unwrap();
     let authorities = AuthoritySetV1::new(1, vec![key]).unwrap();
     let digest = manifest.manifest_digest().unwrap();

@@ -1,7 +1,13 @@
 //! One real GPL producer, two route funding candidates plus one independently
 //! keyed solver-inventory output, one common XMR RPC history, and four separately
-//! credentialed actor sidecars. Nothing is broadcast.
+//! credentialed actor sidecars. Nothing is forwarded to a live chain. The
+//! explicit mutable mode accepts daemon submissions into a private local pool;
+//! initial route candidates are neither submitted nor confirmed for the daemon.
 use super::*;
+
+#[path = "production_xmr_native_route_control_v23_tests.rs"]
+mod control_v23;
+pub(crate) use control_v23::NativeXmrHistoryStatusV23;
 
 fn inventory_custody_digest_v23(domain: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {
     use blake2::digest::{Update, VariableOutput};
@@ -282,11 +288,134 @@ struct RouteEnvelopeV23 {
     scope: String,
     legs: [Envelope; 2],
     solver_inventory: Envelope,
+    #[serde(default)]
+    funding_state_v23: Option<String>,
+    #[serde(default)]
+    source_outputs_v23: Option<[RouteSourceOutputV23; 3]>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteSourceOutputV23 {
+    position: String,
+    tx_hash: String,
+    block_height: u64,
+    global_output_index: u64,
+    amount_piconero: u64,
+    public_key: String,
+    commitment: String,
+}
+
+fn check_route_sources_v23(
+    state: Option<&str>,
+    sources: Option<&[RouteSourceOutputV23; 3]>,
+    mutable: bool,
+    amounts: [u64; 3],
+    candidates: [[u8; 32]; 3],
+) -> Result<()> {
+    if !mutable {
+        if state.is_some() || sources.is_some() {
+            return Err("immutable route unexpectedly exposes mutable funding state".into());
+        }
+        return Ok(());
+    }
+    if state != Some("unconfirmed-route-candidates-inventory-confirmed") {
+        return Err("mutable route candidates must start unconfirmed".into());
+    }
+    let sources = sources.ok_or("mutable route source metadata missing")?;
+    let mut identities = std::collections::BTreeSet::new();
+    for (index, source) in sources.iter().enumerate() {
+        let canonical = |text: &str| -> Result<[u8; 32]> {
+            let bytes: [u8; 32] = hex::decode(text)?
+                .try_into()
+                .map_err(|_| "route source field length")?;
+            if bytes == [0; 32] || hex::encode(bytes) != text {
+                return Err("route source field is not canonical".into());
+            }
+            Ok(bytes)
+        };
+        let tx_hash = canonical(&source.tx_hash)?;
+        canonical(&source.public_key)?;
+        canonical(&source.commitment)?;
+        if source.position != ["upstream", "downstream", "inventory"][index]
+            || source.block_height != index as u64 + 1
+            || source.global_output_index != index as u64 * 8
+            || source.amount_piconero
+                != amounts[index]
+                    .checked_add(1_000_000_000)
+                    .ok_or("route source amount overflow")?
+            || candidates.contains(&tx_hash)
+            || !identities.insert(tx_hash)
+        {
+            return Err("mutable route source scope or identity mismatch".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod source_metadata_tests_v23 {
+    use super::*;
+
+    fn sources() -> [RouteSourceOutputV23; 3] {
+        std::array::from_fn(|index| RouteSourceOutputV23 {
+            position: ["upstream", "downstream", "inventory"][index].into(),
+            tx_hash: hex::encode([index as u8 + 4; 32]),
+            block_height: index as u64 + 1,
+            global_output_index: index as u64 * 8,
+            amount_piconero: 1_000_000_010,
+            public_key: hex::encode([7; 32]),
+            commitment: hex::encode([8; 32]),
+        })
+    }
+
+    #[test]
+    fn route_source_metadata_cannot_preconfirm_or_alias_funding_candidates() {
+        let state = Some("unconfirmed-route-candidates-inventory-confirmed");
+        let candidates = [[1; 32], [2; 32], [3; 32]];
+        assert!(
+            check_route_sources_v23(state, Some(&sources()), true, [10; 3], candidates).is_ok()
+        );
+        assert!(check_route_sources_v23(None, None, false, [10; 3], candidates).is_ok());
+        assert!(
+            check_route_sources_v23(state, Some(&sources()), false, [10; 3], candidates).is_err()
+        );
+        assert!(
+            check_route_sources_v23(None, Some(&sources()), true, [10; 3], candidates).is_err()
+        );
+        assert!(check_route_sources_v23(state, None, true, [10; 3], candidates).is_err());
+        assert!(check_route_sources_v23(
+            Some("confirmed"),
+            Some(&sources()),
+            true,
+            [10; 3],
+            candidates
+        )
+        .is_err());
+        for mutation in 0..9 {
+            let mut values = sources();
+            match mutation {
+                0 => values[0].tx_hash = hex::encode(candidates[0]),
+                1 => values[1].tx_hash = values[0].tx_hash.clone(),
+                2 => values[0].block_height = 100,
+                3 => values[0].global_output_index = 1,
+                4 => values[0].amount_piconero += 1,
+                5 => values[0].position = "downstream".into(),
+                6 => values[0].public_key = "AA".repeat(32),
+                7 => values[0].commitment = "00".repeat(32),
+                _ => values.swap(0, 1),
+            }
+            assert!(
+                check_route_sources_v23(state, Some(&values), true, [10; 3], candidates).is_err()
+            );
+        }
+    }
 }
 
 pub(crate) struct RouteFundingOwnerV23 {
     sidecars: [[PeerSidecarOwnerV23; 2]; 2],
     helper: ProcessOwner,
+    control: Option<control_v23::RouteFixtureControlV23>,
     envelopes: [Envelope; 2],
     hashes: [[u8; 32]; 2],
     inventory_source: Option<NativeMainnetXmrInventorySourceV23>,
@@ -554,6 +683,48 @@ impl Configuration {
         auth: &[[Zeroizing<[u8; 32]>; 2]; 2],
         inventory_authority_id: [u8; 32],
     ) -> Result<RouteFundingOwnerV23> {
+        self.start_route_with_control_v23(
+            spends,
+            amounts,
+            fees,
+            work,
+            auth,
+            inventory_authority_id,
+            false,
+        )
+    }
+
+    pub(crate) fn start_mutable_mainnet_route_v23(
+        &self,
+        spends: [[u8; 32]; 2],
+        amounts: [u64; 2],
+        fees: [u64; 2],
+        work: [&Path; 2],
+        auth: &[[Zeroizing<[u8; 32]>; 2]; 2],
+        inventory_authority_id: [u8; 32],
+    ) -> Result<RouteFundingOwnerV23> {
+        self.start_route_with_control_v23(
+            spends,
+            amounts,
+            fees,
+            work,
+            auth,
+            inventory_authority_id,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_route_with_control_v23(
+        &self,
+        spends: [[u8; 32]; 2],
+        amounts: [u64; 2],
+        fees: [u64; 2],
+        work: [&Path; 2],
+        auth: &[[Zeroizing<[u8; 32]>; 2]; 2],
+        inventory_authority_id: [u8; 32],
+        mutable: bool,
+    ) -> Result<RouteFundingOwnerV23> {
         if spends[0] == spends[1] || spends.contains(&[0; 32]) || inventory_authority_id == [0; 32]
         {
             return Err("route funding requires distinct combined spend keys".into());
@@ -586,6 +757,7 @@ impl Configuration {
             "combined_spend_public_key":hex::encode(spends[0]),"amount_piconero":amounts[0],
             "max_fee_piconero":fees[0],
             "route_peer":{"combined_spend_public_key":hex::encode(spends[1]),
+                "mutable_scenario_v23":mutable,
                 "amount_piconero":amounts[1],"max_fee_piconero":fees[1],
                 "solver_inventory":{"spend_public_key":hex::encode(spend_public),
                     "view_public_key":hex::encode(view_public),
@@ -597,13 +769,29 @@ impl Configuration {
         input.flush()?;
         let (send, receive) = mpsc::sync_channel(1);
         let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let result = BufReader::new(stdout)
-                .take((MAX_ENVELOPE * 3 + 1) as u64)
-                .read_until(b'\n', &mut bytes)
-                .map(|_| bytes)
-                .map_err(|_| "route envelope read");
-            let _ = send.send(result);
+            let mut source = BufReader::new(stdout);
+            let mut first = true;
+            loop {
+                let limit = if first { MAX_ENVELOPE * 3 } else { 65_536 };
+                let mut bytes = Vec::new();
+                let result = source
+                    .by_ref()
+                    .take((limit + 1) as u64)
+                    .read_until(b'\n', &mut bytes)
+                    .map_err(|_| "route helper reply read")
+                    .and_then(|count| {
+                        if count == 0 || count > limit || !bytes.ends_with(b"\n") {
+                            Err("route helper reply framing")
+                        } else {
+                            Ok(bytes)
+                        }
+                    });
+                let failed = result.is_err();
+                if send.send(result).is_err() || failed || !mutable {
+                    break;
+                }
+                first = false;
+            }
         });
         let bytes = match receive.recv_timeout(Duration::from_secs(120)) {
             Ok(result) => result?,
@@ -614,7 +802,12 @@ impl Configuration {
                 return Err("route helper envelope timeout".into());
             }
         };
-        reader.join().map_err(|_| "route envelope reader panic")?;
+        let mut control = if mutable {
+            Some(control_v23::RouteFixtureControlV23::new(receive, reader))
+        } else {
+            reader.join().map_err(|_| "route envelope reader panic")?;
+            None
+        };
         if bytes.len() > MAX_ENVELOPE * 3 || !bytes.ends_with(b"\n") {
             return Err("route envelope bound".into());
         }
@@ -691,6 +884,28 @@ impl Configuration {
         {
             return Err("solver inventory public/provenance binding mismatch".into());
         }
+        check_route_sources_v23(
+            value.funding_state_v23.as_deref(),
+            value.source_outputs_v23.as_ref(),
+            mutable,
+            [amounts[0], amounts[1], inventory_amount],
+            [hashes[0], hashes[1], inventory_hash],
+        )?;
+        if let Some(control) = &mut control {
+            let status =
+                control.status(helper.input.as_mut().ok_or("route helper input absent")?)?;
+            if status.tip_height != 200
+                || !status.pool_tx_hashes.is_empty()
+                || status.transactions.len() != 1
+                || status.transactions[0].tx_hash != inventory_hash
+                || status.transactions[0].block_height != 102
+            {
+                return Err(
+                    "mutable route must retain only inventory, with both route candidates absent"
+                        .into(),
+                );
+            }
+        }
         let mut sidecars = Vec::with_capacity(2);
         for position in 0..2 {
             let mut actors = Vec::with_capacity(2);
@@ -706,6 +921,7 @@ impl Configuration {
         Ok(RouteFundingOwnerV23 {
             sidecars: sidecars.try_into().map_err(|_| "two sidecar positions")?,
             helper,
+            control,
             envelopes: value.legs,
             hashes,
             inventory_source: Some(NativeMainnetXmrInventorySourceV23 {
@@ -729,6 +945,62 @@ impl Configuration {
 }
 
 impl RouteFundingOwnerV23 {
+    pub(crate) fn with_stopped_sidecar_v24<T>(
+        &mut self,
+        position: usize,
+        actor: usize,
+        operation: impl FnOnce(&Path) -> Result<T>,
+    ) -> Result<T> {
+        self.require_alive()?;
+        let result = self
+            .sidecars
+            .get_mut(position)
+            .and_then(|actors| actors.get_mut(actor))
+            .ok_or("route sidecar index")?
+            .with_stopped_v24(operation);
+        match result {
+            Ok(value) => {
+                self.require_alive()?;
+                Ok(value)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn history_status_v23(&mut self) -> Result<NativeXmrHistoryStatusV23> {
+        self.require_alive()?;
+        self.control
+            .as_mut()
+            .ok_or("immutable XMR history has no control channel")?
+            .status(
+                self.helper
+                    .input
+                    .as_mut()
+                    .ok_or("route helper input absent")?,
+            )
+    }
+
+    pub(crate) fn advance_history_v23(
+        &mut self,
+        height: u64,
+        timestamp: u64,
+        include: &[[u8; 32]],
+    ) -> Result<NativeXmrHistoryStatusV23> {
+        self.require_alive()?;
+        self.control
+            .as_mut()
+            .ok_or("immutable XMR history cannot advance")?
+            .advance(
+                self.helper
+                    .input
+                    .as_mut()
+                    .ok_or("route helper input absent")?,
+                height,
+                timestamp,
+                include,
+            )
+    }
+
     pub(crate) fn inventory_authority_id_v23(&self) -> Result<[u8; 32]> {
         self.inventory_source
             .as_ref()

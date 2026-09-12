@@ -1,6 +1,7 @@
 //! Offline GPL component fixture; never a wallet or network funding tool.
-//! The synthetic input/ring has no chain UTXO. The output is a complete signed
-//! V2 CLSAG/Bulletproofs+ transaction scanned by the pinned wallet implementation.
+//! Legacy synthetic input/rings have no chain UTXO. Explicit mutable-route
+//! candidates instead spend retained synthetic source outputs with real rings.
+//! Outputs are complete signed V2 CLSAG/Bulletproofs+ transactions.
 //! No DOM authority or claimed network confirmation is emitted here.
 use anyhow::{Context, Result, anyhow, ensure};
 use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, scalar::Scalar as DalekScalar};
@@ -17,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Read, Write};
 use zeroize::Zeroizing;
 
+#[path = "offline_native_funding_v23/control.rs"]
+mod control;
 #[path = "offline_native_funding_v23/route.rs"]
 mod route;
 #[path = "offline_native_funding_v23/rpc.rs"]
@@ -61,6 +64,13 @@ fn point(value: u64) -> Point {
 }
 
 fn build(request: &Request) -> Result<(Transaction, Point, String)> {
+    build_with_input(request, None)
+}
+
+fn build_with_input(
+    request: &Request,
+    retained_input: Option<OutputWithDecoys>,
+) -> Result<(Transaction, Point, String)> {
     ensure!(
         request.schema == "DOM-XMR-OFFLINE-FUNDING-REQUEST-V23",
         "fixture schema mismatch"
@@ -113,33 +123,38 @@ fn build(request: &Request) -> Result<(Transaction, Point, String)> {
     );
     let offset = u64::from(request.position) * 32;
     let sender = Zeroizing::new(Scalar::from(DalekScalar::from(41u64 + offset)));
-    let mask = Scalar::from(DalekScalar::from(43u64 + offset));
-    let commitment = Commitment::new(mask, input_amount);
-    let mut ring = Vec::with_capacity(16);
-    ring.push([point(41 + offset), commitment.commit()]);
-    for index in 1..16u64 {
-        ring.push([
-            point(100 + offset + index),
-            Commitment::new(
-                Scalar::from(DalekScalar::from(200 + offset + index)),
-                input_amount + index,
-            )
-            .commit(),
-        ]);
-    }
-    let decoys =
-        Decoys::new(vec![1; 16], 0, ring).ok_or_else(|| anyhow!("invalid offline ring"))?;
-    // Public upstream serialization of OutputData followed by Decoys. This is
-    // synthetic input custody for a mathematical fixture, NOT a chain output
-    // observation. SignableTransaction validates and signs it with its true key.
-    let mut input_bytes = Vec::new();
-    input_bytes.extend_from_slice(&point(41 + offset).compress().to_bytes());
-    Scalar::from(DalekScalar::ZERO).write(&mut input_bytes)?;
-    commitment.write(&mut input_bytes)?;
-    decoys.write(&mut input_bytes)?;
-    let mut input_reader = input_bytes.as_slice();
-    let input = OutputWithDecoys::read(&mut input_reader)?;
-    ensure!(input_reader.is_empty(), "offline input codec trailing data");
+    let input = if let Some(input) = retained_input {
+        input
+    } else {
+        let mask = Scalar::from(DalekScalar::from(43u64 + offset));
+        let commitment = Commitment::new(mask, input_amount);
+        let mut ring = Vec::with_capacity(16);
+        ring.push([point(41 + offset), commitment.commit()]);
+        for index in 1..16u64 {
+            ring.push([
+                point(100 + offset + index),
+                Commitment::new(
+                    Scalar::from(DalekScalar::from(200 + offset + index)),
+                    input_amount + index,
+                )
+                .commit(),
+            ]);
+        }
+        let decoys =
+            Decoys::new(vec![1; 16], 0, ring).ok_or_else(|| anyhow!("invalid offline ring"))?;
+        // Public upstream serialization of OutputData followed by Decoys. This is
+        // synthetic input custody for a mathematical fixture, NOT a chain output
+        // observation. SignableTransaction validates and signs it with its true key.
+        let mut input_bytes = Vec::new();
+        input_bytes.extend_from_slice(&point(41 + offset).compress().to_bytes());
+        Scalar::from(DalekScalar::ZERO).write(&mut input_bytes)?;
+        commitment.write(&mut input_bytes)?;
+        decoys.write(&mut input_bytes)?;
+        let mut input_reader = input_bytes.as_slice();
+        let input = OutputWithDecoys::read(&mut input_reader)?;
+        ensure!(input_reader.is_empty(), "offline input codec trailing data");
+        input
+    };
     let change = ViewPair::new(
         point(41 + offset),
         Zeroizing::new(Scalar::from(DalekScalar::from(47u64 + offset))),
@@ -190,10 +205,10 @@ fn main() -> Result<()> {
         "bounded request required"
     );
     let mut request: Request = serde_json::from_str(&line)?;
-    let (transaction, spend, destination) = build(&request)?;
     if let Some(peer) = request.route_peer.take() {
-        return route::serve(request, peer, transaction, spend, destination, input);
+        return route::serve(request, peer, input);
     }
+    let (transaction, spend, destination) = build(&request)?;
     let hash = transaction.hash();
     let bytes = transaction.serialize();
     let servers = rpc::Servers::start(transaction, request.network_tag)?;

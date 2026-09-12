@@ -2974,6 +2974,7 @@ fn map_dom_error(error: SessionStoreError) -> AuthorityRefusalV1 {
     match error {
         SessionStoreError::Filesystem
         | SessionStoreError::StoreBusy
+        | SessionStoreError::NativeXmrRefundTransportPendingV23
         | SessionStoreError::RandomFailure => AuthorityRefusalV1::Unavailable,
         SessionStoreError::InvalidTransition
         | SessionStoreError::FundingAuthorityUnavailable

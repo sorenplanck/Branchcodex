@@ -60,6 +60,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         binding: DomSessionBindingV1,
         chain: TrustedChainIdV1,
         scanner: &ProductionDomF7ScannerAuthorityV1,
+        funding_window: &crate::production_timer::ProductionFundingWindowV23,
         vaults: &crate::production_dom_vaults_v12::ProductionXmrGraphVaultProvisionerV23,
         now: u64,
     ) -> Result<ProductionFundingStepV20, ProductionFundingErrorV20> {
@@ -110,9 +111,45 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         {
             return Err(Error::Binding);
         }
+        let expiry = TimelockSpec::TimestampSeconds {
+            value: now
+                .checked_add(3600)
+                .filter(|_| now != 0)
+                .ok_or(Error::Binding)?,
+        };
+        // Already committed DSC1 bytes are recovery, not a new signature.
+        // Restore their retained ingress owner and retransmit the exact record
+        // even if native-height RPC is unavailable. Never enter begin/sign here.
+        if let OutboundDsc1RecoveryV1::Committed(record) = recovery {
+            if record.sender_id() != &self.local_participant
+                || record.session_id() != &self.session_id
+            {
+                return Err(Error::Binding);
+            }
+            let transport = self.store.prepare_operational_signing_transport_authority(
+                chain,
+                self.session_id,
+                PurposeV1::Funding,
+            )?;
+            let mut relay = self
+                .relay
+                .try_borrow_mut()
+                .map_err(|_| ProductionContractsOutboundErrorV1::OwnerBusy)?;
+            relay.handoff_funding_signing_v20(transport)?;
+            relay
+                .stage_store_outbound_dsc1(*record, expiry)
+                .map_err(ProductionContractsOutboundErrorV1::from)?;
+            return Ok(Step::Staged);
+        }
+        if !funding_window.available() {
+            return Ok(Step::WindowClosed);
+        }
         // Fresh DOM context on every signing tick. No private operation is
         // authorized by the bootstrap's historical chain projection.
-        let context = scanner.funding_validation_context_v20()?;
+        let context = scanner.funding_validation_context_bounded_v23(funding_window.remaining())?;
+        if !funding_window.available() {
+            return Ok(Step::WindowClosed);
+        }
         if material.xmr_graph_shares_v22.is_some()
             && phase == SessionPhaseV1::RefundSigning
             && !self
@@ -133,45 +170,39 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             .try_borrow_mut()
             .map_err(|_| ContractsRelayIngressErrorV1::OwnerBusy)?
             .handoff_funding_signing_v20(transport)?;
-        let expiry = TimelockSpec::TimestampSeconds {
-            value: now
-                .checked_add(3600)
-                .filter(|_| now != 0)
-                .ok_or(Error::Binding)?,
-        };
         match recovery {
             OutboundDsc1RecoveryV1::SigningRequest(request) => {
                 if request.sender_id() != &self.local_participant {
                     return Err(Error::Binding);
                 }
+                if !funding_window.available() {
+                    return Ok(Step::WindowClosed);
+                }
                 self.sign_commit_and_stage(*request, expiry)?;
                 return Ok(Step::Staged);
             }
-            OutboundDsc1RecoveryV1::Committed(record) => {
-                if record.sender_id() != &self.local_participant
-                    || record.session_id() != &self.session_id
-                {
-                    return Err(Error::Binding);
-                }
-                self.relay
-                    .try_borrow_mut()
-                    .map_err(|_| ProductionContractsOutboundErrorV1::OwnerBusy)?
-                    .stage_store_outbound_dsc1(*record, expiry)
-                    .map_err(ProductionContractsOutboundErrorV1::from)?;
-                return Ok(Step::Staged);
-            }
+            // The committed branch returned above without consuming any nonce.
+            OutboundDsc1RecoveryV1::Committed(_) => return Err(Error::Binding),
             OutboundDsc1RecoveryV1::None => {}
         }
         if accepted.accepted_signing_messages().count() == 6 {
             // Re-read after signing/replay, immediately before materialization.
-            let context = scanner.funding_validation_context_v20()?;
+            let context =
+                scanner.funding_validation_context_bounded_v23(funding_window.remaining())?;
+            if !funding_window.available() {
+                return Ok(Step::WindowClosed);
+            }
             let _submission =
                 self.store
                     .complete_f7_funding_signing_v20(chain, self.session_id, context)?;
             self.release_funding_vault_v20(material, chain)?;
             return Ok(Step::Committed);
         }
-        let signing_context = scanner.funding_validation_context_v20()?;
+        let signing_context =
+            scanner.funding_validation_context_bounded_v23(funding_window.remaining())?;
+        if !funding_window.available() {
+            return Ok(Step::WindowClosed);
+        }
         if material.xmr_graph_shares_v22.is_some()
             && !self
                 .store
@@ -233,6 +264,9 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             self.session_id,
             PurposeV1::Funding,
         )?;
+        if !funding_window.available() {
+            return Ok(Step::WindowClosed);
+        }
         match prepare_next_dom_funding_edge_v20(
             &self.store,
             binding,

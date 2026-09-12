@@ -15,7 +15,7 @@
 #![deny(missing_docs)]
 
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dom_consensus::{BlockHeader, Transaction};
 use dom_crypto::blake2b_256;
@@ -623,6 +623,7 @@ pub struct DomHttpChainAdapterV1 {
     client: Client,
     expected: ExpectedDomIdentityV1,
     bearer_token: BearerTokenV1,
+    request_timeout: Duration,
 }
 
 impl DomHttpChainAdapterV1 {
@@ -699,6 +700,7 @@ impl DomHttpChainAdapterV1 {
             client,
             expected,
             bearer_token,
+            request_timeout,
         })
     }
 
@@ -712,6 +714,27 @@ impl DomHttpChainAdapterV1 {
         &self,
         cursor: ScriptlessScanCursorV1,
         max_blocks: u64,
+    ) -> Result<ScriptlessScanPageV1, ChainAdapterError> {
+        self.scan_page_with_deadline_v23(cursor, max_blocks, None)
+    }
+
+    /// Uses the same authenticated scanner and validators, but limits network
+    /// waiting to the remaining caller budget and the configured request bound.
+    /// Evidence finishing validation after the deadline is never returned.
+    pub fn scan_page_until_v23(
+        &self,
+        cursor: ScriptlessScanCursorV1,
+        max_blocks: u64,
+        deadline: Instant,
+    ) -> Result<ScriptlessScanPageV1, ChainAdapterError> {
+        self.scan_page_with_deadline_v23(cursor, max_blocks, Some(deadline))
+    }
+
+    fn scan_page_with_deadline_v23(
+        &self,
+        cursor: ScriptlessScanCursorV1,
+        max_blocks: u64,
+        deadline: Option<Instant>,
     ) -> Result<ScriptlessScanPageV1, ChainAdapterError> {
         cursor.validate()?;
         if max_blocks == 0 || max_blocks > MAX_SCRIPTLESS_SCAN_BLOCKS_V1 {
@@ -735,15 +758,25 @@ impl DomHttpChainAdapterV1 {
                 query.append_pair("anchor_hash", &hex::encode(anchor));
             }
         }
-        let response = self
+        let mut request = self
             .client
             .get(url)
-            .bearer_auth(self.bearer_token.0.as_str())
-            .send()
-            .map_err(map_transport_error)?;
+            .bearer_auth(self.bearer_token.0.as_str());
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ChainAdapterError::TemporarilyUnavailable);
+            }
+            request = request.timeout(remaining.min(self.request_timeout));
+        }
+        let response = request.send().map_err(map_transport_error)?;
         let dto: ScanResponseDto =
             decode_json_response(response, ChainAdapterError::ReorgDetected)?;
-        validate_scan_response(&self.expected, cursor, requested_to, dto)
+        let page = validate_scan_response(&self.expected, cursor, requested_to, dto)?;
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(ChainAdapterError::TemporarilyUnavailable);
+        }
+        Ok(page)
     }
 
     /// Submits exact canonical transaction bytes to the real DOM mempool.
@@ -754,20 +787,55 @@ impl DomHttpChainAdapterV1 {
         &self,
         canonical_bytes: &[u8],
     ) -> Result<SubmissionReceiptV1, ChainAdapterError> {
+        self.submit_canonical_transaction_with_deadline_v23(canonical_bytes, None)
+    }
+
+    /// Submit exactly the retained bytes within a caller's absolute deadline.
+    /// An expired deadline issues no POST. Timeout after starting HTTP is
+    /// ambiguous externalization, not evidence that the node rejected it;
+    /// callers must retain and reconcile the same durable transaction intent.
+    pub fn submit_canonical_transaction_until_v23(
+        &self,
+        canonical_bytes: &[u8],
+        deadline: Instant,
+    ) -> Result<SubmissionReceiptV1, ChainAdapterError> {
+        self.submit_canonical_transaction_with_deadline_v23(canonical_bytes, Some(deadline))
+    }
+
+    fn submit_canonical_transaction_with_deadline_v23(
+        &self,
+        canonical_bytes: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<SubmissionReceiptV1, ChainAdapterError> {
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(ChainAdapterError::TemporarilyUnavailable);
+        }
         let expected_hash = canonical_transaction_hash_v1(canonical_bytes)?;
         let body = SubmitRequestDto {
             tx_hex: hex::encode(canonical_bytes),
         };
-        let response = self
+        let mut request = self
             .client
             .post(self.endpoint_for("tx/submit")?)
             .bearer_auth(self.bearer_token.0.as_str())
-            .json(&body)
-            .send()
-            .map_err(map_transport_error)?;
+            .json(&body);
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ChainAdapterError::TemporarilyUnavailable);
+            }
+            request = request.timeout(remaining.min(self.request_timeout));
+        }
+        let response = request.send().map_err(map_transport_error)?;
         let dto: SubmitResponseDto =
             decode_json_response(response, ChainAdapterError::TransactionRejected)?;
-        validate_submission_response(dto, expected_hash)
+        let receipt = validate_submission_response(dto, expected_hash)?;
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            // Admission may already have happened. Never turn this into a
+            // rejection or let a late response mint a fresh capability.
+            return Err(ChainAdapterError::TemporarilyUnavailable);
+        }
+        Ok(receipt)
     }
 
     fn endpoint_for(&self, suffix: &str) -> Result<reqwest::Url, ChainAdapterError> {
@@ -1370,6 +1438,118 @@ mod tests {
             protocol_version: dom_core::PROTOCOL_VERSION,
             range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
         })
+    }
+
+    #[test]
+    fn expired_scan_budget_makes_no_network_request_v23() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let adapter = DomHttpChainAdapterV1::new(
+            &format!("http://{}", listener.local_addr()?),
+            identity()?,
+            BearerTokenV1::new("synthetic-deadline-test".to_owned())?,
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+        )?;
+        assert!(matches!(
+            adapter.scan_page_until_v23(ScriptlessScanCursorV1::genesis(), 1, Instant::now()),
+            Err(ChainAdapterError::TemporarilyUnavailable)
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expired_submit_budget_never_opens_a_connection_v23() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let adapter = DomHttpChainAdapterV1::new(
+            &format!("http://{}", listener.local_addr()?),
+            identity()?,
+            BearerTokenV1::new("synthetic-submit-deadline".to_owned())?,
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+        )?;
+        // Deadline is checked even before decoding caller bytes.
+        assert!(matches!(
+            adapter.submit_canonical_transaction_until_v23(&[], Instant::now()),
+            Err(ChainAdapterError::TemporarilyUnavailable)
+        ));
+        assert!(
+            matches!(listener.accept(),Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn started_submit_timeout_is_unavailable_not_rejected_v23(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let stop = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .is_err()
+                        {
+                            return false;
+                        }
+                        let mut bytes = [0u8; 2048];
+                        let saw_post = stream
+                            .read(&mut bytes)
+                            .is_ok_and(|n| n > 0 && bytes[..n].starts_with(b"POST /tx/submit "));
+                        // No response: only the caller's request deadline can
+                        // finish the call before this explicitly held socket.
+                        let _ = wait.recv_timeout(Duration::from_secs(2));
+                        return saw_post;
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < stop =>
+                    {
+                        std::thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(_) => return false,
+                }
+            }
+        });
+        let adapter = DomHttpChainAdapterV1::new(
+            &endpoint,
+            identity()?,
+            BearerTokenV1::new("synthetic-submit-timeout".to_owned())?,
+            Duration::from_millis(200),
+            Duration::from_secs(3),
+        )?;
+        // Canonical codec fixture only, never a consensus-valid economic tx.
+        let bytes = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            kernels: vec![],
+            offset: [0; 32],
+        }
+        .to_bytes()?;
+        let started = Instant::now();
+        let result = adapter
+            .submit_canonical_transaction_until_v23(&bytes, started + Duration::from_millis(80));
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        let saw_post = server.join().map_err(|_| "submit fixture thread failed")?;
+        assert!(saw_post);
+        assert!(matches!(
+            result,
+            Err(ChainAdapterError::TemporarilyUnavailable)
+        ));
+        assert!(elapsed < Duration::from_secs(2));
+        Ok(())
     }
 
     #[test]

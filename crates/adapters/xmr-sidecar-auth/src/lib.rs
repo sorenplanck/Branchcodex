@@ -60,6 +60,50 @@ impl SidecarAuthKey {
         Ok(())
     }
 
+    /// Authenticate local Refund construction without a remote request digest.
+    pub fn sign_local_refund_build_v24(
+        &self,
+        request: &mut xmr_live_sidecar_api::LocalRefundBuildRequestV24<BuildSweepRequestV2>,
+    ) -> Result<(), SidecarAuthError> {
+        self.sign_local_refund_in_domain_v24(
+            request,
+            xmr_live_sidecar_api::LOCAL_REFUND_BUILD_AUTH_DOMAIN_V24,
+        )
+    }
+
+    /// Authenticate readback only; its tag cannot authorize a fresh signature.
+    pub fn sign_local_refund_load_v24(
+        &self,
+        request: &mut xmr_live_sidecar_api::LocalRefundLoadRequestV24,
+    ) -> Result<(), SidecarAuthError> {
+        request.auth_tag = [0; 32];
+        let bytes = request
+            .canonical_auth_bytes()
+            .map_err(|_| SidecarAuthError::InvalidRequest)?;
+        request.auth_tag = self.tag_in_domain(
+            xmr_live_sidecar_api::LOCAL_REFUND_LOAD_AUTH_DOMAIN_V24,
+            &bytes,
+        )?;
+        Ok(())
+    }
+
+    fn sign_local_refund_in_domain_v24(
+        &self,
+        request: &mut xmr_live_sidecar_api::LocalRefundBuildRequestV24<BuildSweepRequestV2>,
+        domain: &[u8],
+    ) -> Result<(), SidecarAuthError> {
+        self.sign_build(&mut request.build)?;
+        request.auth_tag = [0; 32];
+        let build = Zeroizing::new(request.build.canonical_auth_bytes().map_err(map_api)?);
+        let bytes = Zeroizing::new(
+            request
+                .canonical_auth_bytes(&build)
+                .map_err(|_| SidecarAuthError::InvalidRequest)?,
+        );
+        request.auth_tag = self.tag_in_domain(domain, &bytes)?;
+        Ok(())
+    }
+
     /// Authenticate a proof-only request in its separate V23 domain.
     pub fn sign_input_proof_v23(
         &self,
@@ -174,6 +218,100 @@ mod tests {
     use super::*;
 
     const KEY: [u8; 32] = [7; 32];
+
+    #[test]
+    fn local_refund_build_and_read_tags_are_not_remote_or_v2_authority() {
+        let key = SidecarAuthKey::new(KEY).unwrap();
+        let mut request = xmr_live_sidecar_api::LocalRefundBuildRequestV24 {
+            api_version: 24,
+            build: BuildSweepRequestV2 {
+                api_version: API_VERSION_V2,
+                request_nonce: [1; 32],
+                settlement_id: [2; 32],
+                funding_tx_hash: [3; 32],
+                expected_amount_piconero: 1000,
+                destination: "synthetic-auth-only-destination".into(),
+                spend_scalar: SecretScalarBytes::new([4; 32]),
+                expected_spend_public_key: [5; 32],
+                view_scalar: SecretScalarBytes::new([6; 32]),
+                auth_tag: [0; 32],
+            },
+            network_genesis: [1; 32],
+            route: [2; 32],
+            session: [3; 32],
+            terms: [4; 32],
+            effect_id: [5; 32],
+            fencing_epoch: 1,
+            semantic_digest: [6; 32],
+            local_authorization_digest: [7; 32],
+            dom_refund_tx_hash: [8; 32],
+            graph_digest: [9; 32],
+            output_index: 0,
+            funding_height: 10,
+            max_fee: 11,
+            auth_tag: [0; 32],
+        };
+        key.sign_local_refund_build_v24(&mut request).unwrap();
+        let build_tag = request.auth_tag;
+        let private = Zeroizing::new(request.build.canonical_auth_bytes().unwrap());
+        let bytes = Zeroizing::new(request.canonical_auth_bytes(&private).unwrap());
+        assert!(key
+            .verify_bytes_in_domain(
+                xmr_live_sidecar_api::LOCAL_REFUND_BUILD_AUTH_DOMAIN_V24,
+                &bytes,
+                &build_tag
+            )
+            .is_ok());
+        for domain in [
+            AUTH_DOMAIN,
+            xmr_live_sidecar_api::BUILD_PROOF_AUTH_DOMAIN_V23,
+            xmr_live_sidecar_api::LOCAL_REFUND_LOAD_AUTH_DOMAIN_V24,
+        ] {
+            assert!(key
+                .verify_bytes_in_domain(domain, &bytes, &build_tag)
+                .is_err());
+        }
+        let mut public = xmr_live_sidecar_api::LocalRefundLoadRequestV24 {
+            api_version: 24,
+            request_nonce: request.effect_id,
+            network_genesis: request.network_genesis,
+            route: request.route,
+            session: request.session,
+            terms: request.terms,
+            effect_id: request.effect_id,
+            fencing_epoch: request.fencing_epoch,
+            semantic_digest: request.semantic_digest,
+            dom_refund_tx_hash: request.dom_refund_tx_hash,
+            graph_digest: request.graph_digest,
+            settlement_id: request.build.settlement_id,
+            funding_tx_hash: request.build.funding_tx_hash,
+            funded_amount: request.build.expected_amount_piconero,
+            destination: request.build.destination.clone(),
+            expected_spend_public_key: request.build.expected_spend_public_key,
+            max_fee: request.max_fee,
+            auth_tag: [0; 32],
+        };
+        key.sign_local_refund_load_v24(&mut public).unwrap();
+        assert_ne!(public.auth_tag, build_tag);
+        let public_bytes = public.canonical_auth_bytes().unwrap();
+        assert_ne!(*bytes, public_bytes);
+        assert!(key
+            .verify_bytes_in_domain(
+                xmr_live_sidecar_api::LOCAL_REFUND_LOAD_AUTH_DOMAIN_V24,
+                &public_bytes,
+                &public.auth_tag
+            )
+            .is_ok());
+        public.semantic_digest[0] ^= 1;
+        let changed = public.canonical_auth_bytes().unwrap();
+        assert!(key
+            .verify_bytes_in_domain(
+                xmr_live_sidecar_api::LOCAL_REFUND_LOAD_AUTH_DOMAIN_V24,
+                &changed,
+                &public.auth_tag
+            )
+            .is_err());
+    }
 
     #[test]
     fn challenge_proof_round_trips_and_binds_to_the_exact_nonce() {

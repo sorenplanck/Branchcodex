@@ -79,14 +79,30 @@ impl ProductionUniversalXmrEnrollmentAuthorityV23 {
         if session.refund_bundle().is_some() {
             return Err(Refusal::Conflict);
         }
-        enrollment
-            .require_setup(session.setup(), bundle.proof())
-            .map_err(|_| Refusal::Conflict)?;
         if session.session_id() != terms.session_id.0
             || session.terms_digest() != terms.terms_hash().map_err(|_| Refusal::Conflict)?
-            || session.setup().settlement_id() != terms.settlement_id.0
             || session.setup().terms_hash() != session.terms_digest()
-            || self.setup_binding_hash != session.setup().binding_hash()
+        {
+            return Err(Refusal::Conflict);
+        }
+        self.validate_enrollment_parameters_v23(terms, session.setup(), enrollment, bundle)
+    }
+
+    /// Shared public checks for canonical writing and native admission. The
+    /// returned policy is negotiated metadata, never a scope/funding grant.
+    pub(super) fn validate_enrollment_parameters_v23(
+        &self,
+        terms: &kaystra_core::terms::SettlementTermsV1,
+        setup: &xmr_setup_profile::ValidatedXmrSetup,
+        enrollment: &xmr_session_init::PreparedXmrShareEnrollmentV23,
+        bundle: &crate::production_inputs::ProductionXmrEnrollmentBundleV23,
+    ) -> Result<ValidatedXmrCompensationPolicyV11, Refusal> {
+        enrollment
+            .require_setup(setup, bundle.proof())
+            .map_err(|_| Refusal::Conflict)?;
+        if setup.settlement_id() != terms.settlement_id.0
+            || setup.terms_hash() != terms.terms_hash().map_err(|_| Refusal::Conflict)?
+            || self.setup_binding_hash != setup.binding_hash()
             || self.refund_point_sec1.as_slice() != bundle.adaptor_point_sec1()
             || self.executor_profile_hash != bundle.executor_profile_hash()
             || self.refund_deadline != bundle.deadline()

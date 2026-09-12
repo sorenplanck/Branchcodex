@@ -6373,6 +6373,9 @@ fn effective_uid() -> Result<u32, ProductionConfigErrorV1> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::enrollment_fixture_v23;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::{DirBuilder, OpenOptions};
@@ -10019,6 +10022,24 @@ mod tests {
         assert!(!format!("{:?}", ProductionConfigErrorV1::ConfigUnavailable)
             .contains(fixture.root.to_str().unwrap()));
     }
+    pub(crate) fn enrollment_fixture_v23(
+        mode: ProductionBootstrapModeV1,
+        update: impl FnOnce(&mut ProductionRoutePinsV1),
+        terms: [&kaystra_core::terms::SettlementTermsV1; 2],
+    ) -> ProductionBootstrapConfigV1 {
+        let mut common = golden_create_config_v6();
+        common.mode = mode;
+        update(&mut common.pins);
+        let mut fields =
+            universal_fields_v11(ProductionChainFamilyV11::Xmr, ProductionChainFamilyV11::Xmr);
+        for (leg, terms) in fields.legs.iter_mut().zip(terms) {
+            leg.settlement_id = terms.settlement_id.0;
+            leg.session_id = terms.session_id.0;
+            leg.chain_id = terms.counterparty_leg.chain_id.0;
+        }
+        ProductionBootstrapConfigV1::from_common_v6_and_legs_v11(common, fields).unwrap()
+    }
+
     fn universal_fields_v11(
         a: ProductionChainFamilyV11,
         b: ProductionChainFamilyV11,
@@ -10041,7 +10062,56 @@ mod tests {
             .unwrap(),
             refund_arming_authority_epoch: 17,
             remote_relay_database_ids: [[0xb1; 32], [0xb2; 32]],
+            shared_relay_peer_v23: false,
             legs: [leg(a, 201, "upstream"), leg(b, 202, "downstream")],
+        }
+    }
+
+    #[test]
+    fn v11_shared_peer_requires_explicit_opt_in_and_preserves_local_and_session_isolation() {
+        use ProductionChainFamilyV11::*;
+        let common = golden_create_config_v6();
+        let mut fields = universal_fields_v11(Xmr, Xmr);
+        let old_bytes = serde_json::to_vec(&fields).unwrap();
+        assert!(!String::from_utf8(old_bytes)
+            .unwrap()
+            .contains("shared_relay_peer_v23"));
+        fields.remote_relay_database_ids[1] = fields.remote_relay_database_ids[0];
+        assert!(ProductionBootstrapConfigV1::from_common_v6_and_legs_v11(
+            common.clone(),
+            fields.clone()
+        )
+        .is_err());
+        fields.shared_relay_peer_v23 = true;
+        let prepared = ProductionBootstrapConfigV1::from_common_v6_and_legs_v11(
+            common.clone(),
+            fields.clone(),
+        )
+        .unwrap();
+        let encoded = prepared.canonical_bytes().unwrap();
+        let decoded = ProductionBootstrapConfigV1::decode_canonical_v11_for_mode(
+            &encoded,
+            ProductionBootstrapModeV1::Create,
+        )
+        .unwrap();
+        assert!(decoded.universal_v11().unwrap().shared_relay_peer_v23);
+        assert_eq!(decoded.canonical_bytes().unwrap(), encoded);
+        for mutation in 0..4 {
+            let mut invalid = fields.clone();
+            match mutation {
+                0 => invalid.remote_relay_database_ids[1] = [0xb2; 32],
+                1 => invalid.remote_relay_database_ids = [[0; 32]; 2],
+                2 => {
+                    invalid.remote_relay_database_ids =
+                        [common.relay_authority_pins_v6().unwrap().relay_database_id; 2]
+                }
+                _ => invalid.legs[1].session_id = invalid.legs[0].session_id,
+            }
+            assert!(ProductionBootstrapConfigV1::from_common_v6_and_legs_v11(
+                common.clone(),
+                invalid
+            )
+            .is_err());
         }
     }
 

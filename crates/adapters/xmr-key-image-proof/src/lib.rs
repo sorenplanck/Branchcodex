@@ -8,6 +8,12 @@
 #![forbid(unsafe_code)]
 
 mod build_request;
+mod local_build_request_v24;
+pub use local_build_request_v24::{
+    LocalRefundBuildRequestV24, LocalRefundBuildResponseV24, LocalRefundLoadRequestV24,
+    LocalRefundReadyScopeV24, LOCAL_REFUND_BUILD_AUTH_DOMAIN_V24,
+    LOCAL_REFUND_LOAD_AUTH_DOMAIN_V24,
+};
 mod request;
 pub use build_request::{
     BuildSweepRequestV23, BuildSweepResponseV23, BuiltRingMemberV23, BUILD_PROOF_AUTH_DOMAIN_V23,

@@ -388,6 +388,34 @@ where
             .map(|_| ())
     }
 
+    /// Only a current canonical-chain observation bound to this frozen
+    /// admission may request deadline recovery. It grants no signing,
+    /// funding, economic finality, or permission to resume normal operation.
+    #[cfg(feature = "production")]
+    pub(crate) fn record_height_deadline_recovery_v23(
+        &mut self,
+        observed: crate::production_timer::ProductionDeadlineRecoveryV23,
+    ) -> Result<(), RouteRuntimeErrorV1> {
+        if observed.route_id() != self.admission.route_id()
+            || observed.frozen_bindings() != self.admission.frozen_bindings()
+        {
+            return Err(RouteRuntimeErrorV1::InvalidConfiguration);
+        }
+        let snapshot = self.supervisor.snapshot()?;
+        if snapshot.aborted_unfunded
+            || (snapshot.coordination == CoordinationPhaseV1::Terminal
+                && !snapshot.has_open_funds())
+        {
+            return Ok(());
+        }
+        self.supervisor.set_health(
+            observed.event_id(),
+            route_executor::HealthStateV1::RecoveryOnly,
+            observed.reason_digest(),
+        )?;
+        Ok(())
+    }
+
     /// Current verified public route snapshot.
     pub fn snapshot(&self) -> Result<RouteSnapshotV1, RouteRuntimeErrorV1> {
         Ok(self.supervisor.snapshot()?)

@@ -674,6 +674,11 @@ impl RemoteSweepResponseV23 {
         self.0.transaction_hash
     }
 
+    /// Public action discriminator; decoding remains separate from authority.
+    pub fn action(&self) -> RemoteSweepActionV23 {
+        self.0.action
+    }
+
     pub fn request_message_digest(&self) -> [u8; 32] {
         self.0.request_message_digest
     }
@@ -911,6 +916,7 @@ mod tests {
         let encoded = response.encode().expect("response encode");
         let decoded = RemoteSweepResponseV23::decode_exact(&encoded).expect("response decode");
         assert_eq!(decoded.encode().expect("canonical reencode"), encoded);
+        assert_eq!(decoded.action(), request.action);
         decoded
             .validate_for_authenticated_request(&request, [23; 32])
             .expect("exact request binding");

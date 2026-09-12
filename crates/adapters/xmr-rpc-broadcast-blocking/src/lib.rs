@@ -2,7 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod broadcast_deadline_v24;
+mod observation_deadline_v24;
 mod time_header_v23;
+use broadcast_deadline_v24::{require_before_v24, send_before_v24};
 pub use time_header_v23::MoneroTimeHeaderV23;
 mod private_funding_v12;
 pub use private_funding_v12::{
@@ -63,45 +66,59 @@ impl BlockingMoneroBroadcaster {
         Ok(value)
     }
 
-    fn require_genesis_v5(&self) -> Result<(), SpendPortError> {
+    fn require_genesis_before_v24(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), SpendPortError> {
+        require_before_v24(deadline)?;
         if let Some(expected) = self.expected_genesis {
             let reader = BlockingMoneroDaemonReaderV1 {
                 base_url: self.base_url.clone(),
                 client: self.client.clone(),
+                observation_deadline_v24: None,
             };
-            if reader.block_hash_at(0)? != expected {
+            if reader.block_hash_at_before_v24(0, deadline)? != expected {
                 return Err(SpendPortError::Rejected);
             }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     fn transaction_is_known(&self, tx_hash: [u8; 32]) -> Result<bool, SpendPortError> {
-        self.require_genesis_v5()?;
-        let response = self
+        self.transaction_is_known_before_v24(tx_hash, None)
+    }
+
+    fn transaction_is_known_before_v24(
+        &self,
+        tx_hash: [u8; 32],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<bool, SpendPortError> {
+        self.require_genesis_before_v24(deadline)?;
+        let request = self
             .client
             .post(format!("{}/get_transactions", self.base_url))
             .json(&GetTransactionsRequest {
                 txs_hashes: vec![hex_lower(&tx_hash)],
                 decode_as_json: false,
-            })
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            });
+        let response = send_before_v24(&self.client, request, deadline)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
         let body: GetTransactionsLocationResponse = read_json_bounded_v5(response)?;
         let known = exact_location_v5(&body, tx_hash)?.is_some();
-        self.require_genesis_v5()?;
+        self.require_genesis_before_v24(deadline)?;
         Ok(known)
     }
 }
 
-impl ExactBroadcastPort for BlockingMoneroBroadcaster {
-    fn submit_exact(
+impl BlockingMoneroBroadcaster {
+    fn submit_exact_scoped_v24(
         &mut self,
         tx_hash: [u8; 32],
         raw_tx: &[u8],
+        deadline: Option<std::time::Instant>,
     ) -> Result<BroadcastAcceptance, SpendPortError> {
         if tx_hash == [0; 32] || raw_tx.is_empty() {
             return Err(SpendPortError::Rejected);
@@ -111,19 +128,21 @@ impl ExactBroadcastPort for BlockingMoneroBroadcaster {
         // broadcaster is a separate step, so this guards against a corrupt or
         // substituted record just as the sidecar check guards the response.
         verify_exact_raw_transaction(raw_tx, tx_hash).map_err(|_| SpendPortError::Rejected)?;
-        self.require_genesis_v5()?;
-        let result = self
+        self.require_genesis_before_v24(deadline)?;
+        let request = self
             .client
             .post(format!("{}/send_raw_transaction", self.base_url))
             .json(&SendRawTransactionRequest {
                 tx_as_hex: hex_lower(raw_tx),
                 do_not_relay: false,
-            })
-            .send();
+            });
+        // The deadline is checked AFTER JSON serialization and immediately
+        // before execute; a slow genesis/raw audit cannot renew its budget.
+        let result = send_before_v24(&self.client, request, deadline);
         let response = match result {
             Ok(value) => value,
             Err(_) => {
-                return if self.transaction_is_known(tx_hash)? {
+                return if self.transaction_is_known_before_v24(tx_hash, deadline)? {
                     Ok(BroadcastAcceptance::AlreadyKnown)
                 } else {
                     Err(SpendPortError::Retryable)
@@ -131,7 +150,7 @@ impl ExactBroadcastPort for BlockingMoneroBroadcaster {
             }
         };
         if !response.status().is_success() {
-            return if self.transaction_is_known(tx_hash)? {
+            return if self.transaction_is_known_before_v24(tx_hash, deadline)? {
                 Ok(BroadcastAcceptance::AlreadyKnown)
             } else if response.status().is_server_error() || response.status().as_u16() == 429 {
                 Err(SpendPortError::Retryable)
@@ -140,16 +159,36 @@ impl ExactBroadcastPort for BlockingMoneroBroadcaster {
             };
         }
         let body: SendRawTransactionResponse = read_json_bounded_v5(response)?;
+        require_before_v24(deadline)?;
         if body.status == "OK" && !body.permanent_rejection() {
             return Ok(BroadcastAcceptance::Accepted);
         }
-        if self.transaction_is_known(tx_hash)? {
+        if self.transaction_is_known_before_v24(tx_hash, deadline)? {
             Ok(BroadcastAcceptance::AlreadyKnown)
         } else if body.busy || body.not_relayed {
             Err(SpendPortError::Retryable)
         } else {
             Err(SpendPortError::Rejected)
         }
+    }
+}
+
+impl ExactBroadcastPort for BlockingMoneroBroadcaster {
+    fn submit_exact(
+        &mut self,
+        tx_hash: [u8; 32],
+        raw_tx: &[u8],
+    ) -> Result<BroadcastAcceptance, SpendPortError> {
+        self.submit_exact_scoped_v24(tx_hash, raw_tx, None)
+    }
+    fn submit_exact_before_v24(
+        &mut self,
+        tx_hash: [u8; 32],
+        raw_tx: &[u8],
+        deadline: std::time::Instant,
+    ) -> Result<BroadcastAcceptance, SpendPortError> {
+        require_before_v24(Some(deadline))?;
+        self.submit_exact_scoped_v24(tx_hash, raw_tx, Some(deadline))
     }
 }
 
@@ -162,6 +201,7 @@ impl ExactBroadcastPort for BlockingMoneroBroadcaster {
 pub struct BlockingMoneroDaemonReaderV1 {
     base_url: String,
     client: Client,
+    observation_deadline_v24: Option<std::time::Instant>,
 }
 
 impl core::fmt::Debug for BlockingMoneroDaemonReaderV1 {
@@ -249,15 +289,14 @@ impl BlockingMoneroDaemonReaderV1 {
             return Err(SpendPortError::Rejected);
         }
         let wanted = hex_lower(&tx_hash);
-        let response = self
+        let request = self
             .client
             .post(format!("{}/get_transactions", self.base_url))
             .json(&GetTransactionsRequest {
                 txs_hashes: vec![wanted.clone()],
                 decode_as_json: false,
-            })
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            });
+        let response = send_before_v24(&self.client, request, self.observation_deadline_v24)?;
         let body: GetTransactionsLocationResponse = read_json_bounded_v5(response)?;
         if body.status != "OK" || body.untrusted || !body.missed_tx.is_empty() {
             return Err(SpendPortError::Retryable);
@@ -274,6 +313,7 @@ impl BlockingMoneroDaemonReaderV1 {
         if self.block_hash_at(0)? != genesis {
             return Err(SpendPortError::Rejected);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         Ok(raw)
     }
 
@@ -292,7 +332,7 @@ impl BlockingMoneroDaemonReaderV1 {
         {
             return Err(SpendPortError::Rejected);
         }
-        let response = self
+        let request = self
             .client
             .post(format!("{}/get_outs", self.base_url))
             .json(&GetOutsRequestV23 {
@@ -304,9 +344,8 @@ impl BlockingMoneroDaemonReaderV1 {
                     })
                     .collect(),
                 get_txid: false,
-            })
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            });
+        let response = send_before_v24(&self.client, request, self.observation_deadline_v24)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
@@ -331,6 +370,7 @@ impl BlockingMoneroDaemonReaderV1 {
         if self.block_hash_at(0)? != genesis {
             return Err(SpendPortError::Rejected);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         Ok(members)
     }
 
@@ -355,13 +395,13 @@ impl BlockingMoneroDaemonReaderV1 {
                 block_height: Some(height),
                 ..
             }) => {
-                let response = self
+                let request = self
                     .client
                     .post(format!("{}/json_rpc", self.base_url))
                     .json(&serde_json::json!({"jsonrpc": "2.0", "id": "0",
-                        "method": "get_block", "params": {"height": height}}))
-                    .send()
-                    .map_err(|_| SpendPortError::Retryable)?;
+                        "method": "get_block", "params": {"height": height}}));
+                let response =
+                    send_before_v24(&self.client, request, self.observation_deadline_v24)?;
                 let body: serde_json::Value = read_json_bounded_v5(response)?;
                 let block_hash = inclusion_block_v5(&body, height, tx_hash)?;
                 let chain_length = self.daemon_height()?;
@@ -379,6 +419,7 @@ impl BlockingMoneroDaemonReaderV1 {
         if self.block_hash_at(0)? != genesis {
             return Err(SpendPortError::Rejected);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         Ok(observation)
     }
 
@@ -395,6 +436,7 @@ impl BlockingMoneroDaemonReaderV1 {
         if self.block_hash_at(0)? != genesis {
             return Err(SpendPortError::Rejected);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         Ok(spent)
     }
     /// Canonical loopback socket port used to reject duplicate quorum voters.
@@ -412,7 +454,11 @@ impl BlockingMoneroDaemonReaderV1 {
             .timeout(core::time::Duration::from_secs(30))
             .build()
             .map_err(|_| SpendPortError::Retryable)?;
-        Ok(Self { base_url, client })
+        Ok(Self {
+            base_url,
+            client,
+            observation_deadline_v24: None,
+        })
     }
 
     /// Where the daemon sees an exact txid, `None` when unknown to it.
@@ -421,29 +467,27 @@ impl BlockingMoneroDaemonReaderV1 {
         tx_hash: [u8; 32],
     ) -> Result<Option<MoneroTransactionLocationV1>, SpendPortError> {
         let wanted = hex_lower(&tx_hash);
-        let response = self
+        let request = self
             .client
             .post(format!("{}/get_transactions", self.base_url))
             .json(&GetTransactionsRequest {
                 txs_hashes: vec![wanted.clone()],
                 decode_as_json: false,
-            })
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            });
+        let response = send_before_v24(&self.client, request, self.observation_deadline_v24)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
         let body: GetTransactionsLocationResponse = read_json_bounded_v5(response)?;
-        exact_location_v5(&body, tx_hash)
+        let result = exact_location_v5(&body, tx_hash);
+        require_before_v24(self.observation_deadline_v24)?;
+        result
     }
 
     /// The daemon's current chain height.
     pub fn daemon_height(&self) -> Result<u64, SpendPortError> {
-        let response = self
-            .client
-            .get(format!("{}/get_height", self.base_url))
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+        let request = self.client.get(format!("{}/get_height", self.base_url));
+        let response = send_before_v24(&self.client, request, self.observation_deadline_v24)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
@@ -451,12 +495,26 @@ impl BlockingMoneroDaemonReaderV1 {
         if body.height == 0 || body.status != "OK" || body.untrusted {
             return Err(SpendPortError::Retryable);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         Ok(body.height)
     }
 
     /// The canonical block hash at one height, from the daemon's chain view.
     pub fn block_hash_at(&self, height: u64) -> Result<[u8; 32], SpendPortError> {
-        let response = self
+        self.block_hash_at_before_v24(height, None)
+    }
+
+    fn block_hash_at_before_v24(
+        &self,
+        height: u64,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<[u8; 32], SpendPortError> {
+        let deadline = match (deadline, self.observation_deadline_v24) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        require_before_v24(deadline)?;
+        let request = self
             .client
             .post(format!("{}/json_rpc", self.base_url))
             .json(&serde_json::json!({
@@ -464,9 +522,8 @@ impl BlockingMoneroDaemonReaderV1 {
                 "id": "0",
                 "method": "get_block_header_by_height",
                 "params": { "height": height },
-            }))
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            }));
+        let response = send_before_v24(&self.client, request, deadline)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
@@ -492,20 +549,20 @@ impl BlockingMoneroDaemonReaderV1 {
             .and_then(decode_hex_32)
             .filter(|hash| *hash != [0; 32])
             .ok_or(SpendPortError::Retryable)?;
+        require_before_v24(deadline)?;
         Ok(hash)
     }
 
     /// Whether the exact key image is spent in the daemon's view (chain or
     /// pool alike: either way the shared output is contested).
     pub fn key_image_spent(&self, key_image: [u8; 32]) -> Result<bool, SpendPortError> {
-        let response = self
+        let request = self
             .client
             .post(format!("{}/is_key_image_spent", self.base_url))
             .json(&IsKeyImageSpentRequest {
                 key_images: vec![hex_lower(&key_image)],
-            })
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            });
+        let response = send_before_v24(&self.client, request, self.observation_deadline_v24)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
@@ -513,6 +570,7 @@ impl BlockingMoneroDaemonReaderV1 {
         if body.status != "OK" || body.untrusted {
             return Err(SpendPortError::Retryable);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         match body.spent_status.as_slice() {
             [0] => Ok(false),
             [1] | [2] => Ok(true),

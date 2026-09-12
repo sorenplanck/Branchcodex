@@ -61,6 +61,20 @@ enum LocalRole {
     RefundReceiver,
 }
 
+/// A route drives both participants through recovery, but only the negotiated
+/// XMR refund receiver owns T and may combine it with publicly revealed U.
+/// Waiting here keeps the other participant's independent DOM recovery pump
+/// alive; it is not a sweep observation, a successful plan, or a terminal exit.
+fn build_route_refund_for_role_v23<T>(
+    role: LocalRole,
+    build: impl FnOnce() -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    match role {
+        LocalRole::ClaimReceiver => Err(Refusal::Unavailable),
+        LocalRole::RefundReceiver => build(),
+    }
+}
+
 /// Closed concrete sources. Both obtain U through native canonical observation;
 /// the V11 source additionally proves the cancel/refund/punish graph ancestry.
 pub(crate) enum ProductionXmrRefundRevealSourceV11 {
@@ -282,6 +296,14 @@ pub(crate) struct ProductionXmrSweepAuthorityV10 {
     funding_terms_v22: SettlementTermsV1,
     funding_profile_v22: XmrAdapterProfileV1,
     funding_quorum_v22: Option<FundingQuorumV22>,
+    local_refund_v24: Option<LocalRefundRuntimeV24>,
+}
+
+#[derive(Clone)]
+struct LocalRefundRuntimeV24 {
+    pins: crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundPinsV23,
+    source: crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundSourceV23,
+    quorum: crate::production_children::QuorumXmrObservationPortV1,
 }
 
 struct FundingQuorumV22 {
@@ -291,6 +313,54 @@ struct FundingQuorumV22 {
 }
 
 impl ProductionXmrSweepAuthorityV10 {
+    pub(crate) fn enable_local_refund_v24(
+        &mut self,
+        common: crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimPinsV23,
+        source: crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundSourceV23,
+        quorum: crate::production_children::QuorumXmrObservationPortV1,
+    ) -> Result<(), Refusal> {
+        if self.local_refund_v24.is_some() || self.binding.local_role != LocalRole::RefundReceiver {
+            return Err(Refusal::Conflict);
+        }
+        let pins = self.remote_refund_pins_v23(common)?;
+        self.local_refund_v24 = Some(LocalRefundRuntimeV24 {
+            pins,
+            source,
+            quorum,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn remote_refund_pins_v23(
+        &self,
+        common: crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimPinsV23,
+    ) -> Result<crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundPinsV23, Refusal>
+    {
+        if common.session_id != self.binding.session_id
+            || common.terms_digest != self.binding.setup.terms_hash()
+            || common.max_fee_piconero != self.binding.max_fee_piconero
+            || usize::try_from(common.adapter_max_raw_transaction_bytes).ok()
+                != Some(self.binding.max_raw_bytes)
+        {
+            return Err(Refusal::Conflict);
+        }
+        Ok(
+            crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundPinsV23 {
+                common,
+                dom_chain: self.binding.dom_chain_id,
+                refund_template: self.binding.refund_template,
+                refund_claim: self.binding.refund_claim,
+                refund_destination: self.binding.refund_destination.clone(),
+                funding_min_confirmations: u64::from(
+                    self.funding_terms_v22
+                        .counterparty_leg
+                        .finality
+                        .min_confirmations,
+                ),
+            },
+        )
+    }
+
     pub(crate) fn with_funding_quorum_v22(
         mut self,
         deployment: deployment_registry::ResolvedMoneroDeploymentV1,
@@ -362,6 +432,7 @@ impl ProductionXmrSweepAuthorityV10 {
             binding,
             secrets: std::rc::Rc::new(secrets),
             sidecar: std::rc::Rc::new(std::cell::RefCell::new(sidecar)),
+            local_refund_v24: None,
             refund_source,
             private_funding_v12: None,
             funding_terms_v22: terms.clone(),
@@ -571,6 +642,46 @@ impl ScopedXmrSweepAuthorityV1 for ProductionXmrSweepAuthorityV10 {
         self.build(request_nonce, remote, true)
     }
 
+    fn build_refund_sweep_v23(
+        &mut self,
+        request: &crate::production_child_router::ProductionChildMaterializationRequestV1,
+    ) -> Result<XmrBuiltSweepV1, Refusal> {
+        // The child validates the full route/effect/profile scope before this
+        // call. Keep malformed or transplanted requests fatal even for a local
+        // participant that cannot construct this operation.
+        if request.action != settlement_coordinator::SettlementActionV1::Refund
+            || request.exposure != settlement_coordinator::ChildExposureV1::NonSecret
+            || request.settlement_id != self.binding.setup.settlement_id()
+            || request.effect_id == [0; 32]
+            || request.public_secret_evidence_digest != [0; 32]
+        {
+            return Err(Refusal::Conflict);
+        }
+        // Do not turn the direct builder's role refusal into permission. This
+        // scoped, asynchronous route attempt alone waits for the authorized
+        // participant; no secret source, sidecar, or signer is invoked by it.
+        build_route_refund_for_role_v23(self.binding.local_role, || {
+            if let Some(runtime) = self.local_refund_v24.clone() {
+                let funding = self.observe_verified_funding_v22()?;
+                let authorized =
+                    crate::production_xmr_remote_sweep_v23::AuthorizedLocalXmrRefundV24::observe(
+                        &runtime.pins,
+                        &self.binding.setup,
+                        request,
+                        &runtime.source,
+                        funding,
+                    )?;
+                let response = self.build_local_refund_with_proofs_v24(&authorized)?;
+                return crate::production_xmr_remote_sweep_v23::verify_local_refund_response_v24(
+                    &authorized,
+                    &response,
+                    &runtime.quorum,
+                );
+            }
+            self.build_refund_sweep(request.effect_id)
+        })
+    }
+
     fn verify_external_funding(
         &mut self,
         request_nonce: [u8; 32],
@@ -634,6 +745,35 @@ mod tests {
         prove_bound, CrossCurveSecret252, ROLE_XMR_REFUND_SHARE, ROLE_XMR_SHARED_SPEND,
     };
     use xmr_setup_profile::{validate_setup, XmrNetwork, XmrSetupBindingV1};
+
+    #[test]
+    fn route_refund_waits_without_invoking_nonreceiver_secret_or_builder() {
+        let calls = std::cell::Cell::new(0);
+        for _ in 0..2 {
+            let result = build_route_refund_for_role_v23(LocalRole::ClaimReceiver, || {
+                calls.set(calls.get() + 1);
+                Ok::<_, Refusal>([7; 32])
+            });
+            assert!(matches!(result, Err(Refusal::Unavailable)));
+        }
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn route_refund_receiver_preserves_native_builder_result_and_refusals() {
+        let calls = std::cell::Cell::new(0);
+        let result = build_route_refund_for_role_v23(LocalRole::RefundReceiver, || {
+            calls.set(calls.get() + 1);
+            Ok::<_, Refusal>([7; 32])
+        });
+        assert_eq!(result.unwrap(), [7; 32]);
+        assert_eq!(calls.get(), 1);
+        for refusal in [Refusal::Unavailable, Refusal::Conflict] {
+            let result =
+                build_route_refund_for_role_v23::<()>(LocalRole::RefundReceiver, || Err(refusal));
+            assert_eq!(result.unwrap_err(), refusal);
+        }
+    }
 
     #[test]
     fn v10_both_xmr_roles_recover_the_same_key_and_refuse_wrong_local_shares() {

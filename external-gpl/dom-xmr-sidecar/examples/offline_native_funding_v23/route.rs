@@ -1,9 +1,12 @@
-//! Two funding transactions on one immutable canonical RPC history.
+//! Two funding transactions and inventory on one local canonical RPC history.
+//! Mutation is off by default and explicitly restricted to the private scenario.
 use super::*;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PeerRequest {
+    #[serde(default)]
+    mutable_scenario_v23: bool,
     combined_spend_public_key: String,
     amount_piconero: u64,
     max_fee_piconero: u64,
@@ -25,20 +28,18 @@ struct RouteEnvelope {
     scope: &'static str,
     legs: [PublicEnvelope; 2],
     solver_inventory: PublicEnvelope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    funding_state_v23: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_outputs_v23: Option<serde_json::Value>,
 }
 
-pub(super) fn serve(
-    request: Request,
-    peer: PeerRequest,
-    primary: Transaction,
-    primary_spend: Point,
-    primary_destination: String,
-    mut input: impl Read,
-) -> Result<()> {
+pub(super) fn serve(request: Request, peer: PeerRequest, mut input: impl Read) -> Result<()> {
     ensure!(
         request.network_tag == 1,
         "new offline route requires explicit Mainnet"
     );
+    let mutable_scenario = peer.mutable_scenario_v23;
     let secondary_request = Request {
         schema: request.schema.clone(),
         network_tag: 1,
@@ -59,8 +60,32 @@ pub(super) fn serve(
         max_fee_piconero: peer.solver_inventory.max_fee_piconero,
         recipient_view_public_key: Some(peer.solver_inventory.view_public_key),
     };
-    let (secondary, secondary_spend, secondary_destination) = build(&secondary_request)?;
-    let (inventory, inventory_spend, inventory_destination) = build(&inventory_request)?;
+    let sources = if mutable_scenario {
+        let amounts = [&request, &secondary_request, &inventory_request].map(|request| {
+            request
+                .amount_piconero
+                .checked_add(1_000_000_000)
+                .ok_or_else(|| anyhow!("source amount overflow"))
+        });
+        let [up, down, inventory] = amounts;
+        Some(rpc::Sources::new([up?, down?, inventory?], 1)?)
+    } else {
+        None
+    };
+    let build_candidate = |request: &Request| -> Result<_> {
+        match &sources {
+            Some(sources) => {
+                let result = build_with_input(request, Some(sources.input(request.position)?))?;
+                sources.validate_candidate(&result.0)?;
+                Ok(result)
+            }
+            None => build(request),
+        }
+    };
+    let (primary, primary_spend, primary_destination) = build_candidate(&request)?;
+    let (secondary, secondary_spend, secondary_destination) = build_candidate(&secondary_request)?;
+    let (inventory, inventory_spend, inventory_destination) = build_candidate(&inventory_request)?;
+    let source_outputs = sources.as_ref().map(rpc::Sources::metadata).transpose()?;
     ensure!(
         primary.hash() != secondary.hash()
             && primary.hash() != inventory.hash()
@@ -78,7 +103,11 @@ pub(super) fn serve(
     ];
     let spends = [primary_spend, secondary_spend];
     let amounts = [request.amount_piconero, secondary_request.amount_piconero];
-    let servers = rpc::Servers::start_multiple(vec![primary, secondary, inventory], 1)?;
+    let servers = if let Some(sources) = sources {
+        sources.start(inventory)?
+    } else {
+        rpc::Servers::start_multiple(vec![primary, secondary, inventory], 1)?
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -87,6 +116,12 @@ pub(super) fn serve(
             monero_simple_request_rpc::SimpleRequestTransport::new(servers.urls()[0].clone())
                 .await?;
         for position in 0..2 {
+            // In mutable mode the contract outputs intentionally do not exist
+            // in the history or pool yet. The candidates were cryptographically
+            // checked against retained source rings above, not pre-funded.
+            if mutable_scenario {
+                continue;
+            }
             let received = monero_wallet_ng::verify::largest_received_utxo(
                 &provider,
                 hashes[position],
@@ -134,10 +169,16 @@ pub(super) fn serve(
             make(1, secondary_request, secondary_destination, down_bytes),
         ],
         solver_inventory: make(2, inventory_request, inventory_destination, inventory_bytes),
+        funding_state_v23: mutable_scenario
+            .then_some("unconfirmed-route-candidates-inventory-confirmed"),
+        source_outputs_v23: source_outputs,
     };
     serde_json::to_writer(std::io::stdout().lock(), &envelope)?;
     println!();
     std::io::stdout().flush()?;
+    if mutable_scenario {
+        return control::serve(input, servers);
+    }
     // Own the one common history until the supervisor closes the retained pipe.
     let mut drained = [0; 1024];
     while input.read(&mut drained)? != 0 {}

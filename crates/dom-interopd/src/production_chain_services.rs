@@ -737,6 +737,7 @@ pub(crate) fn validate_endpoint_text(
     let authority = rest.strip_suffix('/').unwrap_or(rest);
     if authority.is_empty()
         || authority.contains('/')
+        || !endpoint_authority_is_valid(authority)
         || (plaintext && !plaintext_authority_is_loopback(authority))
     {
         return Err(refusal);
@@ -744,20 +745,70 @@ pub(crate) fn validate_endpoint_text(
     Ok(())
 }
 
+/// Validate a literal HTTP origin without resolving a host or opening a client.
+/// Reject URL-parser aliases (encoded hosts, malformed numeric addresses) as
+/// well as invalid ports before a public configuration can be published.
+fn endpoint_authority_is_valid(authority: &str) -> bool {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((address, suffix)) = bracketed.split_once(']') else {
+            return false;
+        };
+        return address.parse::<std::net::Ipv6Addr>().is_ok()
+            && (suffix.is_empty() || suffix.strip_prefix(':').is_some_and(endpoint_port_is_valid));
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if port.is_some_and(|port| !endpoint_port_is_valid(port)) {
+        return false;
+    }
+    // A final DNS root dot is permitted; empty interior labels are not.
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    let last = host.rsplit('.').next().unwrap_or_default();
+    if last.bytes().all(|byte| byte.is_ascii_digit())
+        || last
+            .strip_prefix("0x")
+            .or_else(|| last.strip_prefix("0X"))
+            .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        // HTTP URL parsers interpret a numeric final label as IPv4. Requiring
+        // the standard dotted address above avoids accepting unusable DNS text
+        // such as node.123 or the invalid address 999.0.0.1.
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+fn endpoint_port_is_valid(port: &str) -> bool {
+    !port.is_empty()
+        && port.len() <= 5
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|value| value != 0)
+}
+
 fn plaintext_authority_is_loopback(authority: &str) -> bool {
     if authority == "127.0.0.1" || authority == "[::1]" {
         return true;
     }
-    let port_is_canonical = |port: &str| {
-        !port.is_empty()
-            && port.len() <= 5
-            && port.bytes().all(|byte| byte.is_ascii_digit())
-            && port.parse::<u16>().is_ok_and(|value| value != 0)
-    };
     authority
         .strip_prefix("127.0.0.1:")
         .or_else(|| authority.strip_prefix("[::1]:"))
-        .is_some_and(port_is_canonical)
+        .is_some_and(endpoint_port_is_valid)
 }
 
 pub(crate) fn validate_wallet_name(wallet: &str) -> Result<(), ProductionChainServicesErrorV1> {
@@ -883,6 +934,111 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn public_origins_validate_dns_ipv4_ipv6_and_ports_without_network_access() {
+        for endpoint in [
+            "https://rpc.example",
+            "https://RPC.Example/",
+            "https://rpc-1.example.:443/",
+            "https://localhost:65535",
+            "https://xn--bcher-kva.example",
+            "https://127.0.0.1",
+            "https://192.0.2.1:443/",
+            "https://[::1]",
+            "https://[2001:db8::1]:443/",
+            "https://[::ffff:192.0.2.1]:65535",
+            "http://127.0.0.1:8545/",
+            "http://[::1]:18081",
+            "http://127.0.0.1",
+            "http://[::1]/",
+        ] {
+            assert_eq!(
+                validate_endpoint_text(endpoint, ProductionChainServicesErrorV1::InvalidEncoding),
+                Ok(()),
+                "valid public origin: {endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_origins_refuse_malformed_https_authorities_before_client_construction() {
+        for endpoint in [
+            "https://",
+            "https://:443",
+            "https://host:",
+            "https://host:0",
+            "https://host:65536",
+            "https://host:99999",
+            "https://host:-1",
+            "https://host:+443",
+            "https://host:abc",
+            "https://host:443:80",
+            "https://[]",
+            "https://[::1",
+            "https://::1",
+            "https://[::1]]",
+            "https://[::1]suffix",
+            "https://[::1]:",
+            "https://[::1]:65536",
+            "https://[not-ipv6]:443",
+            "https://[fe80::1%25eth0]",
+            "https://999.0.0.1",
+            "https://127.0.0.01",
+            "https://node.123",
+            "https://-host.example",
+            "https://host-.example",
+            "https://host..example",
+            "https://host_name.example",
+            "https://%65xample.org",
+            "https://.",
+        ] {
+            for refusal in [
+                ProductionChainServicesErrorV1::InvalidEvmEndpoint,
+                ProductionChainServicesErrorV1::InvalidBitcoinEndpoint,
+                ProductionChainServicesErrorV1::InvalidEncoding,
+            ] {
+                assert_eq!(
+                    validate_endpoint_text(endpoint, refusal),
+                    Err(refusal),
+                    "{endpoint}"
+                );
+            }
+        }
+        for endpoint in [
+            format!("https://{}.example", "a".repeat(64)),
+            format!("https://{0}.{0}.{0}.{0}", "a".repeat(63)),
+        ] {
+            assert!(validate_endpoint_text(
+                &endpoint,
+                ProductionChainServicesErrorV1::InvalidEncoding
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn public_origin_syntax_does_not_relax_private_url_or_plaintext_restrictions() {
+        for endpoint in [
+            "https://user:secret@rpc.example",
+            "https://rpc.example/private-key",
+            "https://rpc.example/?token=secret",
+            "https://rpc.example/#fragment",
+            "https://rpc.example\\private",
+            "https://rpc.example ",
+            "https://rpc.example\n",
+            "http://localhost:8545",
+            "http://192.0.2.1:8545",
+            "http://[2001:db8::1]:8545",
+            "http://127.0.0.1.example:8545",
+        ] {
+            assert!(
+                validate_endpoint_text(endpoint, ProductionChainServicesErrorV1::InvalidEncoding)
+                    .is_err(),
+                "{endpoint}"
+            );
+        }
+    }
 
     fn owner_cookie(directory: &Path) -> Result<PathBuf, std::io::Error> {
         fs::set_permissions(

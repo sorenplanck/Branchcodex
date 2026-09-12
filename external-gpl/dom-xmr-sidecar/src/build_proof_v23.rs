@@ -18,8 +18,10 @@ use xmr_key_image_proof::{
     destination_digest_v23, prove_input_spend_v23, prove_tx_key_derivation_v23,
 };
 
-type Request = BuildSweepRequestV23<BuildSweepRequestV2>;
-type Response = BuildSweepResponseV23<BuildSweepResponseV2>;
+mod scope;
+use scope::{
+    LocalRequest, LocalResponse, Origin, RemoteRequest, RemoteResponse, Request, Response,
+};
 const MAINNET_GENESIS: [u8; 32] = [
     0x41, 0x80, 0x15, 0xbb, 0x9a, 0xe9, 0x82, 0xa1, 0x97, 0x5d, 0xa7, 0xd7, 0x92, 0x77, 0xc2, 0x70,
     0x57, 0x27, 0xa5, 0x68, 0x94, 0xba, 0x0f, 0xb2, 0x46, 0xad, 0xaa, 0xbb, 0x1f, 0x46, 0x32, 0xe3,
@@ -176,17 +178,66 @@ fn reconstruct_plan(
 
 pub(super) async fn build(
     config: &Config,
-    request: &Request,
+    request: &RemoteRequest,
+) -> Result<RemoteResponse, SidecarOperationError> {
+    build_scoped(config, &Request::remote(request))
+        .await?
+        .into_remote()
+}
+
+pub(super) async fn build_local_refund(
+    config: &Config,
+    request: &LocalRequest,
+) -> Result<LocalResponse, SidecarOperationError> {
+    build_scoped(config, &Request::local(request))
+        .await?
+        .into_local()
+}
+
+pub(super) async fn load_local_refund(
+    config: &Config,
+    request: &xmr_key_image_proof::LocalRefundLoadRequestV24,
+) -> Result<LocalResponse, SidecarOperationError> {
+    // Deliberately disconnected from build_scoped: this public DTO has no
+    // scalar fields, and this call graph never opens a plan or reaches RPC/RNG.
+    config
+        .auth
+        .verify_local_refund_load_v24(request)
+        .map_err(|_| rejected())?;
+    let scope = request.canonical_auth_bytes().map_err(|_| rejected())?;
+    let guard = config
+        .cache
+        .lookup_local_refund_v24(request.request_nonce)
+        .map_err(cache_error)?;
+    let response = guard
+        .load_public_local_ready_v24(&scope, &config.auth)
+        .map_err(cache_error)?
+        .ok_or(SidecarOperationError::Retryable)?;
+    if response.cache_request_hash != guard.request_hash_v24() {
+        return Err(rejected());
+    }
+    response.validate_framing().map_err(|_| rejected())?;
+    Ok(response)
+}
+
+async fn build_scoped(
+    config: &Config,
+    request: &Request<'_>,
 ) -> Result<Response, SidecarOperationError> {
     let action = request.validate_scope().map_err(|_| rejected())?;
     request
         .build
         .validate_public_fields()
         .map_err(|_| rejected())?;
-    config
-        .auth
-        .verify_build_proof_v23(request)
-        .map_err(|_| rejected())?;
+    request.verify_auth(config)?;
+    let public_scope = request.local_public_scope();
+    let public_lookup = public_scope
+        .as_ref()
+        .map(|scope| {
+            scope.canonical_bytes().map_err(|_| rejected())?;
+            scope.request.canonical_auth_bytes().map_err(|_| rejected())
+        })
+        .transpose()?;
     let destination = MoneroAddress::from_str(Network::Mainnet, &request.build.destination)
         .map_err(|_| rejected())?;
     if destination.network() != Network::Mainnet
@@ -210,12 +261,32 @@ pub(super) async fn build(
             .map_err(|_| rejected())?,
     );
     let request_hash = SweepCache::request_hash(&canonical);
-    let guard = config
-        .cache
-        .begin_build_v23(request.build.request_nonce, request_hash)
-        .map_err(cache_error)?;
-    let encryption_key = config.auth.build_plan_key_v23(&request_hash);
-    if let Some(response) = guard.load_ready().map_err(cache_error)? {
+    let guard = match request.origin {
+        Origin::AcceptedRemote { .. } => config
+            .cache
+            .begin_build_v23(request.build.request_nonce, request_hash),
+        Origin::LocalRefund { .. } => config
+            .cache
+            .begin_local_refund_build_v24(request.build.request_nonce, request_hash),
+    }
+    .map_err(cache_error)?;
+    let encryption_key = match request.origin {
+        Origin::AcceptedRemote { .. } => config.auth.build_plan_key_v23(&request_hash),
+        Origin::LocalRefund { .. } => config.auth.local_refund_plan_key_v24(&request_hash),
+    };
+    let cached = match request.origin {
+        Origin::AcceptedRemote { .. } => guard
+            .load_ready()
+            .map_err(cache_error)?
+            .map(Response::from_remote)
+            .transpose()?,
+        Origin::LocalRefund { .. } => guard
+            .load_local_ready(public_lookup.as_deref().ok_or_else(rejected)?, &config.auth)
+            .map_err(cache_error)?
+            .map(Response::from_local)
+            .transpose()?,
+    };
+    if let Some(response) = cached {
         let encoded = guard
             .load_plan(&encryption_key)
             .map_err(cache_error)?
@@ -449,9 +520,9 @@ pub(super) async fn build(
     )
     .map_err(|_| rejected())?;
     let response = Response {
-        api_version: 23,
-        authorization_digest: request.authorization_digest,
-        request_message_digest: request.request_message_digest,
+        origin: request.origin,
+        cache_request_hash: request_hash,
+        public_scope,
         sweep: BuildSweepResponseV2 {
             api_version: API_VERSION_V2,
             request_nonce: request.build.request_nonce,
@@ -464,7 +535,24 @@ pub(super) async fn build(
         ring_members,
     };
     // Complete cryptographic result is durable before anything crosses the socket.
-    guard.store_ready(&response).map_err(cache_error)?;
+    let response = match response.origin {
+        Origin::AcceptedRemote { .. } => {
+            let wire = response.into_remote()?;
+            guard.store_ready(&wire).map_err(cache_error)?;
+            Response::from_remote(wire)?
+        }
+        Origin::LocalRefund { .. } => {
+            let wire = response.into_local()?;
+            guard
+                .store_local_ready(
+                    &wire,
+                    public_lookup.as_deref().ok_or_else(rejected)?,
+                    &config.auth,
+                )
+                .map_err(cache_error)?;
+            Response::from_local(wire)?
+        }
+    };
     validate_response(request, response)
 }
 
@@ -584,8 +672,8 @@ fn validate_response(
     response: Response,
 ) -> Result<Response, SidecarOperationError> {
     let c = response.validate_framing().map_err(|_| rejected())?;
-    if response.request_message_digest != request.request_message_digest
-        || response.authorization_digest != request.authorization_digest
+    if response.origin != request.origin
+        || response.public_scope != request.local_public_scope()
         || response.sweep.api_version != API_VERSION_V2
         || response.sweep.request_nonce != request.build.request_nonce
         || response.sweep.tx_hash != c.sweep_tx

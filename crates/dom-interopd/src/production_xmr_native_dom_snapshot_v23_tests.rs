@@ -27,6 +27,7 @@ mod evolving_v23;
 #[path = "production_xmr_native_dom_ledger_v23_tests.rs"]
 mod ledger_v23;
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
+type PublicDomHistoryV24 = (ExpectedDomIdentityV1, Value, Vec<Value>);
 
 pub(crate) struct Snapshot {
     adapter: DomHttpChainAdapterV1,
@@ -34,6 +35,7 @@ pub(crate) struct Snapshot {
     stop: Arc<AtomicBool>,
     submissions: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     baseline_wallet_inputs: std::sync::Mutex<[Option<dom_wallet2::StoredOutput>; 3]>,
+    live: Option<Arc<std::sync::Mutex<evolving_v23::EvolvingDomV23>>>,
     worker: Option<thread::JoinHandle<core::result::Result<(), String>>>,
 }
 impl Snapshot {
@@ -292,13 +294,13 @@ impl Snapshot {
             "range_proof_serialization_version":identity.range_proof_serialization_version,
             "coinbase_maturity":dom_core::COINBASE_MATURITY,"tip_height":tip,"tip_hash":hex::encode(previous)});
         let live = live_ledger.map(|ledger| {
-            std::sync::Mutex::new(evolving_v23::EvolvingDomV23::new(
+            Arc::new(std::sync::Mutex::new(evolving_v23::EvolvingDomV23::new(
                 ledger,
                 identity.clone(),
                 identity_json.clone(),
                 blocks.clone(),
                 deployment.finality.min_confirmations,
-            ))
+            )))
         });
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
@@ -314,6 +316,7 @@ impl Snapshot {
         let worker_stop = Arc::clone(&stop);
         let submissions = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = Arc::clone(&submissions);
+        let retained_live = live.clone();
         let worker = thread::spawn(move || -> core::result::Result<(), String> {
             let mut requests = 0usize;
             while !worker_stop.load(Ordering::Acquire) {
@@ -412,9 +415,74 @@ impl Snapshot {
             stop,
             submissions,
             baseline_wallet_inputs: std::sync::Mutex::new(baseline_wallet_inputs),
+            live: retained_live,
             worker: Some(worker),
         })
     }
+    /// Controls are direct handles owned by this local scenario, not RPC methods
+    /// or a credential that can change a live chain or the negotiated deadlines.
+    pub(crate) fn arm_submission_barrier_v23(&self) -> Result<()> {
+        self.live
+            .as_ref()
+            .ok_or("immutable DOM snapshot has no submission barrier")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .arm_submission_barrier()
+    }
+
+    pub(crate) fn pending_submissions_v23(&self) -> Result<Vec<([u8; 32], Vec<u8>)>> {
+        Ok(self
+            .live
+            .as_ref()
+            .ok_or("immutable DOM snapshot has no pending ledger")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .pending_transactions())
+    }
+
+    pub(crate) fn release_submissions_v23(&self) -> Result<()> {
+        self.live
+            .as_ref()
+            .ok_or("immutable DOM snapshot has no pending ledger")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .release_submissions()
+    }
+
+    /// Atomic read of the public local ledger, never a signing/finality token.
+    /// Only native-validated admissions populate this evolving history.
+    pub(crate) fn public_history_v24(&self) -> Result<Option<PublicDomHistoryV24>> {
+        let live = match self
+            .live
+            .as_ref()
+            .ok_or("mutable native ledger required")?
+            .try_lock()
+        {
+            Ok(live) => live,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("native ledger poisoned".into())
+            }
+        };
+        if live.blocks().is_empty() || live.blocks().len() > 4096 {
+            return Err("native public history bound".into());
+        }
+        Ok(Some((
+            self.adapter.expected_identity().clone(),
+            live.identity_json().clone(),
+            live.blocks().to_vec(),
+        )))
+    }
+
+    pub(crate) fn advance_to_height_v23(&self, target: u64) -> Result<()> {
+        self.live
+            .as_ref()
+            .ok_or("immutable DOM snapshot cannot advance")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .advance_to_height(target)
+    }
+
     /// Move a baseline output once, without cloning a funded wallet or store.
     pub(crate) fn take_baseline_wallet_input_v23(
         &self,

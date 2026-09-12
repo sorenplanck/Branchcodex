@@ -22,6 +22,155 @@ use std::{
 
 pub(crate) const FILE_V8: &str = "production-route-services.v8.json";
 const MAX_BYTES: usize = 131_072;
+const PREPARING_V11: &str = ".production-route-services.v8.json.preparing-v11";
+
+/// Public-only preparation; authenticated runtime admission still binds both legs.
+pub const PREPARE_ROUTE_SERVICES_USAGE_V11: &str = "usage: dom-interopd prepare-route-services-v11 --state-dir ABSOLUTE_PRIVATE_DIRECTORY\nRead one public JSON object from non-terminal stdin, then EOF (maximum 131072 bytes).\nFields: version (8), route_id, composition_digest, registry_digest, legs (upstream, downstream).\nEach leg: settlement_id, chain_id, service. Service family is BTC, EVM, SOL or XMR.\nBTC: endpoint, wallet, cookie; EVM: endpoint, refund_timeout_seconds; SOL/XMR: endpoints, quorum.\nIDs are 32-byte arrays. No credentials, signing keys or authenticated URLs are accepted.\nPublishes production-route-services.v8.json atomically with mode 0600; never overwrites.\nThe existing state directory must be canonical, owned by this user and mode 0700.\nNo RPC calls, signatures or chain authority are produced; run still authenticates the document.";
+
+/// Redacted refusals never include endpoints, filesystem paths or input bytes.
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareRouteServicesErrorV11 {
+    /// The bounded noninteractive public JSON stream was refused.
+    #[error("route services require bounded public JSON on non-terminal stdin")]
+    Input,
+    /// The directory is not the caller's canonical private directory.
+    #[error("route services require an existing canonical owner-only state directory")]
+    Directory,
+    /// Existing final/staging objects are never followed or overwritten.
+    #[error("route services output or staging already exists; preserve it before retrying")]
+    AlreadyPresent,
+    /// Ambiguous publication retains any staging object for inspection.
+    #[error("route services publication failed; preserve final and preparing files")]
+    Storage,
+}
+
+/// Metadata only; this report grants no deployment, signing or funding authority.
+#[derive(Debug, Serialize)]
+pub struct PreparedRouteServicesReportV11 {
+    /// Public preparation report identifier.
+    pub schema: &'static str,
+    /// Fixed relative filename, not an operator-supplied path.
+    pub file: &'static str,
+    /// Canonical document size after validation.
+    pub bytes: usize,
+    /// Always two independently selected positions.
+    pub positions: usize,
+    /// Always false: no remote endpoint is contacted during preparation.
+    pub network_access: bool,
+}
+
+/// Prepare only the selected public service document, with no legacy fallback.
+pub fn prepare_route_services_command_v11(
+    state_dir: &Path,
+) -> Result<PreparedRouteServicesReportV11, PrepareRouteServicesErrorV11> {
+    use std::io::{IsTerminal as _, Read as _};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(PrepareRouteServicesErrorV11::Input);
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1));
+    stdin
+        .lock()
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| PrepareRouteServicesErrorV11::Input)?;
+    if bytes.is_empty() || bytes.len() > MAX_BYTES {
+        return Err(PrepareRouteServicesErrorV11::Input);
+    }
+    let document: RouteServicesV8 =
+        serde_json::from_slice(&bytes).map_err(|_| PrepareRouteServicesErrorV11::Input)?;
+    let canonical = document
+        .canonical_bytes()
+        .map_err(|_| PrepareRouteServicesErrorV11::Input)?;
+    publish_route_services_v11(state_dir, &canonical)?;
+    Ok(PreparedRouteServicesReportV11 {
+        schema: "DOM-INTEROPD-PREPARED-ROUTE-SERVICES-V11",
+        file: FILE_V8,
+        bytes: canonical.len(),
+        positions: 2,
+        network_access: false,
+    })
+}
+
+fn publish_route_services_v11(
+    state_dir: &Path,
+    bytes: &[u8],
+) -> Result<(), PrepareRouteServicesErrorV11> {
+    use cap_std::fs::{Dir, MetadataExt as _, OpenOptions, OpenOptionsExt as _};
+    use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    use PrepareRouteServicesErrorV11 as Failure;
+
+    let state =
+        crate::production_config::validate_state_dir(state_dir).map_err(|_| Failure::Directory)?;
+    let before = std::fs::symlink_metadata(&state).map_err(|_| Failure::Directory)?;
+    let root = Dir::open_ambient_dir(&state, cap_std::ambient_authority())
+        .map_err(|_| Failure::Directory)?;
+    let opened = root.dir_metadata().map_err(|_| Failure::Directory)?;
+    let uid = rustix::process::geteuid().as_raw();
+    if opened.dev() != before.dev()
+        || opened.ino() != before.ino()
+        || opened.uid() != uid
+        || !opened.is_dir()
+        || opened.mode() & 0o7777 != 0o700
+    {
+        return Err(Failure::Directory);
+    }
+    for name in [FILE_V8, PREPARING_V11] {
+        match root.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(Failure::AlreadyPresent),
+            Err(_) => return Err(Failure::Storage),
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = root.open_with(PREPARING_V11, &options).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Failure::AlreadyPresent
+        } else {
+            Failure::Storage
+        }
+    })?;
+    let metadata = file.metadata().map_err(|_| Failure::Storage)?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(Failure::Storage);
+    }
+    file.write_all(bytes).map_err(|_| Failure::Storage)?;
+    file.sync_all().map_err(|_| Failure::Storage)?;
+    let named = root
+        .symlink_metadata(PREPARING_V11)
+        .map_err(|_| Failure::Storage)?;
+    if named.file_type().is_symlink()
+        || named.dev() != metadata.dev()
+        || named.ino() != metadata.ino()
+        || named.nlink() != 1
+        || named.len() != bytes.len() as u64
+    {
+        return Err(Failure::Storage);
+    }
+    let directory = root.open(".").map_err(|_| Failure::Storage)?.into_std();
+    directory.sync_all().map_err(|_| Failure::Storage)?;
+    rustix::fs::renameat_with(
+        &directory,
+        PREPARING_V11,
+        &directory,
+        FILE_V8,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            Failure::AlreadyPresent
+        } else {
+            Failure::Storage
+        }
+    })?;
+    directory.sync_all().map_err(|_| Failure::Storage)
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "family", deny_unknown_fields)]
@@ -537,6 +686,29 @@ fn connect_leg(
         }
         _ => Err(Error::InvalidEncoding),
     }
+}
+
+/// V11 accepts only the position-bound document. A missing selected manifest
+/// must not fall back to the legacy configuration with mandatory EVM/BTC
+/// fields, even when those files happen to remain in the state directory.
+pub(crate) fn load_selected_services_v11(
+    state_dir: &Path,
+    inputs: &AuthenticatedProductionInputsV1,
+    timeout_ms: u64,
+) -> Result<SelectedServicesV8, Error> {
+    read_selected_services_v11(state_dir)?.bind(inputs, timeout_ms)
+}
+
+fn read_selected_services_v11(state_dir: &Path) -> Result<RouteServicesV8, Error> {
+    let directory =
+        crate::production_config::validate_state_dir(state_dir).map_err(|_| Error::Unavailable)?;
+    let bytes = crate::production_config::read_owner_file_bounded(
+        &directory.join(FILE_V8),
+        MAX_BYTES as u64,
+        crate::production_config::ProductionConfigErrorV1::InputArtifactUnavailable,
+    )
+    .map_err(|_| Error::Unavailable)?;
+    RouteServicesV8::decode(&bytes)
 }
 
 pub(crate) fn load_selected_services_v8(

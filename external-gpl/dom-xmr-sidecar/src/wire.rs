@@ -222,6 +222,10 @@ pub enum SidecarRequestV2 {
     VerifyFunding(VerifyFundingRequestV2),
     BuildSweep(BuildSweepRequestV2),
     BuildWithProofsV23(xmr_key_image_proof::BuildSweepRequestV23<BuildSweepRequestV2>),
+    BuildLocalRefundWithProofsV24(
+        xmr_key_image_proof::LocalRefundBuildRequestV24<BuildSweepRequestV2>,
+    ),
+    LoadLocalRefundWithProofsV24(xmr_key_image_proof::LocalRefundLoadRequestV24),
     ProveInputV23(xmr_key_image_proof::CachedInputProofRequestV23<BuildSweepRequestV2>),
 }
 
@@ -231,6 +235,9 @@ pub enum SidecarResponseV2 {
     Funding(VerifyFundingResponseV2),
     Sweep(BuildSweepResponseV2),
     SweepWithProofsV23(xmr_key_image_proof::BuildSweepResponseV23<BuildSweepResponseV2>),
+    LocalRefundWithProofsV24(
+        xmr_key_image_proof::LocalRefundBuildResponseV24<BuildSweepResponseV2>,
+    ),
     InputProofV23(xmr_key_image_proof::CachedInputProofResponseV23),
     Error(SidecarErrorBody),
 }

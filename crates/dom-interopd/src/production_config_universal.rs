@@ -60,8 +60,17 @@ pub struct ProductionUniversalBootstrapFieldsV11 {
     pub refund_arming_authority_epoch: u64,
     /// Upstream and downstream remote Relay database identities.
     pub remote_relay_database_ids: [[u8; 32]; 2],
+    /// Explicit off-L1 opt-in for one authenticated peer serving two distinct
+    /// sessions. This is configuration only: Stage 12 must prove both scopes
+    /// and retained identities before opening either network connection.
+    #[serde(default, skip_serializing_if = "shared_peer_disabled_v23")]
+    pub shared_relay_peer_v23: bool,
     /// Upstream and downstream resources, in that exact order.
     pub legs: [ProductionUniversalLegV11; 2],
+}
+
+fn shared_peer_disabled_v23(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -103,7 +112,8 @@ impl ProductionBootstrapConfigV1 {
         if fields.f6_authority_bundle_digest == ZERO_DIGEST
             || fields.refund_arming_authority_epoch == 0
             || fields.remote_relay_database_ids.contains(&ZERO_DIGEST)
-            || fields.remote_relay_database_ids[0] == fields.remote_relay_database_ids[1]
+            || (fields.remote_relay_database_ids[0] == fields.remote_relay_database_ids[1])
+                != fields.shared_relay_peer_v23
             || upstream.settlement_id == downstream.settlement_id
             || upstream.session_id == downstream.session_id
         {

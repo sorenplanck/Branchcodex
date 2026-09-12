@@ -54,6 +54,10 @@ const RECEIPT_DOMAIN: &[u8] = b"DOM-INTEROP/CONTRACTS-RELAY-RECEIPT/V1\0";
 const FAILED_CLOSED_RECEIPT_DOMAIN: &[u8] = b"DOM-INTEROP/CONTRACTS-RELAY-FAILED-CLOSED/V1\0";
 const ZERO_DIGEST: Digest32 = [0; 32];
 
+#[cfg(test)]
+#[path = "relay_worker_terminal_refund_v24_tests.rs"]
+mod terminal_refund_v24_tests;
+
 /// Owner-only directories used by the three independent Relay authorities.
 pub struct RelayWorkerPathsV1 {
     sender_root: PathBuf,
@@ -701,6 +705,10 @@ pub enum ContractsRelayIngressErrorV1 {
     /// phase. Keep it pending until the native bootstrap owner installs ingress.
     #[error("refund edge is awaiting the native bootstrap ingress handoff")]
     AwaitingBootstrapRefundHandoffV18,
+    /// The signed native refund request remains in the inbox until this
+    /// participant independently observes public U and binds its transport.
+    #[error("native XMR refund is awaiting the local public-U transport scope")]
+    AwaitingNativeXmrRefundTransportV23,
     /// A capability belongs to a different session or Store state.
     #[error("prepared Contracts ingress authority does not match this route")]
     WrongAuthority,
@@ -893,6 +901,22 @@ struct ContractsStoreTransportPortV1 {
     /// configuration.
     remote_participant: ParticipantId,
     authority: Option<PreparedContractsIngressV1>,
+    // Monotonic for this worker opening: terminal draining cannot restore a
+    // prepared signing/F7 ingress or dispatch any other economic message.
+    terminal_refund_only_v24: bool,
+}
+
+// Test-only construction of the REAL downstream port for native graph tests.
+// No injected receipt, phase, signature or Store implementation is accepted.
+#[cfg(test)]
+pub(crate) fn native_refund_transport_test_port_v24(
+    store: Rc<ContractsSessionStoreV1>,
+    session: Digest32,
+    local: ParticipantId,
+    remote: ParticipantId,
+) -> Result<impl ContractsTransportPortV1<Error = ContractsRelayIngressErrorV1>, SessionStoreError>
+{
+    ContractsStoreTransportPortV1::new(store, session, local, remote)
 }
 
 impl ContractsStoreTransportPortV1 {
@@ -909,6 +933,7 @@ impl ContractsStoreTransportPortV1 {
             local_participant,
             remote_participant,
             authority: None,
+            terminal_refund_only_v24: false,
         })
     }
 
@@ -916,6 +941,9 @@ impl ContractsStoreTransportPortV1 {
         &mut self,
         authority: PreparedContractsIngressV1,
     ) -> Result<(), ContractsRelayIngressErrorV1> {
+        if self.terminal_refund_only_v24 {
+            return Err(ContractsRelayIngressErrorV1::WrongAuthority);
+        }
         if self.authority.is_some() {
             return Err(ContractsRelayIngressErrorV1::AuthorityAlreadyInstalled);
         }
@@ -1531,6 +1559,31 @@ impl ContractsStoreTransportPortV1 {
     }
 }
 
+fn require_public_refund_payload_v24(
+    kind: MessageTypeV1,
+    payload: &[u8],
+) -> Result<(), ContractsRelayIngressErrorV1> {
+    use xmr_remote_sweep_wire::{
+        RemoteSweepActionV23, RemoteSweepRequestV23, RemoteSweepResponseV23,
+    };
+    let action = match kind {
+        MessageTypeV1::XmrRemoteSweepRequestV23 => {
+            RemoteSweepRequestV23::decode_exact(payload).map(|request| request.action)
+        }
+        MessageTypeV1::XmrRemoteSweepResponseV23 => {
+            RemoteSweepResponseV23::decode_exact(payload).map(|response| response.action())
+        }
+        _ => return Err(ContractsRelayIngressErrorV1::UnpreparedMessage),
+    }
+    .map_err(|_| ContractsRelayIngressErrorV1::InvalidDsc1)?;
+    if action != RemoteSweepActionV23::Refund {
+        return Err(ContractsRelayIngressErrorV1::UnpreparedMessage);
+    }
+    // This filter grants nothing: the original Store transition below still
+    // authenticates signature, phase, pairing, economic scope and uniqueness.
+    Ok(())
+}
+
 impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
     type Error = ContractsRelayIngressErrorV1;
 
@@ -1542,6 +1595,12 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
             .map_err(|_| ContractsRelayIngressErrorV1::InvalidDsc1)?;
         if ParticipantId(*parsed.unsigned().sender_id()) != delivery.sender_id() {
             return Err(ContractsRelayIngressErrorV1::SenderMismatch);
+        }
+        if self.terminal_refund_only_v24 {
+            require_public_refund_payload_v24(
+                parsed.unsigned().kind(),
+                parsed.unsigned().payload(),
+            )?;
         }
         let was_failed_closed =
             self.store.load_session(self.session_id)?.phase() == SessionPhaseV1::FailedClosed;
@@ -1566,6 +1625,9 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
             MessageTypeV1::XmrRemoteSweepRequestV23 | MessageTypeV1::XmrRemoteSweepResponseV23
         ) {
             if let Err(error) = typed_xmr {
+                if matches!(error, SessionStoreError::NativeXmrRefundTransportPendingV23) {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingNativeXmrRefundTransportV23);
+                }
                 return self
                     .terminal_commit(true)?
                     .ok_or(ContractsRelayIngressErrorV1::Store(error));
@@ -2001,6 +2063,137 @@ where
         })
     }
 
+    /// Flush only an existing Store-committed public refund response. A
+    /// different pending application is refused, never skipped or replaced.
+    pub(crate) fn submit_terminal_refund_outbound_v24<Q: RelaySubmitQueueV1>(
+        &mut self,
+        queue: &mut Q,
+        now: TimelockSpec,
+    ) -> Result<RelayOutboundStepV1, RelayWorkerOutboundErrorV1> {
+        let pending = self.sender.pending_envelope()?;
+        let frames = self.sender.frame_transfer_status()?.is_some();
+        let contracts = self.contracts.contracts_mut();
+        let store = Rc::clone(&contracts.store);
+        let session = contracts.session_id;
+        let retained = store
+            .resume_outbound_dsc1(session)
+            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+        let retained = match retained {
+            dom_scriptless_store::OutboundDsc1RecoveryV1::None if pending.is_none() && !frames => {
+                return Ok(RelayOutboundStepV1::Idle);
+            }
+            dom_scriptless_store::OutboundDsc1RecoveryV1::SigningRequest(request)
+                if pending.is_none()
+                    && !frames
+                    && request.message_type() == 0x1a
+                    && require_public_refund_payload_v24(
+                        MessageTypeV1::XmrRemoteSweepResponseV23,
+                        request.payload(),
+                    )
+                    .is_ok() =>
+            {
+                // The public publisher, not this transport-only method, must
+                // finish authenticating/signing the retained DSC1 envelope.
+                return Ok(RelayOutboundStepV1::Idle);
+            }
+            dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) => retained,
+            _ => return Err(RelayWorkerOutboundErrorV1::StoreRejected),
+        };
+        let message = SignedMessageV1::decode_exact(retained.signed_bytes())
+            .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
+        if pending
+            .as_ref()
+            .is_some_and(|pending| pending.application_id() != Some(retained.application_id()))
+            || message.unsigned().kind() != MessageTypeV1::XmrRemoteSweepResponseV23
+            || require_public_refund_payload_v24(
+                message.unsigned().kind(),
+                message.unsigned().payload(),
+            )
+            .is_err()
+        {
+            return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
+        }
+        if self
+            .sender
+            .route_application_status(*retained.application_id())?
+            .is_none()
+        {
+            // Crash after Store commit but before first Relay staging. Only
+            // the publisher can select the initial transport expiry.
+            return if pending.is_none() && !frames {
+                Ok(RelayOutboundStepV1::Idle)
+            } else {
+                Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope)
+            };
+        }
+        // Existing application only: the sender reuses its ORIGINAL expiry
+        // and prepares the next frame, or completes the Store's final ACK
+        // handoff. `now` cannot create or renew availability on this branch.
+        let application_id = *retained.application_id();
+        let message_digest = *retained.message_digest();
+        self.stage_store_outbound_dsc1(*retained, now)?;
+        let submitted = self.submit_outbound_once(queue)?;
+        if matches!(submitted, RelayOutboundStepV1::Acked { .. }) {
+            let dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) = store
+                .resume_outbound_dsc1(session)
+                .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?
+            else {
+                return Err(RelayWorkerOutboundErrorV1::StoreRejected);
+            };
+            if retained.application_id() != &application_id
+                || retained.message_digest() != &message_digest
+            {
+                return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
+            }
+            // Prepare only the next ORIGINAL frame, or finish the Store
+            // handoff immediately after the final durable ACK.
+            self.stage_store_outbound_dsc1(*retained, now)?;
+        }
+        Ok(submitted)
+    }
+
+    pub(crate) fn terminal_refund_frames_pending_v24(
+        &mut self,
+    ) -> Result<bool, RelayWorkerOutboundErrorV1> {
+        let contracts = self.contracts.contracts_mut();
+        let retained = contracts
+            .store
+            .resume_outbound_dsc1(contracts.session_id)
+            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+        let retained_refund = match retained {
+            dom_scriptless_store::OutboundDsc1RecoveryV1::None => false,
+            dom_scriptless_store::OutboundDsc1RecoveryV1::SigningRequest(request) => {
+                if request.message_type() != 0x1a
+                    || require_public_refund_payload_v24(
+                        MessageTypeV1::XmrRemoteSweepResponseV23,
+                        request.payload(),
+                    )
+                    .is_err()
+                {
+                    return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
+                }
+                true
+            }
+            dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) => {
+                let message = SignedMessageV1::decode_exact(retained.signed_bytes())
+                    .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
+                if message.unsigned().kind() != MessageTypeV1::XmrRemoteSweepResponseV23
+                    || require_public_refund_payload_v24(
+                        message.unsigned().kind(),
+                        message.unsigned().payload(),
+                    )
+                    .is_err()
+                {
+                    return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
+                }
+                true
+            }
+        };
+        Ok(self.sender.pending_envelope()?.is_some()
+            || self.sender.frame_transfer_status()?.is_some()
+            || retained_refund)
+    }
+
     /// Pulls and authenticates the mailbox through the one durable transcript,
     /// without dispatching any downstream payload.
     pub fn ingest_mailbox(
@@ -2072,6 +2265,24 @@ where
         let ingest = self.ingest_mailbox(queue, now)?;
         let dispatch = self.dispatch_inbound()?;
         Ok(RelayInboundPollReportV1 { ingest, dispatch })
+    }
+
+    /// Preserve the same authenticated inbox, frame reassembler and sequence
+    /// ordering, but never dispatch F6 or a non-refund Contracts operation.
+    /// An earlier F6/other route row remains pending; it cannot be jumped.
+    pub(crate) fn poll_terminal_refund_inbound_v24(
+        &mut self,
+        queue: &mut relay::production::ProductionRelayV1,
+        now: TimelockSpec,
+    ) -> Result<(), RelayWorkerInboundErrorV1<F::Error>> {
+        let contracts = self.contracts.contracts_mut();
+        contracts.terminal_refund_only_v24 = true;
+        contracts.authority.take();
+        self.ingest_mailbox(queue, now)?;
+        self.inbox
+            .dispatch_routes(&mut self.contracts)
+            .map_err(RelayWorkerInboundErrorV1::Contracts)?;
+        Ok(())
     }
 
     /// Compatibility-only poll for in-memory V1 harnesses.

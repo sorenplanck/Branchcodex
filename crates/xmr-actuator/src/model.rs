@@ -163,6 +163,12 @@ impl XmrActuatorLeaseV1 {
         self.network_id
     }
 
+    /// Original expiry for bounding external calls; reading it cannot renew
+    /// this lease or manufacture another fencing epoch.
+    pub const fn deadline_unix_ms_v24(&self) -> u64 {
+        self.lease_until_unix_ms
+    }
+
     pub(crate) const fn is_live_at(&self, now_unix_ms: u64) -> bool {
         now_unix_ms < self.lease_until_unix_ms
     }

@@ -4,9 +4,23 @@ inputs:
   dom-path:
     description: DOM checkout path relative to the workspace
     default: '.'
+  real-daemon:
+    description: Also build and fingerprint the mandatory release-production daemon
+    default: 'false'
+  run-once-regressions:
+    description: Run shared boundary and producer regressions in this job
+    default: 'true'
 runs:
   using: composite
   steps:
+    - name: Reclaim hosted runner disk for both production build profiles
+      if: ${{ inputs.real-daemon == 'true' }}
+      shell: bash
+      run: |
+        # These are preinstalled SDKs on the disposable GitHub runner, never
+        # checkout contents, user directories, or generated test evidence.
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+        df -h /
     - name: Verify offline tool isolation and mandatory test dispatch
       shell: bash
       working-directory: ${{ inputs.dom-path }}
@@ -14,6 +28,8 @@ runs:
         set -euo pipefail
         python3 -m unittest discover -s scripts/tests -p test_install_sidecar_tools.py
         python3 -m unittest discover -s scripts/tests -p test_hardening_dispatch_v8.py
+        python3 -m unittest discover -s scripts/tests -p test_native_daemon_campaign_v24.py
+        python3 -m unittest discover -s scripts/tests -p test_scoped_boundary_regressions_v24.py
     - name: Compile production library, CLI and integration targets
       shell: bash
       working-directory: ${{ inputs.dom-path }}
@@ -21,6 +37,7 @@ runs:
         CARGO_BUILD_JOBS: '2'
       run: cargo test --locked -p dom-interopd --no-default-features --features production --lib --tests --profile crypto-test --no-run
     - name: Verify Funding and Claim reservation audit purposes
+      if: ${{ inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -80,6 +97,51 @@ runs:
         chmod go-w "$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar" "$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23"
         echo "DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar" >> "$GITHUB_ENV"
         echo "DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23" >> "$GITHUB_ENV"
+    - name: Verify public refund authentication and durable Ready recovery
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        XMR_TEST_WORKSPACE: ${{ github.workspace }}/.ci-eigenwallet
+        CARGO_BUILD_JOBS: '2'
+        RUST_TEST_THREADS: '1'
+      run: |
+        set -euo pipefail
+        # Reuse the tool compilation/profile. These targeted regressions do
+        # not rerun the native signing graph or an economic daemon scenario.
+        for filter in auth::local_refund_tests_v24 cache::build_v23_tests; do
+          log="$RUNNER_TEMP/xmr-${filter//::/-}.log"
+          cargo test --locked --manifest-path "$XMR_TEST_WORKSPACE/Cargo.toml" \
+            --profile crypto-test \
+            --config 'profile.crypto-test.inherits="dev"' \
+            --config 'profile.crypto-test.opt-level=2' \
+            --config 'profile.crypto-test.debug=1' \
+            --config 'profile.crypto-test.debug-assertions=true' \
+            --config 'profile.crypto-test.overflow-checks=true' \
+            --config 'profile.crypto-test.lto=false' \
+            --config 'profile.crypto-test.codegen-units=16' \
+            --config 'profile.crypto-test.incremental=false' \
+            -p dom-xmr-sidecar --bin dom-xmr-sidecar "$filter" \
+            -- --nocapture --test-threads=1 --color never 2>&1 | tee "$log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
+        done
+    - name: Verify scoped funding, custody and transport regressions
+      if: ${{ inputs.run-once-regressions == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+        RUST_TEST_THREADS: '1'
+      run: >-
+        python3 scripts/scoped_boundary_regressions_v24.py
+        --evidence-dir "$RUNNER_TEMP/dom-xmr-boundary-evidence"
+    - name: Preserve scoped boundary regression outcomes
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: dom-xmr-boundary-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/dom-xmr-boundary-evidence/
+        if-no-files-found: warn
+        retention-days: 7
     - name: Verify custody paths and real offline helper startup
       shell: bash
       working-directory: ${{ inputs.dom-path }}
@@ -90,10 +152,50 @@ runs:
         set -euo pipefail
         cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test custody_startup_paths_v23 -- --nocapture
         cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test native_offline_funding_preflight_v23 -- --nocapture
+        # Exercise the restart path's ownership/authentication guards before
+        # any long ceremony. These tests never start a native signing graph.
+        log="$RUNNER_TEMP/xmr-sidecar-restart-guards.log"
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test peer_sidecar_v23:: \
+          -- --nocapture --test-threads=1 --color never 2>&1 | tee "$log"
+        grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
     - name: Verify XMR recovery participant ordering
+      if: ${{ inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: cargo test --locked -p dom-scriptless-store --lib --profile crypto-test xmr_round_audit_v11::tests -- --nocapture
+    - name: Verify offline operational artifact producers
+      if: ${{ inputs.run-once-regressions == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+        RUST_TEST_THREADS: '1'
+      run: |
+        set -euo pipefail
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --tests --profile crypto-test production_prepare_ -- --nocapture --test-threads=1
+        cargo test --locked -p dom-interopd --no-default-features --features production --test route_services_cli --test xmr_enrollment_cli --test xmr_leg_cli --test f6_artifact_cli --test planning_cli --profile crypto-test --no-fail-fast -- --nocapture --test-threads=1
+    - name: Build and fingerprint the real release-production daemon
+      if: ${{ inputs.real-daemon == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+      run: |
+        set -euo pipefail
+        cargo build --locked --release -p dom-interopd --no-default-features --features production --bin dom-interopd
+        chmod go-w target/release/dom-interopd
+        python3 - <<'PY'
+        import hashlib, os
+        from pathlib import Path
+        binary = (Path.cwd() / 'target/release/dom-interopd').resolve(strict=True)
+        digest = hashlib.blake2b(digest_size=32)
+        with binary.open('rb') as source:
+            for chunk in iter(lambda: source.read(65536), b''):
+                digest.update(chunk)
+        with open(os.environ['GITHUB_ENV'], 'a') as output:
+            output.write(f'DOM_INTEROP_REAL_BINARY_V23={binary}\n')
+            output.write(f'DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23={digest.hexdigest()}\n')
+        PY

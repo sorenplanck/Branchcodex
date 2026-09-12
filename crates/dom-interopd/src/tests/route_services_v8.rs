@@ -74,6 +74,67 @@ fn fixture(a: Face, b: Face) -> (RouteServicesV8, ProductionRouteTopologyV4) {
 const FAMILIES: [Face; 4] = [Face::Evm, Face::Bitcoin, Face::Solana, Face::Monero];
 
 #[test]
+fn v11_selected_loader_reads_all_sixteen_pairs_without_legacy_resources() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let root = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let legacy = root
+        .path()
+        .join(crate::production_chain_services::PRODUCTION_CHAIN_SERVICES_CONFIG_FILE_V1);
+    // A leftover legacy authority is intentionally unusable. The universal
+    // reader must not inspect it or demand its EVM endpoint/Bitcoin cookie.
+    symlink("absent-legacy-authority", &legacy).unwrap();
+    let selected = root.path().join(FILE_V8);
+    for a in FAMILIES {
+        for b in FAMILIES {
+            let (document, topology) = fixture(a, b);
+            std::fs::write(&selected, document.canonical_bytes().unwrap()).unwrap();
+            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let loaded = read_selected_services_v11(root.path()).unwrap();
+            assert!(loaded == document);
+            assert!(loaded.require_topology(&topology).is_ok());
+            assert_eq!(
+                std::fs::read_link(&legacy).unwrap(),
+                PathBuf::from("absent-legacy-authority")
+            );
+            assert!(!root.path().join("absent-legacy-authority").exists());
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+        }
+    }
+}
+
+#[test]
+fn v11_selected_loader_never_substitutes_a_legacy_document() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let legacy = root
+        .path()
+        .join(crate::production_chain_services::PRODUCTION_CHAIN_SERVICES_CONFIG_FILE_V1);
+    let legacy_bytes = b"leftover legacy configuration must remain untouched";
+    std::fs::write(&legacy, legacy_bytes).unwrap();
+    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let selected = root.path().join(FILE_V8);
+    assert!(matches!(
+        read_selected_services_v11(root.path()),
+        Err(Error::Unavailable)
+    ));
+    assert!(!selected.exists());
+    std::fs::write(&selected, b"{}\n").unwrap();
+    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(
+        read_selected_services_v11(root.path()),
+        Err(Error::InvalidEncoding)
+    ));
+    assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes);
+    assert_eq!(std::fs::read(&selected).unwrap(), b"{}\n");
+}
+
+#[test]
 fn v8_all_sixteen_service_pairs_roundtrip_without_required_btc_or_evm() {
     let mut exports = Vec::new();
     for a in FAMILIES {

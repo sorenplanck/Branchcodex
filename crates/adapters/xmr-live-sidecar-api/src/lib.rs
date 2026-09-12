@@ -5,7 +5,10 @@
 pub use xmr_key_image_proof::{
     destination_digest_v23, BuildSweepRequestV23, BuildSweepResponseV23, BuiltRingMemberV23,
     CachedInputProofRequestV23, CachedInputProofResponseV23, InputSpendContextV23,
-    InputSpendEnvelopeV23, BUILD_PROOF_AUTH_DOMAIN_V23, INPUT_PROOF_AUTH_DOMAIN_V23,
+    InputSpendEnvelopeV23, LocalRefundBuildRequestV24, LocalRefundBuildResponseV24,
+    LocalRefundLoadRequestV24, LocalRefundReadyScopeV24, BUILD_PROOF_AUTH_DOMAIN_V23,
+    INPUT_PROOF_AUTH_DOMAIN_V23, LOCAL_REFUND_BUILD_AUTH_DOMAIN_V24,
+    LOCAL_REFUND_LOAD_AUTH_DOMAIN_V24,
 };
 
 use serde::{Deserialize, Serialize};
@@ -379,6 +382,10 @@ pub enum SidecarRequestV2 {
     /// Proof only for an already cached V2 sweep; cannot invoke signing.
     /// Fresh native sweep whose private plan and public proofs are durably cached.
     BuildWithProofsV23(BuildSweepRequestV23<BuildSweepRequestV2>),
+    /// Local Refund effect, before any accepted remote DSC1 request exists.
+    BuildLocalRefundWithProofsV24(LocalRefundBuildRequestV24<BuildSweepRequestV2>),
+    /// Read only an already complete local Refund; never starts construction.
+    LoadLocalRefundWithProofsV24(LocalRefundLoadRequestV24),
     ProveInputV23(CachedInputProofRequestV23<BuildSweepRequestV2>),
 }
 
@@ -393,6 +400,8 @@ pub enum SidecarResponseV2 {
     /// Public input-link proof, not a payment receipt.
     /// Exact sweep plus public input/payout proofs (not inclusion or receipt).
     SweepWithProofsV23(BuildSweepResponseV23<BuildSweepResponseV2>),
+    /// Exact locally built Refund, with no purported remote-envelope authority.
+    LocalRefundWithProofsV24(LocalRefundBuildResponseV24<BuildSweepResponseV2>),
     InputProofV23(CachedInputProofResponseV23),
     /// Structured failure.
     Error(SidecarErrorBody),

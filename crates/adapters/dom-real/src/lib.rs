@@ -21,7 +21,8 @@ pub use xmr_recovery_execution_v12::{
 pub use xmr_recovery_finality::{
     VerifiedDomCompensationObservationV11, VerifiedDomRefundSecretV11,
     VerifiedDomXmrCancellationV11, VerifiedDomXmrCollateralV11, VerifiedDomXmrRecoveryFinalityV11,
-    VerifiedDomXmrRecoveryStateV11,
+    VerifiedDomXmrRecoveryStateV11, VerifiedDomXmrRefundReorgV23,
+    VerifiedDomXmrRefundRevalidationV23,
 };
 
 pub use terminal_finality::{
@@ -32,9 +33,13 @@ pub use terminal_finality::{
 
 mod f7_claim_receiver_v15;
 
+#[cfg(test)]
+#[path = "funding_deadline_v23_tests.rs"]
+mod funding_deadline_v23_tests;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
@@ -539,6 +544,11 @@ struct RuntimeCacheV1 {
 pub struct RealDomRpcRuntimeV1 {
     adapter: DomHttpChainAdapterV1,
     cache: Mutex<RuntimeCacheV1>,
+    deadline_scan_v23: Mutex<CursorStateV1>,
+    funding_finality_scan_v23: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
+    xmr_refund_reorg_scan_v23: Mutex<
+        std::collections::BTreeMap<[u8; 32], xmr_recovery_finality::NativeGraphScanProgressV23>,
+    >,
     history_limit: usize,
 }
 
@@ -560,6 +570,9 @@ impl RealDomRpcRuntimeV1 {
         Ok(Self {
             adapter,
             cache: Mutex::new(RuntimeCacheV1::default()),
+            deadline_scan_v23: Mutex::new(CursorStateV1::genesis()),
+            funding_finality_scan_v23: Mutex::new(BTreeMap::new()),
+            xmr_refund_reorg_scan_v23: Mutex::new(std::collections::BTreeMap::new()),
             history_limit,
         })
     }
@@ -647,6 +660,40 @@ impl RealDomRpcRuntimeV1 {
             .map_err(RealDomError::Chain)
     }
 
+    /// Submit the retained funding outbox without extending the caller's
+    /// original authorization deadline. A started, timed-out POST is unknown.
+    pub fn submit_persisted_funding_until_v23(
+        &self,
+        broadcast: FundingBroadcastV1,
+        deadline: Instant,
+    ) -> Result<SubmissionReceiptV1, RealDomError> {
+        broadcast
+            .dispatch_with(&mut BoundedDomFundingBroadcasterV23 {
+                adapter: &self.adapter,
+                deadline,
+            })
+            .map_err(RealDomError::Chain)
+    }
+
+    /// Submit exact native F7 funding under the original authorization bound.
+    pub fn submit_persisted_f7_funding_until_v23(
+        &self,
+        prepared: &dom_scriptless_store::PreparedF7FundingSubmissionV12,
+        deadline: Instant,
+    ) -> Result<SubmissionReceiptV1, RealDomError> {
+        if prepared.chain_id() != self.adapter.expected_identity().chain_id {
+            return Err(RealDomError::InvalidEvidence);
+        }
+        let receipt = self
+            .adapter
+            .submit_canonical_transaction_until_v23(prepared.canonical_bytes(), deadline)
+            .map_err(RealDomError::Chain)?;
+        if receipt.tx_hash() != prepared.tx_hash() || !receipt.is_economically_admitted() {
+            return Err(RealDomError::InvalidEvidence);
+        }
+        Ok(receipt)
+    }
+
     /// Submit immutable native F7 funding through this runtime's sole client.
     pub fn submit_persisted_f7_funding_v20(
         &self,
@@ -729,6 +776,88 @@ impl RealDomRpcRuntimeV1 {
             self.adapter.expected_identity().chain_id,
             now_unix_seconds,
         ))
+    }
+
+    /// Observes a fully validated tip with bounded network waiting. Authenticated
+    /// scan progress survives a budget expiration in memory; it is not itself
+    /// authority. Every call rechecks its retained anchor through the same node
+    /// client, and returns a context only after the cursor reaches that tip.
+    /// A reorg invalidates the checkpoint. No height or wall time is supplied by
+    /// the caller, and no consensus rule or persistent chain state is changed.
+    pub fn current_transaction_validation_context_bounded_v23(
+        &self,
+        budget: Duration,
+    ) -> Result<DomTransactionValidationContextV1, RealDomError> {
+        let unavailable = || RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable);
+        if budget.is_zero() {
+            return Err(unavailable());
+        }
+        let deadline = Instant::now().checked_add(budget).ok_or_else(unavailable)?;
+        self.current_transaction_validation_context_until_v23(deadline)
+    }
+
+    /// Continue the authenticated tip scan without rebasing an external deadline.
+    pub fn current_transaction_validation_context_until_v23(
+        &self,
+        deadline: Instant,
+    ) -> Result<DomTransactionValidationContextV1, RealDomError> {
+        let unavailable = || RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable);
+        if Instant::now() >= deadline {
+            return Err(unavailable());
+        }
+        let mut state = self
+            .deadline_scan_v23
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => unavailable(),
+                std::sync::TryLockError::Poisoned(_) => RealDomError::LockPoisoned,
+            })?;
+        for _ in 0..MAX_SNAPSHOT_SCAN_PAGES {
+            let page = match self.adapter.scan_page_until_v23(
+                state.scanner_cursor(),
+                MAX_SCRIPTLESS_SCAN_BLOCKS_V1,
+                deadline,
+            ) {
+                Ok(page) => page,
+                Err(ChainAdapterError::ReorgDetected) => {
+                    *state = CursorStateV1::genesis();
+                    return Err(unavailable());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut next = state.clone();
+            for block in &page.blocks {
+                next.append(block.height, block.block_hash, self.history_limit)?;
+            }
+            if next.scanner_cursor() != page.next_cursor {
+                return Err(RealDomError::InvalidEvidence);
+            }
+            let advanced = next.next_height != state.next_height;
+            *state = next;
+            if Instant::now() >= deadline {
+                return Err(unavailable());
+            }
+            if state.next_height > page.identity.tip_height {
+                if state.history.last().copied()
+                    != Some((page.identity.tip_height, page.identity.tip_hash))
+                {
+                    return Err(RealDomError::InvalidEvidence);
+                }
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| RealDomError::InvalidEvidence)?
+                    .as_secs();
+                return Ok(DomTransactionValidationContextV1::new(
+                    page.identity.tip_height,
+                    self.adapter.expected_identity().chain_id,
+                    now,
+                ));
+            }
+            if !advanced {
+                return Err(unavailable());
+            }
+        }
+        Err(unavailable())
     }
 
     fn cache_blocks(&self, blocks: &[CanonicalBlockEvidenceV1]) -> Result<(), RealDomError> {
@@ -1760,6 +1889,24 @@ pub struct RealDomExactBroadcasterV1<'a> {
     adapter: &'a DomHttpChainAdapterV1,
 }
 
+struct BoundedDomFundingBroadcasterV23<'a> {
+    adapter: &'a DomHttpChainAdapterV1,
+    deadline: Instant,
+}
+
+impl ExactDomFundingBroadcasterV1 for BoundedDomFundingBroadcasterV23<'_> {
+    type Error = ChainAdapterError;
+    type Receipt = SubmissionReceiptV1;
+
+    fn broadcast_exact_funding(
+        &mut self,
+        exact_bytes: &[u8],
+    ) -> Result<Self::Receipt, Self::Error> {
+        self.adapter
+            .submit_canonical_transaction_until_v23(exact_bytes, self.deadline)
+    }
+}
+
 impl<'a> RealDomExactBroadcasterV1<'a> {
     /// Binds one exact-byte broadcaster to the frozen real-DOM client.
     pub const fn new(adapter: &'a DomHttpChainAdapterV1) -> Self {
@@ -2349,6 +2496,153 @@ mod tests {
             FIXTURE_NETWORK_MAGIC,
             &Hash256::from_bytes(FIXTURE_GENESIS),
         )
+    }
+
+    #[test]
+    fn bounded_tip_refuses_zero_budget_or_busy_checkpoint_without_rpc_v23() -> FixtureResult<()> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let adapter = DomHttpChainAdapterV1::new(
+            &format!("http://{}", listener.local_addr()?),
+            ExpectedDomIdentityV1 {
+                network: "regtest".to_owned(),
+                network_magic: FIXTURE_NETWORK_MAGIC,
+                chain_id: *fixture_chain().as_bytes(),
+                genesis_hash: FIXTURE_GENESIS,
+                protocol_version: dom_core::PROTOCOL_VERSION,
+                range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            },
+            BearerTokenV1::new("synthetic-bounded-tip".to_owned())?,
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+        )?;
+        let runtime = RealDomRpcRuntimeV1::new(adapter, 16)?;
+        assert!(matches!(
+            runtime.current_transaction_validation_context_bounded_v23(Duration::ZERO),
+            Err(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable
+            ))
+        ));
+        let held = runtime
+            .deadline_scan_v23
+            .lock()
+            .map_err(|_| RealDomError::LockPoisoned)?;
+        assert!(matches!(
+            runtime.current_transaction_validation_context_bounded_v23(Duration::from_secs(1)),
+            Err(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable
+            ))
+        ));
+        assert_eq!(held.next_height, 0);
+        assert!(held.history.is_empty());
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_tip_revalidates_retained_anchor_and_resets_only_on_reorg_v23() -> FixtureResult<()> {
+        use std::io::{Read, Write};
+        for status in [200, 409, 401] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            listener.set_nonblocking(true)?;
+            let endpoint = format!("http://{}", listener.local_addr()?);
+            let response = serde_json::json!({
+                "schema_version": 1, "status": "ok", "canonical": true,
+                "identity": {
+                    "network": "regtest", "network_magic": FIXTURE_NETWORK_MAGIC,
+                    "chain_id": hex::encode(fixture_chain().as_bytes()),
+                    "genesis_hash": hex::encode(FIXTURE_GENESIS),
+                    "protocol_version": dom_core::PROTOCOL_VERSION,
+                    "range_proof_serialization_version": dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+                    "coinbase_maturity": 60, "tip_height": 0,
+                    "tip_hash": hex::encode(FIXTURE_GENESIS)
+                },
+                "requested_from": 1, "requested_to": MAX_SCRIPTLESS_SCAN_BLOCKS_V1,
+                "served_from": 1, "served_to": null,
+                "request_anchor": {"height": 0, "block_hash": hex::encode(FIXTURE_GENESIS)},
+                "blocks": [], "continuation": null
+            }).to_string();
+            let server = std::thread::spawn(move || -> std::io::Result<String> {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(1))
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte)?;
+                    request.push(byte[0]);
+                }
+                write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len())?;
+                String::from_utf8(request)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            });
+            // No signing fixture is needed: the checkpoint is the frozen public genesis.
+            let adapter = DomHttpChainAdapterV1::new(
+                &endpoint,
+                ExpectedDomIdentityV1 {
+                    network: "regtest".to_owned(),
+                    network_magic: FIXTURE_NETWORK_MAGIC,
+                    chain_id: *fixture_chain().as_bytes(),
+                    genesis_hash: FIXTURE_GENESIS,
+                    protocol_version: dom_core::PROTOCOL_VERSION,
+                    range_proof_serialization_version:
+                        dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+                },
+                BearerTokenV1::new("synthetic-bounded-tip".to_owned())?,
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+            )?;
+            let runtime = RealDomRpcRuntimeV1::new(adapter, 16)?;
+            runtime
+                .deadline_scan_v23
+                .lock()
+                .map_err(|_| RealDomError::LockPoisoned)?
+                .append(0, FIXTURE_GENESIS, 16)?;
+            let observed =
+                runtime.current_transaction_validation_context_bounded_v23(Duration::from_secs(2));
+            let request = server
+                .join()
+                .map_err(|_| "bounded scanner fixture panicked")??;
+            assert!(request.contains("from=1&to=64"));
+            assert!(request.contains(&format!("anchor_hash={}", hex::encode(FIXTURE_GENESIS))));
+            match status {
+                200 => {
+                    let context = observed?;
+                    assert_eq!(context.current_height(), 0);
+                    assert_eq!(context.chain_id(), fixture_chain().as_bytes());
+                }
+                409 => assert!(matches!(
+                    observed,
+                    Err(RealDomError::Chain(
+                        ChainAdapterError::TemporarilyUnavailable
+                    ))
+                )),
+                _ => assert!(matches!(
+                    observed,
+                    Err(RealDomError::Chain(ChainAdapterError::AuthenticationFailed))
+                )),
+            }
+            let checkpoint = runtime
+                .deadline_scan_v23
+                .lock()
+                .map_err(|_| RealDomError::LockPoisoned)?;
+            assert_eq!(checkpoint.next_height, if status == 409 { 0 } else { 1 });
+        }
+        Ok(())
     }
 
     fn fixture_share(byte: u8) -> FixtureResult<LocalSigningShare> {

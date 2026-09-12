@@ -9,6 +9,41 @@ use dom_scriptless_store::{
     XmrRecoveryOperationV12,
 };
 
+/// One deadline shared by preparation, both observations and exact submission.
+/// Local durable I/O cannot be cancelled safely; if it finishes late, no new
+/// network send or fresh success capability may follow it.
+struct NativeRecoveryDeadlineV23(std::time::Instant);
+impl NativeRecoveryDeadlineV23 {
+    fn until(deadline: std::time::Instant) -> Result<Self, RealDomError> {
+        let value = Self(deadline);
+        if value.remaining()? > std::time::Duration::from_secs(60) {
+            return Err(recovery_deadline_unavailable_v23());
+        }
+        Ok(value)
+    }
+    fn new(budget: std::time::Duration) -> Result<Self, RealDomError> {
+        if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
+            return Err(recovery_deadline_unavailable_v23());
+        }
+        std::time::Instant::now()
+            .checked_add(budget)
+            .map(Self)
+            .ok_or_else(recovery_deadline_unavailable_v23)
+    }
+    fn remaining(&self) -> Result<std::time::Duration, RealDomError> {
+        self.0
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|v| !v.is_zero())
+            .ok_or_else(recovery_deadline_unavailable_v23)
+    }
+    fn require_live(&self) -> Result<(), RealDomError> {
+        self.remaining().map(|_| ())
+    }
+}
+fn recovery_deadline_unavailable_v23() -> RealDomError {
+    RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
+}
+
 /// Fresh collateral observation and the native Store funding commitment agree.
 /// This is a short-lived prerequisite to XMR funding, not a reusable signature.
 /// A runtime must reissue it at the actual selected-XMR funding boundary.
@@ -60,11 +95,44 @@ impl RealDomRpcRuntimeV1 {
         authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
         custody: &XmrRecoveryCustodyV11,
     ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        self.observe_xmr_recovery_bounded_v23(
+            authority,
+            custody,
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    /// The same retained execution authority and exit journal with a bounded
+    /// complete observation. A partial authenticated prefix never becomes U.
+    pub fn observe_xmr_recovery_bounded_v23(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &XmrRecoveryCustodyV11,
+        budget: std::time::Duration,
+    ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::new(budget)?;
+        self.observe_xmr_recovery_until_v24(authority, custody, deadline.0)
+    }
+
+    /// Observe with the exact cutoff received before the caller's Store I/O.
+    /// Never convert it back into a newly starting relative scan budget.
+    pub fn observe_xmr_recovery_until_v24(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &XmrRecoveryCustodyV11,
+        deadline: std::time::Instant,
+    ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::until(deadline)?;
         authority.require_custody(custody)?;
         let state = custody
-            .with_graph(|graph| self.observe_authorized_xmr_graph_v12(authority, graph))
+            .with_graph(|graph| {
+                deadline.require_live()?;
+                self.observe_authorized_xmr_graph_until_v24(authority, graph, deadline.0)
+            })
             .map_err(custody_error)??;
+        deadline.require_live()?;
         retain_observed_exit(authority, custody, &state)?;
+        deadline.require_live()?;
         Ok(state)
     }
 
@@ -76,10 +144,40 @@ impl RealDomRpcRuntimeV1 {
         authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
         custody: &XmrRecoveryCustodyV11,
     ) -> Result<VerifiedDomXmrFundingPrerequisiteV12, RealDomError> {
+        self.verify_xmr_funding_prerequisite_bounded_v23(
+            authority,
+            custody,
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    /// Same prerequisite with one total budget including authority/custody I/O.
+    pub fn verify_xmr_funding_prerequisite_bounded_v23(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &XmrRecoveryCustodyV11,
+        budget: std::time::Duration,
+    ) -> Result<VerifiedDomXmrFundingPrerequisiteV12, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::new(budget)?;
+        self.verify_xmr_funding_prerequisite_until_v23(authority, custody, deadline.0)
+    }
+
+    /// Preserve an absolute deadline that already includes the driver's Store I/O.
+    pub fn verify_xmr_funding_prerequisite_until_v23(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &XmrRecoveryCustodyV11,
+        deadline: std::time::Instant,
+    ) -> Result<VerifiedDomXmrFundingPrerequisiteV12, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::until(deadline)?;
         authority.require_custody(custody)?;
-        custody
+        let prerequisite = custody
             .with_graph(|graph| {
-                let observed = self.observe_authorized_xmr_graph_v12(authority, graph)?;
+                let observed = self.observe_authorized_xmr_graph_bounded_v23(
+                    authority,
+                    graph,
+                    deadline.remaining()?,
+                )?;
                 match observed {
                     VerifiedDomXmrRecoveryStateV11::CollateralReady(collateral) => {
                         if collateral.finality().confirmation_depth()
@@ -110,7 +208,9 @@ impl RealDomRpcRuntimeV1 {
                     _ => Err(RealDomError::InvalidEvidence),
                 }
             })
-            .map_err(custody_error)?
+            .map_err(custody_error)??;
+        deadline.require_live()?;
+        Ok(prerequisite)
     }
 
     /// Advance one recovery operation using only the selected native DOM client.
@@ -123,11 +223,48 @@ impl RealDomRpcRuntimeV1 {
         authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
         custody: &XmrRecoveryCustodyV11,
     ) -> Result<DomXmrRecoveryProgressV12, RealDomError> {
+        self.advance_xmr_recovery_bounded_v23(
+            authority,
+            custody,
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    /// One absolute deadline covers both scans, durable intent preparation and
+    /// the actual HTTP submission. Timeouts leave the exact attempt retained;
+    /// they never claim rejection or permission to replace the transaction.
+    pub fn advance_xmr_recovery_bounded_v23(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &XmrRecoveryCustodyV11,
+        budget: std::time::Duration,
+    ) -> Result<DomXmrRecoveryProgressV12, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::new(budget)?;
+        self.advance_xmr_recovery_until_v23(authority, custody, deadline.0)
+    }
+
+    /// Preserve the caller's absolute deadline without restarting its budget
+    /// after scheduling delays or durable Store work in the production driver.
+    pub fn advance_xmr_recovery_until_v23(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &XmrRecoveryCustodyV11,
+        deadline: std::time::Instant,
+    ) -> Result<DomXmrRecoveryProgressV12, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::until(deadline)?;
         authority.require_custody(custody)?;
         let state = custody
-            .with_graph(|graph| self.observe_authorized_xmr_graph_v12(authority, graph))
+            .with_graph(|graph| {
+                self.observe_authorized_xmr_graph_bounded_v23(
+                    authority,
+                    graph,
+                    deadline.remaining()?,
+                )
+            })
             .map_err(custody_error)??;
+        deadline.require_live()?;
         retain_observed_exit(authority, custody, &state)?;
+        deadline.require_live()?;
         let operation = match state {
             VerifiedDomXmrRecoveryStateV11::Refunded(secret) => {
                 return Ok(DomXmrRecoveryProgressV12::RefundShareRevealed(secret))
@@ -166,6 +303,7 @@ impl RealDomRpcRuntimeV1 {
                 .with_graph(|graph| authority.require_bounded_compensation_v23(graph))
                 .map_err(custody_error)??;
         }
+        deadline.require_live()?;
         let attempt = custody
             .prepare_recovery_attempt_v12(authority, operation)
             .map_err(custody_error)?;
@@ -173,10 +311,15 @@ impl RealDomRpcRuntimeV1 {
         // semantic action. The retained exact identity survives process death.
         custody
             .with_graph(|graph| {
-                let fresh = self.observe_authorized_xmr_graph_v12(authority, graph)?;
+                let fresh = self.observe_authorized_xmr_graph_bounded_v23(
+                    authority,
+                    graph,
+                    deadline.remaining()?,
+                )?;
                 require_operation_state(operation, custody.scope().role, &fresh, graph)
             })
             .map_err(custody_error)??;
+        deadline.require_live()?;
         custody
             .require_attempt_v12(&attempt)
             .map_err(custody_error)?;
@@ -198,7 +341,7 @@ impl RealDomRpcRuntimeV1 {
                         return Err(RealDomError::InvalidEvidence);
                     }
                     self.adapter
-                        .submit_canonical_transaction(bytes)
+                        .submit_canonical_transaction_until_v23(bytes, deadline.0)
                         .map_err(RealDomError::Chain)
                 })
                 .map_err(custody_error)??,
@@ -209,7 +352,7 @@ impl RealDomRpcRuntimeV1 {
                     }
                     private.with_secret_bytes(|bytes| {
                         self.adapter
-                            .submit_canonical_transaction(bytes)
+                            .submit_canonical_transaction_until_v23(bytes, deadline.0)
                             .map_err(RealDomError::Chain)
                     })
                 })
@@ -218,14 +361,29 @@ impl RealDomRpcRuntimeV1 {
         custody
             .retain_recovery_admission_v12(&attempt, &receipt)
             .map_err(custody_error)?;
+        // Retain a definite admission even if its durable write runs late;
+        // the caller then reconciles it instead of receiving a late grant.
+        deadline.require_live()?;
         Ok(DomXmrRecoveryProgressV12::Submitted { operation, receipt })
     }
 
-    fn observe_authorized_xmr_graph_v12(
+    fn observe_authorized_xmr_graph_bounded_v23(
         &self,
         authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
         graph: &VerifiedXmrRecoveryGraphV11,
+        budget: std::time::Duration,
     ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        let deadline = NativeRecoveryDeadlineV23::new(budget)?;
+        self.observe_authorized_xmr_graph_until_v24(authority, graph, deadline.0)
+    }
+
+    fn observe_authorized_xmr_graph_until_v24(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+        graph: &VerifiedXmrRecoveryGraphV11,
+        deadline: std::time::Instant,
+    ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        NativeRecoveryDeadlineV23::until(deadline)?;
         let binding = graph.binding();
         if authority.chain_id() != binding.chain_id
             || authority.session_id() != binding.session_id
@@ -238,8 +396,12 @@ impl RealDomRpcRuntimeV1 {
         // funding. Recovery transactions use the signed DOM finality policy;
         // applying collateral depth again here could consume the refund window.
         let minimum = authority.minimum_confirmations();
-        let state =
-            self.verified_xmr_recovery_state_v11(graph, minimum, authority.max_reorg_depth())?;
+        let state = self.verified_xmr_recovery_state_until_v24(
+            graph,
+            minimum,
+            authority.max_reorg_depth(),
+            deadline,
+        )?;
         let finality = match &state {
             VerifiedDomXmrRecoveryStateV11::CollateralReady(value) => value.finality(),
             VerifiedDomXmrRecoveryStateV11::Cancelled(value) => value.finality(),
@@ -354,6 +516,47 @@ fn retain_observed_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn composed_recovery_deadline_refuses_zero_oversized_and_expired_without_sleep_v23(
+    ) -> Result<(), RealDomError> {
+        assert!(NativeRecoveryDeadlineV23::new(std::time::Duration::ZERO).is_err());
+        assert!(NativeRecoveryDeadlineV23::new(std::time::Duration::from_secs(61)).is_err());
+        let live = NativeRecoveryDeadlineV23::new(std::time::Duration::from_secs(1))?;
+        assert!(live.remaining()? <= std::time::Duration::from_secs(1));
+        let expired = NativeRecoveryDeadlineV23(std::time::Instant::now());
+        assert!(matches!(
+            expired.require_live(),
+            Err(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn composed_recovery_reuses_one_absolute_deadline_across_steps_v23() -> Result<(), RealDomError>
+    {
+        let deadline = NativeRecoveryDeadlineV23::new(std::time::Duration::from_secs(1))?;
+        let first = deadline.remaining()?;
+        let second = deadline.remaining()?;
+        assert!(second <= first);
+        // Unlike a new per-step timer, the final network deadline is exactly
+        // the initial deadline, not Instant::now() + original budget.
+        let absolute = deadline.0;
+        deadline.require_live()?;
+        assert_eq!(deadline.0, absolute);
+        Ok(())
+    }
+    #[test]
+    fn public_observation_until_keeps_callers_exact_cutoff_v24() -> Result<(), RealDomError> {
+        let original = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let outer = NativeRecoveryDeadlineV23::until(original)?;
+        let inner = NativeRecoveryDeadlineV23::until(outer.0)?;
+        assert_eq!(outer.0, original);
+        assert_eq!(inner.0, original);
+        assert!(NativeRecoveryDeadlineV23::until(std::time::Instant::now()).is_err());
+        Ok(())
+    }
     #[test]
     fn refund_reveal_has_strict_mempool_safety_cutoff_and_no_compensation_role() {
         let owner = XmrRecoveryCustodyRoleV11::PrivateRefundOwner;

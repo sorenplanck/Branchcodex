@@ -4,6 +4,10 @@
 use super::*;
 use dom_scriptless_crypto::VerifiedXmrRecoveryGraphV11;
 
+#[path = "xmr_refund_reorg_v23.rs"]
+mod refund_reorg_v23;
+pub use refund_reorg_v23::{VerifiedDomXmrRefundReorgV23, VerifiedDomXmrRefundRevalidationV23};
+
 #[cfg(test)]
 mod tests;
 
@@ -134,6 +138,17 @@ pub struct VerifiedDomRefundSecretV11 {
     finality: VerifiedDomXmrRecoveryFinalityV11,
 }
 impl VerifiedDomRefundSecretV11 {
+    /// Require a live canonical observation at a productive consumer boundary.
+    /// Persisted checkpoint bytes cannot recreate this monotonic freshness.
+    pub fn require_recent_v23(&self) -> Result<(), RealDomError> {
+        if self.finality.observed_at.elapsed() > std::time::Duration::from_secs(30) {
+            return Err(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable,
+            ));
+        }
+        Ok(())
+    }
+
     /// Exact native session of the observed refund.
     pub const fn session_id(&self) -> [u8; 32] {
         self.finality.session_id
@@ -200,7 +215,7 @@ pub enum VerifiedDomXmrRecoveryStateV11 {
     Compensated(VerifiedDomCompensationObservationV11),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct GraphTrace {
     funding: Option<CanonicalTransactionEvidenceV1>,
     c_spend: Option<CanonicalTransactionEvidenceV1>,
@@ -208,10 +223,31 @@ struct GraphTrace {
     d_spend: Option<CanonicalTransactionEvidenceV1>,
 }
 
+// A bounded authenticated prefix, never a proof of absence or finality.
+// Retained only in this physical runtime opening and keyed by graph/checkpoint.
+#[derive(Clone)]
+pub(super) struct NativeGraphScanProgressV23 {
+    state: CursorStateV1,
+    trace: GraphTrace,
+    blocks: std::collections::BTreeMap<u64, [u8; 32]>,
+    touched_at: std::time::Instant,
+}
+impl Default for NativeGraphScanProgressV23 {
+    fn default() -> Self {
+        Self {
+            state: CursorStateV1::genesis(),
+            trace: GraphTrace::default(),
+            blocks: std::collections::BTreeMap::new(),
+            touched_at: std::time::Instant::now(),
+        }
+    }
+}
+
 impl RealDomRpcRuntimeV1 {
     /// Observe the native graph with no legacy plain-refund Store assumption.
     /// A bounded, complete, linked scan proves both inclusion and absence of
-    /// other C/D spends. All pages and a final tip check must share one snapshot.
+    /// other C/D spends. Each batch closes against one snapshot; retained
+    /// prefixes are reanchored on the selected canonical chain before reuse.
     /// Missing/immature evidence is retryable; substituted identities, unknown
     /// spends, duplicate graph outputs, and contradictory ancestry are refused.
     pub fn verified_xmr_recovery_state_v11(
@@ -220,6 +256,55 @@ impl RealDomRpcRuntimeV1 {
         minimum_confirmations: u32,
         max_reorg_depth: u32,
     ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        self.verified_xmr_recovery_state_bounded_v23(
+            graph,
+            minimum_confirmations,
+            max_reorg_depth,
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    /// Resume an authenticated canonical prefix within the caller's budget.
+    /// The cache contains no readiness grant: every result requires the current
+    /// anchored tip, complete graph trace, finality and post-classification bound.
+    pub fn verified_xmr_recovery_state_bounded_v23(
+        &self,
+        graph: &VerifiedXmrRecoveryGraphV11,
+        minimum_confirmations: u32,
+        max_reorg_depth: u32,
+        budget: std::time::Duration,
+    ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        let unavailable = || RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable);
+        if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
+            return Err(unavailable());
+        }
+        let deadline = std::time::Instant::now()
+            .checked_add(budget)
+            .ok_or_else(unavailable)?;
+        self.verified_xmr_recovery_state_until_v24(
+            graph,
+            minimum_confirmations,
+            max_reorg_depth,
+            deadline,
+        )
+    }
+
+    /// Preserve one absolute cutoff through the authenticated incremental scan.
+    /// Expiration is checked before cache access or any chain request.
+    pub fn verified_xmr_recovery_state_until_v24(
+        &self,
+        graph: &VerifiedXmrRecoveryGraphV11,
+        minimum_confirmations: u32,
+        max_reorg_depth: u32,
+        deadline: std::time::Instant,
+    ) -> Result<VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        let unavailable = || RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable);
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(unavailable)?;
+        if remaining.is_zero() || remaining > std::time::Duration::from_secs(60) {
+            return Err(unavailable());
+        }
         let required = usize::try_from(max_reorg_depth)
             .ok()
             .and_then(|v| v.checked_add(1))
@@ -232,65 +317,206 @@ impl RealDomRpcRuntimeV1 {
         {
             return Err(RealDomError::FinalityPolicyInvalid);
         }
-        let (trace, state, identity) = self.scan_xmr_recovery_graph_v11(graph)?;
-        classify_graph(
+        let cache_scope = digest_parts(
+            b"DOM-INTEROP/XMR-RECOVERY-LIVE-SCAN/V23\0",
+            &[
+                graph.graph_digest(),
+                &minimum_confirmations.to_be_bytes(),
+                &max_reorg_depth.to_be_bytes(),
+            ],
+        );
+        let (trace, state, identity, _) = self.scan_xmr_recovery_graph_watched_v23(
+            graph,
+            &std::collections::BTreeSet::new(),
+            Some(deadline),
+            Some(cache_scope),
+        )?;
+        let observed = classify_graph(
             graph,
             trace,
             &state,
             &identity,
             minimum_confirmations,
             max_reorg_depth,
-        )
+        )?;
+        if std::time::Instant::now() >= deadline {
+            return Err(unavailable());
+        }
+        Ok(observed)
     }
 
-    fn scan_xmr_recovery_graph_v11(
+    fn scan_xmr_recovery_graph_watched_v23(
         &self,
         graph: &VerifiedXmrRecoveryGraphV11,
-    ) -> Result<(GraphTrace, CursorStateV1, ObservedDomIdentityV1), RealDomError> {
-        let mut state = CursorStateV1::genesis();
+        watched: &std::collections::BTreeSet<u64>,
+        deadline: Option<std::time::Instant>,
+        cache_scope: Option<[u8; 32]>,
+    ) -> Result<
+        (
+            GraphTrace,
+            CursorStateV1,
+            ObservedDomIdentityV1,
+            std::collections::BTreeMap<u64, [u8; 32]>,
+        ),
+        RealDomError,
+    > {
+        if watched.len() > MAX_CURSOR_HISTORY + 1 {
+            return Err(RealDomError::BoundsExceeded);
+        }
+        if cache_scope.is_some() && deadline.is_none() {
+            return Err(RealDomError::InvalidEvidence);
+        }
+        let mut cache = if cache_scope.is_some() {
+            Some(
+                self.xmr_refund_reorg_scan_v23
+                    .try_lock()
+                    .map_err(|error| match error {
+                        std::sync::TryLockError::WouldBlock => {
+                            RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
+                        }
+                        std::sync::TryLockError::Poisoned(_) => RealDomError::LockPoisoned,
+                    })?,
+            )
+        } else {
+            None
+        };
+        let progress = match (cache.as_mut(), cache_scope) {
+            (Some(cache), Some(key)) => cache.remove(&key).unwrap_or_default(),
+            _ => NativeGraphScanProgressV23::default(),
+        };
+        let NativeGraphScanProgressV23 {
+            mut state,
+            mut trace,
+            mut blocks,
+            ..
+        } = progress;
         let mut expected_tip: Option<ObservedDomIdentityV1> = None;
-        let mut trace = GraphTrace::default();
-        for _ in 0..MAX_SNAPSHOT_SCAN_PAGES {
-            let page = self
-                .adapter
-                .scan_page(state.scanner_cursor(), MAX_SCRIPTLESS_SCAN_BLOCKS_V1)?;
-            if let Some(expected) = &expected_tip {
-                require_same_snapshot(expected, &page.identity)?;
+        let result = (|| {
+            for _ in 0..MAX_SNAPSHOT_SCAN_PAGES {
+                let page = match deadline {
+                    Some(deadline) => self.adapter.scan_page_until_v23(
+                        state.scanner_cursor(),
+                        MAX_SCRIPTLESS_SCAN_BLOCKS_V1,
+                        deadline,
+                    )?,
+                    None => self
+                        .adapter
+                        .scan_page(state.scanner_cursor(), MAX_SCRIPTLESS_SCAN_BLOCKS_V1)?,
+                };
+                if let Some(expected) = &expected_tip {
+                    require_same_snapshot(expected, &page.identity)?;
+                } else {
+                    expected_tip = Some(page.identity.clone());
+                }
+                for block in &page.blocks {
+                    if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+                        return Err(RealDomError::Chain(
+                            ChainAdapterError::TemporarilyUnavailable,
+                        ));
+                    }
+                    if watched.contains(&block.height) {
+                        blocks.insert(block.height, block.block_hash);
+                    }
+                    for transaction in &block.transactions {
+                        trace.observe(graph, transaction)?;
+                    }
+                    state.append(block.height, block.block_hash, self.history_limit)?;
+                }
+                if state.scanner_cursor() != page.next_cursor {
+                    return Err(RealDomError::InvalidEvidence);
+                }
+                if page.reached_snapshot_tip {
+                    if state.history.last().copied()
+                        != Some((page.identity.tip_height, page.identity.tip_hash))
+                    {
+                        return Err(RealDomError::InvalidEvidence);
+                    }
+                    // A response for the successor cursor must confirm the same tip
+                    // with no extra block. This closes a scan concurrent with reorg.
+                    let recheck = match deadline {
+                        Some(deadline) => {
+                            self.adapter
+                                .scan_page_until_v23(state.scanner_cursor(), 1, deadline)?
+                        }
+                        None => self.adapter.scan_page(state.scanner_cursor(), 1)?,
+                    };
+                    require_same_snapshot(&page.identity, &recheck.identity)?;
+                    if !recheck.blocks.is_empty()
+                        || recheck.next_cursor != state.scanner_cursor()
+                        || !recheck.reached_snapshot_tip
+                    {
+                        return Err(RealDomError::InvalidEvidence);
+                    }
+                    if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+                        return Err(RealDomError::Chain(
+                            ChainAdapterError::TemporarilyUnavailable,
+                        ));
+                    }
+                    return Ok(page.identity);
+                }
+                if page.blocks.is_empty() {
+                    return Err(RealDomError::EvidenceNotFound);
+                }
+            }
+            if deadline.is_some() {
+                Err(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))
             } else {
-                expected_tip = Some(page.identity.clone());
+                Err(RealDomError::BoundsExceeded)
             }
-            for block in &page.blocks {
-                for transaction in &block.transactions {
-                    trace.observe(graph, transaction)?;
+        })();
+        let progress = NativeGraphScanProgressV23 {
+            state,
+            trace,
+            blocks,
+            touched_at: std::time::Instant::now(),
+        };
+        if let (Some(cache), Some(key)) = (cache.as_mut(), cache_scope) {
+            retain_native_graph_progress_v23(cache, key, &progress, result.as_ref().err());
+        }
+        result
+            .map(|identity| (progress.trace, progress.state, identity, progress.blocks))
+            .map_err(|error| match error {
+                RealDomError::Chain(ChainAdapterError::ReorgDetected) if cache_scope.is_some() => {
+                    RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
                 }
-                state.append(block.height, block.block_hash, self.history_limit)?;
-            }
-            if state.scanner_cursor() != page.next_cursor {
-                return Err(RealDomError::InvalidEvidence);
-            }
-            if page.reached_snapshot_tip {
-                if state.history.last().copied()
-                    != Some((page.identity.tip_height, page.identity.tip_hash))
-                {
-                    return Err(RealDomError::InvalidEvidence);
-                }
-                // A response for the successor cursor must confirm the same tip
-                // with no extra block. This closes a scan concurrent with reorg.
-                let recheck = self.adapter.scan_page(state.scanner_cursor(), 1)?;
-                require_same_snapshot(&page.identity, &recheck.identity)?;
-                if !recheck.blocks.is_empty()
-                    || recheck.next_cursor != state.scanner_cursor()
-                    || !recheck.reached_snapshot_tip
-                {
-                    return Err(RealDomError::InvalidEvidence);
-                }
-                return Ok((trace, state, page.identity));
-            }
-            if page.blocks.is_empty() {
-                return Err(RealDomError::EvidenceNotFound);
+                other => other,
+            })
+    }
+}
+
+fn retain_native_graph_progress_v23(
+    cache: &mut std::collections::BTreeMap<[u8; 32], NativeGraphScanProgressV23>,
+    key: [u8; 32],
+    progress: &NativeGraphScanProgressV23,
+    error: Option<&RealDomError>,
+) {
+    let retained = match error {
+        None | Some(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)) => {
+            Some(progress.clone())
+        }
+        Some(RealDomError::Chain(ChainAdapterError::ReorgDetected)) => {
+            Some(NativeGraphScanProgressV23::default())
+        }
+        _ => None,
+    };
+    cache.remove(&key);
+    if let Some(mut retained) = retained {
+        // At most four graph/checkpoint scopes, each four graph events and
+        // max_reorg+2 watched headers. Evict the least recently used scope so
+        // stale checkpoints cannot starve a newly active graph prefix.
+        if cache.len() >= 4 {
+            if let Some(evicted) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.touched_at)
+                .map(|(key, _)| *key)
+            {
+                cache.remove(&evicted);
             }
         }
-        Err(RealDomError::BoundsExceeded)
+        retained.touched_at = std::time::Instant::now();
+        cache.insert(key, retained);
     }
 }
 

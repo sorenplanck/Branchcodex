@@ -10,14 +10,14 @@ use kaystra_core::{
     types::{AssetId, ChainId, TimelockSpec},
 };
 
-pub(super) fn configure(
+pub(crate) fn configure(
     manifest: &mut RegistryManifestV1,
     terms: [&mut SettlementTermsV1; 2],
 ) -> Result<(), Box<dyn std::error::Error>> {
     configure_network(manifest, terms, xmr_setup_profile::XmrNetwork::Stagenet)
 }
 
-pub(super) fn configure_network(
+pub(crate) fn configure_network(
     manifest: &mut RegistryManifestV1,
     terms: [&mut SettlementTermsV1; 2],
     selected: xmr_setup_profile::XmrNetwork,

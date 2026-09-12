@@ -139,13 +139,23 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             .with_graph(|graph| graph.require_conditional_compensation_v22())
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        crate::production_xmr_recovery_driver_v12::ProductionXmrRecoveryDriverV12::new(
-            Rc::clone(&self.store),
-            gate,
-            custody,
-            client,
-        )
-        .map(Rc::new)
+        let driver = Rc::new(
+            crate::production_xmr_recovery_driver_v12::ProductionXmrRecoveryDriverV12::new(
+                Rc::clone(&self.store),
+                gate,
+                custody,
+                client,
+            )?,
+        );
+        let mut owner = self
+            .claim_owner_v21
+            .try_borrow_mut()
+            .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
+        if owner.xmr_refund_readiness_v23.is_some() {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        owner.xmr_refund_readiness_v23 = Some(Rc::clone(&driver));
+        Ok(driver)
     }
 }
 
@@ -519,7 +529,6 @@ where
     }
 }
 
-
 fn map_evm_remote_transport_error(
     error: ProductionContractsOutboundErrorV1,
 ) -> ChildAuthorityRefusalV1 {
@@ -757,6 +766,29 @@ impl core::fmt::Debug for ProductionDomChildStoreAuthorityV1 {
 }
 
 impl ProductionDomChildStoreAuthorityV1 {
+    /// Share only the already installed recovery driver; no Store reopening,
+    /// private scalar export, or alternate RPC source is created here.
+    pub(crate) fn native_xmr_refund_driver_v23(
+        &self,
+    ) -> Result<
+        Option<Rc<crate::production_xmr_recovery_driver_v12::ProductionXmrRecoveryDriverV12>>,
+        settlement_coordinator::ChildAuthorityRefusalV1,
+    > {
+        let driver = self
+            .claim_owner_v21
+            .try_borrow()
+            .map_err(|_| settlement_coordinator::ChildAuthorityRefusalV1::Unavailable)?
+            .xmr_refund_readiness_v23
+            .clone();
+        if let Some(driver) = &driver {
+            if driver.refund_gate_v23().session_id() != &self.binding.session_id() {
+                return Err(settlement_coordinator::ChildAuthorityRefusalV1::Conflict);
+            }
+            driver.require_attachment(self.binding.terms_digest())?;
+        }
+        Ok(driver)
+    }
+
     pub(crate) fn bind(&self) -> DomActuatorResult<DomContractsActuatorV1<'_>> {
         DomContractsActuatorV1::bind(self.store.as_ref(), self.binding)
     }
@@ -1707,7 +1739,6 @@ where
     pub(crate) fn xmr_remote_transport_authority_v23(
         &self,
         pins: &crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimPinsV23,
-        expiry: TimelockSpec,
     ) -> Result<
         Box<dyn crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteSweepTransportV23>,
         ChildAuthorityRefusalV1,
@@ -1715,8 +1746,7 @@ where
     where
         F: 'static,
     {
-        if !valid_timelock(expiry)
-            || pins.route_id != self.route_id
+        if pins.route_id != self.route_id
             || pins.session_id != self.session_id
             || self.xmr_remote_transport_authority_issued.replace(true)
         {
@@ -1730,7 +1760,8 @@ where
             store: Rc::clone(&self.store),
             identity: Rc::clone(&self.identity),
             relay: Rc::clone(&self.relay),
-            expiry,
+            last_transport_time_v24: Cell::new(0),
+            action_v24: xmr_remote_sweep_wire::RemoteSweepActionV23::Claim,
         }))
     }
 
@@ -1740,7 +1771,6 @@ where
     pub(crate) fn xmr_remote_responder_authority_v23(
         &self,
         pins: &crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimPinsV23,
-        expiry: TimelockSpec,
     ) -> Result<
         Box<dyn crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteSweepResponderTransportV23>,
         ChildAuthorityRefusalV1,
@@ -1748,8 +1778,7 @@ where
     where
         F: 'static,
     {
-        if !valid_timelock(expiry)
-            || pins.route_id != self.route_id
+        if pins.route_id != self.route_id
             || pins.session_id != self.session_id
             || self.xmr_remote_transport_authority_issued.replace(true)
         {
@@ -1763,8 +1792,65 @@ where
             store: Rc::clone(&self.store),
             identity: Rc::clone(&self.identity),
             relay: Rc::clone(&self.relay),
-            expiry,
+            last_transport_time_v24: Cell::new(0),
+            action_v24: xmr_remote_sweep_wire::RemoteSweepActionV23::Claim,
         }))
+    }
+
+    /// One issuance, two disjoint action faces over this SAME opening. The
+    /// signed terms choose roles: the Claim receiver requests Refund and serves
+    /// Claim; the XMR funder requests Claim and serves Refund. Neither face can
+    /// be retargeted to the other action, and no XMR spend key is issued here.
+    pub(crate) fn xmr_remote_action_pair_v24(
+        &self,
+        pins: &crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimPinsV23,
+        terms: &kaystra_core::terms::SettlementTermsV1,
+    ) -> Result<(
+        Box<dyn crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteSweepTransportV23>,
+        Box<dyn crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteSweepResponderTransportV23>,
+    ), ChildAuthorityRefusalV1>
+    where F: 'static,
+    {
+        use xmr_remote_sweep_wire::RemoteSweepActionV23::{Claim, Refund};
+        if pins.route_id != self.route_id
+            || pins.session_id != self.session_id
+            || terms.session_id.0 != self.session_id
+            || terms
+                .terms_hash()
+                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?
+                != pins.terms_digest
+            || terms.counterparty_leg.beneficiary == terms.counterparty_leg.refund_to
+            || !terms.roster.iter().any(|p| p.0 == self.local_participant)
+            || !terms.roster.iter().any(|p| p.0 == self.remote_participant)
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let (request_action, response_action) =
+            if self.local_participant == terms.counterparty_leg.beneficiary.0 {
+                (Refund, Claim)
+            } else if self.local_participant == terms.counterparty_leg.refund_to.0 {
+                (Claim, Refund)
+            } else {
+                return Err(ChildAuthorityRefusalV1::Conflict);
+            };
+        if self.xmr_remote_transport_authority_issued.replace(true) {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let face = |action_v24| ProductionXmrRemoteContractsAuthorityV23 {
+            session_id: self.session_id,
+            route_id: self.route_id,
+            local_participant: self.local_participant,
+            remote_participant: self.remote_participant,
+            store: Rc::clone(&self.store),
+            identity: Rc::clone(&self.identity),
+            relay: Rc::clone(&self.relay),
+            last_transport_time_v24: Cell::new(0),
+            action_v24,
+        };
+        Ok((
+            Box::new(face(request_action)),
+            Box::new(face(response_action)),
+        ))
     }
 
     /// Build the startup-safe DOM public-secret source/installer pair from this
@@ -2145,6 +2231,39 @@ where
             .map_err(|_| ProductionContractsPollErrorV1::OwnerBusy)?
             .poll_inbound(queue, now)
             .map_err(ProductionContractsPollErrorV1::Worker)
+    }
+
+    /// Terminal public transport only; no F6 or prepared signing ingress.
+    pub(crate) fn poll_terminal_refund_inbound_v24(
+        &mut self,
+        queue: &mut relay::production::ProductionRelayV1,
+        now: TimelockSpec,
+    ) -> Result<(), ProductionContractsPollErrorV1<F::Error>> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsPollErrorV1::OwnerBusy)?
+            .poll_terminal_refund_inbound_v24(queue, now)
+            .map_err(ProductionContractsPollErrorV1::Worker)
+    }
+
+    pub(crate) fn submit_terminal_refund_outbound_v24<Q: RelaySubmitQueueV1>(
+        &mut self,
+        queue: &mut Q,
+        now: TimelockSpec,
+    ) -> Result<RelayOutboundStepV1, RelayWorkerOutboundErrorV1> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| RelayWorkerOutboundErrorV1::OwnerBusy)?
+            .submit_terminal_refund_outbound_v24(queue, now)
+    }
+
+    pub(crate) fn terminal_refund_frames_pending_v24(
+        &mut self,
+    ) -> Result<bool, RelayWorkerOutboundErrorV1> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| RelayWorkerOutboundErrorV1::OwnerBusy)?
+            .terminal_refund_frames_pending_v24()
     }
 
     #[cfg_attr(

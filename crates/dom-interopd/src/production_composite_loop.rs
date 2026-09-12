@@ -10,7 +10,7 @@
 mod noise_recovery_v23;
 use noise_recovery_v23::attach_xmr_signing_noise_v23;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kaystra_core::types::TimelockSpec;
 use route_executor::LegIdV1;
@@ -34,6 +34,7 @@ use crate::production_relay_network_runtime::{
     ProductionRelayNetworkBoundsV1, ProductionRelayNetworkRuntimeErrorV1,
     ProductionRelayNetworkRuntimeV1,
 };
+use crate::production_relay_peer_scope_v23::ProductionSharedRelayPeerScopeV23;
 use crate::production_relay_stage12::ProductionRelayStage12OwnerV1;
 use crate::relay_worker::{
     RelayInboundPollReportV1, RelayOutboundStepV1, RelayWorkerInboundErrorV1,
@@ -53,10 +54,73 @@ const MIN_BACKOFF_V1: Duration = Duration::from_millis(1);
 const MAX_ACTIVATION_ROUNDS_V1: u64 = 1_000_000;
 const MAX_INTERLEAVED_ROUNDS_V1: u64 = 1_000_000;
 
+/// Operational drain limits, not negotiated route or Relay message expiry.
+/// Time is fixed once; neither an unavailable peer nor a new frame renews it.
+const TERMINAL_REFUND_DRAIN_TIME_V24: Duration = Duration::from_secs(180);
+const TERMINAL_REFUND_DRAIN_ROUNDS_V24: u16 = route_transport::MAX_ROUTE_FRAME_COUNT_V2 + 2;
+
+pub(crate) struct TerminalRefundDrainBudgetV24 {
+    deadline: Instant,
+    rounds: u16,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TerminalRefundDrainProgressV24 {
+    staged: bool,
+    complete: bool,
+}
+
+impl TerminalRefundDrainProgressV24 {
+    pub(crate) fn complete(self) -> bool {
+        self.complete
+    }
+    pub(crate) fn needs_publication(self) -> bool {
+        !self.staged
+    }
+    pub(crate) fn publication_staged(&mut self) {
+        self.staged = true;
+    }
+    pub(crate) fn observe_flush(&mut self, flushed: bool) {
+        self.complete |= self.staged && flushed;
+    }
+}
+
+impl TerminalRefundDrainBudgetV24 {
+    pub(crate) fn new(started: Instant) -> Result<Self, ProductionCompositeLoopErrorV1> {
+        Ok(Self {
+            deadline: started
+                .checked_add(TERMINAL_REFUND_DRAIN_TIME_V24)
+                .ok_or(ProductionCompositeLoopErrorV1::InvalidConfiguration)?,
+            rounds: 0,
+        })
+    }
+
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub(crate) fn next_round(&mut self, now: Instant) -> bool {
+        if now >= self.deadline || self.rounds >= TERMINAL_REFUND_DRAIN_ROUNDS_V24 {
+            return false;
+        }
+        self.rounds += 1;
+        true
+    }
+
+    pub(crate) fn permits(&self, now: Instant, blocking_bound: Duration) -> bool {
+        !blocking_bound.is_zero()
+            && self
+                .deadline
+                .checked_duration_since(now)
+                .is_some_and(|remaining| remaining >= blocking_bound)
+    }
+}
+
 /// Fixed blocking and retry bounds for one composite owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProductionCompositeLoopConfigV1 {
     network: ProductionRelayNetworkRuntimeV1,
+    blocking_bound: Duration,
     exchange_timeout: Duration,
     backoff: Duration,
     activation_round_budget: u64,
@@ -83,7 +147,7 @@ impl ProductionCompositeLoopConfigV1 {
         // The combined worst-case blocking window per leg must stay within the
         // composite bound even though the loop takes its per-call bounds from
         // the network runtime below.
-        connect_timeout
+        let blocking_bound = connect_timeout
             .max(accept_timeout)
             .checked_add(exchange_timeout)
             .filter(|bound| *bound <= MAX_COMPOSITE_BLOCKING_BOUND_V1)
@@ -92,6 +156,7 @@ impl ProductionCompositeLoopConfigV1 {
             .map_err(|_| ProductionCompositeLoopErrorV1::InvalidConfiguration)?;
         Ok(Self {
             network: ProductionRelayNetworkRuntimeV1::new(bounds),
+            blocking_bound,
             exchange_timeout,
             backoff,
             activation_round_budget,
@@ -159,7 +224,9 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     owner: ProductionRelayStage12OwnerV1,
     network_config: ProductionRelayNetworkConfigV1,
     network: ProductionRelayNetworkRuntimeV1,
+    blocking_bound: Duration,
     sessions: [ProductionNoiseRelaySessionV1; 2],
+    shared_peer_scope_v23: Option<ProductionSharedRelayPeerScopeV23>,
     exchange_timeout: Duration,
     backoff: Duration,
     last_relay_time_seconds: u64,
@@ -192,6 +259,24 @@ impl ProductionCompositeRelayLoopV1 {
         network_config
             .validate_local_database_id(local_database)
             .map_err(map_network_config_error)?;
+        let shared_peer_scope_v23 = if network_config.shared_peer_v23() {
+            Some(
+                ProductionSharedRelayPeerScopeV23::authenticate(
+                    &owner,
+                    [
+                        network_config
+                            .link(ProductionRelayLinkPositionV1::Upstream)
+                            .remote_relay_database_id(),
+                        network_config
+                            .link(ProductionRelayLinkPositionV1::Downstream)
+                            .remote_relay_database_id(),
+                    ],
+                )
+                .map_err(|_| ProductionCompositeLoopErrorV1::InvalidConfiguration)?,
+            )
+        } else {
+            None
+        };
         let upstream = derive_noise_session(
             &owner,
             LegIdV1::Upstream,
@@ -213,7 +298,9 @@ impl ProductionCompositeRelayLoopV1 {
             owner,
             network_config,
             network: config.network,
+            blocking_bound: config.blocking_bound,
             sessions: [upstream, downstream],
+            shared_peer_scope_v23,
             exchange_timeout: config.exchange_timeout,
             backoff: config.backoff,
 
@@ -226,6 +313,120 @@ impl ProductionCompositeRelayLoopV1 {
         &mut self,
         leg: LegIdV1,
     ) -> Result<ProductionCompositeRelayStepReportV1, ProductionCompositeLoopErrorV1> {
+        self.validate_retained_peer_scope_v23()?;
+        self.step_local_bootstrap_v23(leg)?;
+        self.step_exchange_and_poll_v23(leg)
+    }
+
+    /// One retained public-refund cycle after route termination. This never
+    /// enters local bootstrap, F6, F7 readiness, auxiliary signing workers or
+    /// graph-candidate acceptance. The negotiated Noise scopes may retransmit
+    /// already-retained public graph offers/auxiliary Relay bytes; they never
+    /// create or dispatch signing work. Authentication, Relay expiry and
+    /// shared-stream ordering remain unchanged (no base-only downgrade).
+    pub(crate) fn step_terminal_refund_v24(
+        &mut self,
+        leg: LegIdV1,
+    ) -> Result<bool, ProductionCompositeLoopErrorV1> {
+        self.validate_retained_peer_scope_v23()?;
+        let now = self.fresh_relay_time()?;
+        match leg {
+            LegIdV1::Upstream => {
+                let (contracts, relay) = self.owner.upstream_and_relay_mut();
+                contracts.submit_terminal_refund_outbound_v24(relay, now)
+            }
+            LegIdV1::Downstream => {
+                let (contracts, relay) = self.owner.downstream_and_relay_mut();
+                contracts.submit_terminal_refund_outbound_v24(relay, now)
+            }
+        }
+        .map_err(ProductionCompositeLoopErrorV1::Outbound)?;
+        let position = relay_position(leg);
+        let index = relay_index(leg);
+        // This only reconstructs public Noise scopes from retained owners;
+        // it does not call the graph producer or install new economic gates.
+        self.sessions[index] = derive_noise_session(
+            &self.owner,
+            leg,
+            self.network_config.link(position),
+            self.owner.relay().database_id(),
+            self.exchange_timeout,
+        )?;
+        let exchange = {
+            let (identity, relay) = self.owner.identity_and_relay_mut();
+            self.network
+                .exchange_configured_link(
+                    self.network_config.link(position),
+                    &self.sessions[index],
+                    identity,
+                    relay,
+                )
+                .map_err(ProductionCompositeLoopErrorV1::Network)
+        };
+        let result = complete_exchange_poll_v23(exchange, |_report| {
+            // Any authenticated graph candidate remains memory-only. Do not
+            // consume it into Store or acknowledge economic graph acceptance;
+            // ordinary bootstrap may receive it again on a later normal run.
+            let now = self.fresh_relay_time()?;
+            match leg {
+                LegIdV1::Upstream => {
+                    let (contracts, relay) = self.owner.upstream_and_relay_mut();
+                    contracts.poll_terminal_refund_inbound_v24(relay, now)
+                }
+                LegIdV1::Downstream => {
+                    let (contracts, relay) = self.owner.downstream_and_relay_mut();
+                    contracts.poll_terminal_refund_inbound_v24(relay, now)
+                }
+            }
+            .map_err(ProductionCompositeLoopErrorV1::Inbound)
+        });
+        match result {
+            Ok((exchange, ())) => {
+                let pending = self
+                    .owner
+                    .leg_mut(leg)
+                    .contracts_mut()
+                    .terminal_refund_frames_pending_v24()
+                    .map_err(ProductionCompositeLoopErrorV1::Outbound)?;
+                // Only a successful authenticated exchange with an exhausted
+                // local frame job is flush evidence. A missing peer is not.
+                Ok(!pending && !exchange.outbound_backlog_remains)
+            }
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
+            // The next public publisher tick may install the retained public
+            // transport witness. No ACK is invented for the pending 0x19.
+            Err(error) if is_terminal_refund_transport_awaiting_v24(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn terminal_refund_relay_bound_v24(&self) -> Duration {
+        self.blocking_bound
+    }
+
+    fn validate_retained_peer_scope_v23(&self) -> Result<(), ProductionCompositeLoopErrorV1> {
+        if let Some(scope) = &self.shared_peer_scope_v23 {
+            scope
+                .validate_owner(
+                    &self.owner,
+                    [
+                        self.network_config
+                            .link(ProductionRelayLinkPositionV1::Upstream)
+                            .remote_relay_database_id(),
+                        self.network_config
+                            .link(ProductionRelayLinkPositionV1::Downstream)
+                            .remote_relay_database_id(),
+                    ],
+                )
+                .map_err(|_| ProductionCompositeLoopErrorV1::InvalidConfiguration)?;
+        }
+        Ok(())
+    }
+
+    fn step_local_bootstrap_v23(
+        &mut self,
+        leg: LegIdV1,
+    ) -> Result<(), ProductionCompositeLoopErrorV1> {
         let TimelockSpec::TimestampSeconds { value: now } = self.fresh_relay_time()? else {
             return Err(ProductionCompositeLoopErrorV1::ClockUnavailable);
         };
@@ -244,6 +445,13 @@ impl ProductionCompositeRelayLoopV1 {
                 .step_f7_readiness_v19(chain, now)
                 .map_err(ProductionCompositeLoopErrorV1::F7Readiness)?;
         }
+        Ok(())
+    }
+
+    fn step_exchange_and_poll_v23(
+        &mut self,
+        leg: LegIdV1,
+    ) -> Result<ProductionCompositeRelayStepReportV1, ProductionCompositeLoopErrorV1> {
         if let Some((contracts, relay)) = self.owner.cancelled_and_relay_mut_v22(leg) {
             let _cancelled_outbound = contracts
                 .submit_outbound_once(relay)
@@ -283,21 +491,35 @@ impl ProductionCompositeRelayLoopV1 {
             self.owner.relay().database_id(),
             self.exchange_timeout,
         )?;
-        let mut exchange = {
+        let exchange = {
             let link = self.network_config.link(position);
             let session = &self.sessions[session_index];
             let (identity, relay) = self.owner.identity_and_relay_mut();
             self.network
                 .exchange_configured_link(link, session, identity, relay)
-                .map_err(ProductionCompositeLoopErrorV1::Network)?
+                .map_err(ProductionCompositeLoopErrorV1::Network)
         };
 
-        if let Some(candidate) = exchange.graph_candidate_v22.take() {
-            self.owner
-                .receive_xmr_graph_candidate_v22(leg, candidate)
-                .map_err(ProductionCompositeLoopErrorV1::Bootstrap)?;
-        }
+        let (exchange, inbound) = complete_exchange_poll_v23(exchange, |exchange| {
+            if let Some(candidate) = exchange.and_then(|report| report.graph_candidate_v22.take()) {
+                self.owner
+                    .receive_xmr_graph_candidate_v22(leg, candidate)
+                    .map_err(ProductionCompositeLoopErrorV1::Bootstrap)?;
+            }
+            self.poll_retained_inbound_v23(leg)
+        })?;
+        Ok(ProductionCompositeRelayStepReportV1 {
+            leg,
+            outbound,
+            exchange,
+            inbound,
+        })
+    }
 
+    fn poll_retained_inbound_v23(
+        &mut self,
+        leg: LegIdV1,
+    ) -> Result<RelayInboundPollReportV1, ProductionCompositeLoopErrorV1> {
         // Poll time is sampled only after the potentially blocking network
         // exchange; a stale timestamp can never be reused across legs.
         let now = self.fresh_relay_time()?;
@@ -355,12 +577,7 @@ impl ProductionCompositeRelayLoopV1 {
                     .map_err(ProductionCompositeLoopErrorV1::Inbound)?
             }
         };
-        Ok(ProductionCompositeRelayStepReportV1 {
-            leg,
-            outbound,
-            exchange,
-            inbound,
-        })
+        Ok(inbound)
     }
 
     fn fresh_relay_time(&mut self) -> Result<TimelockSpec, ProductionCompositeLoopErrorV1> {
@@ -427,9 +644,38 @@ impl core::fmt::Debug for ProductionCompositeActivationExitV1 {
     }
 }
 
+/// Process previously authenticated durable ingress even if this exchange could
+/// not obtain a peer. Never invent a successful exchange, accept unauthenticated
+/// bytes, or hide a local validation/storage failure behind a socket timeout.
+fn complete_exchange_poll_v23<T, U>(
+    mut exchange: Result<T, ProductionCompositeLoopErrorV1>,
+    poll: impl FnOnce(Option<&mut T>) -> Result<U, ProductionCompositeLoopErrorV1>,
+) -> Result<(T, U), ProductionCompositeLoopErrorV1> {
+    exchange = match exchange {
+        Err(error) if !is_peer_temporarily_unavailable_v23(&error) => return Err(error),
+        other => other,
+    };
+    let inbound = poll(exchange.as_mut().ok())?;
+    Ok((exchange?, inbound))
+}
+
+fn is_peer_temporarily_unavailable_v23(error: &ProductionCompositeLoopErrorV1) -> bool {
+    matches!(
+        error,
+        ProductionCompositeLoopErrorV1::Network(
+            ProductionRelayNetworkRuntimeErrorV1::ConnectUnavailable
+                | ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed
+                | ProductionRelayNetworkRuntimeErrorV1::ChannelUnavailable
+        )
+    )
+}
+
 trait CompositeActivationRelayV1 {
     type Error;
 
+    fn resume_local_activation_v23(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error>;
     fn activation_backoff(&self) -> Duration;
     fn bootstrap_ready_v16(&self) -> bool {
@@ -440,11 +686,21 @@ trait CompositeActivationRelayV1 {
 impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
     type Error = ProductionCompositeLoopErrorV1;
 
+    fn resume_local_activation_v23(&mut self) -> Result<(), Self::Error> {
+        self.validate_retained_peer_scope_v23()?;
+        // Stage 12 has already authenticated both retained F6 applied histories.
+        // Rehydrate bootstrap from those exact owners before any socket. This
+        // does not manufacture F6 readiness or grant funding/recovery authority.
+        self.step_local_bootstrap_v23(LegIdV1::Upstream)?;
+        self.step_local_bootstrap_v23(LegIdV1::Downstream)
+    }
+
     fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
         match self.step_leg(leg) {
             Ok(_) => Ok(()),
             Err(error) if is_f6_activation_awaiting(&error) => Ok(()),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(()),
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -522,6 +778,28 @@ where
             .map_err(CompositeActivationCoreErrorV1::Control)?
         {
             return Ok(CompositeActivationCoreExitV1::Shutdown);
+        }
+        // Already-rehydrated retained owners need no bootstrap or socket to
+        // hand off the exact authenticated pair. Missing readiness still
+        // enters the normal resume path below, with all original checks.
+        if relay.bootstrap_ready_v16() {
+            if let Some(ready) = receiver
+                .take_activation_ready()
+                .map_err(CompositeActivationCoreErrorV1::Receiver)?
+            {
+                return Ok(CompositeActivationCoreExitV1::Ready(ready));
+            }
+        }
+        relay
+            .resume_local_activation_v23()
+            .map_err(CompositeActivationCoreErrorV1::Relay)?;
+        if relay.bootstrap_ready_v16() {
+            if let Some(ready) = receiver
+                .take_activation_ready()
+                .map_err(CompositeActivationCoreErrorV1::Receiver)?
+            {
+                return Ok(CompositeActivationCoreExitV1::Ready(ready));
+            }
         }
         relay
             .step_activation_leg(LegIdV1::Upstream)
@@ -630,12 +908,20 @@ pub(crate) enum ProductionCompositeRuntimeExitV1 {
 trait CompositeRelayCycleV1 {
     type Error;
 
+    fn blocking_bound_v23(&self) -> Duration {
+        Duration::ZERO
+    }
+
     fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error>;
     fn backoff(&self) -> Duration;
 }
 
 impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
     type Error = ProductionCompositeLoopErrorV1;
+
+    fn blocking_bound_v23(&self) -> Duration {
+        self.blocking_bound
+    }
 
     fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
         match self.step_leg(leg) {
@@ -645,6 +931,10 @@ impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
             // and recovery clock. Never ACK or classify bad evidence as absent.
             Err(error) if is_claim_finality_awaiting_v16(&error) => Ok(()),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(()),
+            // Socket absence cannot suppress an already authorized local
+            // recovery tick. step_leg still polls the authenticated durable
+            // inbox, and any local refusal takes precedence over network loss.
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -657,6 +947,9 @@ impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
 trait CompositeRouteCycleV1 {
     type Error;
 
+    fn prepare_relay_block_v23(&mut self, _bound: Duration) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn step_route(&mut self) -> Result<RouteDriveReportV1, Self::Error>;
 }
 
@@ -674,6 +967,12 @@ where
     Y: RouteSecretRetirementAuthority,
 {
     type Error = RouteRuntimeErrorV1;
+
+    fn prepare_relay_block_v23(&mut self, bound: Duration) -> Result<(), Self::Error> {
+        // Each leg can independently exhaust its authenticated socket bound.
+        // Renew before BOTH calls, not once before the whole recovery loop.
+        self.prepare_bounded_external_block(bound)
+    }
 
     fn step_route(&mut self) -> Result<RouteDriveReportV1, Self::Error> {
         self.step()
@@ -710,12 +1009,14 @@ where
         {
             return Ok(ProductionCompositeRuntimeExitV1::Shutdown { rounds });
         }
-        relay
-            .step_relay_leg(LegIdV1::Upstream)
-            .map_err(CompositeCoreErrorV1::Relay)?;
-        relay
-            .step_relay_leg(LegIdV1::Downstream)
-            .map_err(CompositeCoreErrorV1::Relay)?;
+        for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
+            route
+                .prepare_relay_block_v23(relay.blocking_bound_v23())
+                .map_err(CompositeCoreErrorV1::Route)?;
+            relay
+                .step_relay_leg(leg)
+                .map_err(CompositeCoreErrorV1::Relay)?;
+        }
         let report = route.step_route().map_err(CompositeCoreErrorV1::Route)?;
         rounds = rounds
             .checked_add(1)
@@ -899,7 +1200,8 @@ fn is_template_construction_awaiting_v17(error: &ProductionCompositeLoopErrorV1)
         RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
             route_transport::FramedContractsTransportErrorV2::Contracts(
                 crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingTemplateConstructionV17
-                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingBootstrapRefundHandoffV18))))))
+                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingBootstrapRefundHandoffV18
+                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrRefundTransportV23))))))
 }
 
 fn is_claim_finality_awaiting_v16(error: &ProductionCompositeLoopErrorV1) -> bool {
@@ -907,6 +1209,13 @@ fn is_claim_finality_awaiting_v16(error: &ProductionCompositeLoopErrorV1) -> boo
         RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
             route_transport::FramedContractsTransportErrorV2::Contracts(
                 crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16))))))
+}
+
+fn is_terminal_refund_transport_awaiting_v24(error: &ProductionCompositeLoopErrorV1) -> bool {
+    matches!(error, ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
+        RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
+            route_transport::FramedContractsTransportErrorV2::Contracts(
+                crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrRefundTransportV23))))))
 }
 
 #[cfg(test)]
@@ -920,6 +1229,88 @@ mod tests {
     use crate::{RouteDriveStageV1, RouteRunControlErrorV1};
 
     use super::*;
+
+    #[test]
+    fn terminal_refund_drain_never_renews_original_deadline_or_round_budget() {
+        let start = Instant::now();
+        let mut budget = TerminalRefundDrainBudgetV24::new(start).unwrap();
+        let deadline = budget.deadline();
+        assert_eq!(deadline.duration_since(start), Duration::from_secs(180));
+        for _ in 0..TERMINAL_REFUND_DRAIN_ROUNDS_V24 {
+            assert!(budget.next_round(start));
+            assert_eq!(budget.deadline(), deadline);
+        }
+        assert!(!budget.next_round(start));
+        let mut elapsed = TerminalRefundDrainBudgetV24::new(start).unwrap();
+        assert!(!elapsed.next_round(deadline));
+        assert!(!elapsed.permits(deadline, Duration::from_nanos(1)));
+        assert!(!elapsed.permits(deadline - Duration::from_secs(1), Duration::from_secs(2)));
+        assert!(!elapsed.permits(start, Duration::ZERO));
+        assert!(elapsed.permits(deadline - Duration::from_secs(1), Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn terminal_refund_staged_frames_flush_without_another_publisher() {
+        let mut progress = TerminalRefundDrainProgressV24::default();
+        progress.observe_flush(true);
+        assert!(
+            !progress.complete(),
+            "empty mailbox is not a published response"
+        );
+        let mut publisher_calls = 0;
+        for flushed in [false, false, false, true] {
+            if progress.needs_publication() {
+                publisher_calls += 1;
+                progress.publication_staged();
+            }
+            progress.observe_flush(flushed);
+            assert_eq!(progress.complete(), flushed);
+        }
+        assert_eq!(publisher_calls, 1);
+        assert!(progress.complete());
+        assert!(!progress.needs_publication());
+    }
+
+    #[test]
+    fn terminal_refund_drain_has_no_bootstrap_f6_or_private_recovery_edge() {
+        let source = include_str!("production_composite_loop.rs");
+        let body = source
+            .split("pub(crate) fn step_terminal_refund_v24(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn terminal_refund_relay_bound_v24")
+            .next()
+            .unwrap();
+        for forbidden in [
+            ".step_bootstrap",
+            ".step_f7",
+            ".poll_inbound(",
+            ".receive_xmr_graph_candidate",
+            ".cancelled_and_relay_mut",
+            ".xmr_signing_and_relay_mut",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "terminal drain regained {forbidden}"
+            );
+        }
+        assert!(body.contains(".poll_terminal_refund_inbound_v24("));
+        assert!(body.contains(".submit_terminal_refund_outbound_v24("));
+        let root = include_str!("production_run_universal.rs");
+        let drain = root
+            .split("macro_rules! drain_terminal_refund_v24")
+            .nth(1)
+            .unwrap()
+            .split("    loop {")
+            .next()
+            .unwrap();
+        let receive = drain.find(".step_terminal_refund_v24(leg)").unwrap();
+        let publish = drain.find("tick_remote_refund_bounded_v24").unwrap();
+        let flush = drain.rfind(".step_terminal_refund_v24(leg)").unwrap();
+        assert!(receive < publish && publish < flush);
+        assert!(drain.find("funding_window_v23.close()").unwrap() < receive);
+        assert!(!drain.contains("pump.tick()"));
+    }
 
     #[derive(Default)]
     struct TestRelayV1 {
@@ -1038,6 +1429,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn each_relay_leg_requires_a_fresh_route_lease_before_blocking() {
+        struct LeaseCheckedRoute {
+            log: Rc<RefCell<Vec<&'static str>>>,
+            preparations: usize,
+            refuse_on: usize,
+        }
+        impl CompositeRouteCycleV1 for LeaseCheckedRoute {
+            type Error = ();
+            fn prepare_relay_block_v23(&mut self, _bound: Duration) -> Result<(), ()> {
+                self.preparations += 1;
+                self.log.borrow_mut().push("renew-route");
+                if self.preparations == self.refuse_on {
+                    return Err(());
+                }
+                Ok(())
+            }
+            fn step_route(&mut self) -> Result<RouteDriveReportV1, ()> {
+                self.log.borrow_mut().push("route-step");
+                Ok(report(RouteDriveDispositionV1::RecoveryRequired, 4))
+            }
+        }
+        for refuse_on in [0, 1, 2] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let mut relay = TestRelayV1 {
+                log: Rc::clone(&log),
+                backoff: Duration::from_millis(1),
+            };
+            let mut route = LeaseCheckedRoute {
+                log: Rc::clone(&log),
+                preparations: 0,
+                refuse_on,
+            };
+            let result =
+                run_interleaved_core_v1(&mut relay, &mut route, &mut TestControlV1::default(), 1);
+            if refuse_on == 0 {
+                assert!(result.is_ok());
+                assert_eq!(
+                    log.borrow().as_slice(),
+                    [
+                        "renew-route",
+                        "upstream-relay",
+                        "renew-route",
+                        "downstream-relay",
+                        "route-step"
+                    ]
+                );
+            } else {
+                assert!(matches!(result, Err(CompositeCoreErrorV1::Route(()))));
+                let expected: &[&str] = if refuse_on == 1 {
+                    &["renew-route"]
+                } else {
+                    &["renew-route", "upstream-relay", "renew-route"]
+                };
+                assert_eq!(log.borrow().as_slice(), expected);
+            }
+        }
+    }
+
     struct TestRouteV1 {
         log: Rc<RefCell<Vec<&'static str>>>,
         reports: Vec<RouteDriveReportV1>,
@@ -1123,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_releases_ready_only_after_both_legs_and_receiver_gate() {
+    fn activation_checks_retained_receiver_before_and_after_network_round() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let backoff = Duration::from_millis(11);
         let mut relay = TestRelayV1 {
@@ -1132,7 +1582,8 @@ mod tests {
         };
         let mut receiver = TestActivationReceiverV1 {
             calls: 0,
-            ready_on_call: 2,
+            // Initial retained check, post-resume check, then post-network.
+            ready_on_call: 3,
         };
         let mut control = TestControlV1::default();
         match run_activation_core_v1(&mut relay, &mut receiver, &mut control, 3)
@@ -1144,15 +1595,10 @@ mod tests {
         }
         assert_eq!(
             log.borrow().as_slice(),
-            [
-                "upstream-relay",
-                "downstream-relay",
-                "upstream-relay",
-                "downstream-relay"
-            ]
+            ["upstream-relay", "downstream-relay"]
         );
-        assert_eq!(receiver.calls, 2);
-        assert_eq!(control.waits, vec![backoff]);
+        assert_eq!(receiver.calls, 3);
+        assert!(control.waits.is_empty());
     }
 
     #[test]
@@ -1172,6 +1618,271 @@ mod tests {
         ));
     }
 
+    struct RetainedActivationRelayV23 {
+        resumed: bool,
+        refuse_resume: bool,
+        network_calls: u64,
+        resume_calls: u64,
+    }
+
+    impl CompositeActivationRelayV1 for RetainedActivationRelayV23 {
+        type Error = ProductionCompositeLoopErrorV1;
+
+        fn resume_local_activation_v23(&mut self) -> Result<(), Self::Error> {
+            self.resume_calls += 1;
+            if self.refuse_resume {
+                return Err(ProductionCompositeLoopErrorV1::InvalidConfiguration);
+            }
+            self.resumed = true;
+            Ok(())
+        }
+
+        fn step_activation_leg(&mut self, _: LegIdV1) -> Result<(), Self::Error> {
+            self.network_calls += 1;
+            Err(ProductionCompositeLoopErrorV1::Network(
+                ProductionRelayNetworkRuntimeErrorV1::ConnectUnavailable,
+            ))
+        }
+
+        fn bootstrap_ready_v16(&self) -> bool {
+            self.resumed
+        }
+
+        fn activation_backoff(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+    }
+
+    #[test]
+    fn reopened_authenticated_ready_is_consumed_without_contacting_absent_peer() {
+        let mut relay = RetainedActivationRelayV23 {
+            resumed: false,
+            refuse_resume: false,
+            network_calls: 0,
+            resume_calls: 0,
+        };
+        let mut receiver = TestActivationReceiverV1 {
+            calls: 0,
+            ready_on_call: 1,
+        };
+        let mut control = TestControlV1::default();
+        assert!(matches!(
+            run_activation_core_v1(&mut relay, &mut receiver, &mut control, 1),
+            Ok(CompositeActivationCoreExitV1::Ready(7))
+        ));
+        assert!(relay.resumed);
+        assert_eq!(relay.resume_calls, 1);
+        assert_eq!(relay.network_calls, 0);
+        assert_eq!(receiver.calls, 1);
+        assert!(control.waits.is_empty());
+    }
+
+    #[test]
+    fn initially_ready_activation_never_resumes_bootstrap_or_contacts_peer() {
+        let mut relay = RetainedActivationRelayV23 {
+            resumed: true,
+            refuse_resume: true,
+            network_calls: 0,
+            resume_calls: 0,
+        };
+        let mut receiver = TestActivationReceiverV1 {
+            calls: 0,
+            ready_on_call: 1,
+        };
+        let mut control = TestControlV1::default();
+        assert!(matches!(
+            run_activation_core_v1(&mut relay, &mut receiver, &mut control, 1),
+            Ok(CompositeActivationCoreExitV1::Ready(7))
+        ));
+        assert_eq!(relay.resume_calls, 0);
+        assert_eq!(relay.network_calls, 0);
+        assert_eq!(receiver.calls, 1);
+        assert!(control.waits.is_empty());
+    }
+
+    #[test]
+    fn refused_local_resume_never_consumes_ready_or_contacts_peer() {
+        let mut relay = RetainedActivationRelayV23 {
+            resumed: false,
+            refuse_resume: true,
+            network_calls: 0,
+            resume_calls: 0,
+        };
+        let mut receiver = TestActivationReceiverV1 {
+            calls: 0,
+            ready_on_call: 1,
+        };
+        assert!(matches!(
+            run_activation_core_v1(&mut relay, &mut receiver, &mut TestControlV1::default(), 1),
+            Err(CompositeActivationCoreErrorV1::Relay(
+                ProductionCompositeLoopErrorV1::InvalidConfiguration
+            ))
+        ));
+        assert_eq!(relay.network_calls, 0);
+        assert_eq!(relay.resume_calls, 1);
+        assert_eq!(receiver.calls, 0);
+    }
+
+    #[test]
+    fn transport_absence_polls_durable_ingress_but_never_invents_exchange_success() {
+        use ProductionRelayNetworkRuntimeErrorV1 as Network;
+        for error in [
+            Network::ConnectUnavailable,
+            Network::AcceptDeadlineElapsed,
+            Network::ChannelUnavailable,
+        ] {
+            let mut polled = false;
+            let result = complete_exchange_poll_v23::<(), _>(
+                Err(ProductionCompositeLoopErrorV1::Network(error)),
+                |exchange| {
+                    assert!(exchange.is_none());
+                    polled = true;
+                    Ok(())
+                },
+            );
+            assert!(polled);
+            assert!(
+                matches!(result, Err(ProductionCompositeLoopErrorV1::Network(actual)) if actual == error)
+            );
+        }
+    }
+
+    #[test]
+    fn authentication_configuration_and_storage_errors_are_never_peer_absence() {
+        use ProductionRelayNetworkRuntimeErrorV1 as Network;
+        for error in [
+            Network::InvalidConfiguration,
+            Network::ListenUnavailable,
+            Network::AuthenticatedExchangeFailed,
+            Network::DurableRelayUnavailable,
+        ] {
+            let result = complete_exchange_poll_v23::<(), ()>(
+                Err(ProductionCompositeLoopErrorV1::Network(error)),
+                |_| panic!("fatal network refusal must not poll or advance recovery"),
+            );
+            assert!(
+                matches!(result, Err(ProductionCompositeLoopErrorV1::Network(actual)) if actual == error)
+            );
+            assert!(!is_peer_temporarily_unavailable_v23(
+                &ProductionCompositeLoopErrorV1::Network(error)
+            ));
+        }
+        assert!(!is_peer_temporarily_unavailable_v23(
+            &ProductionCompositeLoopErrorV1::ClockUnavailable
+        ));
+    }
+
+    #[test]
+    fn local_validation_refusal_has_priority_over_peer_timeout() {
+        let result = complete_exchange_poll_v23::<(), ()>(
+            Err(ProductionCompositeLoopErrorV1::Network(
+                ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed,
+            )),
+            |_| Err(ProductionCompositeLoopErrorV1::ClockUnavailable),
+        );
+        assert!(matches!(
+            result,
+            Err(ProductionCompositeLoopErrorV1::ClockUnavailable)
+        ));
+    }
+
+    struct UnavailableCycleV23 {
+        error: ProductionRelayNetworkRuntimeErrorV1,
+        polls: usize,
+    }
+
+    impl CompositeRelayCycleV1 for UnavailableCycleV23 {
+        type Error = ProductionCompositeLoopErrorV1;
+        fn step_relay_leg(&mut self, _: LegIdV1) -> Result<(), Self::Error> {
+            let result = complete_exchange_poll_v23::<(), _>(
+                Err(ProductionCompositeLoopErrorV1::Network(self.error)),
+                |_| {
+                    self.polls += 1;
+                    Ok(())
+                },
+            );
+            match result {
+                Ok(_) => Ok(()),
+                Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+        fn backoff(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+    }
+
+    impl CompositeActivationRelayV1 for UnavailableCycleV23 {
+        type Error = ProductionCompositeLoopErrorV1;
+
+        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+            self.step_relay_leg(leg)
+        }
+
+        fn activation_backoff(&self) -> Duration {
+            self.backoff()
+        }
+    }
+
+    #[test]
+    fn absent_peer_without_retained_f6_authority_remains_bounded_and_not_ready() {
+        let mut relay = UnavailableCycleV23 {
+            error: ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed,
+            polls: 0,
+        };
+        let mut receiver = TestActivationReceiverV1 {
+            calls: 0,
+            ready_on_call: 0,
+        };
+        let mut control = TestControlV1::default();
+        assert!(matches!(
+            run_activation_core_v1(&mut relay, &mut receiver, &mut control, 2),
+            Ok(CompositeActivationCoreExitV1::RoundBudgetExhausted)
+        ));
+        assert_eq!(relay.polls, 4);
+        assert_eq!(receiver.calls, 6);
+        assert_eq!(control.waits, [Duration::from_millis(1); 2]);
+    }
+
+    #[test]
+    fn absent_peer_keeps_recovery_interleaved_but_failed_authentication_stops_it() {
+        for (error, expected_polls) in [
+            (ProductionRelayNetworkRuntimeErrorV1::ConnectUnavailable, 2),
+            (
+                ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed,
+                2,
+            ),
+            (ProductionRelayNetworkRuntimeErrorV1::ChannelUnavailable, 2),
+            (
+                ProductionRelayNetworkRuntimeErrorV1::AuthenticatedExchangeFailed,
+                0,
+            ),
+        ] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let mut route = TestRouteV1 {
+                log: Rc::clone(&log),
+                reports: vec![report(RouteDriveDispositionV1::RecoveryRequired, 4)],
+            };
+            let mut relay = UnavailableCycleV23 { error, polls: 0 };
+            let mut control = TestControlV1::default();
+            let result = run_interleaved_core_v1(&mut relay, &mut route, &mut control, 1);
+            assert_eq!(relay.polls, expected_polls);
+            if expected_polls == 0 {
+                assert!(matches!(result, Err(CompositeCoreErrorV1::Relay(_))));
+                assert!(log.borrow().is_empty());
+                assert!(control.progress.is_empty());
+            } else {
+                assert!(matches!(
+                    result,
+                    Ok(ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { rounds: 1 })
+                ));
+                assert_eq!(log.borrow().as_slice(), ["route-step"]);
+                assert_eq!(control.progress.len(), 1);
+                assert_eq!(control.waits, [Duration::from_millis(1)]);
+            }
+        }
+    }
+
     #[test]
     fn v16_only_native_verified_claim_wait_preserves_runtime_progress() {
         use crate::relay_worker::ContractsRelayIngressErrorV1 as Ingress;
@@ -1187,6 +1898,9 @@ mod tests {
         assert!(is_claim_finality_awaiting_v16(&wrap(
             Ingress::AwaitingFinalClaimObservationV16
         )));
+        assert!(is_template_construction_awaiting_v17(&wrap(
+            Ingress::AwaitingNativeXmrRefundTransportV23
+        )));
         for error in [
             Ingress::UnpreparedMessage,
             Ingress::InvalidDsc1,
@@ -1196,7 +1910,9 @@ mod tests {
             Ingress::Store(dom_scriptless_store::SessionStoreError::Quarantined),
             Ingress::Store(dom_scriptless_store::SessionStoreError::InvalidDomTransaction),
         ] {
-            assert!(!is_claim_finality_awaiting_v16(&wrap(error)));
+            let wrapped = wrap(error);
+            assert!(!is_template_construction_awaiting_v17(&wrapped));
+            assert!(!is_claim_finality_awaiting_v16(&wrapped));
         }
     }
 
@@ -1242,6 +1958,23 @@ mod tests {
 
     #[test]
     fn composite_bounds_reject_zero_and_long_blocking_windows() {
+        let bounded = ProductionCompositeLoopConfigV1::new(
+            Duration::from_secs(2),
+            Duration::from_secs(3),
+            Duration::from_secs(4),
+            Duration::from_millis(1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(bounded.blocking_bound, Duration::from_secs(7));
+        assert!(ProductionCompositeLoopConfigV1::new(
+            Duration::from_secs(15),
+            Duration::from_secs(20),
+            Duration::from_secs(11),
+            Duration::from_millis(1),
+            1,
+        )
+        .is_err());
         assert!(ProductionCompositeLoopConfigV1::new(
             Duration::ZERO,
             Duration::from_millis(25),

@@ -1,6 +1,11 @@
 //! End-to-end ownership of the local Mainnet-profile startup preparation.
 //! This runs no code at module initialization and never authorizes Relay IDs.
 use super::*;
+type PublicDomHistoryV24 = (
+    dom_scriptless_chain_adapter::ExpectedDomIdentityV1,
+    serde_json::Value,
+    Vec<serde_json::Value>,
+);
 use crate::production_config::ProductionUniversalBootstrapFieldsV11;
 use crate::production_inputs::native_daemon_planning_v23::NativeDaemonPlanningContextV23;
 use crate::production_xmr_native_binary_v23_tests::NativeDaemonBinaryV23;
@@ -31,6 +36,152 @@ struct RunningDependenciesV23 {
 }
 
 impl NativeMainnetStartupV23 {
+    /// Freeze inclusion, not validation, before either daemon starts. The
+    /// scenario can then remove a peer after an exact funding submission and
+    /// before chain confirmation makes claim signing eligible.
+    pub(crate) fn arm_dom_submission_barrier_v23(&self) -> ColdStartResult<()> {
+        self.baseline
+            .as_ref()
+            .ok_or("startup DOM baseline absent")?
+            .arm_submission_barrier_v23()
+    }
+
+    /// Connect the retained, independently provisioned actor identities to the
+    /// actual binary. No third Relay database is invented for the second leg:
+    /// both documents opt into the production shared-peer gate explicitly.
+    /// Addresses are supplied by the local scenario, never resolved through DNS.
+    pub(crate) fn export_and_launch_shared_peer_v23(
+        self,
+        binary: &NativeDaemonBinaryV23,
+        addresses: [std::net::SocketAddr; 2],
+        refund_arming_authority_epoch: u64,
+    ) -> ColdStartResult<NativeXmrRunningColdStartV23> {
+        use crate::production_config::{
+            production_f6_authority_bundle_digest_v8, ProductionBootstrapModeV1,
+            ProductionChainFamilyV11, ProductionF6PathRoleV8, ProductionUniversalLegV11,
+            PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1,
+        };
+        use crate::production_relay_network_config::{
+            ProductionRelayEndpointModeV1, ProductionRelayNetworkConfigV1,
+            ProductionRelayNetworkLinkV1,
+        };
+        use relay::production::RelayDatabaseIdV1;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        if refund_arming_authority_epoch == 0
+            || addresses[0] == addresses[1]
+            || addresses
+                .iter()
+                .any(|address| !address.ip().is_loopback() || address.port() == 0)
+        {
+            return Err(
+                "shared-peer startup requires two distinct local endpoints and an epoch".into(),
+            );
+        }
+        let f6 = self.f6()?;
+        let mut local_ids = Vec::with_capacity(2);
+        for actor in 0..2 {
+            let provision = &f6.actors[actor];
+            let common = self.planning(actor)?.common_v6(
+                ProductionBootstrapModeV1::Create,
+                provision.bounds,
+                provision.family.clone(),
+                &provision.owners,
+            )?;
+            local_ids.push(RelayDatabaseIdV1::new(
+                common
+                    .relay_authority_pins_v6()
+                    .ok_or("shared-peer local Relay owner")?
+                    .relay_database_id,
+            )?);
+        }
+        if local_ids[0] == local_ids[1]
+            || self.planning(0)?.composition().binding_digest()
+                != self.planning(1)?.composition().binding_digest()
+            || self.planning(0)?.roster_bundle().bundle_digest()?
+                != self.planning(1)?.roster_bundle().bundle_digest()?
+        {
+            return Err("shared-peer actors must own distinct databases for the same route".into());
+        }
+        let mut fields = Vec::with_capacity(2);
+        let mut sidecars = Vec::with_capacity(2);
+        for actor in 0..2 {
+            let plan = self.planning(actor)?;
+            let peer = local_ids[1 - actor];
+            let mode = if actor == 0 {
+                ProductionRelayEndpointModeV1::Listen
+            } else {
+                ProductionRelayEndpointModeV1::Connect
+            };
+            let network = ProductionRelayNetworkConfigV1::new_shared_peer_v23(
+                ProductionRelayNetworkLinkV1::new(mode, addresses[0], peer)?,
+                ProductionRelayNetworkLinkV1::new(mode, addresses[1], peer)?,
+            )?;
+            network.validate_local_database_id(local_ids[actor])?;
+            sidecars.push(network.canonical_bytes()?);
+            let legs = [
+                route_executor::LegIdV1::Upstream,
+                route_executor::LegIdV1::Downstream,
+            ]
+            .map(|leg| {
+                let session = plan.monero_session(leg);
+                let position = if leg == route_executor::LegIdV1::Upstream {
+                    0
+                } else {
+                    1
+                };
+                ProductionUniversalLegV11 {
+                    family: ProductionChainFamilyV11::Xmr,
+                    settlement_id: session.setup().settlement_id(),
+                    session_id: session.session_id(),
+                    chain_id: session.deployment().profile().chain_id.0,
+                    actuator_store: format!("daemon-xmr-{position}-actuator.sqlite"),
+                    authority_bundle: format!("daemon-xmr-{position}-authority.json"),
+                    // Resource export replaces this with its canonical encoder's digest
+                    // before any configuration is validated or published.
+                    authority_bundle_digest: [0; 32],
+                }
+            });
+            fields.push(ProductionUniversalBootstrapFieldsV11 {
+                f6_paths: ProductionF6PathRoleV8::ALL.map(|role| {
+                    format!(
+                        "daemon-{}",
+                        role.key().strip_prefix("path_").unwrap_or(role.key())
+                    )
+                }),
+                f6_authority_bundle_digest: production_f6_authority_bundle_digest_v8(
+                    &f6.actors[actor].bundle,
+                )?,
+                refund_arming_authority_epoch,
+                remote_relay_database_ids: [*peer.as_bytes(); 2],
+                shared_relay_peer_v23: true,
+                legs,
+            });
+        }
+        // Complete both public encodings before publishing either. A partial
+        // publication is retained on failure; never overwrite an old topology.
+        let prepared = self.prepared.as_ref().ok_or("startup already consumed")?;
+        for (actor, bytes) in sidecars.into_iter().enumerate() {
+            let root = prepared[actor].0.state_dir();
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                .open(root.join(PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1))?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::File::open(root)?.sync_all()?;
+        }
+        self.export_and_launch(
+            binary,
+            fields
+                .try_into()
+                .map_err(|_| "two shared-peer exports required")?,
+        )
+    }
+
     /// Only invoke after implementation is complete: this starts local RPC/HSM
     /// helpers, but does not launch the daemon or move any live-chain funds.
     pub(crate) fn prepare(
@@ -161,5 +312,94 @@ impl NativeMainnetStartupV23 {
             .take()
             .ok_or("startup cold owner absent")?
             .launch_with_dependencies_v23(binary, exports, Some(Box::new(dependencies)))
+    }
+}
+
+impl NativeXmrRunningColdStartV23 {
+    fn mainnet_dependencies_mut_v23(&mut self) -> ColdStartResult<&mut RunningDependenciesV23> {
+        self._dependencies
+            .as_mut()
+            .and_then(|owner| owner.downcast_mut::<RunningDependenciesV23>())
+            .ok_or_else(|| "running daemon has no retained mainnet scenario dependencies".into())
+    }
+
+    pub(crate) fn xmr_history_status_v23(
+        &mut self,
+    ) -> ColdStartResult<xmr_graph_wallet_tests::native_observation_v23::NativeXmrHistoryStatusV23>
+    {
+        self.mainnet_dependencies_mut_v23()?
+            ._funding
+            .history_status_v23()
+    }
+
+    pub(crate) fn xmr_pool_v23(&mut self) -> ColdStartResult<Vec<[u8; 32]>> {
+        Ok(self.xmr_history_status_v23()?.pool_tx_hashes)
+    }
+
+    /// Test-only, exact original helper restart. No live route writer may
+    /// race the cache audit/retirement closure, and no private cache is copied.
+    pub(crate) fn with_stopped_sidecar_v24<T>(
+        &mut self,
+        position: usize,
+        actor: usize,
+        operation: impl FnOnce(&Path) -> ColdStartResult<T>,
+    ) -> ColdStartResult<T> {
+        if position >= 2 || actor >= 2 || self.processes.iter().any(Option::is_some) {
+            return Err(
+                "sidecar cache operation requires two reaped original daemons and exact indices"
+                    .into(),
+            );
+        }
+        self.mainnet_dependencies_mut_v23()?
+            ._funding
+            .with_stopped_sidecar_v24(position, actor, operation)
+    }
+
+    /// Include only explicitly selected, cryptographically verified local pool
+    /// transactions. The helper checks the complete contiguous history and ACK;
+    /// no command is addressed to a live-network daemon.
+    pub(crate) fn advance_xmr_history_v23(
+        &mut self,
+        height: u64,
+        timestamp: u64,
+        include: &[[u8; 32]],
+    ) -> ColdStartResult<xmr_graph_wallet_tests::native_observation_v23::NativeXmrHistoryStatusV23>
+    {
+        self.mainnet_dependencies_mut_v23()?
+            ._funding
+            .advance_history_v23(height, timestamp, include)
+    }
+
+    fn mainnet_dependencies_v23(&self) -> ColdStartResult<&RunningDependenciesV23> {
+        self._dependencies
+            .as_ref()
+            .and_then(|owner| owner.downcast_ref::<RunningDependenciesV23>())
+            .ok_or_else(|| "running daemon has no retained mainnet scenario dependencies".into())
+    }
+
+    pub(crate) fn pending_dom_submissions_v23(&self) -> ColdStartResult<Vec<([u8; 32], Vec<u8>)>> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .pending_submissions_v23()
+    }
+
+    pub(crate) fn public_dom_history_v24(&self) -> ColdStartResult<Option<PublicDomHistoryV24>> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .public_history_v24()
+    }
+
+    pub(crate) fn release_dom_submissions_v23(&self) -> ColdStartResult<()> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .release_submissions_v23()
+    }
+
+    /// Append genuine validated coinbase/UTXO transitions to the controlled
+    /// RPC ledger. The headers are still a simulation, not proof of mainnet PoW.
+    pub(crate) fn advance_dom_height_v23(&self, target: u64) -> ColdStartResult<()> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .advance_to_height_v23(target)
     }
 }

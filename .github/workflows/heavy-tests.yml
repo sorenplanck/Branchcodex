@@ -18,6 +18,8 @@
 #     and the forge artifact they read.
 #   * bp-soak — the DSC-F4 collaborative Bulletproof soak at its full
 #     10 000-case requirement (seconds per case locally; hours of CPU).
+#   * dom-xmr-native also selects dom-xmr-real-daemon (serial claim and DOM
+#     compensation) and dom-xmr-real-refund (XMR refund after public U).
 #
 # Deliberately NOT here: `#[ignore]`d subprocess crash helpers (only their
 # parent tests may invoke them), golden-vector printers ("run only when
@@ -169,6 +171,8 @@ jobs:
           forge install foundry-rs/forge-std@v1.9.6 --no-git
 
       - uses: ./.github/actions/xmr-test-tools
+        with:
+          run-once-regressions: 'false'
 
       - name: Verify prepared operational integration ingress
         env:
@@ -332,6 +336,7 @@ jobs:
       - uses: ./dom/.github/actions/xmr-test-tools
         with:
           dom-path: dom
+          run-once-regressions: 'false'
 
       - name: DOM↔XMR native claim, real scanner and durable signing graph
         working-directory: dom
@@ -373,10 +378,190 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  dom-xmr-real-daemon:
+    name: "DOM↔XMR real daemon — claims, DOM compensation, original-store reopen"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '1'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dom
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Initialize explicit not-run evidence
+        shell: bash
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/dom-xmr-real-evidence"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-real-evidence'
+          (root / 'campaign.json').write_text(json.dumps({
+              'schema': 'DOM-XMR-REAL-DAEMON-CAMPAIGN-V23',
+              'status': 'not-run',
+              'reason': 'scenario prerequisites have not completed',
+          }, indent=2) + '\n')
+          PY
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dom -> target
+          key: dom-xmr-real-daemon-v23
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+
+      - name: Verify frozen consensus sources
+        working-directory: dom
+        run: bash scripts/check-consensus-unchanged.sh
+
+      - uses: ./dom/.github/actions/xmr-test-tools
+        with:
+          dom-path: dom
+          real-daemon: 'true'
+          run-once-regressions: 'false'
+
+      # A debug or feature-less executable cannot satisfy NativeDaemonBinaryV23.
+      # GPL tooling lives in the sibling checkout, outside this build's git state.
+      - name: Record the verified release-production binary input
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-real-evidence'
+          (evidence / 'daemon-blake2b256.txt').write_text(os.environ['DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23'] + '\n')
+          PY
+
+      # The runner invokes BOTH full names with --ignored --exact and insists
+      # on one passed test each. Never a blanket ignored suite or a silent skip.
+      # Each case has 150 minutes; second case starts only after verified cleanup.
+      - name: Run both mandatory real daemon scenarios sequentially
+        working-directory: dom
+        run: >-
+          python3 scripts/run_native_daemon_scenario_v23.py
+          --evidence-dir "$RUNNER_TEMP/dom-xmr-real-evidence" --timeout-seconds 9000
+          --scenario native_real_daemon_two_claims_survive_original_store_reopen_v23
+          --scenario native_real_daemon_dom_compensation_without_counterparty_v23
+
+      - name: Preserve real outcomes and original synthetic journals
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-xmr-real-daemon-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dom-xmr-real-evidence/campaign.json
+            ${{ runner.temp }}/dom-xmr-real-evidence/daemon-blake2b256.txt
+            ${{ runner.temp }}/dom-xmr-real-evidence/*/result.json
+            ${{ runner.temp }}/dom-xmr-real-evidence/*/test.log
+            ${{ runner.temp }}/dom-xmr-real-evidence/*/failed-fixture-path.txt
+            ${{ runner.temp }}/dom-xmr-real-evidence/*/synthetic-fixtures.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # A separate machine preserves the full 150-minute per-case bound without
+  # crowding three scenarios plus builds into one runner's six-hour job limit.
+  # No dependency on the claims job: its failure must not silently skip refund.
+  dom-xmr-real-refund:
+    name: "DOM↔XMR real daemon — XMR refund after public U without counterparty"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '1'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dom
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Initialize explicit not-run refund evidence
+        shell: bash
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/dom-xmr-refund-evidence"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-refund-evidence'
+          (root / 'campaign.json').write_text(json.dumps({
+              'schema': 'DOM-XMR-REAL-DAEMON-CAMPAIGN-V23',
+              'status': 'not-run',
+              'reason': 'refund scenario prerequisites have not completed',
+          }, indent=2) + '\n')
+          PY
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dom -> target
+          key: dom-xmr-real-daemon-v23
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+
+      - name: Verify frozen consensus sources
+        working-directory: dom
+        run: bash scripts/check-consensus-unchanged.sh
+
+      - uses: ./dom/.github/actions/xmr-test-tools
+        with:
+          dom-path: dom
+          real-daemon: 'true'
+          run-once-regressions: 'false'
+
+      - name: Record the verified release-production binary input
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-refund-evidence'
+          (evidence / 'daemon-blake2b256.txt').write_text(os.environ['DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23'] + '\n')
+          PY
+
+      - name: Run mandatory real XMR refund after public U
+        working-directory: dom
+        run: >-
+          python3 scripts/run_native_daemon_scenario_v23.py
+          --evidence-dir "$RUNNER_TEMP/dom-xmr-refund-evidence" --timeout-seconds 9000
+          --scenario native_real_daemon_xmr_refund_after_public_u_without_counterparty_v23
+
+      - name: Preserve real refund outcome and original synthetic journals
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-xmr-real-refund-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dom-xmr-refund-evidence/campaign.json
+            ${{ runner.temp }}/dom-xmr-refund-evidence/daemon-blake2b256.txt
+            ${{ runner.temp }}/dom-xmr-refund-evidence/*/result.json
+            ${{ runner.temp }}/dom-xmr-refund-evidence/*/test.log
+            ${{ runner.temp }}/dom-xmr-refund-evidence/*/failed-fixture-path.txt
+            ${{ runner.temp }}/dom-xmr-refund-evidence/*/synthetic-fixtures.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   heavy-gate:
     name: heavy suites gate
     runs-on: ubuntu-latest
-    needs: [integration-heavy, interop-full, live-composed-route, bp-soak, dom-xmr-native]
+    needs: [integration-heavy, interop-full, live-composed-route, bp-soak, dom-xmr-native, dom-xmr-real-daemon, dom-xmr-real-refund]
     if: always()
     steps:
       # skipped is acceptable (a dispatch may select one suite); failure and
@@ -387,9 +572,16 @@ jobs:
                    "${{ needs.interop-full.result }}" \
                    "${{ needs.live-composed-route.result }}" \
                    "${{ needs.bp-soak.result }}" \
-                   "${{ needs.dom-xmr-native.result }}"; do
+                   "${{ needs.dom-xmr-native.result }}" \
+                   "${{ needs.dom-xmr-real-daemon.result }}" \
+                   "${{ needs.dom-xmr-real-refund.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "a selected heavy suite did not pass: $r"; exit 1 ;;
             esac
           done
+          if [[ "${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}" == "true" ]]; then
+            [[ "${{ needs.dom-xmr-native.result }}" == success ]]
+            [[ "${{ needs.dom-xmr-real-daemon.result }}" == success ]]
+            [[ "${{ needs.dom-xmr-real-refund.result }}" == success ]]
+          fi

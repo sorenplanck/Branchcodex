@@ -16,6 +16,8 @@
 
 mod build_proof_v23;
 mod input_proof_v23;
+#[cfg(all(test, unix))]
+mod local_load_deadline_v24_tests;
 
 use std::{
     io::{Read, Write},
@@ -103,14 +105,26 @@ impl BlockingUdsSidecarPort {
         let deadline = Instant::now()
             .checked_add(self.timeout)
             .ok_or(SpendPortError::Rejected)?;
+        self.call_until_v24(request, deadline)
+    }
+
+    #[cfg(unix)]
+    fn call_until_v24(
+        &self,
+        request: &SidecarRequestV2,
+        deadline: Instant,
+    ) -> Result<SidecarResponseV2, SpendPortError> {
+        remaining(deadline)?;
         // The serialized request contains private scalars as well as its tag.
         let bytes =
             Zeroizing::new(serde_json::to_vec(request).map_err(|_| SpendPortError::Rejected)?);
         if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
             return Err(SpendPortError::Rejected);
         }
-        let mut stream = connect_bounded(&self.socket_path)?;
+        let mut stream = connect_bounded(&self.socket_path, deadline)?;
+        remaining(deadline)?;
         require_same_uid_peer(&stream)?;
+        remaining(deadline)?;
         self.handshake(&mut stream, deadline)?;
         write_frame(&mut stream, &bytes, deadline)?;
         let response = read_frame(&mut stream, MAX_FRAME_BYTES, deadline)?;
@@ -127,6 +141,7 @@ impl BlockingUdsSidecarPort {
         stream: &mut std::os::unix::net::UnixStream,
         deadline: Instant,
     ) -> Result<(), SpendPortError> {
+        remaining(deadline)?;
         let mut challenge_nonce = [0_u8; 32];
         rand::rngs::OsRng
             .try_fill_bytes(&mut challenge_nonce)
@@ -144,11 +159,22 @@ impl BlockingUdsSidecarPort {
         proof.validate().map_err(|_| SpendPortError::Rejected)?;
         self.auth_key
             .verify_challenge_proof(&challenge_nonce, &proof.proof)
-            .map_err(|_| SpendPortError::Rejected)
+            .map_err(|_| SpendPortError::Rejected)?;
+        remaining(deadline)?;
+        Ok(())
     }
 
     #[cfg(not(unix))]
     fn call(&self, _request: &SidecarRequestV2) -> Result<SidecarResponseV2, SpendPortError> {
+        Err(SpendPortError::Rejected)
+    }
+
+    #[cfg(not(unix))]
+    fn call_until_v24(
+        &self,
+        _request: &SidecarRequestV2,
+        _deadline: Instant,
+    ) -> Result<SidecarResponseV2, SpendPortError> {
         Err(SpendPortError::Rejected)
     }
 
@@ -168,9 +194,13 @@ fn path_in_world_writable_root(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn connect_bounded(path: &Path) -> Result<std::os::unix::net::UnixStream, SpendPortError> {
+fn connect_bounded(
+    path: &Path,
+    deadline: Instant,
+) -> Result<std::os::unix::net::UnixStream, SpendPortError> {
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
     use std::os::fd::AsRawFd;
+    remaining(deadline)?;
     let address = UnixAddr::new(path).map_err(|_| SpendPortError::Rejected)?;
     let fd = socket(
         AddressFamily::Unix,
@@ -181,7 +211,9 @@ fn connect_bounded(path: &Path) -> Result<std::os::unix::net::UnixStream, SpendP
     .map_err(|_| SpendPortError::Retryable)?;
     // A full Unix listen backlog reports EAGAIN. Close and retry the entire
     // authenticated call later; never block on connect or send before success.
+    remaining(deadline)?;
     connect(fd.as_raw_fd(), &address).map_err(|_| SpendPortError::Retryable)?;
+    remaining(deadline)?;
     let stream = std::os::unix::net::UnixStream::from(fd);
     stream
         .set_nonblocking(false)
@@ -189,7 +221,6 @@ fn connect_bounded(path: &Path) -> Result<std::os::unix::net::UnixStream, SpendP
     Ok(stream)
 }
 
-#[cfg(unix)]
 fn remaining(deadline: Instant) -> Result<Duration, SpendPortError> {
     deadline
         .checked_duration_since(Instant::now())
@@ -335,6 +366,7 @@ impl SweepBuildPort for BlockingUdsSidecarPort {
             SidecarResponseV2::Error(error) => Err(Self::classify_error(error)),
             SidecarResponseV2::Funding(_)
             | SidecarResponseV2::InputProofV23(_)
+            | SidecarResponseV2::LocalRefundWithProofsV24(_)
             | SidecarResponseV2::SweepWithProofsV23(_) => Err(SpendPortError::Rejected),
         }
     }
@@ -354,7 +386,7 @@ mod tests {
     /// them, and `connect(2)` bounds the whole path by `SUN_LEN` (~108
     /// bytes), so the scratch directory is the first short-enough private
     /// base: the runtime dir, the crate dir, or the home directory.
-    fn socket_scratch_dir() -> tempfile::TempDir {
+    pub(super) fn socket_scratch_dir() -> tempfile::TempDir {
         let candidates = [
             std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
@@ -389,7 +421,7 @@ mod tests {
         }
     }
 
-    fn read_test_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    pub(super) fn read_test_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
         let mut prefix = [0_u8; 4];
         stream.read_exact(&mut prefix)?;
         let mut frame = vec![0_u8; u32::from_be_bytes(prefix) as usize];
@@ -397,7 +429,7 @@ mod tests {
         Ok(frame)
     }
 
-    fn write_test_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
+    pub(super) fn write_test_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
         let length = u32::try_from(bytes.len()).expect("frame length");
         stream.write_all(&length.to_be_bytes())?;
         stream.write_all(bytes)?;

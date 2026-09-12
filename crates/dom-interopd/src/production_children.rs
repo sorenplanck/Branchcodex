@@ -382,6 +382,69 @@ pub(crate) struct QuorumXmrObservationPortV1 {
 }
 
 impl QuorumXmrObservationPortV1 {
+    fn observation_scope_v24(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<Self, XmrActuatorErrorV1> {
+        require_observation_deadline_v24(deadline)?;
+        let readers = self
+            .readers
+            .iter()
+            .map(|reader| {
+                require_observation_deadline_v24(deadline)?;
+                reader
+                    .with_observation_deadline_v24(deadline)
+                    .map_err(|_| XmrActuatorErrorV1::ObservationUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        require_observation_deadline_v24(deadline)?;
+        Ok(Self {
+            readers,
+            quorum: self.quorum,
+            genesis: self.genesis,
+        })
+    }
+
+    /// Same original deadline for all voters and all nested RPCs. A timed-out
+    /// operation cannot emit inclusion or manufacture absence.
+    pub(crate) fn transaction_inclusion_with_deadline_v24(
+        &self,
+        tx_hash: [u8; 32],
+        deadline: std::time::Instant,
+    ) -> Result<Option<XmrTxInclusionV1>, XmrActuatorErrorV1> {
+        let deadline = bounded_observation_deadline_v24(deadline)?;
+        let mut bounded = self.observation_scope_v24(deadline)?;
+        let result = bounded.transaction_inclusion(tx_hash);
+        require_observation_deadline_v24(deadline)?;
+        result
+    }
+
+    /// Read exact funding bytes without extending the public-LOAD lease.
+    pub(crate) fn authenticated_funding_raw_with_deadline_v24(
+        &self,
+        tx_hash: [u8; 32],
+        deadline: std::time::Instant,
+    ) -> Result<Vec<u8>, XmrActuatorErrorV1> {
+        let deadline = bounded_observation_deadline_v24(deadline)?;
+        let bounded = self.observation_scope_v24(deadline)?;
+        let result = bounded.authenticated_funding_raw_v23(tx_hash);
+        require_observation_deadline_v24(deadline)?;
+        result
+    }
+
+    /// Resolve all sixteen claimed ring members under the same original bound.
+    pub(crate) fn authenticate_remote_ring_with_deadline_v24(
+        &self,
+        claimed: &[xmr_remote_sweep_wire::RemoteRingMemberV23],
+        deadline: std::time::Instant,
+    ) -> Result<Vec<xmr_raw_tx_verify::RingMemberEvidenceV23>, XmrActuatorErrorV1> {
+        let deadline = bounded_observation_deadline_v24(deadline)?;
+        let bounded = self.observation_scope_v24(deadline)?;
+        let result = bounded.authenticate_remote_ring_v23(claimed);
+        require_observation_deadline_v24(deadline)?;
+        result
+    }
+
     pub(crate) fn new(
         readers: Vec<BlockingMoneroDaemonReaderV1>,
         quorum: usize,
@@ -526,6 +589,26 @@ impl QuorumXmrObservationPortV1 {
             return Err(XmrActuatorErrorV1::Conflict);
         }
         Ok(winner)
+    }
+}
+
+fn bounded_observation_deadline_v24(
+    original: std::time::Instant,
+) -> Result<std::time::Instant, XmrActuatorErrorV1> {
+    require_observation_deadline_v24(original)?;
+    let cap = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(60))
+        .ok_or(XmrActuatorErrorV1::ObservationUnavailable)?;
+    Ok(original.min(cap))
+}
+
+fn require_observation_deadline_v24(
+    deadline: std::time::Instant,
+) -> Result<(), XmrActuatorErrorV1> {
+    if deadline <= std::time::Instant::now() {
+        Err(XmrActuatorErrorV1::ObservationUnavailable)
+    } else {
+        Ok(())
     }
 }
 
@@ -1355,6 +1438,43 @@ fn compose_monero_child(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_observation_deadline_expiry_contacts_no_voter_v24(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let listeners = (0..3)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let readers = listeners
+            .iter()
+            .map(|listener| {
+                listener.set_nonblocking(true)?;
+                let url = format!("http://{}", listener.local_addr()?);
+                Ok(BlockingMoneroDaemonReaderV1::new(url)?)
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let quorum = QuorumXmrObservationPortV1::new(readers, 2, [1; 32])?;
+        let deadline = std::time::Instant::now();
+        assert!(matches!(
+            quorum.transaction_inclusion_with_deadline_v24([2; 32], deadline),
+            Err(XmrActuatorErrorV1::ObservationUnavailable)
+        ));
+        assert!(matches!(
+            quorum.authenticated_funding_raw_with_deadline_v24([2; 32], deadline),
+            Err(XmrActuatorErrorV1::ObservationUnavailable)
+        ));
+        assert!(matches!(
+            quorum.authenticate_remote_ring_with_deadline_v24(&[], deadline),
+            Err(XmrActuatorErrorV1::ObservationUnavailable)
+        ));
+        for listener in listeners {
+            assert_eq!(
+                listener.accept().err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::WouldBlock)
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn monero_v5_requires_majority_nonzero_genesis_and_distinct_endpoint_ports() {

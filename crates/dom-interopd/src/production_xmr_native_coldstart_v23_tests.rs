@@ -2,6 +2,8 @@
 //! This deliberately never calls the component graph/wallet fixture: the real
 //! daemon must create its own reservation and Contracts journals from scratch.
 use super::*;
+#[path = "production_xmr_native_daemon_scenario_v23_tests.rs"]
+mod daemon_scenario_v23;
 #[path = "production_xmr_native_mainnet_startup_v23_tests.rs"]
 mod mainnet_startup_v23;
 pub(crate) use mainnet_startup_v23::{NativeMainnetStartupV23, MAINNET_BASELINE_TIP_V23};
@@ -33,10 +35,194 @@ type ColdStartResult<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Field order is deliberate: stop/reap both children before TempDir cleanup.
 pub(crate) struct NativeXmrRunningColdStartV23 {
-    pub(crate) processes:
-        [crate::production_xmr_native_binary_v23_tests::NativeDaemonProcessV23; 2],
+    processes: [Option<crate::production_xmr_native_binary_v23_tests::NativeDaemonProcessV23>; 2],
+    restart: [NativeDaemonRestartInputV23; 2],
     _dependencies: Option<Box<dyn std::any::Any>>,
     _fixture: Fixture,
+}
+
+struct NativeDaemonRestartInputV23 {
+    state_dir: PathBuf,
+    credentials: zeroize::Zeroizing<Vec<u8>>,
+    manifests: [Vec<u8>; 2],
+}
+
+impl NativeDaemonRestartInputV23 {
+    fn read_manifests(state_dir: &Path) -> ColdStartResult<[Vec<u8>; 2]> {
+        use crate::production_config::{
+            read_owner_file_bounded, ProductionConfigErrorV1, PRODUCTION_CREATE_CONFIG_FILE_V11,
+            PRODUCTION_REOPEN_CONFIG_FILE_V11,
+        };
+        let mut result = Vec::with_capacity(2);
+        for name in [
+            PRODUCTION_CREATE_CONFIG_FILE_V11,
+            PRODUCTION_REOPEN_CONFIG_FILE_V11,
+        ] {
+            result.push(read_owner_file_bounded(
+                &state_dir.join(name),
+                262_144,
+                ProductionConfigErrorV1::InputArtifactUnavailable,
+            )?);
+        }
+        result
+            .try_into()
+            .map_err(|_| "two original manifests required".into())
+    }
+}
+
+impl NativeXmrRunningColdStartV23 {
+    pub(crate) fn state_dir(&self, actor: usize) -> ColdStartResult<&Path> {
+        Ok(&self
+            .restart
+            .get(actor)
+            .ok_or("daemon actor index")?
+            .state_dir)
+    }
+
+    pub(crate) fn require_running(&mut self, actor: usize) -> ColdStartResult<()> {
+        self.processes
+            .get_mut(actor)
+            .ok_or("daemon actor index")?
+            .as_mut()
+            .ok_or("daemon actor is stopped")?
+            .require_running()
+    }
+
+    pub(crate) fn poll_actor_v23(
+        &mut self,
+        actor: usize,
+    ) -> ColdStartResult<Option<std::process::ExitStatus>> {
+        self.processes
+            .get_mut(actor)
+            .ok_or("daemon actor index")?
+            .as_mut()
+            .ok_or("daemon actor is stopped")?
+            .poll()
+    }
+
+    /// Reap a successful natural terminal exit, never substitute SIGTERM or
+    /// SIGKILL for proof that the real daemon completed its own run function.
+    pub(crate) fn reap_successful_actor_v23(&mut self, actor: usize) -> ColdStartResult<()> {
+        match self.poll_actor_v23(actor)? {
+            Some(status) if status.success() => {}
+            Some(_) => return Err("real daemon exited unsuccessfully".into()),
+            None => return Err("real daemon has not exited naturally".into()),
+        }
+        // stop() sees the already retained exit status and sends no signal.
+        let status = self
+            .processes
+            .get_mut(actor)
+            .ok_or("daemon actor index")?
+            .take()
+            .ok_or("daemon actor is stopped")?
+            .stop()?;
+        if !status.success() {
+            return Err("reaped daemon status changed".into());
+        }
+        Ok(())
+    }
+
+    /// Keep success evidence only after the scenario explicitly reaped both
+    /// daemon owners. Do not turn a still-running process into passing evidence
+    /// by stopping it as a side effect of archival. The outer runner separately
+    /// verifies helper/descendant cleanup before archiving these original files.
+    pub(crate) fn retain_successful_fixture_v24(self) -> ColdStartResult<PathBuf> {
+        if self.processes.iter().any(Option::is_some) {
+            self.retain_failed_fixture_v23();
+            return Err("successful fixture still has an unreaped daemon owner".into());
+        }
+        let Self {
+            processes,
+            restart,
+            _dependencies,
+            _fixture,
+        } = self;
+        drop(processes);
+        drop(_dependencies);
+        drop(restart);
+        let retained = _fixture._root.keep();
+        eprintln!(
+            "native real daemon: successful fixture retained at {}",
+            retained.display()
+        );
+        Ok(retained)
+    }
+
+    /// Retain original synthetic Stores after failure, only after every owned
+    /// process/helper is stopped and reaped. No live authority is copied.
+    pub(crate) fn retain_failed_fixture_v23(self) -> PathBuf {
+        let Self {
+            processes,
+            restart,
+            _dependencies,
+            _fixture,
+        } = self;
+        drop(processes);
+        drop(_dependencies);
+        drop(restart);
+        let retained = _fixture._root.keep();
+        eprintln!(
+            "native real daemon: failed fixture retained at {}",
+            retained.display()
+        );
+        if let Some(marker) = std::env::var_os("DOM_XMR_FAILED_FIXTURE_MARKER_V23") {
+            let marker = PathBuf::from(marker);
+            let publish = (|| -> ColdStartResult<()> {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let parent = marker.parent().ok_or("fixture marker parent")?;
+                if !marker.is_absolute() || std::fs::canonicalize(parent)? != parent {
+                    return Err("fixture marker must have a canonical absolute parent".into());
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                    .open(&marker)?;
+                writeln!(file, "{}", retained.display())?;
+                file.sync_all()?;
+                std::fs::File::open(parent)?.sync_all()?;
+                Ok(())
+            })();
+            if publish.is_err() {
+                eprintln!("native real daemon: fixture kept; marker unavailable or already exists (not overwritten)");
+            }
+        }
+        retained
+    }
+
+    /// Kill/reap only the selected actual child. Keep the other daemon and
+    /// all original private stores/helpers alive to exercise noncooperation.
+    pub(crate) fn crash_actor(&mut self, actor: usize) -> ColdStartResult<()> {
+        self.processes
+            .get_mut(actor)
+            .ok_or("daemon actor index")?
+            .take()
+            .ok_or("daemon actor is already stopped")?
+            .crash_for_reopen()
+    }
+
+    /// Explicit Create resumes a partial creation journal; Reopen is required
+    /// after completion. The real binary, not this harness, validates that mode.
+    /// No database or manifest is copied, reconstructed, or repaired here.
+    pub(crate) fn restart_actor(
+        &mut self,
+        actor: usize,
+        binary: &crate::production_xmr_native_binary_v23_tests::NativeDaemonBinaryV23,
+        mode: crate::production_xmr_native_binary_v23_tests::NativeDaemonModeV23,
+    ) -> ColdStartResult<()> {
+        let process = self.processes.get_mut(actor).ok_or("daemon actor index")?;
+        if process.is_some() {
+            return Err("daemon restart requires a reaped original process".into());
+        }
+        let retained = &self.restart[actor];
+        if NativeDaemonRestartInputV23::read_manifests(&retained.state_dir)? != retained.manifests {
+            return Err("daemon restart manifests differ from original export".into());
+        }
+        *process = Some(binary.launch(&retained.state_dir, retained.credentials.clone(), mode)?);
+        Ok(())
+    }
 }
 
 struct NativeLaunchGuardV23 {
@@ -73,7 +259,7 @@ impl NativeXmrColdStartV23 {
             secrets,
             Some((limits, dom_baseline_tip)),
             |spends, terms, work, _actors, solver| {
-                let owner = configuration.start_mainnet_route_v23(
+                let owner = configuration.start_mutable_mainnet_route_v23(
                     spends,
                     [
                         u64::try_from(terms[0].counterparty_leg.amount)?,
@@ -172,6 +358,11 @@ impl NativeXmrColdStartV23 {
         let fixture = fixture_with_registry_configuration_v23(true, |manifest, terms| {
             secrets.configure_registry(manifest, terms).unwrap();
             if let Some((limits, tip)) = time {
+                // This is the initial local negotiation, not a lease refresh.
+                // Registry and time policy must cover the same campaign; the
+                // fixture defaults must not truncate it after configuration.
+                manifest.valid_from = limits.valid_from_seconds;
+                manifest.expires_at = limits.expires_at_seconds;
                 deadlines = Some(
                     deadline_plan_v23::NativeDeadlinePlanV23::new(manifest, limits, tip).unwrap(),
                 );
@@ -383,6 +574,14 @@ impl NativeXmrColdStartV23 {
             dependencies,
             fixture,
         };
+        let mut restart = Vec::with_capacity(2);
+        for export in &exports {
+            restart.push(NativeDaemonRestartInputV23 {
+                state_dir: export.state_dir.clone(),
+                credentials: export.stdin_v4.clone(),
+                manifests: NativeDaemonRestartInputV23::read_manifests(&export.state_dir)?,
+            });
+        }
         let [alice, bob] = exports;
         guard.processes.push(binary.launch(
             &alice.state_dir,
@@ -394,11 +593,16 @@ impl NativeXmrColdStartV23 {
             bob.stdin_v4,
             NativeDaemonModeV23::Create,
         )?);
-        Ok(NativeXmrRunningColdStartV23 {
-            processes: guard
+        let processes: [crate::production_xmr_native_binary_v23_tests::NativeDaemonProcessV23; 2] =
+            guard
                 .processes
                 .try_into()
-                .map_err(|_| "two started daemons required")?,
+                .map_err(|_| "two started daemons required")?;
+        Ok(NativeXmrRunningColdStartV23 {
+            processes: processes.map(Some),
+            restart: restart
+                .try_into()
+                .map_err(|_| "two retained restart inputs required")?,
             _dependencies: guard.dependencies,
             _fixture: guard.fixture,
         })

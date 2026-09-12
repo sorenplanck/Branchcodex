@@ -10,6 +10,13 @@ pub(crate) use xmr_enrollment_authority_v23::{
     ProductionXmrEnrolledFundingV23,
 };
 
+#[path = "production_xmr_enrollment_bundle_writer_v23.rs"]
+mod xmr_enrollment_bundle_writer_v23;
+pub use xmr_enrollment_bundle_writer_v23::{
+    encode_xmr_enrollment_leg_authority_bundle_v23, ProductionXmrEnrollmentFundingFileV23,
+    ProductionXmrEnrollmentLegResourcesV23,
+};
+
 #[cfg(test)]
 #[path = "production_native_xmr_bundle_v23_tests.rs"]
 pub(crate) mod native_bundle_v23;

@@ -21,6 +21,9 @@ use crate::production_config::{
 const HEADER_V1: &str = "DOM-INTEROPD-PRODUCTION-RELAY-NETWORK-V1";
 const END_V1: &str = "END-DOM-INTEROPD-PRODUCTION-RELAY-NETWORK-V1";
 const DIGEST_DOMAIN_V1: &[u8] = b"DOM-INTEROPD/PRODUCTION-RELAY-NETWORK/V1\0";
+const HEADER_SHARED_V2: &str = "DOM-INTEROPD-PRODUCTION-RELAY-NETWORK-V2-SHARED-PEER";
+const END_SHARED_V2: &str = "END-DOM-INTEROPD-PRODUCTION-RELAY-NETWORK-V2-SHARED-PEER";
+const DIGEST_DOMAIN_SHARED_V2: &[u8] = b"DOM-INTEROPD/PRODUCTION-RELAY-NETWORK/V2-SHARED-PEER\0";
 const LINE_COUNT_V1: usize = 9;
 const MAX_SOCKET_ADDRESS_BYTES_V1: usize = 64;
 
@@ -151,6 +154,7 @@ impl ProductionRelayNetworkLinkV1 {
 pub struct ProductionRelayNetworkConfigV1 {
     upstream: ProductionRelayNetworkLinkV1,
     downstream: ProductionRelayNetworkLinkV1,
+    shared_peer_v23: bool,
 }
 
 impl ProductionRelayNetworkConfigV1 {
@@ -167,7 +171,30 @@ impl ProductionRelayNetworkConfigV1 {
         Ok(Self {
             upstream,
             downstream,
+            shared_peer_v23: false,
         })
+    }
+
+    /// Explicit shared-peer request, encoded in a separate V2 domain. No
+    /// authority is granted here: the V11 manifest must opt in independently,
+    /// and the composite owner verifies the two authenticated session scopes.
+    pub fn new_shared_peer_v23(
+        upstream: ProductionRelayNetworkLinkV1,
+        downstream: ProductionRelayNetworkLinkV1,
+    ) -> Result<Self, ProductionRelayNetworkConfigErrorV1> {
+        if upstream.remote_relay_database_id != downstream.remote_relay_database_id {
+            return Err(ProductionRelayNetworkConfigErrorV1::InvalidLink);
+        }
+        Ok(Self {
+            upstream,
+            downstream,
+            shared_peer_v23: true,
+        })
+    }
+
+    /// Whether the document requests the authenticated shared-peer gate.
+    pub const fn shared_peer_v23(&self) -> bool {
+        self.shared_peer_v23
     }
 
     /// Returns the link for one named route position.
@@ -191,7 +218,7 @@ impl ProductionRelayNetworkConfigV1 {
         expected_upstream: RelayDatabaseIdV1,
         expected_downstream: RelayDatabaseIdV1,
     ) -> Result<(), ProductionRelayNetworkConfigErrorV1> {
-        if expected_upstream == expected_downstream
+        if (expected_upstream == expected_downstream) != self.shared_peer_v23
             || self.upstream.remote_relay_database_id != expected_upstream
             || self.downstream.remote_relay_database_id != expected_downstream
         {
@@ -216,8 +243,13 @@ impl ProductionRelayNetworkConfigV1 {
     /// Exact canonical bytes, including the domain-bound integrity digest.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ProductionRelayNetworkConfigErrorV1> {
         let body = self.canonical_body();
-        let digest = relay_network_digest(body.as_bytes())?;
-        let encoded = format!("{body}config_digest={}\n{END_V1}\n", encode_hex(&digest));
+        let digest = self.body_digest(body.as_bytes())?;
+        let end = if self.shared_peer_v23 {
+            END_SHARED_V2
+        } else {
+            END_V1
+        };
+        let encoded = format!("{body}config_digest={}\n{end}\n", encode_hex(&digest));
         if encoded.len() as u64 > MAX_PRODUCTION_RELAY_NETWORK_CONFIG_BYTES_V1 {
             return Err(ProductionRelayNetworkConfigErrorV1::InvalidEncoding);
         }
@@ -237,7 +269,12 @@ impl ProductionRelayNetworkConfigV1 {
         let text = std::str::from_utf8(bytes)
             .map_err(|_| ProductionRelayNetworkConfigErrorV1::InvalidEncoding)?;
         let lines: Vec<&str> = text[..text.len() - 1].split('\n').collect();
-        if lines.len() != LINE_COUNT_V1 || lines.first() != Some(&HEADER_V1) {
+        let shared = match lines.first().copied() {
+            Some(HEADER_V1) => false,
+            Some(HEADER_SHARED_V2) => true,
+            _ => return Err(ProductionRelayNetworkConfigErrorV1::InvalidEncoding),
+        };
+        if lines.len() != LINE_COUNT_V1 {
             return Err(ProductionRelayNetworkConfigErrorV1::InvalidEncoding);
         }
 
@@ -245,13 +282,18 @@ impl ProductionRelayNetworkConfigV1 {
         let downstream = decode_link(&lines, 4, "downstream")?;
         let supplied_digest = decode_digest(take_value(&lines, 7, "config_digest")?)
             .map_err(|_| ProductionRelayNetworkConfigErrorV1::InvalidEncoding)?;
-        if lines.get(8) != Some(&END_V1) {
+        let end = if shared { END_SHARED_V2 } else { END_V1 };
+        if lines.get(8) != Some(&end) {
             return Err(ProductionRelayNetworkConfigErrorV1::InvalidEncoding);
         }
 
-        let config = Self::new(upstream, downstream)?;
+        let config = if shared {
+            Self::new_shared_peer_v23(upstream, downstream)?
+        } else {
+            Self::new(upstream, downstream)?
+        };
         let body = config.canonical_body();
-        if relay_network_digest(body.as_bytes())? != supplied_digest
+        if config.body_digest(body.as_bytes())? != supplied_digest
             || config.canonical_bytes()?.as_slice() != bytes
         {
             return Err(ProductionRelayNetworkConfigErrorV1::InvalidEncoding);
@@ -260,8 +302,13 @@ impl ProductionRelayNetworkConfigV1 {
     }
 
     fn canonical_body(&self) -> String {
+        let header = if self.shared_peer_v23 {
+            HEADER_SHARED_V2
+        } else {
+            HEADER_V1
+        };
         format!(
-            "{HEADER_V1}\nupstream_mode={}\nupstream_address={}\nupstream_remote_relay_database_id={}\ndownstream_mode={}\ndownstream_address={}\ndownstream_remote_relay_database_id={}\n",
+            "{header}\nupstream_mode={}\nupstream_address={}\nupstream_remote_relay_database_id={}\ndownstream_mode={}\ndownstream_address={}\ndownstream_remote_relay_database_id={}\n",
             self.upstream.mode.as_str(),
             self.upstream.address,
             encode_hex(self.upstream.remote_relay_database_id.as_bytes()),
@@ -269,6 +316,16 @@ impl ProductionRelayNetworkConfigV1 {
             self.downstream.address,
             encode_hex(self.downstream.remote_relay_database_id.as_bytes()),
         )
+    }
+
+    fn body_digest(&self, body: &[u8]) -> Result<[u8; 32], ProductionRelayNetworkConfigErrorV1> {
+        if !self.shared_peer_v23 {
+            return relay_network_digest(body);
+        }
+        let mut bound = Vec::with_capacity(DIGEST_DOMAIN_SHARED_V2.len() + body.len());
+        bound.extend_from_slice(DIGEST_DOMAIN_SHARED_V2);
+        bound.extend_from_slice(body);
+        config_digest(&bound).map_err(|_| ProductionRelayNetworkConfigErrorV1::InvalidEncoding)
     }
 }
 
@@ -459,6 +516,61 @@ mod tests {
         assert!(fixture()?
             .validate_remote_database_ids(expected_upstream, expected_downstream)
             .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn shared_peer_v2_has_an_explicit_domain_and_never_downgrades_to_v1() -> TestResult {
+        let up = *fixture()?.link(ProductionRelayLinkPositionV1::Upstream);
+        let down = ProductionRelayNetworkLinkV1::new(
+            ProductionRelayEndpointModeV1::Connect,
+            "127.0.0.1:41002".parse()?,
+            up.remote_relay_database_id(),
+        )?;
+        assert!(ProductionRelayNetworkConfigV1::new(up, down).is_err());
+        let config = ProductionRelayNetworkConfigV1::new_shared_peer_v23(up, down)?;
+        assert!(config.shared_peer_v23());
+        let encoded = config.canonical_bytes()?;
+        let decoded = ProductionRelayNetworkConfigV1::decode_canonical(&encoded)?;
+        assert_eq!(config, decoded);
+        assert_eq!(encoded, decoded.canonical_bytes()?);
+        assert!(decoded
+            .validate_remote_database_ids(database(0xa1)?, database(0xa1)?)
+            .is_ok());
+        assert!(decoded
+            .validate_remote_database_ids(database(0xa1)?, database(0xb2)?)
+            .is_err());
+        assert!(decoded.validate_local_database_id(database(0xa1)?).is_err());
+        assert!(decoded.validate_local_database_id(database(0xc3)?).is_ok());
+        let downgrade = String::from_utf8(encoded.clone())?
+            .replace(HEADER_SHARED_V2, HEADER_V1)
+            .replace(END_SHARED_V2, END_V1);
+        assert!(ProductionRelayNetworkConfigV1::decode_canonical(downgrade.as_bytes()).is_err());
+        // Even a recomputed V1 digest cannot opt an old document into sharing.
+        let old_body = config.canonical_body().replace(HEADER_SHARED_V2, HEADER_V1);
+        assert!(
+            ProductionRelayNetworkConfigV1::decode_canonical(&encode_body(&old_body)?).is_err()
+        );
+        let wrong_domain = relay_network_digest(config.canonical_body().as_bytes())?;
+        let wrong = format!(
+            "{}config_digest={}\n{END_SHARED_V2}\n",
+            config.canonical_body(),
+            encode_hex(&wrong_domain)
+        );
+        assert!(ProductionRelayNetworkConfigV1::decode_canonical(wrong.as_bytes()).is_err());
+        let ordinary = fixture()?;
+        assert!(!ordinary.shared_peer_v23());
+        assert!(ProductionRelayNetworkConfigV1::new_shared_peer_v23(
+            *ordinary.link(ProductionRelayLinkPositionV1::Upstream),
+            *ordinary.link(ProductionRelayLinkPositionV1::Downstream),
+        )
+        .is_err());
+        let root = tempfile::tempdir()?;
+        write_owner_config(root.path(), &encoded)?;
+        assert_eq!(
+            load_production_relay_network_config_v1(root.path())?,
+            config
+        );
         Ok(())
     }
 

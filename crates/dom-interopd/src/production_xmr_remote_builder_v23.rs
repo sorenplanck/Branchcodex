@@ -6,6 +6,128 @@ use xmr_live_sidecar_api::{BuildSweepRequestV23, BuildSweepResponseV2, BuildSwee
 use xmr_remote_sweep_wire::RemoteSweepActionV23;
 
 impl ProductionXmrSweepAuthorityV10 {
+    /// Local signing is independent of a remote request. Public readback has
+    /// a separate method below which never loads or combines private material.
+    pub(crate) fn build_local_refund_with_proofs_v24(
+        &mut self,
+        authorized: &crate::production_xmr_remote_sweep_v23::AuthorizedLocalXmrRefundV24,
+    ) -> Result<xmr_live_sidecar_api::LocalRefundBuildResponseV24<BuildSweepResponseV2>, Refusal>
+    {
+        authorized.require_recent()?;
+        let request = authorized.request();
+        let observed = authorized.observed();
+        let setup = &self.binding.setup;
+        let quorum = self.funding_quorum_v22.as_ref().ok_or(Refusal::Conflict)?;
+        let funding = authorized.funding();
+        if self.binding.local_role != LocalRole::RefundReceiver
+            || request.action != RemoteSweepActionV23::Refund
+            || request.session_id != self.binding.session_id
+            || request.settlement_id != setup.settlement_id()
+            || request.terms_digest != setup.terms_hash()
+            || request.funding_tx_hash != setup.funding_tx_hash()
+            || request.destination != self.binding.refund_destination
+            || request.funded_amount_piconero != setup.expected_amount_piconero()
+            || request.network_genesis != quorum.deployment.deployment().genesis_hash
+            || request.registry_digest != quorum.deployment.registry_digest()
+            || request.profile_digest != quorum.deployment.profile_digest()
+            || request.max_fee_piconero != self.binding.max_fee_piconero
+            || request.max_fee_piconero > quorum.deployment.deployment().max_fee_piconero
+            || usize::try_from(request.adapter_max_raw_transaction_bytes).ok()
+                != Some(self.binding.max_raw_bytes)
+            || funding.setup_binding_hash() != &setup.binding_hash()
+            || funding.block_height() != request.funding_block_height
+            || u64::from(funding.output_index()) != request.funding_output_index
+            || observed.chain_id() != self.binding.dom_chain_id
+            || observed.session_id() != self.binding.session_id
+            || observed.template_hash() != self.binding.refund_template
+            || observed.refund_point() != self.binding.refund_claim.secp_compressed
+            || observed.finality().terms_hash() != setup.terms_hash()
+        {
+            return Err(Refusal::Conflict);
+        }
+        let executor = DomRefundAdaptorExecutor::new(self.binding.refund_claim);
+        let remote = observed
+            .expose(|bytes| executor.recover_share(*bytes))
+            .map_err(|_| Refusal::Conflict)?;
+        if !remote.expose(|bytes| *bytes == request.public_spend_share) {
+            return Err(Refusal::Conflict);
+        }
+        let material = self.material()?;
+        let (local, view) = self.binding.local_keys(&material)?;
+        let combined = local.combine(&remote).map_err(|_| Refusal::Conflict)?;
+        if combined.public_key().map_err(|_| Refusal::Conflict)?
+            != setup.combined_spend_public_key()
+        {
+            return Err(Refusal::Conflict);
+        }
+        // Recheck immediately before the secret-bearing authenticated UDS call.
+        authorized.require_recent()?;
+        let build = xmr_live_sidecar_api::LocalRefundBuildRequestV24 {
+            api_version: 24,
+            build: BuildSweepRequestV2 {
+                api_version: API_VERSION_V2,
+                request_nonce: request.effect_id,
+                settlement_id: setup.settlement_id(),
+                funding_tx_hash: setup.funding_tx_hash(),
+                expected_amount_piconero: setup.expected_amount_piconero(),
+                destination: self.binding.refund_destination.clone(),
+                spend_scalar: combined.expose(|bytes| SecretScalarBytes::new(*bytes)),
+                expected_spend_public_key: setup.combined_spend_public_key(),
+                view_scalar: view.expose(|bytes| SecretScalarBytes::new(*bytes)),
+                auth_tag: [0; 32],
+            },
+            network_genesis: request.network_genesis,
+            route: request.route_id,
+            session: request.session_id,
+            terms: request.terms_digest,
+            effect_id: request.effect_id,
+            fencing_epoch: request.fencing_epoch,
+            semantic_digest: request.semantic_digest,
+            local_authorization_digest: authorized.authorization_digest(),
+            dom_refund_tx_hash: observed.finality().transaction_hash(),
+            graph_digest: observed.finality().graph_digest(),
+            output_index: request.funding_output_index,
+            funding_height: request.funding_block_height,
+            max_fee: request.max_fee_piconero,
+            auth_tag: [0; 32],
+        };
+        let mut sidecar = self
+            .sidecar
+            .try_borrow_mut()
+            .map_err(|_| Refusal::Unavailable)?;
+        let response = sidecar
+            .build_local_refund_with_proofs_v24(build)
+            .map_err(map_port)?;
+        authorized.require_recent()?;
+        Ok(response)
+    }
+
+    /// Public Ready lookup only. No material(), local_keys(), scalar recovery,
+    /// signing endpoint or funding scanner is reachable from this method.
+    pub(crate) fn load_local_refund_with_proofs_v24(
+        &self,
+        request: xmr_live_sidecar_api::LocalRefundLoadRequestV24,
+    ) -> Result<xmr_live_sidecar_api::LocalRefundBuildResponseV24<BuildSweepResponseV2>, Refusal>
+    {
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(60))
+            .ok_or(Refusal::Unavailable)?;
+        self.load_local_refund_with_deadline_v24(request, deadline)
+    }
+
+    pub(crate) fn load_local_refund_with_deadline_v24(
+        &self,
+        request: xmr_live_sidecar_api::LocalRefundLoadRequestV24,
+        deadline: std::time::Instant,
+    ) -> Result<xmr_live_sidecar_api::LocalRefundBuildResponseV24<BuildSweepResponseV2>, Refusal>
+    {
+        self.sidecar
+            .try_borrow_mut()
+            .map_err(|_| Refusal::Unavailable)?
+            .load_local_refund_with_deadline_v24(request, deadline)
+            .map_err(map_port)
+    }
+
     pub(crate) fn build_authenticated_remote_sweep_v23(
         &mut self,
         authorized: &AuthenticatedRemoteSweepBuildV23<'_>,

@@ -17,6 +17,7 @@ pub(super) fn recover_on_private_fork(
     work: [&Path; 2],
     funding: &mut FundingOwner,
     deployment: deployment_registry::ResolvedDomDeploymentV1,
+    xmr_deployment: &deployment_registry::ResolvedMoneroDeploymentV1,
     funding_bytes: &[u8],
     funding_height: u64,
 ) -> Result<crate::production_child_xmr::XmrBuiltSweepV1> {
@@ -26,7 +27,14 @@ pub(super) fn recover_on_private_fork(
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&roots[actor])?;
-        for resource in ["runtime-contracts", "native-xmr-recovery-v23"] {
+        // The alternate transcript must also own an isolated identity journal:
+        // signing its refund request must not consume the original Claim
+        // continuation's DSC1 sequence or outbound signing record.
+        for resource in [
+            "runtime-contracts",
+            "native-xmr-recovery-v23",
+            "identity-parent",
+        ] {
             private_copy::copy_tree(&work[actor].join(resource), &roots[actor].join(resource))?;
         }
     }
@@ -191,7 +199,33 @@ pub(super) fn recover_on_private_fork(
     drop(gate);
     drop(custody);
     drop(store);
+    // Reuse this fully signed graph and canonical U snapshot: transport races
+    // must not be tested with a manually constructed native F7 capability.
+    let transport_message = {
+        let (store0, custody0) = open(0)?;
+        let (store1, custody1) = open(1)?;
+        native.assert_native_refund_transport_v24(
+            [std::rc::Rc::new(store0), std::rc::Rc::new(store1)],
+            [&custody0, &custody1],
+            signed.chain,
+            [signed.wallets[0].0, signed.wallets[1].0],
+            &runtime,
+            xmr_deployment,
+            &funding.envelope.daemon_urls,
+            &mut funding.port,
+            [&roots[0], &roots[1]],
+            [&roots[0], &roots[1]],
+        )?
+    };
     let (store, custody) = open(public_actor)?;
+    let retained = store
+        .resume_pending_xmr_remote_sweep_request_for_local_signer(session)?
+        .ok_or("native refund grant/request must survive original Store reopen")?;
+    assert_eq!(retained.message_digest(), &transport_message);
+    assert_eq!(
+        xmr_remote_sweep_wire::RemoteSweepRequestV23::decode_exact(retained.payload())?.action,
+        xmr_remote_sweep_wire::RemoteSweepActionV23::Refund,
+    );
     let gate = store.resume_f7_funding_gate_v12(signed.chain, session)?;
     let authority = store.authorize_xmr_recovery_execution_v12(&gate, &custody)?;
     funding.require_alive()?;

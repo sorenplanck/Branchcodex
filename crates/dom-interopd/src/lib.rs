@@ -51,9 +51,45 @@ mod production_dom_shared_bootstrap_v12;
 #[cfg(feature = "production")]
 mod production_dom_vaults_v12;
 #[cfg(feature = "production")]
+mod production_prepare_f6_artifact_v23;
+#[cfg(feature = "production")]
+mod production_prepare_planning_v23;
+#[cfg(feature = "production")]
+mod production_prepare_xmr_enrollment_v23;
+#[cfg(feature = "production")]
+mod production_prepare_xmr_leg_v23;
+#[cfg(feature = "production")]
+mod production_relay_peer_scope_v23;
+#[cfg(feature = "production")]
 mod production_xmr_compensation;
 #[cfg(feature = "production")]
 mod production_xmr_funding_command_v12;
+#[cfg(feature = "production")]
+pub use production_f6_factory::artifact_writer_v23::{
+    F6ArtifactWriteErrorV23, PreparedUntrustedF6ArtifactV23, PublicF6ArtifactInputsV23,
+    PublicF6ClaimProfileV23, PublicF6SignerEndpointV23, UntrustedF6RoutePinsV23,
+};
+#[cfg(feature = "production")]
+pub use production_prepare_f6_artifact_v23::{
+    finalize_f6_artifact_command_v23, prepare_f6_artifact_command_v23,
+    resume_f6_artifact_command_v23, PrepareF6ArtifactErrorV23, PreparedPublicF6ReportV23,
+    PREPARE_F6_ARTIFACT_USAGE_V23,
+};
+#[cfg(feature = "production")]
+pub use production_prepare_planning_v23::{
+    prepare_planning_command_v23, PreparePlanningErrorV23, PreparedPlanningReportV23,
+    PREPARE_PLANNING_USAGE_V23,
+};
+#[cfg(feature = "production")]
+pub use production_prepare_xmr_enrollment_v23::{
+    prepare_xmr_enrollment_command_v23, EnrollmentErrorV23, PreparedXmrEnrollmentReportV23,
+    PREPARE_XMR_ENROLLMENT_USAGE_V23,
+};
+#[cfg(feature = "production")]
+pub use production_prepare_xmr_leg_v23::{
+    prepare_xmr_leg_command_v23, PrepareXmrLegErrorV23, PreparedXmrLegReportV23,
+    PREPARE_XMR_LEG_USAGE_V23,
+};
 #[cfg(feature = "production")]
 mod production_xmr_graph_driver_v12;
 #[cfg(feature = "production")]
@@ -182,6 +218,9 @@ mod supervisor;
 #[cfg(all(test, feature = "production", target_os = "linux"))]
 mod production_xmr_native_binary_v23_tests;
 
+#[cfg(all(test, feature = "production"))]
+mod production_xmr_native_registry_fixture_v23;
+
 // The production unit tests share one authenticated route-time fixture. It is
 // declared exactly once at the crate root so Clippy's duplicate-module guard
 // also guarantees that every consumer exercises the same Rust types/statics.
@@ -279,6 +318,11 @@ pub use production_relay_network_config::{
     MAX_PRODUCTION_RELAY_NETWORK_CONFIG_BYTES_V1, PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1,
 };
 #[cfg(feature = "production")]
+pub use production_route_services::{
+    prepare_route_services_command_v11, PrepareRouteServicesErrorV11,
+    PreparedRouteServicesReportV11, PREPARE_ROUTE_SERVICES_USAGE_V11,
+};
+#[cfg(feature = "production")]
 pub use production_run::{
     run_production_v1, ProductionRunErrorV1, ProductionRunModeV1, ProductionRunOptionsV1,
     PRODUCTION_KNOWN_LIMITS_V1,
@@ -297,8 +341,9 @@ pub use production_signal::{
 };
 #[cfg(feature = "production")]
 pub use production_universal_leg_authority::{
-    encode_evm_leg_authority_bundle_v22, ProductionEvmLegBundleParametersV22,
-    ProductionLegBundleIdentityV22, ProductionLegBundleV22,
+    encode_evm_leg_authority_bundle_v22, encode_xmr_enrollment_leg_authority_bundle_v23,
+    ProductionEvmLegBundleParametersV22, ProductionLegBundleIdentityV22, ProductionLegBundleV22,
+    ProductionXmrEnrollmentFundingFileV23, ProductionXmrEnrollmentLegResourcesV23,
 };
 #[cfg(feature = "production")]
 pub use relay_worker::{

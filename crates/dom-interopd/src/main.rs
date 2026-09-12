@@ -39,11 +39,253 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == OsStr::new("bootstrap-v13") => {
             prepare_bootstrap_v13(rest)
         }
+        #[cfg(feature = "production")]
+        [command, rest @ ..] if command == OsStr::new("prepare-route-services-v11") => {
+            prepare_route_services(rest)
+        }
+        #[cfg(feature = "production")]
+        [command, rest @ ..] if command == OsStr::new("prepare-f6-artifact-v23") => {
+            prepare_f6_artifact(rest)
+        }
+        #[cfg(feature = "production")]
+        [command, rest @ ..] if command == OsStr::new("prepare-planning-v23") => {
+            prepare_planning(rest)
+        }
+        #[cfg(feature = "production")]
+        [command, rest @ ..] if command == OsStr::new("prepare-xmr-leg-v23") => {
+            prepare_xmr_leg(rest)
+        }
+        #[cfg(feature = "production")]
+        [command, rest @ ..] if command == OsStr::new("prepare-xmr-enrollment-v23") => {
+            prepare_xmr_enrollment(rest)
+        }
         #[cfg(feature = "simulation")]
         [command, rest @ ..] if command == OsStr::new("simulate") => run_simulation(rest),
         _ => {
             print_usage();
             ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+fn prepare_planning(arguments: &[OsString]) -> ExitCode {
+    use dom_interopd::{prepare_planning_command_v23, PREPARE_PLANNING_USAGE_V23};
+    if matches!(arguments, [flag] if flag == OsStr::new("--help")) {
+        println!("{PREPARE_PLANNING_USAGE_V23}");
+        return ExitCode::SUCCESS;
+    }
+    let [input_flag, input, output_flag, output] = arguments else {
+        eprintln!("{PREPARE_PLANNING_USAGE_V23}");
+        return ExitCode::from(2);
+    };
+    if input_flag != OsStr::new("--input") || output_flag != OsStr::new("--output-dir") {
+        eprintln!("{PREPARE_PLANNING_USAGE_V23}");
+        return ExitCode::from(2);
+    }
+    match prepare_planning_command_v23(&PathBuf::from(input), &PathBuf::from(output)) {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("planning report unavailable; preserve the output directory");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+fn prepare_f6_artifact(arguments: &[OsString]) -> ExitCode {
+    use dom_interopd::{
+        finalize_f6_artifact_command_v23, prepare_f6_artifact_command_v23,
+        resume_f6_artifact_command_v23, PREPARE_F6_ARTIFACT_USAGE_V23,
+    };
+    if matches!(arguments, [flag] if flag == OsStr::new("--help")) {
+        println!("{PREPARE_F6_ARTIFACT_USAGE_V23}");
+        return ExitCode::SUCCESS;
+    }
+    let result = match arguments {
+        [input_flag, input, output_flag, output]
+            if input_flag == OsStr::new("--input") && output_flag == OsStr::new("--output-dir") =>
+        {
+            prepare_f6_artifact_command_v23(&PathBuf::from(input), &PathBuf::from(output))
+        }
+        [mode, request_flag, request]
+            if mode == OsStr::new("--resume") && request_flag == OsStr::new("--request-dir") =>
+        {
+            resume_f6_artifact_command_v23(&PathBuf::from(request))
+        }
+        [mode, request_flag, request, signatures_flag, signatures]
+            if mode == OsStr::new("--finalize")
+                && request_flag == OsStr::new("--request-dir")
+                && signatures_flag == OsStr::new("--signatures") =>
+        {
+            finalize_f6_artifact_command_v23(&PathBuf::from(request), &PathBuf::from(signatures))
+        }
+        _ => {
+            eprintln!("{PREPARE_F6_ARTIFACT_USAGE_V23}");
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("F6 artifact report unavailable; preserve the request directory");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+fn prepare_xmr_leg(arguments: &[OsString]) -> ExitCode {
+    use dom_interopd::{
+        prepare_xmr_leg_command_v23, ProductionRoutePositionV1, PREPARE_XMR_LEG_USAGE_V23,
+    };
+    if matches!(arguments, [flag] if flag == OsStr::new("--help")) {
+        println!("{PREPARE_XMR_LEG_USAGE_V23}");
+        return ExitCode::SUCCESS;
+    }
+    let [state_flag, state, position_flag, position, output_flag, output] = arguments else {
+        eprintln!("{PREPARE_XMR_LEG_USAGE_V23}");
+        return ExitCode::from(2);
+    };
+    let position = match position.to_str() {
+        Some("upstream") => ProductionRoutePositionV1::Upstream,
+        Some("downstream") => ProductionRoutePositionV1::Downstream,
+        _ => {
+            eprintln!("{PREPARE_XMR_LEG_USAGE_V23}");
+            return ExitCode::from(2);
+        }
+    };
+    if state_flag != OsStr::new("--state-dir")
+        || position_flag != OsStr::new("--position")
+        || output_flag != OsStr::new("--output-file")
+    {
+        eprintln!("{PREPARE_XMR_LEG_USAGE_V23}");
+        return ExitCode::from(2);
+    }
+    match prepare_xmr_leg_command_v23(&PathBuf::from(state), position, &PathBuf::from(output)) {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("XMR leg report unavailable; preserve the published bundle");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+fn prepare_xmr_enrollment(arguments: &[OsString]) -> ExitCode {
+    use dom_interopd::{
+        prepare_xmr_enrollment_command_v23, ProductionRoutePositionV1,
+        PREPARE_XMR_ENROLLMENT_USAGE_V23,
+    };
+    if matches!(arguments, [flag] if flag == OsStr::new("--help")) {
+        println!("{PREPARE_XMR_ENROLLMENT_USAGE_V23}");
+        return ExitCode::SUCCESS;
+    }
+    let (arguments, reopen) = match arguments.split_last() {
+        Some((last, rest)) if last == OsStr::new("--reopen") => (rest, true),
+        _ => (arguments, false),
+    };
+    let [state_flag, state, position_flag, position, output_flag, output] = arguments else {
+        eprintln!("{PREPARE_XMR_ENROLLMENT_USAGE_V23}");
+        return ExitCode::from(2);
+    };
+    let position = if position == OsStr::new("upstream") {
+        Some(ProductionRoutePositionV1::Upstream)
+    } else if position == OsStr::new("downstream") {
+        Some(ProductionRoutePositionV1::Downstream)
+    } else {
+        None
+    };
+    if state_flag != OsStr::new("--state-dir")
+        || position_flag != OsStr::new("--position")
+        || output_flag != OsStr::new("--output-dir")
+        || position.is_none()
+    {
+        eprintln!("{PREPARE_XMR_ENROLLMENT_USAGE_V23}");
+        return ExitCode::from(2);
+    }
+    let Some(position) = position else {
+        return ExitCode::from(2);
+    };
+    match prepare_xmr_enrollment_command_v23(
+        &PathBuf::from(state),
+        position,
+        &PathBuf::from(output),
+        reopen,
+    ) {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("enrollment report unavailable; preserve custody");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+fn prepare_route_services(arguments: &[OsString]) -> ExitCode {
+    use dom_interopd::{prepare_route_services_command_v11, PREPARE_ROUTE_SERVICES_USAGE_V11};
+    if matches!(arguments, [flag] if flag == OsStr::new("--help")) {
+        println!("{PREPARE_ROUTE_SERVICES_USAGE_V11}");
+        return ExitCode::SUCCESS;
+    }
+    let [flag, state_dir] = arguments else {
+        eprintln!("{PREPARE_ROUTE_SERVICES_USAGE_V11}");
+        return ExitCode::from(2);
+    };
+    if flag != OsStr::new("--state-dir") || state_dir.is_empty() {
+        eprintln!("{PREPARE_ROUTE_SERVICES_USAGE_V11}");
+        return ExitCode::from(2);
+    }
+    match prepare_route_services_command_v11(&PathBuf::from(state_dir)) {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("route services report unavailable; preserve the published document");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -110,6 +352,16 @@ fn print_usage() {
     eprintln!("{}", dom_interopd::PREPARE_XMR_FUNDING_USAGE_V12);
     #[cfg(feature = "production")]
     eprintln!("{}", dom_interopd::PREPARE_XMR_INVENTORY_USAGE_V23);
+    #[cfg(feature = "production")]
+    eprintln!("{}", dom_interopd::PREPARE_ROUTE_SERVICES_USAGE_V11);
+    #[cfg(feature = "production")]
+    eprintln!("{}", dom_interopd::PREPARE_F6_ARTIFACT_USAGE_V23);
+    #[cfg(feature = "production")]
+    eprintln!("{}", dom_interopd::PREPARE_PLANNING_USAGE_V23);
+    #[cfg(feature = "production")]
+    eprintln!("{}", dom_interopd::PREPARE_XMR_ENROLLMENT_USAGE_V23);
+    #[cfg(feature = "production")]
+    eprintln!("{}", dom_interopd::PREPARE_XMR_LEG_USAGE_V23);
     #[cfg(feature = "simulation")]
     eprintln!(
         "usage: dom-interopd self-check [--json]\n       dom-interopd simulate --state-dir PATH --scenario claim|refund [--crash-after authority-persist|timer-event-commit]"

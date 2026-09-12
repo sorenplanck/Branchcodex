@@ -213,6 +213,15 @@ pub(crate) struct ProductionDomActionContextV1<'call, 'store> {
     trusted_chain_id: &'call TrustedChainIdV1,
     runtime: &'call RealDomRpcRuntimeV1,
     now_unix_ms: u64,
+    funding_limit_v23: ProductionDomFundingLimitV23,
+}
+
+#[derive(Clone, Copy)]
+enum ProductionDomFundingLimitV23 {
+    Legacy,
+    // Independent read-only budget; it never authorizes a submission.
+    Closed(std::time::Instant),
+    Until(std::time::Instant),
 }
 
 /// Receipt-free result from the sole concrete DOM action authority.
@@ -315,6 +324,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
             trusted_chain_id,
             runtime,
             now_unix_ms,
+            funding_limit_v23,
         } = context;
         let scope = binding.request().scope();
         match scope.action() {
@@ -322,13 +332,29 @@ impl ConcreteProductionDomActionAuthorityV1 {
                 if refund_context.is_some() {
                     return Err(ChildAuthorityRefusalV1::Conflict);
                 }
-                match contracts.dispatch_f7_funding_child_v20(
-                    control,
-                    lease,
-                    binding,
-                    runtime,
-                    now_unix_ms,
-                ) {
+                let native = match funding_limit_v23 {
+                    ProductionDomFundingLimitV23::Legacy => contracts
+                        .dispatch_f7_funding_child_v20(
+                            control,
+                            lease,
+                            binding,
+                            runtime,
+                            now_unix_ms,
+                        ),
+                    ProductionDomFundingLimitV23::Closed(_) => {
+                        return Err(ChildAuthorityRefusalV1::Unavailable)
+                    }
+                    ProductionDomFundingLimitV23::Until(deadline) => contracts
+                        .dispatch_f7_funding_child_until_v23(
+                            control,
+                            lease,
+                            binding,
+                            runtime,
+                            now_unix_ms,
+                            deadline,
+                        ),
+                };
+                match native {
                     Ok(Some(_receipt)) => return Ok(ProductionDomActionResultV1::Externalized),
                     Ok(None) => {}
                     Err(DomActuatorError::RpcAuthorityUnavailable) => {
@@ -355,7 +381,17 @@ impl ConcreteProductionDomActionAuthorityV1 {
                             ),
                     }
                     .map_err(map_actuator_error)?;
-                Self::rpc_result(contracts.dispatch_funding_broadcast(runtime, broadcast))
+                Self::rpc_result(match funding_limit_v23 {
+                    ProductionDomFundingLimitV23::Legacy => {
+                        contracts.dispatch_funding_broadcast(runtime, broadcast)
+                    }
+                    ProductionDomFundingLimitV23::Closed(_) => {
+                        return Err(ChildAuthorityRefusalV1::Unavailable)
+                    }
+                    ProductionDomFundingLimitV23::Until(deadline) => {
+                        contracts.dispatch_funding_broadcast_until_v23(runtime, broadcast, deadline)
+                    }
+                })
             }
             DomActionV1::BroadcastRefund => {
                 let current_context = refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?;
@@ -542,6 +578,39 @@ impl ProductionDomActionAuthorityV1 for ConcreteProductionDomActionAuthorityV1 {
         context: ProductionDomActionContextV1<'_, '_>,
         call: AuthenticatedDomReconciliationCallV1,
     ) -> Result<ProductionDomActionResultV1, ChildAuthorityRefusalV1> {
+        if call.binding().request().scope().action() == DomActionV1::BroadcastFunding {
+            if let ProductionDomFundingLimitV23::Closed(deadline) = context.funding_limit_v23 {
+                // A durable pending intent is not proof of transmission. Resolve
+                // exact canonical funding instead of replaying bytes after expiry.
+                return match context.contracts.observe_funding_finality_until_v23(
+                    context.control,
+                    context.lease,
+                    context.runtime,
+                    context.trusted_chain_id,
+                    &EvidenceRefV1 {
+                        chain_id: ChainId(call.binding().request().scope().binding().chain_id()),
+                        tx_id: call.binding().transaction_id(),
+                        event_index: 0,
+                        block_height: 0,
+                        block_anchor: ZERO_DIGEST,
+                    },
+                    context.now_unix_ms,
+                    deadline,
+                ) {
+                    Ok(observed)
+                        if observed.transaction_id() == call.binding().transaction_id() =>
+                    {
+                        Ok(ProductionDomActionResultV1::Externalized)
+                    }
+                    Ok(_) => Err(ChildAuthorityRefusalV1::Conflict),
+                    Err(
+                        DomActuatorError::FinalityPending
+                        | DomActuatorError::RpcAuthorityUnavailable,
+                    ) => Ok(ProductionDomActionResultV1::Unknown),
+                    Err(error) => Err(map_actuator_error(error)),
+                };
+            }
+        }
         self.execute(context, call.binding(), call.refund_context())
     }
 }
@@ -555,6 +624,7 @@ pub(crate) struct ProductionDomChildPortV1<C, A> {
     runtime: Arc<RealDomRpcRuntimeV1>,
     clock: C,
     lease_renewal_ms_v12: Option<u64>,
+    funding_window_v23: Option<crate::production_timer::ProductionFundingWindowV23>,
     route_terms_digest: Digest32,
     materialization_scope: ProductionDomMaterializationScopeV1,
 }
@@ -681,6 +751,41 @@ pub(crate) struct ProductionDomXmrRecoveryClientV12 {
 }
 
 impl ProductionDomXmrRecoveryClientV12 {
+    pub(crate) fn observe_bounded_v23(
+        &self,
+        authority: &dom_scriptless_store::VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &dom_scriptless_store::XmrRecoveryCustodyV11,
+        budget: std::time::Duration,
+    ) -> Result<adapter_dom_real::VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        self.runtime
+            .observe_xmr_recovery_bounded_v23(authority, custody, budget)
+    }
+    /// Preserve the caller's absolute cutoff through Store/custody/scan I/O.
+    pub(crate) fn observe_until_v24(
+        &self,
+        authority: &dom_scriptless_store::VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &dom_scriptless_store::XmrRecoveryCustodyV11,
+        deadline: std::time::Instant,
+    ) -> Result<adapter_dom_real::VerifiedDomXmrRecoveryStateV11, RealDomError> {
+        self.runtime
+            .observe_xmr_recovery_until_v24(authority, custody, deadline)
+    }
+    pub(crate) fn observe_refund_reorg_v23(
+        &self,
+        authority: &dom_scriptless_store::VerifiedXmrRecoveryExecutionAuthorityV12,
+        custody: &dom_scriptless_store::XmrRecoveryCustodyV11,
+        checkpoint: &[u8],
+        transaction: [u8; 32],
+        budget: std::time::Duration,
+    ) -> Result<adapter_dom_real::VerifiedDomXmrRefundRevalidationV23, RealDomError> {
+        self.runtime.verified_xmr_refund_reorg_v23(
+            authority,
+            custody,
+            checkpoint,
+            transaction,
+            budget,
+        )
+    }
     pub(crate) fn observe(
         &self,
         authority: &dom_scriptless_store::VerifiedXmrRecoveryExecutionAuthorityV12,
@@ -693,17 +798,20 @@ impl ProductionDomXmrRecoveryClientV12 {
         &self,
         authority: &dom_scriptless_store::VerifiedXmrRecoveryExecutionAuthorityV12,
         custody: &dom_scriptless_store::XmrRecoveryCustodyV11,
+        deadline: std::time::Instant,
     ) -> Result<adapter_dom_real::DomXmrRecoveryProgressV12, RealDomError> {
-        self.runtime.advance_xmr_recovery_v12(authority, custody)
+        self.runtime
+            .advance_xmr_recovery_until_v23(authority, custody, deadline)
     }
 
     pub(crate) fn verify_funding_prerequisite(
         &self,
         authority: &dom_scriptless_store::VerifiedXmrRecoveryExecutionAuthorityV12,
         custody: &dom_scriptless_store::XmrRecoveryCustodyV11,
+        deadline: std::time::Instant,
     ) -> Result<adapter_dom_real::VerifiedDomXmrFundingPrerequisiteV12, RealDomError> {
         self.runtime
-            .verify_xmr_funding_prerequisite_v12(authority, custody)
+            .verify_xmr_funding_prerequisite_until_v23(authority, custody, deadline)
     }
 }
 impl ProductionDomRefundScannerV10 {
@@ -741,6 +849,14 @@ impl ProductionDomF7ScannerAuthorityV1 {
         &self,
     ) -> Result<DomTransactionValidationContextV1, RealDomError> {
         self.runtime.current_transaction_validation_context()
+    }
+
+    pub(crate) fn funding_validation_context_bounded_v23(
+        &self,
+        budget: std::time::Duration,
+    ) -> Result<DomTransactionValidationContextV1, RealDomError> {
+        self.runtime
+            .current_transaction_validation_context_bounded_v23(budget)
     }
 
     /// Observe a universal receiver claim using this child's sole native DOM client.
@@ -868,6 +984,10 @@ pub(crate) fn compose_production_dom_child_port_v1(
 
 /// Opts the real universal runtime into finite, same-owner lease renewal.
 /// An expired epoch is never reacquired here: takeover remains explicit.
+#[expect(
+    dead_code,
+    reason = "Compatibility constructor; the universal daemon uses the mandatory V23 funding gate"
+)]
 pub(crate) fn compose_production_dom_child_port_v12(
     control: DomActuatorStoreV1,
     bindings: ProductionDomChildBindingsV1,
@@ -879,10 +999,38 @@ pub(crate) fn compose_production_dom_child_port_v12(
     compose_production_dom_child_port_with_renewal_v12(control, bindings, Some(duration_ms))
 }
 
+/// Mandatory funding-window handoff for the real universal daemon. Both DOM
+/// owners receive the same revocable, default-closed route gate.
+pub(crate) fn compose_production_dom_child_port_v23(
+    control: DomActuatorStoreV1,
+    bindings: ProductionDomChildBindingsV1,
+    duration_ms: u64,
+    funding_window: crate::production_timer::ProductionFundingWindowV23,
+) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
+    if duration_ms == 0 || duration_ms > 3_600_000 {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    compose_production_dom_child_port_bounded_v23(
+        control,
+        bindings,
+        Some(duration_ms),
+        Some(funding_window),
+    )
+}
+
 fn compose_production_dom_child_port_with_renewal_v12(
     control: DomActuatorStoreV1,
     bindings: ProductionDomChildBindingsV1,
     renewal: Option<u64>,
+) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
+    compose_production_dom_child_port_bounded_v23(control, bindings, renewal, None)
+}
+
+fn compose_production_dom_child_port_bounded_v23(
+    control: DomActuatorStoreV1,
+    bindings: ProductionDomChildBindingsV1,
+    renewal: Option<u64>,
+    funding_window: Option<crate::production_timer::ProductionFundingWindowV23>,
 ) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
     let (mut port, public_secret_consumers) = ProductionDomChildPortV1::compose_shared(
         control,
@@ -894,6 +1042,7 @@ fn compose_production_dom_child_port_with_renewal_v12(
         ],
     )?;
     port.lease_renewal_ms_v12 = renewal;
+    port.funding_window_v23 = funding_window;
     port.renew_actuator_lease_v12()?;
     let f7_scanner = ProductionDomF7ScannerAuthorityV1::from_child_runtime(&port.runtime);
     if !f7_scanner.shares_runtime(&port.runtime) {
@@ -1025,6 +1174,7 @@ where
             runtime,
             clock,
             lease_renewal_ms_v12: None,
+            funding_window_v23: None,
             route_terms_digest,
             materialization_scope,
         };
@@ -1046,13 +1196,36 @@ where
         )
     }
 
+    fn funding_limit_v23(
+        &self,
+        route_id: Digest32,
+        now_unix_ms: u64,
+        started: std::time::Instant,
+    ) -> Result<ProductionDomFundingLimitV23, ChildAuthorityRefusalV1> {
+        let Some(window) = &self.funding_window_v23 else {
+            return Ok(ProductionDomFundingLimitV23::Legacy);
+        };
+        let budget = native_refund_budget_v23(self.lease, now_unix_ms)?;
+        let lease_deadline = started
+            .checked_add(budget)
+            .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
+        Ok(match window.deadline_for_route(route_id) {
+            Some(deadline) => ProductionDomFundingLimitV23::Until(deadline.min(lease_deadline)),
+            None => ProductionDomFundingLimitV23::Closed(lease_deadline),
+        })
+    }
+
     fn validate_dispatch(
         &mut self,
         request: &ChildDispatchRequestV1,
         now_unix_ms: u64,
     ) -> Result<ValidatedDomOperationV1, ChildAuthorityRefusalV1> {
         validate_dispatch_request_shape(request)?;
-        self.validate_operation(ExpectedDomBindingsV1::from_dispatch(request), now_unix_ms)
+        self.validate_operation(
+            ExpectedDomBindingsV1::from_dispatch(request),
+            now_unix_ms,
+            false,
+        )
     }
 
     fn validate_observation(
@@ -1064,6 +1237,7 @@ where
         self.validate_operation(
             ExpectedDomBindingsV1::from_observation(request),
             now_unix_ms,
+            true,
         )
     }
 
@@ -1071,6 +1245,7 @@ where
         &mut self,
         expected: ExpectedDomBindingsV1,
         now_unix_ms: u64,
+        observation_only: bool,
     ) -> Result<ValidatedDomOperationV1, ChildAuthorityRefusalV1> {
         let session_index = self.session_index(expected.settlement_id, expected.leg)?;
         let session = &self.sessions[session_index];
@@ -1097,7 +1272,26 @@ where
             dom_exposure(expected.exposure),
         )
         .map_err(map_actuator_error)?;
-        let refund_context = if expected.action == SettlementActionV1::Refund {
+        let native_refund_observer =
+            if observation_only && expected.action == SettlementActionV1::Refund {
+                session.contracts.native_xmr_refund_driver_v23()?
+            } else {
+                None
+            };
+        let native_refund = if observation_only {
+            None
+        } else {
+            native_refund_observation_v23(
+                &session.contracts,
+                expected.action,
+                self.lease,
+                now_unix_ms,
+            )?
+        };
+        let refund_context = if expected.action == SettlementActionV1::Refund
+            && native_refund.is_none()
+            && native_refund_observer.is_none()
+        {
             Some(
                 self.runtime
                     .current_transaction_validation_context()
@@ -1106,6 +1300,7 @@ where
         } else {
             None
         };
+        let now_unix_ms = fresh_dom_time(&mut self.clock, now_unix_ms)?;
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
         let retained = match expected.action {
             SettlementActionV1::Funding => contracts.bind_funding_settlement_child(
@@ -1121,6 +1316,31 @@ where
                 binding_request,
                 now_unix_ms,
             ),
+            SettlementActionV1::Refund if native_refund_observer.is_some() => {
+                let driver = native_refund_observer
+                    .as_ref()
+                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                contracts.retained_native_xmr_refund_settlement_child_binding_v23(
+                    &mut self.control,
+                    self.lease,
+                    expected.custody_digest,
+                    driver.refund_gate_v23(),
+                    now_unix_ms,
+                )
+            }
+            SettlementActionV1::Refund if native_refund.is_some() => {
+                let native = native_refund
+                    .as_ref()
+                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                contracts.bind_native_xmr_refund_settlement_child_v23(
+                    &mut self.control,
+                    self.lease,
+                    binding_request,
+                    native.driver.refund_gate_v23(),
+                    &native.observed,
+                    now_unix_ms,
+                )
+            }
             SettlementActionV1::Refund => contracts.bind_refund_settlement_child(
                 &mut self.control,
                 self.lease,
@@ -1136,6 +1356,8 @@ where
             expected,
             binding: retained,
             refund_context,
+            native_refund,
+            native_refund_observer,
         })
     }
 
@@ -1419,6 +1641,24 @@ where
                 &evidence,
                 now_unix_ms,
             ),
+            SettlementActionV1::Refund if validated.native_driver_v23().is_some() => {
+                let driver = validated
+                    .native_driver_v23()
+                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                let observation_now = fresh_dom_time(&mut self.clock, now_unix_ms)?;
+                let observed = driver.observe_refund_share_bounded_v23(
+                    native_refund_budget_v23(self.lease, observation_now)?,
+                )?;
+                let now_unix_ms = fresh_dom_time(&mut self.clock, observation_now)?;
+                contracts.observe_native_xmr_refund_settlement_finality_v23(
+                    &mut self.control,
+                    self.lease,
+                    validated.expected.custody_digest,
+                    driver.refund_gate_v23(),
+                    &observed,
+                    now_unix_ms,
+                )
+            }
             SettlementActionV1::Refund => contracts.observe_refund_settlement_finality(
                 &mut self.control,
                 self.lease,
@@ -1454,6 +1694,67 @@ where
                 &self.runtime,
                 now_unix_ms,
             ),
+            SettlementActionV1::Refund if validated.native_driver_v23().is_some() => {
+                let driver = validated
+                    .native_driver_v23()
+                    .ok_or(DomActuatorError::CapabilityMismatch)?;
+                let checkpoint = contracts.native_xmr_refund_checkpoint_v23(
+                    &mut self.control,
+                    self.lease,
+                    validated.expected.custody_digest,
+                    driver.refund_gate_v23(),
+                    now_unix_ms,
+                )?;
+                let observation_now = fresh_dom_time(&mut self.clock, now_unix_ms)
+                    .map_err(|_| DomActuatorError::RpcAuthorityUnavailable)?;
+                let budget_ms = self
+                    .lease
+                    .lease_until_unix_ms()
+                    .checked_sub(observation_now)
+                    .filter(|remaining| *remaining > 0)
+                    .ok_or(DomActuatorError::LeaseExpired)?
+                    .min(60_000);
+                let observed = driver.observe_refund_reorg_v23(
+                    &checkpoint,
+                    validated.binding.transaction_id(),
+                    std::time::Duration::from_millis(budget_ms),
+                );
+                let now_unix_ms = fresh_dom_time(&mut self.clock, observation_now)
+                    .map_err(|_| DomActuatorError::RpcAuthorityUnavailable)?;
+                match observed {
+                    Ok(adapter_dom_real::VerifiedDomXmrRefundRevalidationV23::Invalidated(
+                        proof,
+                    )) => contracts.record_native_xmr_refund_reorg_v23(
+                        &mut self.control,
+                        self.lease,
+                        validated.expected.custody_digest,
+                        driver.refund_gate_v23(),
+                        &proof,
+                        now_unix_ms,
+                    ),
+                    Ok(adapter_dom_real::VerifiedDomXmrRefundRevalidationV23::StillFinal(
+                        observed,
+                    )) => contracts.revalidate_native_xmr_refund_settlement_finality_v23(
+                        &mut self.control,
+                        self.lease,
+                        validated.expected.custody_digest,
+                        driver.refund_gate_v23(),
+                        &observed,
+                        now_unix_ms,
+                    ),
+                    Err(RealDomError::InsufficientConfirmations) => {
+                        Err(DomActuatorError::FinalityPending)
+                    }
+                    Err(RealDomError::ReorgBeyondPolicy) => {
+                        Err(DomActuatorError::ReorgBeyondPolicy)
+                    }
+                    Err(
+                        RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
+                        | RealDomError::LockPoisoned,
+                    ) => Err(DomActuatorError::RpcAuthorityUnavailable),
+                    Err(_) => Err(DomActuatorError::FinalityEvidenceInvalid),
+                }
+            }
             SettlementActionV1::Refund => contracts.revalidate_refund_settlement_finality(
                 &mut self.control,
                 self.lease,
@@ -1482,6 +1783,18 @@ where
                 &self.trusted_chain_id,
                 now_unix_ms,
             ),
+            SettlementActionV1::Refund if validated.native_driver_v23().is_some() => {
+                let driver = validated
+                    .native_driver_v23()
+                    .ok_or(DomActuatorError::CapabilityMismatch)?;
+                contracts.recover_native_xmr_refund_invalidation_v23(
+                    &mut self.control,
+                    self.lease,
+                    validated.expected.custody_digest,
+                    driver.refund_gate_v23(),
+                    now_unix_ms,
+                )
+            }
             SettlementActionV1::Refund => contracts.recover_refund_settlement_invalidation(
                 &mut self.control,
                 self.lease,
@@ -1692,15 +2005,22 @@ where
         )
         .map_err(map_actuator_error)?;
         let pre_context_now = self.clock.now_unix_ms()?;
-        let refund_context = if request.action == SettlementActionV1::Refund {
-            Some(
-                self.runtime
-                    .current_transaction_validation_context()
-                    .map_err(map_runtime_binding_error)?,
-            )
-        } else {
-            None
-        };
+        let native_refund = native_refund_observation_v23(
+            &session.contracts,
+            request.action,
+            self.lease,
+            pre_context_now,
+        )?;
+        let refund_context =
+            if request.action == SettlementActionV1::Refund && native_refund.is_none() {
+                Some(
+                    self.runtime
+                        .current_transaction_validation_context()
+                        .map_err(map_runtime_binding_error)?,
+                )
+            } else {
+                None
+            };
         let now = if request.action == SettlementActionV1::Refund {
             fresh_dom_time(&mut self.clock, pre_context_now)?
         } else {
@@ -1738,6 +2058,19 @@ where
                 binding_request,
                 now,
             ),
+            SettlementActionV1::Refund if native_refund.is_some() => {
+                let native = native_refund
+                    .as_ref()
+                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                contracts.bind_native_xmr_refund_settlement_child_v23(
+                    &mut self.control,
+                    self.lease,
+                    binding_request,
+                    native.driver.refund_gate_v23(),
+                    &native.observed,
+                    now,
+                )
+            }
             SettlementActionV1::Refund => contracts.bind_refund_settlement_child(
                 &mut self.control,
                 self.lease,
@@ -1769,8 +2102,16 @@ where
         request: &ChildDispatchRequestV1,
     ) -> Result<ChildExecutionOutcomeV1, ChildAuthorityRefusalV1> {
         self.renew_actuator_lease_v12()?;
+        let started = std::time::Instant::now();
         let now = self.clock.now_unix_ms()?;
+        let funding_limit_v23 = self.funding_limit_v23(request.route_id(), now, started)?;
+        if request.action() == SettlementActionV1::Funding
+            && matches!(funding_limit_v23, ProductionDomFundingLimitV23::Closed(_))
+        {
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
         let validated = self.validate_dispatch(request, now)?;
+        let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = dispatch_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
             DomSettlementChildPortCallKindV1::Dispatch,
@@ -1794,17 +2135,28 @@ where
         };
         let session = &mut self.sessions[validated.session_index];
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
-        let returned = session.actions.externalize(
-            ProductionDomActionContextV1 {
-                contracts: &contracts,
-                control: &mut self.control,
-                lease: self.lease,
-                trusted_chain_id: &self.trusted_chain_id,
-                runtime: &self.runtime,
-                now_unix_ms: now,
-            },
-            call,
-        )?;
+        let returned = if let Some(native) = &validated.native_refund {
+            // The completed locator is backed by a fresh canonical U token,
+            // not a new send permission. Do not invoke the plain broadcaster.
+            native
+                .observed
+                .require_recent_v23()
+                .map_err(map_runtime_binding_error)?;
+            ProductionDomActionResultV1::Externalized
+        } else {
+            session.actions.externalize(
+                ProductionDomActionContextV1 {
+                    contracts: &contracts,
+                    control: &mut self.control,
+                    lease: self.lease,
+                    trusted_chain_id: &self.trusted_chain_id,
+                    runtime: &self.runtime,
+                    now_unix_ms: now,
+                    funding_limit_v23,
+                },
+                call,
+            )?
+        };
         let returned = stage_final_claim_transport_v1(
             &mut session.contracts,
             &self.trusted_chain_id,
@@ -1824,7 +2176,10 @@ where
         request: &ChildReconciliationRequestV1,
     ) -> Result<ChildReconciliationOutcomeV1, ChildAuthorityRefusalV1> {
         self.renew_actuator_lease_v12()?;
+        let started = std::time::Instant::now();
         let now = self.clock.now_unix_ms()?;
+        let funding_limit_v23 =
+            self.funding_limit_v23(request.dispatch.route_id(), now, started)?;
         if request.current_route_fencing_epoch != request.dispatch.route_fencing_epoch()
             || request.current_coordinator_fencing_epoch
                 < request.dispatch.coordinator_fencing_epoch()
@@ -1833,6 +2188,7 @@ where
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         let validated = self.validate_dispatch(&request.dispatch, now)?;
+        let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = reconciliation_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
             DomSettlementChildPortCallKindV1::Reconciliation,
@@ -1856,17 +2212,26 @@ where
         };
         let session = &mut self.sessions[validated.session_index];
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
-        let returned = session.actions.reconcile(
-            ProductionDomActionContextV1 {
-                contracts: &contracts,
-                control: &mut self.control,
-                lease: self.lease,
-                trusted_chain_id: &self.trusted_chain_id,
-                runtime: &self.runtime,
-                now_unix_ms: now,
-            },
-            call,
-        )?;
+        let returned = if let Some(native) = &validated.native_refund {
+            native
+                .observed
+                .require_recent_v23()
+                .map_err(map_runtime_binding_error)?;
+            ProductionDomActionResultV1::Externalized
+        } else {
+            session.actions.reconcile(
+                ProductionDomActionContextV1 {
+                    contracts: &contracts,
+                    control: &mut self.control,
+                    lease: self.lease,
+                    trusted_chain_id: &self.trusted_chain_id,
+                    runtime: &self.runtime,
+                    now_unix_ms: now,
+                    funding_limit_v23,
+                },
+                call,
+            )?
+        };
         let returned = stage_final_claim_transport_v1(
             &mut session.contracts,
             &self.trusted_chain_id,
@@ -1888,6 +2253,7 @@ where
         self.renew_actuator_lease_v12()?;
         let now = self.clock.now_unix_ms()?;
         let validated = self.validate_observation(request, now)?;
+        let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = observation_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
             DomSettlementChildPortCallKindV1::Observation,
@@ -2083,6 +2449,61 @@ struct ValidatedDomOperationV1 {
     expected: ExpectedDomBindingsV1,
     binding: DomSettlementChildBindingV1,
     refund_context: Option<DomTransactionValidationContextV1>,
+    native_refund: Option<NativeDomRefundObservationV23>,
+    native_refund_observer: Option<
+        std::rc::Rc<crate::production_xmr_recovery_driver_v12::ProductionXmrRecoveryDriverV12>,
+    >,
+}
+
+impl ValidatedDomOperationV1 {
+    fn native_driver_v23(
+        &self,
+    ) -> Option<&crate::production_xmr_recovery_driver_v12::ProductionXmrRecoveryDriverV12> {
+        self.native_refund_observer
+            .as_deref()
+            .or_else(|| self.native_refund.as_ref().map(|v| v.driver.as_ref()))
+    }
+}
+
+struct NativeDomRefundObservationV23 {
+    driver: std::rc::Rc<crate::production_xmr_recovery_driver_v12::ProductionXmrRecoveryDriverV12>,
+    observed: adapter_dom_real::VerifiedDomRefundSecretV11,
+}
+
+fn native_refund_observation_v23(
+    contracts: &ProductionDomChildStoreAuthorityV1,
+    action: SettlementActionV1,
+    lease: DomLeaseV1,
+    now: u64,
+) -> Result<Option<NativeDomRefundObservationV23>, ChildAuthorityRefusalV1> {
+    let started = std::time::Instant::now();
+    if action != SettlementActionV1::Refund {
+        return Ok(None);
+    }
+    let Some(driver) = contracts.native_xmr_refund_driver_v23()? else {
+        return Ok(None);
+    };
+    // Once the native driver is present an unavailable/nonfinal graph never
+    // falls back to the incompatible plain refund lane.
+    let budget = native_refund_budget_v23(lease, now)?
+        .checked_sub(started.elapsed())
+        .filter(|v| !v.is_zero())
+        .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
+    let observed = driver.observe_refund_share_bounded_v23(budget)?;
+    Ok(Some(NativeDomRefundObservationV23 { driver, observed }))
+}
+
+fn native_refund_budget_v23(
+    lease: DomLeaseV1,
+    now: u64,
+) -> Result<std::time::Duration, ChildAuthorityRefusalV1> {
+    let millis = lease
+        .lease_until_unix_ms()
+        .checked_sub(now)
+        .filter(|value| *value > 0)
+        .ok_or(ChildAuthorityRefusalV1::Unavailable)?
+        .min(60_000);
+    Ok(std::time::Duration::from_millis(millis))
 }
 
 fn exact_dom_session_index_v1(
@@ -2185,7 +2606,8 @@ fn map_contracts_outbound_error(
             SessionStoreError::Filesystem
             | SessionStoreError::StoreBusy
             | SessionStoreError::CapacityExceeded
-            | SessionStoreError::RandomFailure,
+            | SessionStoreError::RandomFailure
+            | SessionStoreError::NativeXmrRefundTransportPendingV23,
         ) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Store(
             SessionStoreError::Conflict
@@ -2546,6 +2968,28 @@ fn map_f7_claim_error_v21(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_refund_scan_budget_never_exceeds_live_lease_or_sixty_seconds_v23() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = DomActuatorStoreV1::create(&root.path().join("lease.sqlite")).unwrap();
+        let lease = store
+            .acquire_lease([81; 32], [82; 32], 1_000, 120_000)
+            .unwrap();
+        assert_eq!(
+            native_refund_budget_v23(lease, 1_000).unwrap(),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            native_refund_budget_v23(lease, 120_999).unwrap(),
+            std::time::Duration::from_millis(1)
+        );
+        assert!(native_refund_budget_v23(lease, 121_000).is_err());
+        assert!(native_refund_budget_v23(lease, u64::MAX).is_err());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

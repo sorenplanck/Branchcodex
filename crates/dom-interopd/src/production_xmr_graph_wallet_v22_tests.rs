@@ -194,24 +194,27 @@ fn v23_native_two_leg_templates_custody_ready_and_bounded_funding(
     )
 }
 
-/// Real native Claim component with actual GPL output scan and local RPC snapshots.
+/// Real native Claim/Refund transport component using mainnet encodings on
+/// isolated GPL output scans and local RPC snapshots, never network broadcast.
 /// Requires explicit helper/sidecar paths; no missing-dependency success or skip.
 #[test]
 fn v23_native_claim_six_messages_and_presignature_with_real_output_scan(
 ) -> core::result::Result<(), Box<dyn std::error::Error>> {
     let config = native_observation_v23::Configuration::require()?;
     let profile =
-        xmr_setup_profile::XmrAdapterProfileV1::new(xmr_setup_profile::XmrNetwork::Stagenet, 2, 2)?;
+        xmr_setup_profile::XmrAdapterProfileV1::new(xmr_setup_profile::XmrNetwork::Mainnet, 2, 2)?;
     run_native_xmr_graph_fixture_v23(
         native_custody_v23::NativeXmrSecretsFixtureV23::new(profile)
             .with_funding_fee_cap_v23(10_000)?
             .with_claim_payout_v23()?,
         |secrets, signed, terms, actors, work, roles| {
             let mut funding = config
-                .start(
+                .start_mainnet_at_v23(
                     secrets.combined_spend_public_key_v23()?,
                     u64::try_from(terms[0].counterparty_leg.amount)?,
                     u64::try_from(terms[0].fee_limit.counterparty_max)?,
+                    work[0],
+                    [0x79; 32],
                 )
                 .map_err(|error| format!("native claim funding observer startup: {error}"))?;
             eprintln!("native claim: real GPL funding observer ready");

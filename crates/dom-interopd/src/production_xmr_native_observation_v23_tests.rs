@@ -23,7 +23,8 @@ pub(crate) use peer_sidecar_v23::PeerSidecarOwnerV23;
 #[path = "production_xmr_native_route_funding_owner_v23_tests.rs"]
 mod route_funding_v23;
 pub(crate) use route_funding_v23::{
-    NativeMainnetXmrInventorySourceV23, RouteFundingOwnerV23, NATIVE_XMR_INVENTORY_DESCRIPTOR_V23,
+    NativeMainnetXmrInventorySourceV23, NativeXmrHistoryStatusV23, RouteFundingOwnerV23,
+    NATIVE_XMR_INVENTORY_DESCRIPTOR_V23,
 };
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
@@ -421,6 +422,7 @@ pub(super) fn run_claim(
         work,
         funding,
         registry.resolve_dom()?,
+        &deployment,
         &funding_bytes,
         funding_height,
     )?;

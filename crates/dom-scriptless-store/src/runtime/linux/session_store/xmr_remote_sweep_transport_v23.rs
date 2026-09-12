@@ -164,6 +164,102 @@ impl PreparedXmrRemoteSweepImportV23 {
 }
 
 impl ContractsSessionStoreV1 {
+    fn require_xmr_remote_sweep_phase_v23(
+        &self,
+        request: &RemoteSweepRequestV23,
+        phase: SessionPhaseV1,
+    ) -> Result<(), SessionStoreError> {
+        if request.action != RemoteSweepActionV23::Refund
+            || !self.native_xmr_refund_transport_applies_v23(request.session_id)?
+        {
+            // The historical phase gate is unchanged for Claim and legacy.
+            return require_xmr_remote_sweep_phase(request.action, phase);
+        }
+        if !matches!(
+            phase,
+            SessionPhaseV1::FundingBroadcast
+                | SessionPhaseV1::FundingConfirmed
+                | SessionPhaseV1::RefundEligible
+                | SessionPhaseV1::RefundBroadcast
+        ) {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        match self.require_native_xmr_refund_transport_v23(request) {
+            Ok(()) => Ok(()),
+            Err(SessionStoreError::NativeXmrRefundTransportPendingV23) => {
+                // A newly arrived request can precede this participant's own
+                // canonical U scan. Never produce an acceptance receipt then.
+                // Once ANY refund edge is retained, disappearance is corruption.
+                let mut retained = false;
+                self.scan_xmr_remote_sweep_records(|_, envelope, payload| {
+                    if envelope.session_id == request.session_id {
+                        retained |= match envelope.message_type {
+                            0x19 => {
+                                decode_xmr_request(payload)?.action == RemoteSweepActionV23::Refund
+                            }
+                            0x1a => {
+                                let response = decode_xmr_response(payload)?;
+                                let paired = self.load_xmr_remote_sweep_request_by_digest(
+                                    response.request_message_digest(),
+                                )?;
+                                decode_xmr_request(&paired.payload)?.action
+                                    == RemoteSweepActionV23::Refund
+                            }
+                            _ => false,
+                        };
+                    }
+                    Ok(())
+                })?;
+                // Preparing a local DSC1 signature is already durable intent,
+                // even when no signed message has reached the transport log.
+                let mut failure = None;
+                self.rosters
+                    .scan_lexicographic(|name, node| {
+                        if !name.ends_with(".outbound-dsc1-request") {
+                            return Ok(());
+                        }
+                        if node.node_type != ExpectedNodeType::RegularFile {
+                            return Err(LinuxCapabilityError::InvalidObject);
+                        }
+                        let outcome = (|| -> Result<(), SessionStoreError> {
+                            let bytes = self.rosters.read_bounded_file(
+                                &ValidatedComponent::registered(name)?,
+                                OUTBOUND_DSC1_REQUEST_MAX_LEN,
+                            )?;
+                            let record = OutboundDsc1SigningRequestRecordV1::from_bytes(&bytes)?;
+                            if outbound_dsc1_request_name(
+                                record.session_id,
+                                record.sender_id,
+                                record.sequence,
+                            ) != name
+                            {
+                                return Err(SessionStoreError::Quarantined);
+                            }
+                            if record.session_id == request.session_id
+                                && record.message_type == 0x19
+                            {
+                                retained |= decode_xmr_request(&record.payload)?.action
+                                    == RemoteSweepActionV23::Refund;
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = outcome {
+                            failure = Some(error);
+                            return Err(LinuxCapabilityError::ExactBytesMismatch);
+                        }
+                        Ok(())
+                    })
+                    .map_err(|error| failure.take().unwrap_or_else(|| error.into()))?;
+                Err(if retained {
+                    SessionStoreError::Quarantined
+                } else {
+                    SessionStoreError::NativeXmrRefundTransportPendingV23
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Persists the exact outbound DSC1 `0x19` request selected by the local
     /// transport identity.  The request carries only public facts and a
     /// public-on-DOM scalar; the remote signer must reconstruct policy from
@@ -179,7 +275,7 @@ impl ContractsSessionStoreV1 {
         }
         let _guard = self.operation_lock()?;
         let current = self.load_session_locked(session_id)?;
-        require_xmr_remote_sweep_phase(decoded.action, current.phase())?;
+        self.require_xmr_remote_sweep_phase_v23(&decoded, current.phase())?;
         let roster = self.load_transport_roster(session_id)?;
         let local = self.authenticate_local_transport_signer_binding(session_id)?;
         let _ = xmr_counterparty(&roster, local.participant_id)?;
@@ -222,13 +318,19 @@ impl ContractsSessionStoreV1 {
         }
         let _guard = self.operation_lock()?;
         let current = self.load_session_locked(envelope.session_id)?;
-        require_xmr_remote_sweep_phase(request.action, current.phase())?;
         let roster = self.load_transport_roster(envelope.session_id)?;
         let requester = roster
             .participants
             .iter()
             .find(|candidate| candidate.participant_id == envelope.sender_id)
             .ok_or(SessionStoreError::Canonical)?;
+        // A missing local grant is a wait only for an authenticated request,
+        // never a way to defer invalid signatures or a transplanted chain.
+        envelope.verify(&requester.identity_key)?;
+        if envelope.chain_id != roster.chain_id {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        self.require_xmr_remote_sweep_phase_v23(&request, current.phase())?;
         let _signer_id = xmr_counterparty(&roster, requester.participant_id)?;
         self.require_unique_xmr_remote_sweep_request(
             envelope.session_id,
@@ -285,7 +387,7 @@ impl ContractsSessionStoreV1 {
         require_xmr_response_matches_request(&response, &request.payload, &request.message_digest)?;
         let current = self.load_session_locked(request.session_id)?;
         let decoded_request = decode_xmr_request(&request.payload)?;
-        require_xmr_remote_sweep_phase(decoded_request.action, current.phase())?;
+        self.require_xmr_remote_sweep_phase_v23(&decoded_request, current.phase())?;
         let signer = self.authenticate_local_transport_signer_binding(request.session_id)?;
         if signer.participant_id != request.signer_id {
             return Ok(None);
@@ -326,7 +428,7 @@ impl ContractsSessionStoreV1 {
         require_xmr_response_matches_request(&response, &request.payload, &request.message_digest)?;
         let current = self.load_session_locked(envelope.session_id)?;
         let decoded_request = decode_xmr_request(&request.payload)?;
-        require_xmr_remote_sweep_phase(decoded_request.action, current.phase())?;
+        self.require_xmr_remote_sweep_phase_v23(&decoded_request, current.phase())?;
         let roster = self.load_transport_roster(envelope.session_id)?;
         let signer = roster
             .participants
@@ -413,7 +515,7 @@ impl ContractsSessionStoreV1 {
                     if signer_id != local.participant_id {
                         return Ok(());
                     }
-                    require_xmr_remote_sweep_phase(request.action, current.phase())?;
+                    self.require_xmr_remote_sweep_phase_v23(&request, current.phase())?;
                     if record.equivocation
                         || candidate
                             .replace((
@@ -479,7 +581,7 @@ impl ContractsSessionStoreV1 {
                 &request.payload,
                 &request.message_digest,
             )?;
-            require_xmr_remote_sweep_phase(decoded_request.action, current.phase())?;
+            self.require_xmr_remote_sweep_phase_v23(&decoded_request, current.phase())?;
             if request.chain_id != roster.chain_id
                 || request.session_id != session_id
                 || request.signer_id != local.participant_id
@@ -530,7 +632,7 @@ impl ContractsSessionStoreV1 {
                 return Ok(());
             }
             let request = decode_xmr_request(payload)?;
-            require_xmr_remote_sweep_phase(request.action, current.phase())?;
+            self.require_xmr_remote_sweep_phase_v23(&request, current.phase())?;
             if sequence.replace(envelope.sequence).is_some() {
                 return Err(SessionStoreError::Conflict);
             }
@@ -658,7 +760,7 @@ impl ContractsSessionStoreV1 {
             self.load_xmr_remote_sweep_request_by_digest(accepted.request_message_digest)?;
         let current = self.load_session_locked(accepted.session_id)?;
         let decoded_request = decode_xmr_request(&request.payload)?;
-        require_xmr_remote_sweep_phase(decoded_request.action, current.phase())?;
+        self.require_xmr_remote_sweep_phase_v23(&decoded_request, current.phase())?;
         Ok(PreparedXmrRemoteSweepImportV23 {
             session_id: accepted.session_id,
             request_message_digest: accepted.request_message_digest,
@@ -693,7 +795,7 @@ impl ContractsSessionStoreV1 {
                 if request.session_id != envelope.session_id {
                     return Err(SessionStoreError::InvalidTransition);
                 }
-                require_xmr_remote_sweep_phase(request.action, current.phase())?;
+                self.require_xmr_remote_sweep_phase_v23(&request, current.phase())?;
                 xmr_counterparty(&roster, envelope.sender_id)?;
                 self.require_unique_xmr_remote_sweep_request(
                     current.session_id(),
@@ -711,7 +813,7 @@ impl ContractsSessionStoreV1 {
                     &request.message_digest,
                 )?;
                 let decoded_request = decode_xmr_request(&request.payload)?;
-                require_xmr_remote_sweep_phase(decoded_request.action, current.phase())?;
+                self.require_xmr_remote_sweep_phase_v23(&decoded_request, current.phase())?;
                 if request.chain_id != envelope.chain_id
                     || request.session_id != envelope.session_id
                     || request.signer_id != envelope.sender_id
@@ -750,7 +852,7 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::InvalidTransition);
         }
         xmr_counterparty(&roster, request.sender_id)?;
-        require_xmr_remote_sweep_phase(decoded.action, predecessor.phase())
+        self.require_xmr_remote_sweep_phase_v23(&decoded, predecessor.phase())
     }
 
     pub(super) fn require_static_xmr_remote_sweep_response_v23(

@@ -585,6 +585,7 @@ impl ProductionRelayStage12OwnerV1 {
         leg: LegIdV1,
         binding: dom_actuator::DomSessionBindingV1,
         scanner: &crate::production_child_dom::ProductionDomF7ScannerAuthorityV1,
+        funding_window: &crate::production_timer::ProductionFundingWindowV23,
         now: u64,
     ) -> Result<(), crate::production_contracts::ProductionFundingErrorV20> {
         let index = match leg {
@@ -613,6 +614,7 @@ impl ProductionRelayStage12OwnerV1 {
                 return Ok(());
             }
         }
+        // Recovery activation above remains independent of funding freshness.
         let material = &mut self
             ._private_bootstrap_v13
             .as_mut()
@@ -627,6 +629,7 @@ impl ProductionRelayStage12OwnerV1 {
             binding,
             selected.trusted_chain_id,
             scanner,
+            funding_window,
             &self.xmr_graph_vault_provisioner_v23,
             now,
         )?;

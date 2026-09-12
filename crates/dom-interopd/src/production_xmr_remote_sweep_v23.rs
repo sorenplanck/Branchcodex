@@ -26,6 +26,74 @@ use crate::production_child_xmr::{
 };
 use crate::production_children::QuorumXmrObservationPortV1;
 
+#[path = "production_xmr_remote_refund_v23.rs"]
+mod remote_refund_v23;
+pub(crate) use remote_refund_v23::{
+    verify_local_refund_response_v24, AuthorizedLocalXmrRefundV24, ProductionXmrRefundResponderV24,
+    ProductionXmrRemoteRefundClientV23, ProductionXmrRemoteRefundPinsV23,
+    ProductionXmrRemoteRefundSourceV23, RefundPublicationProgressV24,
+};
+
+/// Wires disjoint Claim/Refund roles while preserving the one shared sweep
+/// owner, the one physical actuator opening and local recovery independence.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_native_xmr_action_faces_v24(
+    sweep: crate::production_xmr_recovery_pump_v22::SharedXmrSweepV22,
+    pins: ProductionXmrRemoteClaimPinsV23,
+    setup: ValidatedXmrSetup,
+    source: ProductionXmrRemoteRefundSourceV23,
+    actuator: std::rc::Rc<xmr_actuator::DurableXmrActuatorV1>,
+    requester: Box<dyn ProductionXmrRemoteSweepTransportV23>,
+    responder: Box<dyn ProductionXmrRemoteSweepResponderTransportV23>,
+    quorum: QuorumXmrObservationPortV1,
+    claim_receiver: bool,
+) -> Result<
+    (
+        Box<dyn ScopedXmrSweepAuthorityV1>,
+        Option<ProductionXmrRefundResponderV24>,
+    ),
+    ChildAuthorityRefusalV1,
+> {
+    let refund_pins = sweep.remote_refund_pins_v23(pins.clone())?;
+    if claim_receiver {
+        let refund = ProductionXmrRemoteRefundClientV23::new(
+            refund_pins,
+            setup.clone(),
+            source,
+            requester,
+            quorum.clone(),
+        )?;
+        let claim = RemoteServingXmrSweepAuthorityV23::new(sweep, pins, setup, responder, quorum)?
+            .with_remote_refund_v24(refund)?;
+        Ok((Box::new(claim), None))
+    } else {
+        sweep.enable_local_refund_v24(pins.clone(), source.clone(), quorum.clone())?;
+        let reader = crate::production_child_xmr::ProductionXmrRetainedRefundReaderV24::new(
+            actuator,
+            setup.clone(),
+            pins.max_fee_piconero,
+            (pins.adapter_max_raw_transaction_bytes as usize)
+                .min(xmr_actuator::MAX_RAW_TX_BYTES_V1),
+        )?;
+        let refund = ProductionXmrRefundResponderV24::new(
+            refund_pins,
+            setup.clone(),
+            source,
+            reader,
+            responder,
+            quorum.clone(),
+        )?;
+        let claim = ProductionXmrRemoteClaimClientV23::new(pins, setup, requester, quorum)?;
+        Ok((
+            Box::new(RemoteClaimingXmrSweepAuthorityV23::new(
+                Box::new(sweep),
+                claim,
+            )),
+            Some(refund),
+        ))
+    }
+}
+
 /// Ratified Monero Mainnet genesis hash, in canonical RPC byte order.
 pub(crate) const MONERO_MAINNET_GENESIS_V23: [u8; 32] = [
     0x41, 0x80, 0x15, 0xbb, 0x9a, 0xe9, 0x82, 0xa1, 0x97, 0x5d, 0xa7, 0xd7, 0x92, 0x77, 0xc2, 0x70,
@@ -95,6 +163,7 @@ pub(crate) fn require_stable_xmr_remote_request_retry_v23(
 
 /// Pins obtained from the authenticated route, setup and public DOM evidence.
 /// The remote peer cannot select any of these fields.
+#[derive(Clone)]
 pub(crate) struct ProductionXmrRemoteClaimPinsV23 {
     pub(crate) network_genesis: [u8; 32],
     pub(crate) route_id: [u8; 32],
@@ -152,10 +221,22 @@ impl ProductionXmrRemoteClaimPinsV23 {
         setup: &ValidatedXmrSetup,
         request: &ProductionChildMaterializationRequestV1,
     ) -> Result<(), ChildAuthorityRefusalV1> {
-        self.validate(setup)?;
         if request.action != settlement_coordinator::SettlementActionV1::Claim
             || request.exposure != settlement_coordinator::ChildExposureV1::UsesPublicSecret
-            || request.route_id != self.route_id
+            || request.public_secret_evidence_digest == [0; 32]
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.require_common_materialization(setup, request)
+    }
+
+    fn require_common_materialization(
+        &self,
+        setup: &ValidatedXmrSetup,
+        request: &ProductionChildMaterializationRequestV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        self.validate(setup)?;
+        if request.route_id != self.route_id
             || request.settlement_id != setup.settlement_id()
             || request.terms_digest != self.route_terms_digest
             || request.registry_digest != self.registry_digest
@@ -165,7 +246,6 @@ impl ProductionXmrRemoteClaimPinsV23 {
             || request.composition_digest != self.composition_digest
             || request.role_plan_digest != self.role_plan_digest
             || request.source_scope_digest != self.source_scope_digest
-            || request.public_secret_evidence_digest == [0; 32]
             || request.leg != self.leg
             || request.effect_id == [0; 32]
             || request.semantic_digest == [0; 32]
@@ -514,6 +594,7 @@ pub(crate) struct RemoteServingXmrSweepAuthorityV23 {
     transport: Box<dyn ProductionXmrRemoteSweepResponderTransportV23>,
     quorum: QuorumXmrObservationPortV1,
     pending: Option<PreparedRemoteSweepPublicationV23>,
+    remote_refund_v24: Option<ProductionXmrRemoteRefundClientV23>,
 }
 
 impl RemoteServingXmrSweepAuthorityV23 {
@@ -532,7 +613,19 @@ impl RemoteServingXmrSweepAuthorityV23 {
             transport,
             quorum,
             pending: None,
+            remote_refund_v24: None,
         })
+    }
+
+    pub(crate) fn with_remote_refund_v24(
+        mut self,
+        refund: ProductionXmrRemoteRefundClientV23,
+    ) -> Result<Self, ChildAuthorityRefusalV1> {
+        if self.remote_refund_v24.is_some() {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.remote_refund_v24 = Some(refund);
+        Ok(self)
     }
 
     fn clone_built(built: &XmrBuiltSweepV1) -> XmrBuiltSweepV1 {
@@ -700,6 +793,9 @@ impl RemoteServingXmrSweepAuthorityV23 {
 }
 
 impl ScopedXmrSweepAuthorityV1 for RemoteServingXmrSweepAuthorityV23 {
+    fn requires_remote_custody_v23(&self, kind: xmr_actuator::XmrOperationKindV1) -> bool {
+        kind == xmr_actuator::XmrOperationKindV1::Refund && self.remote_refund_v24.is_some()
+    }
     fn observe_verified_funding_v22(
         &mut self,
     ) -> Result<f7_anchor_authority::families_v11::VerifiedXmrFundingV11, ChildAuthorityRefusalV1>
@@ -743,6 +839,10 @@ impl ScopedXmrSweepAuthorityV1 for RemoteServingXmrSweepAuthorityV23 {
         &mut self,
         request: &ProductionChildMaterializationRequestV1,
     ) -> Result<XmrBuiltSweepV1, ChildAuthorityRefusalV1> {
+        if let Some(refund) = self.remote_refund_v24.as_mut() {
+            let funding = self.local.observe_verified_funding_v22()?;
+            return refund.build_refund(request, funding);
+        }
         self.local.build_refund_sweep_v23(request)
     }
 
@@ -1125,7 +1225,7 @@ pub(crate) fn verify_remote_xmr_sweep_v23(
 mod tests {
     use super::*;
 
-    fn request() -> RemoteSweepRequestV23 {
+    pub(super) fn request() -> RemoteSweepRequestV23 {
         RemoteSweepRequestV23 {
             network_genesis: [1; 32],
             route_id: [2; 32],
@@ -1156,6 +1256,45 @@ mod tests {
             public_spend_share: [18; 32],
             destination: "48productionMainnetDestination".to_owned(),
         }
+    }
+
+    #[test]
+    fn local_refund_cache_keeps_original_effect_but_not_observation_tip_v24() {
+        use super::remote_refund_v23::local_refund_authorization_digest_v24 as digest;
+        let mut original = request();
+        original.action = RemoteSweepActionV23::Refund;
+        let expected = digest(&original, [40; 32], [41; 32]).unwrap();
+        let mut refreshed = original.clone();
+        refreshed.funding_evidence_digest = [42; 32];
+        assert_eq!(expected, digest(&refreshed, [40; 32], [41; 32]).unwrap());
+        // A new lease cannot select the old signature cache after reopening.
+        for field in 0..10 {
+            let mut changed = refreshed.clone();
+            match field {
+                0 => changed.effect_id[0] ^= 1,
+                1 => changed.fencing_epoch += 1,
+                2 => changed.semantic_digest[0] ^= 1,
+                3 => changed.funding_block_height += 1,
+                4 => changed.funding_output_index += 1,
+                5 => changed.destination.push('1'),
+                6 => changed.max_fee_piconero += 1,
+                7 => changed.funded_amount_piconero += 1,
+                8 => changed.public_secret_evidence_digest[0] ^= 1,
+                9 => changed.source_scope_digest[0] ^= 1,
+                _ => unreachable!(),
+            }
+            assert_ne!(expected, digest(&changed, [40; 32], [41; 32]).unwrap());
+        }
+        assert_ne!(expected, digest(&refreshed, [43; 32], [41; 32]).unwrap());
+        assert_ne!(expected, digest(&refreshed, [40; 32], [43; 32]).unwrap());
+        refreshed.action = RemoteSweepActionV23::Claim;
+        assert_eq!(
+            digest(&refreshed, [40; 32], [41; 32]),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
+        refreshed.action = RemoteSweepActionV23::Refund;
+        refreshed.funding_evidence_digest = [0; 32];
+        assert!(digest(&refreshed, [40; 32], [41; 32]).is_err());
     }
 
     #[test]

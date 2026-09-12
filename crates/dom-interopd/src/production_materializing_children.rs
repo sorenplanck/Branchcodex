@@ -56,7 +56,8 @@ pub(crate) struct ProductionSolanaChildInputV7 {
         Option<crate::production_universal_actuator::ProductionUniversalActuatorLeaseOwnerV11>,
 }
 pub(crate) struct ProductionXmrChildInputV7 {
-    pub(crate) actuator: xmr_actuator::DurableXmrActuatorV1,
+    pub(crate) funding_window_v23: crate::production_timer::ProductionFundingWindowV23,
+    pub(crate) actuator: std::rc::Rc<xmr_actuator::DurableXmrActuatorV1>,
     pub(crate) broadcast: xmr_rpc_broadcast_blocking::BlockingMoneroBroadcaster,
     pub(crate) observation: crate::production_children::QuorumXmrObservationPortV1,
     pub(crate) deployment: deployment_registry::ResolvedMoneroDeploymentV1,
@@ -192,7 +193,8 @@ impl ProductionCounterpartyChildInputV7<'_> {
                     SystemProductionXmrChildClockV1,
                     i.sweep,
                     i.scope,
-                )?;
+                )?
+                .with_funding_window_v23(i.funding_window_v23)?;
                 if let Some(owner) = i.lease_owner {
                     port = port.with_lease_owner_v11(owner)?;
                 }

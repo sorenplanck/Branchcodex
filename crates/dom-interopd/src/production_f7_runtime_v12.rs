@@ -448,6 +448,26 @@ fn classify_observation(
     }
 }
 
+/// Sample the trusted wall clock after blocking observations, without renewing
+/// the participant's lease. The actuator still checks the durable fencing
+/// generation; this guard refuses an already expired local capability before
+/// any secret-bearing operation is called.
+fn exposure_time_after_observation(
+    previous_now: u64,
+    lease: dom_actuator::DomLeaseV1,
+    since_epoch: Option<Duration>,
+) -> Result<u64, super::ProductionF7FinalClaimErrorV14> {
+    use super::ProductionF7FinalClaimErrorV14 as Error;
+    let now = since_epoch
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .filter(|value| previous_now != 0 && *value >= previous_now)
+        .ok_or(Error::Scope)?;
+    if now > lease.lease_until_unix_ms() {
+        return Err(dom_actuator::DomActuatorError::LeaseExpired.into());
+    }
+    Ok(now)
+}
+
 #[must_use]
 pub(crate) enum ProductionF7StepV12 {
     FundingAbsent,
@@ -756,12 +776,13 @@ where
             .tip_height;
         // Observation can block on RPC. Never reuse the pre-observation clock
         // for an irreversible write guarded by an expiring actuator lease.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-            .filter(|value| *value >= previous_now && *value != 0)
-            .ok_or(Error::Scope)?;
+        let now = exposure_time_after_observation(
+            previous_now,
+            lease,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok(),
+        )?;
         let actuator =
             dom_actuator::DomContractsActuatorV1::bind(self.store.as_ref(), self.binding)?;
         let _submission = actuator.prepare_and_expose_f7_final_claim_v14(
@@ -834,6 +855,16 @@ where
                 .load_session(self.binding.session_id())?
                 .chain()
                 .tip_height;
+            // The selected-chain observations may outlive the caller's lease.
+            // Match the settlement-child path: a stale pre-RPC timestamp must
+            // never authorize first exposure, and this does not renew a lease.
+            request.now_unix_ms = exposure_time_after_observation(
+                request.now_unix_ms,
+                request.lease,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok(),
+            )?;
             request.adaptation = Some(super::ProductionF7ClaimAdaptationV14 {
                 authority,
                 secret,
@@ -847,6 +878,61 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fresh_exposure_clock_refuses_rpc_delay_past_the_original_lease() {
+        let root = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let mut control =
+            dom_actuator::DomActuatorStoreV1::create(&root.path().join("actuator")).unwrap();
+        let lease = control.acquire_lease([1; 32], [2; 32], 1_000, 100).unwrap();
+        assert_eq!(
+            exposure_time_after_observation(1_000, lease, Some(Duration::from_millis(1_100)))
+                .unwrap(),
+            1_100
+        );
+        // No secret/nonce owner is passed to the guard. The later exposure
+        // operation cannot be reached when an RPC used up the original lease.
+        assert!(matches!(
+            exposure_time_after_observation(1_000, lease, Some(Duration::from_millis(1_101))),
+            Err(super::super::ProductionF7FinalClaimErrorV14::Actuator(
+                dom_actuator::DomActuatorError::LeaseExpired
+            ))
+        ));
+        // This guard must not renew the underlying durable lease either.
+        assert_eq!(
+            control
+                .acquire_lease([1; 32], [2; 32], 1_050, 9_000)
+                .unwrap(),
+            lease
+        );
+    }
+
+    #[test]
+    fn fresh_exposure_clock_refuses_invalid_backwards_and_overflowing_time() {
+        let root = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let mut control =
+            dom_actuator::DomActuatorStoreV1::create(&root.path().join("actuator")).unwrap();
+        let lease = control.acquire_lease([1; 32], [2; 32], 1_000, 100).unwrap();
+        for (previous, current) in [
+            (0, Some(Duration::from_millis(1_000))),
+            (1_000, None),
+            (1_000, Some(Duration::ZERO)),
+            (1_000, Some(Duration::from_millis(999))),
+            (1_000, Some(Duration::from_secs(u64::MAX))),
+        ] {
+            assert!(matches!(
+                exposure_time_after_observation(previous, lease, current),
+                Err(super::super::ProductionF7FinalClaimErrorV14::Scope)
+            ));
+        }
+    }
 
     #[test]
     fn missing_exact_funding_is_distinct_from_wrong_identity_and_service_failure() {

@@ -15,6 +15,9 @@ mod xmr_recovery_pending_v23;
 #[path = "f7_xmr_refund_readiness_v23.rs"]
 mod xmr_refund_readiness_v23;
 pub use xmr_refund_readiness_v23::VerifiedXmrRefundReadinessV23;
+#[path = "f7_xmr_refund_transport_v23.rs"]
+mod xmr_refund_transport_v23;
+use xmr_refund_transport_v23::{validate_refund_transport_bytes_v23, REFUND_TRANSPORT_LEN_V23};
 #[path = "funding_child_v20.rs"]
 mod funding_child_v20;
 pub use funding_child_v20::RealDomFundingFactsV23;
@@ -1963,6 +1966,21 @@ impl ConsumedF7ClaimAuthorizationV12 {
     pub const fn session_id(&self) -> [u8; 32] {
         self.session_id
     }
+
+    fn require_recent_observation(&self) -> Result<(), SessionStoreError> {
+        if self.observed_at.get().elapsed()
+            > f7_anchor_authority::families_v11::MAX_V11_EXTERNAL_ANCHOR_AGE
+        {
+            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
+        }
+        Ok(())
+    }
+
+    /// Called only after the fresh opaque F7 token has passed scope and ancestry
+    /// validation. Retain its scan origin, not the completion time of this audit.
+    fn retain_observation_at(&self, observed_at: std::time::Instant) {
+        self.observed_at.set(observed_at);
+    }
 }
 
 pub(super) struct F7ClaimRecordV12 {
@@ -2150,7 +2168,7 @@ impl ContractsSessionStoreV1 {
             consumption_digest: authenticated.consumption_digest,
             open_instance_id: self.open_instance_id,
             owner,
-            observed_at: std::cell::Cell::new(std::time::Instant::now()),
+            observed_at: std::cell::Cell::new(anchors.observed_at()),
         })
     }
 
@@ -2158,11 +2176,10 @@ impl ContractsSessionStoreV1 {
         &self,
         handle: &ConsumedF7ClaimAuthorizationV12,
     ) -> Result<(F7GateRecordV12, F7ClaimRecordV12, SessionRecordV1), SessionStoreError> {
-        if handle.open_instance_id != self.open_instance_id
-            || handle.observed_at.get().elapsed() > std::time::Duration::from_secs(60)
-        {
+        if handle.open_instance_id != self.open_instance_id {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
         }
+        handle.require_recent_observation()?;
         let result = self.authenticate_f7_claim_v12(handle.session_id)?;
         self.require_downstream_claim_gate_locked_v23(&result.0)?;
         if result.1.digest != handle.issuance_digest
@@ -2687,7 +2704,7 @@ impl ContractsSessionStoreV1 {
             )?;
             self.persist_session_record(&next)?;
         }
-        authorization.observed_at.set(std::time::Instant::now());
+        authorization.retain_observation_at(anchors.observed_at());
         Ok(())
     }
     pub(super) fn require_authenticated_f7_claim_signing_successor_v12(
@@ -3622,6 +3639,45 @@ mod tests {
     assert_not_impl_any!(ConsumedF7ClaimAuthorizationV12:Clone,Copy,core::fmt::Debug);
     assert_not_impl_any!(VerifiedXmrRecoveryExecutionAuthorityV12:Clone,Copy,core::fmt::Debug);
 
+    #[test]
+    fn consumed_claim_retains_scan_age_across_revalidation_without_sleeping() {
+        let origin = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .unwrap();
+        let handle = ConsumedF7ClaimAuthorizationV12 {
+            session_id: [1; 32],
+            issuance_digest: [2; 32],
+            consumption_digest: [3; 32],
+            open_instance_id: [4; 32],
+            owner: Arc::new(()),
+            observed_at: std::cell::Cell::new(origin),
+        };
+        assert!(handle.require_recent_observation().is_ok());
+        for _ in 0..3 {
+            handle.retain_observation_at(origin);
+            assert_eq!(handle.observed_at.get(), origin);
+        }
+        let expired = std::time::Instant::now()
+            .checked_sub(
+                f7_anchor_authority::families_v11::MAX_V11_EXTERNAL_ANCHOR_AGE
+                    + std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        // A slow ancestry/storage operation does not renew the scan. The next
+        // signing/exposure check rejects it before accepting the handle's owner.
+        handle.retain_observation_at(expired);
+        assert_eq!(handle.observed_at.get(), expired);
+        assert!(matches!(
+            handle.require_recent_observation(),
+            Err(SessionStoreError::ClaimSigningAuthorityUnavailable)
+        ));
+        // Only a genuinely new, already-verified observation can restore age.
+        let fresh = std::time::Instant::now();
+        handle.retain_observation_at(fresh);
+        assert!(handle.require_recent_observation().is_ok());
+        assert_eq!(handle.observed_at.get(), fresh);
+    }
+
     fn claim_bytes(
         id: f7_anchor_authority::families_v11::F7FundingIdV11,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -3736,7 +3792,7 @@ mod tests {
 // The new profile shares the existing retained artifacts directory. Keeping the
 // nine root objects unchanged also keeps the native staging capture, inode
 // checks and prepared-open revalidation authoritative for every V12 write.
-const F7_V12_ARTIFACT_COUNT_MAX: usize = MAX_PREPARED_RECOVERY_SOURCES * 10;
+const F7_V12_ARTIFACT_COUNT_MAX: usize = MAX_PREPARED_RECOVERY_SOURCES * 11;
 const F7_V12_ARTIFACT_BYTES_MAX: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -3751,6 +3807,7 @@ pub(super) enum F7ArtifactKindV12 {
     ExposureV14,
     AdmissionV14,
     ObservationV15,
+    RefundTransportV23,
 }
 impl F7ArtifactKindV12 {
     fn suffix(self) -> &'static str {
@@ -3765,6 +3822,7 @@ impl F7ArtifactKindV12 {
             Self::ExposureV14 => "claim-exposure-v14",
             Self::AdmissionV14 => "claim-admission-v14",
             Self::ObservationV15 => "claim-observation-v15",
+            Self::RefundTransportV23 => "refund-transport-v23",
         }
     }
     fn maximum_length(self) -> usize {
@@ -3778,6 +3836,7 @@ impl F7ArtifactKindV12 {
             Self::ExposureV14 => EXPOSURE_MAX_V14,
             Self::AdmissionV14 => ADMISSION_LEN_V14,
             Self::ObservationV15 => OBSERVATION_MAX_V15,
+            Self::RefundTransportV23 => REFUND_TRANSPORT_LEN_V23,
         }
     }
 }
@@ -3807,6 +3866,7 @@ pub(super) fn parse_f7_artifact_name_v12(name: &str) -> Option<([u8; 32], F7Arti
         "claim-exposure-v14" => F7ArtifactKindV12::ExposureV14,
         "claim-admission-v14" => F7ArtifactKindV12::AdmissionV14,
         "claim-observation-v15" => F7ArtifactKindV12::ObservationV15,
+        "refund-transport-v23" => F7ArtifactKindV12::RefundTransportV23,
         _ => return None,
     };
     Some((session, kind))
@@ -3824,6 +3884,9 @@ pub(super) fn validate_f7_artifact_bytes_v12(
         return Err(SessionStoreError::CapacityExceeded);
     }
     match kind {
+        F7ArtifactKindV12::RefundTransportV23 => {
+            validate_refund_transport_bytes_v23(session, bytes)?
+        }
         F7ArtifactKindV12::ObservationV15 => validate_f7_observation_bytes_v15(session, bytes)?,
         F7ArtifactKindV12::ExposureV14 | F7ArtifactKindV12::AdmissionV14 => {
             validate_final_claim_artifact_v14(session, kind, bytes)?;
@@ -4042,12 +4105,16 @@ impl ContractsSessionStoreV1 {
                 return Err(SessionStoreError::Quarantined);
             }
             let signing_extra = usize::from(kinds.contains(&K::FundingSigningV20));
+            let transport_extra = usize::from(kinds.contains(&K::RefundTransportV23));
+            if transport_extra != 0 {
+                self.audit_native_xmr_refund_transport_v23(session)?;
+            }
             let signing = self.optional_f7_funding_signing_v20(&gate)?;
             if signing.is_some() != (signing_extra == 1) {
                 return Err(SessionStoreError::Quarantined);
             }
             if !kinds.contains(&K::Funding) {
-                if kinds.len() != 1 + signing_extra {
+                if kinds.len() != 1 + signing_extra + transport_extra {
                     return Err(SessionStoreError::Quarantined);
                 }
                 if let Some(signing) = signing.as_ref() {
@@ -4062,7 +4129,7 @@ impl ContractsSessionStoreV1 {
             let funding = self.load_f7_funding_v12(&gate)?;
             if current.revision() < funding.successor.revision() {
                 if current.digest() != &funding.predecessor_digest
-                    || kinds.len() != 2 + signing_extra
+                    || kinds.len() != 2 + signing_extra + transport_extra
                 {
                     return Err(SessionStoreError::Quarantined);
                 }
@@ -4078,7 +4145,7 @@ impl ContractsSessionStoreV1 {
                 return Err(SessionStoreError::Quarantined);
             }
             if !kinds.contains(&K::Issued) {
-                if kinds.len() != 2 + signing_extra {
+                if kinds.len() != 2 + signing_extra + transport_extra {
                     return Err(SessionStoreError::Quarantined);
                 }
                 continue;
@@ -4087,7 +4154,7 @@ impl ContractsSessionStoreV1 {
                 F7ClaimRecordV12::decode(&self.read_f7_v12(session, "claim-issued", 4096)?)?;
             self.authenticate_f7_issuance_ancestry_v12(&gate, &funding, &issued)?;
             if !kinds.contains(&K::Consumed) {
-                if kinds.len() != 3 + signing_extra
+                if kinds.len() != 3 + signing_extra + transport_extra
                     || self.f7_native_claim_binding_exists_v12(session)?
                 {
                     return Err(SessionStoreError::Quarantined);
@@ -4234,6 +4301,7 @@ pub(super) fn validate_f7_artifact_staging_v12(
         F7ArtifactKindV12::ExposureV14 => b"DOMFCX14",
         F7ArtifactKindV12::AdmissionV14 => b"DOMFAD14",
         F7ArtifactKindV12::ObservationV15 => b"DOMFOB15",
+        F7ArtifactKindV12::RefundTransportV23 => b"DOMXRT24",
     };
     if bytes.len() > kind.maximum_length()
         || bytes.get(..bytes.len().min(8)) != Some(&magic[..bytes.len().min(8)])
@@ -4248,6 +4316,7 @@ pub(super) fn validate_f7_artifact_staging_v12(
         F7ArtifactKindV12::ExposureV14 => Some(24),
         F7ArtifactKindV12::AdmissionV14 => Some(8),
         F7ArtifactKindV12::ObservationV15 => Some(40),
+        F7ArtifactKindV12::RefundTransportV23 => Some(40),
         _ => None,
     };
     if let Some(offset) = session_offset {
@@ -4266,6 +4335,7 @@ pub(super) fn validate_f7_artifact_staging_v12(
         F7ArtifactKindV12::ExposureV14 => (24 + 10 * 32, 2),
         F7ArtifactKindV12::AdmissionV14 => (170, 0),
         F7ArtifactKindV12::ObservationV15 => (OBSERVATION_PREFIX_V15, 1),
+        F7ArtifactKindV12::RefundTransportV23 => (REFUND_TRANSPORT_LEN_V23 - 32, 0),
     };
     for _ in 0..blob_count {
         if bytes.len() < cursor + 4 {

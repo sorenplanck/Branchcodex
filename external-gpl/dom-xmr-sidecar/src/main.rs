@@ -606,6 +606,44 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
         }
     };
     let response = match request {
+        SidecarRequestV2::LoadLocalRefundWithProofsV24(request) => {
+            match build_proof_v23::load_local_refund(&config, &request).await {
+                Ok(response) => SidecarResponseV2::LocalRefundWithProofsV24(response),
+                Err(SidecarOperationError::Retryable) => {
+                    SidecarResponseV2::Error(SidecarErrorBody {
+                        code: "v24_local_refund_read_unavailable".to_owned(),
+                        message: "complete local Refund result unavailable".to_owned(),
+                        retryable: true,
+                    })
+                }
+                Err(SidecarOperationError::Rejected(_)) => {
+                    SidecarResponseV2::Error(SidecarErrorBody {
+                        code: "v24_local_refund_read_rejected".to_owned(),
+                        message: "local Refund read scope or durable result rejected".to_owned(),
+                        retryable: false,
+                    })
+                }
+            }
+        }
+        SidecarRequestV2::BuildLocalRefundWithProofsV24(request) => {
+            match build_proof_v23::build_local_refund(&config, &request).await {
+                Ok(response) => SidecarResponseV2::LocalRefundWithProofsV24(response),
+                Err(SidecarOperationError::Retryable) => {
+                    SidecarResponseV2::Error(SidecarErrorBody {
+                        code: "v24_local_refund_unavailable".to_owned(),
+                        message: "local Refund builder temporarily unavailable".to_owned(),
+                        retryable: true,
+                    })
+                }
+                Err(SidecarOperationError::Rejected(_)) => {
+                    SidecarResponseV2::Error(SidecarErrorBody {
+                        code: "v24_local_refund_rejected".to_owned(),
+                        message: "local Refund scope or durable plan rejected".to_owned(),
+                        retryable: false,
+                    })
+                }
+            }
+        }
         SidecarRequestV2::BuildWithProofsV23(request) => {
             match build_proof_v23::build(&config, &request).await {
                 Ok(response) => SidecarResponseV2::SweepWithProofsV23(response),

@@ -714,7 +714,12 @@ impl ProductionAuthenticatedSettlementPlanAuthorityV1 {
             (
                 SettlementActionV1::Funding | SettlementActionV1::Refund,
                 SettlementChildrenV1::Materialized(children),
-            ) => self.validate_materialized_pair(children, leg, ChildExposureV1::NonSecret),
+            ) => self.validate_materialized_pair(
+                children,
+                leg,
+                ChildExposureV1::NonSecret,
+                nonsecret_first_face_v23(leg.counterparty_face, bindings.action),
+            ),
             (SettlementActionV1::Claim, SettlementChildrenV1::Materialized(children))
                 if bindings.leg == SettlementLegV1::Upstream
                     && matches!(
@@ -725,7 +730,12 @@ impl ProductionAuthenticatedSettlementPlanAuthorityV1 {
                     && plan.secret_requirement() == SecretRequirementV1::AlreadyPublic
                     && plan.preexisting_secret_evidence_digest().is_some() =>
             {
-                self.validate_materialized_pair(children, leg, ChildExposureV1::UsesPublicSecret)
+                self.validate_materialized_pair(
+                    children,
+                    leg,
+                    ChildExposureV1::UsesPublicSecret,
+                    leg.counterparty_face,
+                )
             }
             (
                 SettlementActionV1::Claim,
@@ -760,13 +770,21 @@ impl ProductionAuthenticatedSettlementPlanAuthorityV1 {
         children: &[SettlementChildPlanV1; 2],
         leg: ProductionLegMaterializationBindingsV1,
         exposure: ChildExposureV1,
+        first_face: SettlementFaceV1,
     ) -> Result<(), PlanAuthorityRefusalV1> {
-        if children[0].face != leg.counterparty_face
-            || children[0].chain_id != leg.counterparty_chain_id
-            || children[0].exposure != exposure
-            || children[1].face != SettlementFaceV1::Dom
-            || children[1].chain_id != self.dom_chain_id
-            || children[1].exposure != exposure
+        let (dom, counterparty) = if first_face == SettlementFaceV1::Dom {
+            (&children[0], &children[1])
+        } else if first_face == leg.counterparty_face {
+            (&children[1], &children[0])
+        } else {
+            return Err(PlanAuthorityRefusalV1::Conflict);
+        };
+        if counterparty.face != leg.counterparty_face
+            || counterparty.chain_id != leg.counterparty_chain_id
+            || counterparty.exposure != exposure
+            || dom.face != SettlementFaceV1::Dom
+            || dom.chain_id != self.dom_chain_id
+            || dom.exposure != exposure
         {
             return Err(PlanAuthorityRefusalV1::Conflict);
         }
@@ -1203,9 +1221,17 @@ impl ProductionSettlementDraftMaterializerV2 {
             ChildExposureV1::NonSecret,
             true,
         );
+        let first_face =
+            nonsecret_first_face_v23(leg.counterparty_face, settlement_action(request.action()));
         let children = self
             .router
             .with_router(|router| {
+                if first_face == SettlementFaceV1::Dom {
+                    let first = router.materialize_child(SettlementFaceV1::Dom, dom, None)?;
+                    let second =
+                        router.materialize_child(leg.counterparty_face, counterparty, None)?;
+                    return Ok([first, second]);
+                }
                 let first = router.materialize_child(leg.counterparty_face, counterparty, None)?;
                 let second = router.materialize_child(SettlementFaceV1::Dom, dom, None)?;
                 Ok([first, second])
@@ -1215,7 +1241,7 @@ impl ProductionSettlementDraftMaterializerV2 {
             leg,
             &children,
             [ChildExposureV1::NonSecret, ChildExposureV1::NonSecret],
-            leg.counterparty_face,
+            first_face,
         )?;
         Ok(children)
     }
@@ -1600,6 +1626,20 @@ const fn settlement_leg(leg: LegIdV1) -> SettlementLegV1 {
     }
 }
 
+/// Monero funding cannot be sent until native DOM collateral is final. The
+/// coordinator dispatches children in order, so putting XMR first deadlocks
+/// that prerequisite. Only new funding plans change order; no retained plan,
+/// claim ordering, secret rule, or other family's sequence is rewritten here.
+const fn nonsecret_first_face_v23(
+    counterparty: SettlementFaceV1,
+    action: SettlementActionV1,
+) -> SettlementFaceV1 {
+    match (counterparty, action) {
+        (SettlementFaceV1::Monero, SettlementActionV1::Funding) => SettlementFaceV1::Dom,
+        _ => counterparty,
+    }
+}
+
 const fn settlement_action(action: ActionKindV1) -> SettlementActionV1 {
     match action {
         ActionKindV1::Funding => SettlementActionV1::Funding,
@@ -1750,6 +1790,62 @@ mod tests {
             expected_transaction_id: [seed; 32],
             intent_digest: [seed.wrapping_add(1); 32],
             custody_digest: [seed.wrapping_add(2); 32],
+        }
+    }
+
+    #[test]
+    fn monero_funding_requires_dom_first_without_reordering_other_nonsecret_plans() {
+        for face in [
+            SettlementFaceV1::Bitcoin,
+            SettlementFaceV1::Evm,
+            SettlementFaceV1::Solana,
+            SettlementFaceV1::Monero,
+        ] {
+            for action in [SettlementActionV1::Funding, SettlementActionV1::Refund] {
+                let mut authority = plan_authority();
+                authority.legs[0].counterparty_face = face;
+                let leg = authority.legs[0];
+                let external = child(
+                    face,
+                    ChildExposureV1::NonSecret,
+                    leg.counterparty_chain_id,
+                    0x51,
+                );
+                let dom = child(
+                    SettlementFaceV1::Dom,
+                    ChildExposureV1::NonSecret,
+                    authority.dom_chain_id,
+                    0x61,
+                );
+                let first = nonsecret_first_face_v23(face, action);
+                assert_eq!(
+                    first == SettlementFaceV1::Dom,
+                    face == SettlementFaceV1::Monero && action == SettlementActionV1::Funding
+                );
+                let children = if first == SettlementFaceV1::Dom {
+                    [dom, external]
+                } else {
+                    [external, dom]
+                };
+                let valid = CompositeSettlementPlanV1::new(
+                    plan_bindings(&authority, SettlementLegV1::Upstream, action),
+                    SecretRequirementV1::None,
+                    None,
+                    children.clone(),
+                )
+                .unwrap();
+                assert!(authority.validate_plan(&valid).is_ok());
+                let mut reversed = children;
+                reversed.swap(0, 1);
+                let invalid = CompositeSettlementPlanV1::new(
+                    plan_bindings(&authority, SettlementLegV1::Upstream, action),
+                    SecretRequirementV1::None,
+                    None,
+                    reversed,
+                )
+                .unwrap();
+                assert!(authority.validate_plan(&invalid).is_err());
+            }
         }
     }
 

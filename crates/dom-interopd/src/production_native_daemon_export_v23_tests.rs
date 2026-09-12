@@ -51,7 +51,7 @@ pub(crate) struct NativeF6BundleInputsV23 {
     pub claim_profile: NativeF6ClaimInputsV23,
 }
 
-/// Encodes exactly DOMF6A07 and verifies threshold signatures through the
+/// Encodes DOMF6A07/DOMF6A23 using the operational writer and verifies signatures through the
 /// production signature verifier before returning public bytes. First-export
 /// later runs the complete production decoder against reloaded admission.
 /// The callback signs the
@@ -61,148 +61,76 @@ pub(crate) fn encode_native_f6_bundle_v23(
     input: &NativeF6BundleInputsV23,
     sign: impl FnOnce(Digest32) -> Result<Vec<(u16, [u8; 64])>>,
 ) -> Result<Vec<u8>> {
+    use super::artifact_writer_v23::*;
     context_v23::validate_input(admitted, input)?;
-    let mut bytes = Vec::new();
-    let (magic, version, domain) = match &input.claim_profile {
-        NativeF6ClaimInputsV23::Bound { .. } => {
-            (BUNDLE_MAGIC_V7, BUNDLE_VERSION_V7, BUNDLE_DOMAIN_V7)
-        }
-        NativeF6ClaimInputsV23::NativeEnrollment => (
-            claim_enrollment_v23::MAGIC_V23,
-            claim_enrollment_v23::VERSION_V23,
-            claim_enrollment_v23::DOMAIN_V23,
-        ),
+    let claim_profile = match &input.claim_profile {
+        NativeF6ClaimInputsV23::Bound { role_plan, sources } => PublicF6ClaimProfileV23::Bound {
+            role_plan: role_plan.clone(),
+            sources: sources.clone(),
+        },
+        NativeF6ClaimInputsV23::NativeEnrollment => PublicF6ClaimProfileV23::NativeEnrollment {
+            upstream: admitted.composition().upstream().clone(),
+            downstream: admitted.composition().downstream().clone(),
+        },
     };
-    bytes.extend_from_slice(magic);
-    bytes.extend_from_slice(&version.to_be_bytes());
-    bytes.extend_from_slice(&0_u16.to_be_bytes());
-    for digest in [
-        admitted.roster_bundle().network_id(),
-        admitted.admission().route_id(),
-        admitted.composition().binding_digest(),
-        admitted.composition().route_scope_digest(),
-        admitted.resolved_registry().manifest_digest(),
-    ] {
-        bytes.extend_from_slice(&digest);
-    }
-    bytes.extend_from_slice(&admitted.resolved_registry().epoch().to_be_bytes());
-    for digest in [
-        admitted.admission().frozen_bindings().profile_bundle_digest,
-        input.solver.0,
-        input.inventory_binding_digest,
-        input.bond_policy_hash,
-        input.bond_asset_binding_digest,
-    ] {
-        bytes.extend_from_slice(&digest);
-    }
-    bytes.extend_from_slice(&input.required_collateral.to_be_bytes());
-    for value in [
-        input.status_max_lifetime_seconds,
-        input.pre_f6_limits.valid_from_seconds,
-        input.pre_f6_limits.expires_at_seconds,
-        input.pre_f6_limits.max_evidence_age_seconds,
-    ] {
-        bytes.extend_from_slice(&value.to_be_bytes());
-    }
-    for authority in [&input.bond_authorities, &input.status_authorities] {
-        append_sized(
-            &mut bytes,
-            &authority.canonical_bytes()?,
-            MAX_AUTHORITY_BYTES_V7,
-        )?;
-    }
-    let relay = admitted
-        .roster_bundle()
-        .legs()
-        .iter()
-        .flat_map(|leg| leg.members.iter().map(|member| member.xonly_key))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let chain = admitted
-        .registry_authorities()
-        .xonly_keys()
-        .iter()
-        .chain(admitted.time_policy_authorities().xonly_keys())
-        .chain(admitted.time_evidence_authorities().xonly_keys())
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    for keys in [&relay, &input.reserved_participant_keys, &chain] {
-        if keys.is_empty() || keys.len() > MAX_SIGNERS_V7 {
-            return Err("native F6 reserved key count".into());
-        }
-        bytes.extend_from_slice(&u16::try_from(keys.len())?.to_be_bytes());
-        for key in keys {
-            bytes.extend_from_slice(key);
-        }
-    }
-    for signers in &input.signers {
-        if !(2..=MAX_SIGNERS_V7).contains(&signers.len()) {
-            return Err("native F6 signer count".into());
-        }
-        bytes.extend_from_slice(&u16::try_from(signers.len())?.to_be_bytes());
-        for signer in signers {
-            bytes.extend_from_slice(&signer.independent_authority_id);
-            bytes.extend_from_slice(&signer.signer_index.to_be_bytes());
-            bytes.extend_from_slice(&signer.signer_public_key);
-            bytes.extend_from_slice(&signer.endpoint_uid.to_be_bytes());
-            append_sized(
-                &mut bytes,
-                signer
-                    .endpoint
-                    .to_str()
-                    .ok_or("native F6 endpoint encoding")?
-                    .as_bytes(),
-                MAX_ENDPOINT_BYTES_V7,
-            )?;
-        }
-    }
-    match &input.claim_profile {
-        NativeF6ClaimInputsV23::Bound { role_plan, sources } => {
-            bytes.extend_from_slice(&role_plan.canonical_bytes());
-            for source in sources {
-                bytes.extend_from_slice(&source.canonical_bytes());
-            }
-        }
-        NativeF6ClaimInputsV23::NativeEnrollment => {
-            bytes.extend_from_slice(
-                claim_enrollment_v23::NativeClaimEnrollmentV23::from_composition(
-                    admitted.composition(),
-                )?
-                .bytes(),
-            );
-        }
-    }
-    let signed_prefix_len = bytes.len();
-    let signatures = sign(digest_parts(&[domain, &bytes])?)?;
-    if signatures.len() > MAX_SIGNERS_V7 {
-        return Err("native F6 root signature count".into());
-    }
-    bytes.extend_from_slice(&u16::try_from(signatures.len())?.to_be_bytes());
-    for (index, signature) in signatures {
-        bytes.extend_from_slice(&index.to_be_bytes());
-        bytes.extend_from_slice(&signature);
-    }
-    let mut signatures = BundleReaderV7::new(&bytes[signed_prefix_len..]);
-    verify_bundle_signatures(
-        &mut signatures,
-        &bytes[..signed_prefix_len],
-        admitted.registry_authorities(),
+    let prepared = PreparedUntrustedF6ArtifactV23::prepare(
+        PublicF6ArtifactInputsV23 {
+            route: UntrustedF6RoutePinsV23 {
+                network_id: admitted.roster_bundle().network_id(),
+                route_id: admitted.admission().route_id(),
+                composition_digest: admitted.composition().binding_digest(),
+                route_scope_digest: admitted.composition().route_scope_digest(),
+                registry_digest: admitted.resolved_registry().manifest_digest(),
+                registry_epoch: admitted.resolved_registry().epoch(),
+                profile_bundle_digest: admitted.admission().frozen_bindings().profile_bundle_digest,
+            },
+            solver: input.solver,
+            inventory_binding_digest: input.inventory_binding_digest,
+            bond_policy_hash: input.bond_policy_hash,
+            bond_asset_binding_digest: input.bond_asset_binding_digest,
+            required_collateral: input.required_collateral,
+            status_max_lifetime_seconds: input.status_max_lifetime_seconds,
+            pre_f6_limits: input.pre_f6_limits,
+            supplied_registry_roots: admitted.registry_authorities().clone(),
+            bond_authorities: input.bond_authorities.clone(),
+            status_authorities: input.status_authorities.clone(),
+            reserved_relay_keys: admitted
+                .roster_bundle()
+                .legs()
+                .iter()
+                .flat_map(|leg| leg.members.iter().map(|member| member.xonly_key))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            reserved_participant_keys: input.reserved_participant_keys.clone(),
+            reserved_chain_keys: admitted
+                .registry_authorities()
+                .xonly_keys()
+                .iter()
+                .chain(admitted.time_policy_authorities().xonly_keys())
+                .chain(admitted.time_evidence_authorities().xonly_keys())
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            signers: std::array::from_fn(|position| {
+                input.signers[position]
+                    .iter()
+                    .map(|signer| PublicF6SignerEndpointV23 {
+                        independent_authority_id: signer.independent_authority_id,
+                        signer_index: signer.signer_index,
+                        signer_public_key: signer.signer_public_key,
+                        endpoint_uid: signer.endpoint_uid,
+                        endpoint: signer.endpoint.clone(),
+                    })
+                    .collect()
+            }),
+            claim_profile,
+        },
         admitted.verification_context(),
     )?;
-    signatures.finish()?;
-    Ok(bytes)
-}
-
-fn append_sized(bytes: &mut Vec<u8>, value: &[u8], maximum: usize) -> Result<()> {
-    if value.is_empty() || value.len() > maximum {
-        return Err("native F6 bounded field".into());
-    }
-    bytes.extend_from_slice(&u16::try_from(value.len())?.to_be_bytes());
-    bytes.extend_from_slice(value);
-    Ok(())
+    let signatures = sign(prepared.signing_digest())?;
+    Ok(prepared.finalize(&signatures, admitted.verification_context())?)
 }
 
 /// Only a fully checked export can be handed to the process runner. No Clone

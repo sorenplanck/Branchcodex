@@ -133,7 +133,7 @@ pub(super) fn run(
             runtime_bounds.external_call_timeout_ms,
         )
         .map_err(|_| ProductionRunErrorV1::DomNodeAuthority)?;
-    let selected_services = crate::production_route_services::load_selected_services_v8(
+    let selected_services = crate::production_route_services::load_selected_services_v11(
         bootstrap.layout().state_dir(),
         &inputs,
         runtime_bounds.external_call_timeout_ms,
@@ -446,6 +446,7 @@ pub(super) fn run(
     let f6_route = ProductionF6AuthenticatedRouteContextV7::from_authenticated(&inputs);
     let composition_owner = inputs.composition_owner();
     let route_id = inputs.admission().route_id();
+    let funding_window_v23 = crate::production_timer::ProductionFundingWindowV23::new(route_id);
     let composition_digest = inputs.composition().binding_digest();
     let dom_chain_id = inputs.composition().upstream().dom_leg.chain_id;
 
@@ -757,6 +758,46 @@ pub(super) fn run(
     let deadline_timer =
         ProductionDeadlineTimerAuthorityV1::from_composition(route_id, inputs.composition())
             .map_err(|_| ProductionRunErrorV1::TimerAuthority)?;
+    let height_deadlines_v23 =
+        crate::production_timer::ProductionHeightDeadlineAuthorityV23::from_composition(
+            route_id,
+            inputs.composition(),
+            inputs.admission().frozen_bindings().clone(),
+        )
+        .map_err(|_| ProductionRunErrorV1::TimerAuthority)?;
+    let mut xmr_deadline_sources_v23 = Vec::new();
+    for (position, selected_leg) in selected.iter().enumerate() {
+        let (deployment, urls) = match selected_leg {
+            SelectedLegV11::Monero {
+                deployment,
+                funding_daemon_urls_v22,
+                ..
+            }
+            | SelectedLegV11::MoneroEnrollment {
+                deployment,
+                funding_daemon_urls_v22,
+                ..
+            } => (deployment, funding_daemon_urls_v22),
+            _ => continue,
+        };
+        let leg = if position == 0 {
+            LegIdV1::Upstream
+        } else {
+            LegIdV1::Downstream
+        };
+        let session = inputs
+            .monero_session(leg)
+            .ok_or(ProductionRunErrorV1::Inputs)?;
+        xmr_deadline_sources_v23.push(
+            crate::production_timer::ProductionXmrDeadlineSourceV23::new(
+                leg,
+                deployment.clone(),
+                session.profile().clone(),
+                urls.clone(),
+            )
+            .map_err(|_| ProductionRunErrorV1::TimerAuthority)?,
+        );
+    }
     let refund_stage_before_begin = provisioning
         .stage_state(ProductionProvisioningStageV1::RefundArmingAuthority)
         .map_err(|_| ProductionRunErrorV1::Provisioning)?;
@@ -993,7 +1034,7 @@ pub(super) fn run(
             runtime_bounds.actuator_lease_ms,
         )
         .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?;
-    let dom_child_composition = crate::production_child_dom::compose_production_dom_child_port_v12(
+    let dom_child_composition = crate::production_child_dom::compose_production_dom_child_port_v23(
         dom_actuator_store,
         ProductionDomChildBindingsV1 {
             sessions: [
@@ -1019,6 +1060,7 @@ pub(super) fn run(
             materialization_scope: dom_materialization_scope,
         },
         runtime_bounds.actuator_lease_ms,
+        funding_window_v23.clone(),
     )
     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
     let (dom_child, dom_public_secret_consumers, dom_f7_scanner) = dom_child_composition.split();
@@ -1043,6 +1085,7 @@ pub(super) fn run(
         &mut relay_stage12_owner,
         &dom_f7_scanner,
         &mut xmr_recovery_pumps_v22,
+        &funding_window_v23,
     )?;
     let downstream_child = downstream_selected.into_child(
         &inputs,
@@ -1058,6 +1101,7 @@ pub(super) fn run(
         &mut relay_stage12_owner,
         &dom_f7_scanner,
         &mut xmr_recovery_pumps_v22,
+        &funding_window_v23,
     )?;
     let child_router = compose_materializing_route_children_v7(
         &inputs,
@@ -1191,7 +1235,7 @@ pub(super) fn run(
         bridge_config,
         plan_source,
         plan_persistence,
-        child_runtime_handle,
+        funding_window_v23.guard(child_runtime_handle),
     );
 
     // ------------------------------------------------------------------
@@ -1215,7 +1259,7 @@ pub(super) fn run(
         per_queue_batch_limit,
     )
     .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
-    let supervisor = RouteSupervisorV1::acquire_production_route_store(
+    let mut supervisor = RouteSupervisorV1::acquire_production_route_store(
         route_store,
         route_id,
         pins.process_owner_id,
@@ -1223,13 +1267,18 @@ pub(super) fn run(
         SystemClockV1,
     )
     .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
+    // Exact composed Unix deadlines were previously only admitted, never
+    // scheduled. Stable identities preserve the original timers on restart.
+    deadline_timer
+        .schedule_bound_deadlines(&mut supervisor)
+        .map_err(|_| ProductionRunErrorV1::TimerAuthority)?;
 
     // ------------------------------------------------------------------
     // Stages 27-29 — the exact authority set and the concrete route runtime.
     // ------------------------------------------------------------------
     let operational = RouteRuntimeOperationalAuthoritiesV1 {
         refund: refund_arming_authority,
-        action: settlement.action,
+        action: funding_window_v23.guard(settlement.action),
         observer: settlement.observer,
         runner: ProductionExternalCustodyOnlyRunnerV1,
     };
@@ -1260,8 +1309,220 @@ pub(super) fn run(
     // Physical SOL/XMR ownership remains alive until after the router drops;
     // the same per-position epochs fence every retained transaction mutation.
     let _retained_actuator_guards = (upstream_guard, downstream_guard);
+    // Refresh before work which can create funding, not only before recovery
+    // pumps (which may consume the entire previous observation's lifetime).
+    // The shared gate independently rechecks expiry at authorization/dispatch.
+    let mut retry_height_observation_v23: bool;
+    macro_rules! refresh_funding_window_v23 {
+        () => {
+            if retry_height_observation_v23 && !funding_window_v23.available() {
+                funding_window_v23.close();
+                let observation_started = std::time::Instant::now();
+                let mut all_before_deadline = true;
+                let observation_bound = if xmr_deadline_sources_v23.is_empty() {
+                    external_call_bound
+                } else {
+                    external_call_bound.max(Duration::from_secs(60))
+                };
+                route_runtime
+                    .prepare_bounded_external_block(observation_bound)
+                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                actuator_heartbeat
+                    .renew()
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                for observed in height_deadlines_v23.observe_selected_v23(
+                    &dom_f7_scanner,
+                    external_call_bound,
+                    &xmr_deadline_sources_v23,
+                ) {
+                    match observed {
+                        Ok(deadlines) => {
+                            all_before_deadline &= deadlines.is_empty();
+                            for deadline in deadlines {
+                                route_runtime
+                                    .record_height_deadline_recovery_v23(deadline)
+                                    .map_err(|_| ProductionRunErrorV1::TimerAuthority)?;
+                            }
+                        }
+                        Err(crate::supervisor::AuthorityRefusalV1::Unavailable) => {
+                            all_before_deadline = false;
+                        }
+                        Err(_) => return Err(ProductionRunErrorV1::TimerAuthority),
+                    }
+                }
+                if all_before_deadline {
+                    funding_window_v23.observed_all_before_deadline(observation_started);
+                }
+                // A failed/too-slow observation closes fresh funding for this
+                // round. Do not spend another full RPC budget at each signing
+                // seam and delay recovery. The next round retries naturally.
+                retry_height_observation_v23 = funding_window_v23.available();
+            }
+        };
+    }
+    macro_rules! drain_terminal_refund_v24 {
+        ($snapshot:expr) => {{
+            use crate::production_composite_loop::{
+                TerminalRefundDrainBudgetV24, TerminalRefundDrainProgressV24,
+            };
+            use crate::production_xmr_remote_sweep_v23::RefundPublicationProgressV24;
+            let snapshot = $snapshot;
+            // Terminal serving has no path back to funding or recovery BUILD.
+            // Only LOAD/proof verification and the existing public transcript
+            // may advance; economic/Relay expiry is never rewritten here.
+            funding_window_v23.close();
+            let mut budget = TerminalRefundDrainBudgetV24::new(std::time::Instant::now())
+                .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+            let mut progress = [TerminalRefundDrainProgressV24::default(); 2];
+            let relay_bound = relay_loop.terminal_refund_relay_bound_v24();
+            'drain: while budget.next_round(std::time::Instant::now()) {
+                let mut outstanding = false;
+                for pump in &mut xmr_recovery_pumps_v22 {
+                    let Some(leg) = pump.terminal_refund_leg_v24(&snapshot) else {
+                        continue;
+                    };
+                    let index = match leg {
+                        LegIdV1::Upstream => 0,
+                        LegIdV1::Downstream => 1,
+                    };
+                    if progress[index].complete() {
+                        continue;
+                    }
+                    outstanding = true;
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+                        || !budget.permits(std::time::Instant::now(), relay_bound)
+                    {
+                        break 'drain;
+                    }
+                    route_runtime
+                        .prepare_bounded_external_block(relay_bound)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    actuator_heartbeat
+                        .renew()
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    // Receive the real 0x19 BEFORE the publisher, then flush
+                    // the exact resulting 0x1a AFTER it in this same round.
+                    let incoming_flushed = relay_loop
+                        .step_terminal_refund_v24(leg)
+                        .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+                    progress[index].observe_flush(incoming_flushed);
+                    if progress[index].complete() {
+                        route_runtime
+                            .prepare_bounded_external_block(Duration::from_millis(1))
+                            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        actuator_heartbeat
+                            .renew()
+                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                        continue;
+                    }
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+                        || !budget.permits(std::time::Instant::now(), Duration::from_millis(1))
+                    {
+                        break 'drain;
+                    }
+                    if progress[index].needs_publication() {
+                        let call_bound = Duration::from_secs(60);
+                        route_runtime
+                            .prepare_bounded_external_block(call_bound)
+                            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        actuator_heartbeat
+                            .renew()
+                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                        let call_deadline = budget.deadline().min(
+                            std::time::Instant::now()
+                                .checked_add(call_bound)
+                                .ok_or(ProductionRunErrorV1::Configuration)?,
+                        );
+                        let publication = match pump
+                            .tick_remote_refund_bounded_v24(&snapshot, call_deadline)
+                        {
+                            Ok(progress) => progress,
+                            Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {
+                                RefundPublicationProgressV24::Waiting
+                            }
+                            Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                        };
+                        if matches!(
+                            publication,
+                            RefundPublicationProgressV24::Staged
+                                | RefundPublicationProgressV24::Complete
+                        ) {
+                            progress[index].publication_staged();
+                        }
+                    }
+                    // Recheck the retained lease after external observation;
+                    // a stale writer must not send a newly staged response.
+                    route_runtime
+                        .prepare_bounded_external_block(relay_bound)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    actuator_heartbeat
+                        .renew()
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+                        || !budget.permits(std::time::Instant::now(), relay_bound)
+                    {
+                        break 'drain;
+                    }
+                    let flushed = relay_loop
+                        .step_terminal_refund_v24(leg)
+                        .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+                    route_runtime
+                        .prepare_bounded_external_block(Duration::from_millis(1))
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    actuator_heartbeat
+                        .renew()
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    progress[index].observe_flush(flushed);
+                }
+                if !outstanding {
+                    break;
+                }
+                // Finite retry, never a service awaiting a future peer. Budget
+                // exhaustion keeps every original pending byte for reopen.
+                let backoff = relay_backoff.min(Duration::from_millis(100));
+                if !budget.permits(std::time::Instant::now(), backoff) {
+                    break;
+                }
+                crate::RouteRunControlV1::wait(&mut _run_control, backoff)
+                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+            }
+        }};
+    }
     loop {
+        let before_round = route_runtime
+            .snapshot()
+            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+        if xmr_recovery_pumps_v22
+            .iter()
+            .any(|pump| pump.terminal_refund_leg_v24(&before_round).is_some())
+        {
+            // Reopen of an already-terminal refund must not run the normal
+            // bootstrap/F7/compensation pumps even once before public serving.
+            drain_terminal_refund_v24!(before_round);
+            break;
+        }
+        retry_height_observation_v23 = true;
+        refresh_funding_window_v23!();
         for pump in &mut xmr_recovery_pumps_v22 {
+            // The responder reads original refund effects and existing local
+            // bytes even after route dispatch has moved past materialization.
+            // No peer response is a prerequisite for the funder's own refund.
+            let snapshot = route_runtime
+                .snapshot()
+                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+            route_runtime
+                .prepare_bounded_external_block(std::time::Duration::from_secs(60))
+                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+            actuator_heartbeat
+                .renew()
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            match pump.tick_remote_refund_v24(&snapshot) {
+                Ok(()) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
+                Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+            }
             // Separate funding observation and execution ticks preserve the
             // one-minute freshness bound without a second sidecar owner.
             route_runtime
@@ -1289,6 +1550,7 @@ pub(super) fn run(
             (LegIdV1::Upstream, upstream_dom_binding),
             (LegIdV1::Downstream, downstream_dom_binding),
         ] {
+            refresh_funding_window_v23!();
             actuator_heartbeat
                 .renew()
                 .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1296,6 +1558,7 @@ pub(super) fn run(
                 leg,
                 binding,
                 &dom_f7_scanner,
+                &funding_window_v23,
                 trusted_now_millis_v1()? / 1_000,
             ) {
                 Ok(()) => {}
@@ -1362,6 +1625,7 @@ pub(super) fn run(
                 Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
             }
         }
+        refresh_funding_window_v23!();
         match run_production_composite_runtime_bounded_v1(
             &mut relay_loop,
             &mut route_runtime,
@@ -1373,8 +1637,14 @@ pub(super) fn run(
         )
         .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
         {
-            ProductionCompositeRuntimeExitV1::Terminal { .. }
-            | ProductionCompositeRuntimeExitV1::Shutdown { .. } => break,
+            ProductionCompositeRuntimeExitV1::Terminal { .. } => {
+                let terminal = route_runtime
+                    .snapshot()
+                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                drain_terminal_refund_v24!(terminal);
+                break;
+            }
+            ProductionCompositeRuntimeExitV1::Shutdown { .. } => break,
             ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { .. } => {}
         }
         if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
@@ -1506,6 +1776,15 @@ fn bind_relay_network_v11(
         .relay_database_id;
     let network = load_production_relay_network_config_v1(bootstrap.layout().state_dir())
         .map_err(|_| ProductionRunErrorV1::RelayNetworkConfiguration)?;
+    if network.shared_peer_v23()
+        != bootstrap
+            .config()
+            .universal_v11()
+            .ok_or(ProductionRunErrorV1::Configuration)?
+            .shared_relay_peer_v23
+    {
+        return Err(ProductionRunErrorV1::RelayNetworkConfiguration);
+    }
     let upstream =
         RelayDatabaseIdV1::new(peers[0]).map_err(|_| ProductionRunErrorV1::Configuration)?;
     let downstream =
@@ -2584,6 +2863,7 @@ impl SelectedLegV11 {
         xmr_pumps_v22: &mut Vec<
             crate::production_xmr_recovery_pump_v22::ProductionXmrRecoveryPumpV22,
         >,
+        funding_window_v23: &crate::production_timer::ProductionFundingWindowV23,
     ) -> Result<ProductionCounterpartyChildInputV7<'a>, ProductionRunErrorV1> {
         let pins = bootstrap.config().pins();
         let bounds = bootstrap.config().bounds();
@@ -2854,50 +3134,46 @@ impl SelectedLegV11 {
                     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
                 let remote_pins =
                     xmr_remote_claim_pins_v23(inputs, role_plan, leg, &deployment, &setup)?;
-                let remote_expiry = settlement.counterparty_leg.deadline;
-                let sweep: Box<dyn crate::production_child_xmr::ScopedXmrSweepAuthorityV1> =
-                    if local_xmr_participant == settlement.counterparty_leg.beneficiary.0 {
-                        let responder = relay
-                            .leg_mut(leg)
-                            .contracts_mut()
-                            .xmr_remote_responder_authority_v23(&remote_pins, remote_expiry)
-                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                        Box::new(
-                            crate::production_xmr_remote_sweep_v23::RemoteServingXmrSweepAuthorityV23::new(
-                                sweep,
-                                remote_pins,
-                                setup.clone(),
-                                responder,
-                                observation.clone(),
-                            )
-                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
-                        )
-                    } else if local_xmr_participant == settlement.counterparty_leg.refund_to.0 {
-                        let transport = relay
-                            .leg_mut(leg)
-                            .contracts_mut()
-                            .xmr_remote_transport_authority_v23(&remote_pins, remote_expiry)
-                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                        let remote = crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimClientV23::new(
-                            remote_pins,
-                            setup.clone(),
-                            transport,
-                            observation.clone(),
-                        )
-                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                        Box::new(
-                            crate::production_xmr_remote_sweep_v23::RemoteClaimingXmrSweepAuthorityV23::new(
-                                Box::new(sweep),
-                                remote,
-                            ),
-                        )
-                    } else {
-                        return Err(ProductionRunErrorV1::SettlementChildAuthority);
-                    };
+                use crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundSourceV23;
+                let source = match (&recovery, &recovery_deferred) {
+                    (Some(driver), None) => {
+                        ProductionXmrRemoteRefundSourceV23::Attached(Rc::clone(driver))
+                    }
+                    (None, Some(slot)) => {
+                        ProductionXmrRemoteRefundSourceV23::Deferred(Rc::clone(slot))
+                    }
+                    _ => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                };
+                let actuator = Rc::new(actuator);
+                let (requester, responder) = relay
+                    .leg_mut(leg)
+                    .contracts_mut()
+                    .xmr_remote_action_pair_v24(&remote_pins, settlement)
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                let (sweep, refund_responder) =
+                    crate::production_xmr_remote_sweep_v23::assemble_native_xmr_action_faces_v24(
+                        sweep,
+                        remote_pins,
+                        setup.clone(),
+                        source,
+                        Rc::clone(&actuator),
+                        requester,
+                        responder,
+                        observation.clone(),
+                        local_xmr_participant == settlement.counterparty_leg.beneficiary.0,
+                    )
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                let pump = match refund_responder {
+                    Some(responder) => pump
+                        .with_refund_responder_v24(responder)
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
+                    None => pump,
+                };
                 xmr_pumps_v22.push(pump);
                 Ok(ProductionCounterpartyChildInputV7::Monero(Box::new(
                     crate::production_materializing_children::ProductionXmrChildInputV7 {
                         actuator,
+                        funding_window_v23: funding_window_v23.clone(),
                         broadcast,
                         observation,
                         deployment,
@@ -2991,50 +3267,37 @@ impl SelectedLegV11 {
                     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
                 let remote_pins =
                     xmr_remote_claim_pins_v23(inputs, role_plan, leg, &deployment, &setup)?;
-                let remote_expiry = settlement.counterparty_leg.deadline;
-                let sweep: Box<dyn crate::production_child_xmr::ScopedXmrSweepAuthorityV1> =
-                    if local_xmr_participant == settlement.counterparty_leg.beneficiary.0 {
-                        let responder = relay
-                            .leg_mut(leg)
-                            .contracts_mut()
-                            .xmr_remote_responder_authority_v23(&remote_pins, remote_expiry)
-                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                        Box::new(
-                            crate::production_xmr_remote_sweep_v23::RemoteServingXmrSweepAuthorityV23::new(
-                                sweep,
-                                remote_pins,
-                                setup.clone(),
-                                responder,
-                                observation.clone(),
-                            )
-                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
-                        )
-                    } else if local_xmr_participant == settlement.counterparty_leg.refund_to.0 {
-                        let transport = relay
-                            .leg_mut(leg)
-                            .contracts_mut()
-                            .xmr_remote_transport_authority_v23(&remote_pins, remote_expiry)
-                            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                        let remote = crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteClaimClientV23::new(
-                            remote_pins,
-                            setup.clone(),
-                            transport,
-                            observation.clone(),
-                        )
-                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                        Box::new(
-                            crate::production_xmr_remote_sweep_v23::RemoteClaimingXmrSweepAuthorityV23::new(
-                                Box::new(sweep),
-                                remote,
-                            ),
-                        )
-                    } else {
-                        return Err(ProductionRunErrorV1::SettlementChildAuthority);
-                    };
+                let source = crate::production_xmr_remote_sweep_v23::ProductionXmrRemoteRefundSourceV23::Deferred(Rc::clone(&deferred));
+                let actuator = Rc::new(actuator);
+                let (requester, responder) = relay
+                    .leg_mut(leg)
+                    .contracts_mut()
+                    .xmr_remote_action_pair_v24(&remote_pins, settlement)
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                let (sweep, refund_responder) =
+                    crate::production_xmr_remote_sweep_v23::assemble_native_xmr_action_faces_v24(
+                        sweep,
+                        remote_pins,
+                        setup.clone(),
+                        source,
+                        Rc::clone(&actuator),
+                        requester,
+                        responder,
+                        observation.clone(),
+                        local_xmr_participant == settlement.counterparty_leg.beneficiary.0,
+                    )
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                let pump = match refund_responder {
+                    Some(responder) => pump
+                        .with_refund_responder_v24(responder)
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
+                    None => pump,
+                };
                 xmr_pumps_v22.push(pump);
                 Ok(ProductionCounterpartyChildInputV7::Monero(Box::new(
                     crate::production_materializing_children::ProductionXmrChildInputV7 {
                         actuator,
+                        funding_window_v23: funding_window_v23.clone(),
                         broadcast,
                         observation,
                         deployment,

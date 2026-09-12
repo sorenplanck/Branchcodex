@@ -21,6 +21,16 @@ use route_executor::{
 use crate::supervisor::authority_seal;
 use crate::supervisor::{AuthorityRefusalV1, TimerAuthority, TimerDispatchV1};
 
+#[path = "production_funding_window_v23.rs"]
+mod funding_window_v23;
+#[path = "production_height_timer_v23.rs"]
+mod height_v23;
+pub(crate) use funding_window_v23::ProductionFundingWindowV23;
+pub(crate) use height_v23::{
+    ProductionDeadlineRecoveryV23, ProductionHeightDeadlineAuthorityV23,
+    ProductionXmrDeadlineSourceV23,
+};
+
 const ZERO_DIGEST: Digest32 = [0; 32];
 const DEADLINE_REASON_DOMAIN_V1: &[u8] = b"DOM-INTEROPD/DEADLINE-RECOVERY/V1\0";
 const DEADLINE_CONTEXT_DOMAIN_V2: &[u8] = b"DOM-INTEROPD/AUTHENTICATED-DEADLINE-CONTEXT/V2\0";
@@ -105,7 +115,7 @@ pub(crate) fn production_deadline_bindings_v2(
             deadline_unix_ms,
         )?);
     }
-    if bindings.is_empty() {
+    if bindings.is_empty() && !height_v23::composition_has_height_deadline(composition) {
         return Err(AuthorityRefusalV1::Refused);
     }
     Ok(bindings)
@@ -167,10 +177,44 @@ impl ProductionDeadlineTimerAuthorityV1 {
         route_id: RouteIdV1,
         composition: &ComposedBindingV2,
     ) -> Result<Self, AuthorityRefusalV1> {
-        Self::new(
-            route_id,
-            production_deadline_bindings_v2(route_id, composition)?,
-        )
+        let bindings = production_deadline_bindings_v2(route_id, composition)?;
+        if bindings.is_empty() {
+            // An authenticated height-only route has no Unix wakeup. Its
+            // independent native-height consumer must be wired by production.
+            return Ok(Self {
+                route_id,
+                deadlines: BTreeMap::new(),
+            });
+        }
+        Self::new(route_id, bindings)
+    }
+
+    /// Actually install the exact authenticated wall-clock wakeups. Stable
+    /// event identities make takeover/reopen reuse the original durable row.
+    pub(crate) fn schedule_bound_deadlines<C: crate::supervisor::Clock>(
+        &self,
+        supervisor: &mut crate::supervisor::RouteSupervisorV1<C>,
+    ) -> Result<(), crate::supervisor::RouteSupervisorErrorV1> {
+        use crate::supervisor::RouteSupervisorErrorV1 as Error;
+        let snapshot = supervisor.snapshot()?;
+        if snapshot.route_id != self.route_id {
+            return Err(Error::AdmissionScopeMismatch);
+        }
+        if snapshot.aborted_unfunded
+            || (snapshot.coordination == route_executor::CoordinationPhaseV1::Terminal
+                && !snapshot.has_open_funds())
+        {
+            return Ok(());
+        }
+        for (context, deadline) in &self.deadlines {
+            let event = height_v23::hash_parts(
+                b"DOM-INTEROPD/DEADLINE-SCHEDULE/V23\0",
+                &[&self.route_id, context, &deadline.to_be_bytes()],
+            )
+            .map_err(Error::TimerAuthority)?;
+            supervisor.schedule_timer(event, TimerKindV1::Deadline, *deadline, *context)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn new<I>(route_id: RouteIdV1, bindings: I) -> Result<Self, AuthorityRefusalV1>
@@ -360,7 +404,7 @@ mod tests {
         }
     }
 
-    fn authenticated_composition() -> (tempfile::TempDir, ComposedBindingV2) {
+    pub(super) fn authenticated_composition() -> (tempfile::TempDir, ComposedBindingV2) {
         let fixture = time_common::fixture();
         let directory = tempfile::TempDir::new().expect("owner directory");
         #[cfg(unix)]

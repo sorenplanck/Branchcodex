@@ -380,7 +380,11 @@ pub(super) fn custody_and_funding_for_claim(
             before.as_bytes(),
             signed.stores[actor].load_session(session)?.as_bytes()
         );
-        signed.stores[actor].begin_f7_funding_signing_v20(chain, session, context)?;
+        custody_stage(
+            actor,
+            "begin bounded funding signing",
+            signed.stores[actor].begin_f7_funding_signing_v20(chain, session, context),
+        )?;
         let authorized_head = signed.stores[actor].load_session(session)?;
         assert!(!signed.stores[actor].xmr_funding_window_open_v23(chain, session, closed)?);
         assert!(signed.stores[actor].xmr_funding_window_open_v23(chain, session, context)?);
@@ -402,9 +406,13 @@ pub(super) fn custody_and_funding_for_claim(
             .require_f7_funding_signing_window_v20(session, closed)
             .is_err());
         signed.stores[actor].require_f7_funding_signing_window_v20(session, context)?;
-        let share = signed.wallets[actor]
-            .1
-            .take_funding_share_v23(&signed.stores[actor])?;
+        let share = custody_stage(
+            actor,
+            "take the one-time native funding share",
+            signed.wallets[actor]
+                .1
+                .take_funding_share_v23(&signed.stores[actor]),
+        )?;
         assert!(signed.wallets[actor]
             .1
             .take_funding_share_v23(&signed.stores[actor])
@@ -430,10 +438,14 @@ pub(super) fn custody_and_funding_for_claim(
             &unlock,
         )
         .mount(Arc::new(root(actor)?), signed.budget.clone(), false);
-        let vault = provisioner.provision_funding_v23(
-            &signed.stores[actor],
-            signed.wallets[actor].0,
-            chain,
+        let vault = custody_stage(
+            actor,
+            "provision retained native funding vault",
+            provisioner.provision_funding_v23(
+                &signed.stores[actor],
+                signed.wallets[actor].0,
+                chain,
+            ),
         )?;
         assert_eq!(
             signed.stores[actor]
@@ -451,13 +463,18 @@ pub(super) fn custody_and_funding_for_claim(
             "Funding must own one separate native root"
         );
         funding_paths.push(created.into_iter().next().ok_or("missing Funding root")?);
-        signers.push(dom_actuator::participant_retained_vault_signer_v12(
-            vault,
-            Rc::clone(&signed.stores[actor]),
-            signed.wallets[actor].0,
-            chain,
-            share,
+        signers.push(custody_stage(
+            actor,
+            "bind retained native funding signer",
+            dom_actuator::participant_retained_vault_signer_v12(
+                vault,
+                Rc::clone(&signed.stores[actor]),
+                signed.wallets[actor].0,
+                chain,
+                share,
+            ),
         )?);
+        eprintln!("native funding actor={actor}: retained vault Ready and signer bound");
     }
     let mut messages = Vec::new();
     for position in 0..6 {

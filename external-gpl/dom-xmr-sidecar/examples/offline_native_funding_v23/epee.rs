@@ -6,8 +6,9 @@ use monero_epee::{Array, HEADER, Type, VERSION};
 
 const MAX_REQUEST: usize = 16_384;
 const MAX_OUTPUTS: usize = 128;
-const MAX_HEIGHTS: usize = 4096;
+const MAX_HEIGHTS: usize = 1_000_001;
 const MAX_RESPONSE: usize = 65_536;
+const MAX_DISTRIBUTION_RESPONSE: usize = 8 * 1024 * 1024;
 const MAX_BLOCKS: usize = 200;
 const MAX_BLOCK_RESPONSE: usize = 4 * 1024 * 1024;
 
@@ -398,6 +399,8 @@ pub(super) fn dispatch(path: &str, body: &[u8], ledger: &impl Ledger) -> Result<
     }
     let limit = if path == "/get_blocks.bin" {
         MAX_BLOCK_RESPONSE
+    } else if path == "/get_output_distribution.bin" {
+        MAX_DISTRIBUTION_RESPONSE
     } else {
         MAX_RESPONSE
     };

@@ -90,6 +90,38 @@ impl PreparedXmrRecoveryAttemptV12 {
 }
 
 impl XmrRecoveryCustodyV11 {
+    /// Read the first retained DOM-U observation checkpoint under this exact
+    /// native custody/graph. The returned public pair is historical audit
+    /// data, NEVER a fresh chain observation or permission to reveal U.
+    /// Production consumers must independently obtain the opaque, recent
+    /// canonical refund observation before publishing any public-share request.
+    pub fn read_refund_exit_checkpoint_v23(
+        &self,
+        authority: &VerifiedXmrRecoveryExecutionAuthorityV12,
+    ) -> Result<([u8; 32], [u8; 32])> {
+        self.revalidate()?;
+        authority
+            .require_custody(self)
+            .map_err(|_| XmrRecoveryCustodyErrorV11::Conflict)?;
+        let attempt = PreparedXmrRecoveryAttemptV12 {
+            scope: self.scope,
+            funding_tx_hash: authority.funding_tx_hash(),
+            operation: XmrRecoveryOperationV12::Refund,
+            transaction_hash: [0; 32],
+        };
+        let mut expected = record_bytes(&attempt, false);
+        expected[9] = 2;
+        let component = ValidatedComponent::registered(EXIT_NAME)?;
+        let bytes = self.root.read_bounded_file(&component, RECORD_LEN + 64)?;
+        let result = parse_refund_exit_checkpoint_v23(&bytes, &expected)?;
+        if self.scope.role == XmrRecoveryCustodyRoleV11::PrivateRefundOwner
+            && result.0 != self.recovery_transaction_hash_v12(XmrRecoveryOperationV12::Refund)?
+        {
+            return Err(XmrRecoveryCustodyErrorV11::Conflict);
+        }
+        Ok(result)
+    }
+
     /// Persist the first actual XMR funding observation separately from a send
     /// attempt. This is historical audit data, never fresh spend authority.
     /// A restart still requires a new exact quorum/view-key observation.
@@ -408,6 +440,67 @@ fn record_bytes(attempt: &PreparedXmrRecoveryAttemptV12, admitted: bool) -> Vec<
         out.extend_from_slice(&bytes);
     }
     out
+}
+
+fn parse_refund_exit_checkpoint_v23(bytes: &[u8], expected: &[u8]) -> Result<([u8; 32], [u8; 32])> {
+    if expected.len() != RECORD_LEN
+        || bytes.len() != RECORD_LEN + 64
+        || bytes[..RECORD_LEN - 32] != expected[..RECORD_LEN - 32]
+        || bytes[..8] != RECORD_MAGIC[..]
+        || bytes[8] != XmrRecoveryOperationV12::Refund.tag()
+        || bytes[9] != 2
+        || blake2b_256(&bytes[..RECORD_LEN + 32]).as_bytes() != &bytes[RECORD_LEN + 32..]
+    {
+        return Err(XmrRecoveryCustodyErrorV11::Conflict);
+    }
+    let transaction = bytes[RECORD_LEN - 32..RECORD_LEN]
+        .try_into()
+        .map_err(|_| XmrRecoveryCustodyErrorV11::Conflict)?;
+    let digest = bytes[RECORD_LEN..RECORD_LEN + 32]
+        .try_into()
+        .map_err(|_| XmrRecoveryCustodyErrorV11::Conflict)?;
+    if transaction == [0; 32] || digest == [0; 32] {
+        return Err(XmrRecoveryCustodyErrorV11::Conflict);
+    }
+    Ok((transaction, digest))
+}
+
+#[cfg(test)]
+mod refund_checkpoint_tests_v23 {
+    use super::*;
+
+    fn fixture() -> (Vec<u8>, Vec<u8>) {
+        let mut expected = vec![7; RECORD_LEN];
+        expected[..8].copy_from_slice(RECORD_MAGIC);
+        expected[8] = XmrRecoveryOperationV12::Refund.tag();
+        expected[9] = 2;
+        expected[RECORD_LEN - 32..].fill(0);
+        let mut bytes = expected.clone();
+        bytes[RECORD_LEN - 32..].fill(9);
+        bytes.extend_from_slice(&[11; 32]);
+        bytes.extend_from_slice(blake2b_256(&bytes).as_bytes());
+        (expected, bytes)
+    }
+
+    #[test]
+    fn checkpoint_reader_refuses_scope_class_digest_and_truncation() {
+        let (expected, bytes) = fixture();
+        assert_eq!(
+            parse_refund_exit_checkpoint_v23(&bytes, &expected).unwrap(),
+            ([9; 32], [11; 32])
+        );
+        for index in [0, 8, 9, 10, 42, 74, 106, 138, 170, RECORD_LEN] {
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
+            assert!(parse_refund_exit_checkpoint_v23(&changed, &expected).is_err());
+        }
+        for length in [0, 8, RECORD_LEN, bytes.len() - 1] {
+            assert!(parse_refund_exit_checkpoint_v23(&bytes[..length], &expected).is_err());
+        }
+        let mut other_scope = expected;
+        other_scope[106] ^= 1;
+        assert!(parse_refund_exit_checkpoint_v23(&bytes, &other_scope).is_err());
+    }
 }
 
 pub(super) fn publish_exact_record(

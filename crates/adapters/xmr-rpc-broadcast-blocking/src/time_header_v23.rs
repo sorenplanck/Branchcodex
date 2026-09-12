@@ -20,15 +20,14 @@ impl BlockingMoneroDaemonReaderV1 {
     /// untrusted, zero-identity and incomplete projections. The caller must
     /// link the sequence to the pinned genesis and apply the selected quorum.
     pub fn time_header_at_v23(&self, height: u64) -> Result<MoneroTimeHeaderV23, SpendPortError> {
-        let response = self
+        let request = self
             .client
             .post(format!("{}/json_rpc", self.base_url))
             .json(&serde_json::json!({
                 "jsonrpc":"2.0", "id":"0", "method":"get_block_header_by_height",
                 "params":{"height":height}
-            }))
-            .send()
-            .map_err(|_| SpendPortError::Retryable)?;
+            }));
+        let response = send_before_v24(&self.client, request, self.observation_deadline_v24)?;
         if !response.status().is_success() {
             return Err(SpendPortError::Retryable);
         }
@@ -66,6 +65,7 @@ impl BlockingMoneroDaemonReaderV1 {
         {
             return Err(SpendPortError::Rejected);
         }
+        require_before_v24(self.observation_deadline_v24)?;
         Ok(MoneroTimeHeaderV23 {
             height,
             hash,

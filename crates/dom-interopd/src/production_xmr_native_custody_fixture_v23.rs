@@ -23,6 +23,8 @@ mod claim_payout_v23;
 mod claim_sweep_v23;
 #[path = "production_xmr_native_refund_sweep_v23_tests.rs"]
 mod refund_sweep_v23;
+#[path = "production_xmr_native_refund_transport_v24_tests.rs"]
+mod refund_transport_v24;
 use claim_payout_v23::NativeClaimPayoutV23;
 #[path = "production_xmr_native_claim_extraction_v23_tests.rs"]
 mod claim_extraction_v23;
@@ -32,12 +34,11 @@ mod observation_v23;
 mod participant_export_v23;
 #[path = "production_xmr_native_route_initializer_v23_tests.rs"]
 mod route_initializer_v23;
+use crate::production_xmr_native_registry_fixture_v23 as registry_v23;
 pub(crate) use route_initializer_v23::{
     NativeXmrEnrolledFixtureV23, NativeXmrEnrollmentPlanV23, NativeXmrPlannedLegV23,
     NativeXmrRouteSecretsV23,
 };
-#[path = "production_xmr_native_registry_fixture_v23.rs"]
-mod registry_v23;
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -72,12 +73,13 @@ impl NativeXmrSecretsFixtureV23 {
 
     /// Freeze the distinct local payout wallet before starting either graph leg.
     pub(crate) fn with_claim_payout_v23(mut self) -> Result<Self> {
-        if self.profile.network != xmr_setup_profile::XmrNetwork::Stagenet {
-            return Err("offline payout requires Stagenet".into());
-        }
-        self.claim_payout_v23 = Some(NativeClaimPayoutV23::new(
+        // The caller selects the network before registry signing and both
+        // graphs; never transplant an address into an already-bound setup.
+        self.claim_payout_v23 = Some(NativeClaimPayoutV23::new_for_network_v23(
             self.funding_fee_cap_v23
                 .ok_or("freeze fee cap before payout")?,
+            0,
+            self.profile.network,
         )?);
         Ok(self)
     }
@@ -87,9 +89,6 @@ impl NativeXmrSecretsFixtureV23 {
         manifest: &mut deployment_registry::RegistryManifestV1,
         mut terms: [&mut SettlementTermsV1; 2],
     ) -> Result<()> {
-        if self.profile.network != xmr_setup_profile::XmrNetwork::Stagenet {
-            return Err("native registry fixture supports only ratified stagenet".into());
-        }
         if self.claim_payout_v23.is_some() {
             for terms in &mut terms {
                 terms.counterparty_leg.amount = 1_000_000_000;
@@ -100,7 +99,7 @@ impl NativeXmrSecretsFixtureV23 {
                 terms.fee_limit.counterparty_max = u128::from(cap);
             }
         }
-        registry_v23::configure(manifest, terms)?;
+        registry_v23::configure_network(manifest, terms, self.profile.network)?;
         if let Some(cap) = self.funding_fee_cap_v23 {
             for chain in &mut manifest.chains {
                 if let deployment_registry::ChainDeploymentV1::Monero(deployment) =

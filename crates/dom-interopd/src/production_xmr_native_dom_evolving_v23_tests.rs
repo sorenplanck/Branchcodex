@@ -8,6 +8,8 @@ pub(super) struct EvolvingDomV23 {
     public: Value,
     blocks: Vec<Value>,
     confirmations: u32,
+    hold_submissions: bool,
+    pending: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
 }
 impl EvolvingDomV23 {
     pub(super) fn new(
@@ -23,6 +25,8 @@ impl EvolvingDomV23 {
             public,
             blocks,
             confirmations,
+            hold_submissions: false,
+            pending: std::collections::BTreeMap::new(),
         }
     }
     pub(super) fn identity_json(&self) -> &Value {
@@ -30,6 +34,88 @@ impl EvolvingDomV23 {
     }
     pub(super) fn blocks(&self) -> &[Value] {
         &self.blocks
+    }
+
+    /// Scenario-owner control only, never reachable through the HTTP server.
+    pub(super) fn arm_submission_barrier(&mut self) -> Result<()> {
+        if self.hold_submissions || !self.pending.is_empty() {
+            return Err("local submission barrier already armed".into());
+        }
+        self.hold_submissions = true;
+        Ok(())
+    }
+
+    pub(super) fn pending_transactions(&self) -> Vec<([u8; 32], Vec<u8>)> {
+        self.pending
+            .iter()
+            .map(|(hash, bytes)| (*hash, bytes.clone()))
+            .collect()
+    }
+
+    pub(super) fn release_submissions(&mut self) -> Result<()> {
+        if !self.hold_submissions || self.pending.is_empty() {
+            return Err("local release requires retained unconfirmed submissions".into());
+        }
+        // Revalidate each exact transaction against the then-current UTXO set.
+        // A failure retains that transaction and all later ones for diagnosis.
+        while let Some((&hash, bytes)) = self.pending.first_key_value() {
+            let bytes = bytes.clone();
+            self.admit(&bytes)?;
+            self.pending.remove(&hash);
+        }
+        self.hold_submissions = false;
+        Ok(())
+    }
+
+    pub(super) fn advance_to_height(&mut self, target: u64) -> Result<()> {
+        let current = self.public["tip_height"].as_u64().ok_or("local tip")?;
+        if target < current || target >= 4096 || self.hold_submissions || !self.pending.is_empty() {
+            return Err(
+                "local recovery advance must be monotonic, bounded and after inclusion".into(),
+            );
+        }
+        while self.public["tip_height"].as_u64().ok_or("local tip")? < target {
+            self.append_empty()?;
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self, bytes: &[u8]) -> Result<Value> {
+        let hash = dom_scriptless_chain_adapter::canonical_transaction_hash_v1(bytes)?;
+        if !self.hold_submissions || self.ledger.contains_transaction(&hash) {
+            return self.admit(bytes);
+        }
+        let already_known = self.pending.contains_key(&hash);
+        if !already_known {
+            if self.pending.len() >= 4 {
+                return Err("local pending submission bound".into());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let prepared = self.ledger.prepare(bytes, now)?;
+            for retained in self.pending.values() {
+                let previous = dom_consensus::Transaction::from_bytes(retained)?;
+                if prepared.transaction().inputs.iter().any(|input| {
+                    previous
+                        .inputs
+                        .iter()
+                        .any(|other| other.commitment == input.commitment)
+                }) {
+                    return Err(
+                        "local pending input already reserved by another transaction".into(),
+                    );
+                }
+            }
+            self.pending.insert(hash, bytes.to_vec());
+        } else if self.pending.get(&hash).map(Vec::as_slice) != Some(bytes) {
+            return Err("local pending transaction hash collision".into());
+        }
+        Ok(
+            json!({"accepted":true,"relayed":false,"tx_hash":hex::encode(hash),
+            "state":"pending","already_known":already_known,"confirmed":false,
+            "warning":"controlled local pending ledger; not mined mainnet","error":null}),
+        )
     }
 
     fn append_empty(&mut self) -> Result<()> {
@@ -247,7 +333,7 @@ pub(super) fn submit_http_v23(
         ledger
             .lock()
             .map_err(|_| "local ledger poisoned")?
-            .admit(&bytes)
+            .submit(&bytes)
     })();
     let (status, value) = match result {
         Ok(value) => ("200 OK", value),

@@ -13,7 +13,7 @@ pub use xmr_bounded_v23::{
 use super::{
     ExternalFundingEvidenceV11, F7ExternalFamilyV11, F7FamilyAuthorityErrorV11 as Error,
     F7FundingIdV11, VerifiedDomXmrAnchorEvidenceV11, VerifiedEvmFundingV11,
-    VerifiedSolanaFundingV11,
+    VerifiedSolanaFundingV11, MAX_V11_EXTERNAL_ANCHOR_AGE,
 };
 use crate::verify_dom_funding_evidence_inner;
 use dom_final_claim_binding::FinalClaimRoleBindingV1;
@@ -97,9 +97,15 @@ impl VerifiedF7AnchorAuthorizationV12 {
     pub const fn evidence_digest(&self) -> &[u8; 32] {
         &self.evidence_digest
     }
+    /// Original process-local observation time of the oldest required chain
+    /// snapshot. Consumption may retain it, but must never reset its age.
+    /// This read-only timestamp cannot construct or authenticate an observation.
+    pub const fn observed_at(&self) -> Instant {
+        self.observed_at
+    }
     /// Require immediate consumption; a restart must query both chains again.
     pub fn require_recent(&self) -> Result<(), Error> {
-        if self.observed_at.elapsed() > Duration::from_secs(60) {
+        if self.observed_at.elapsed() > MAX_V11_EXTERNAL_ANCHOR_AGE {
             Err(Error::WindowClosed)
         } else {
             Ok(())
@@ -121,9 +127,20 @@ impl VerifiedF7AnchorAuthorizationV12 {
             xmr_setup_binding_hash: Some(*value.xmr().setup_binding_hash()),
             round_start_transcript_hash: *value.claim_round_start_transcript_hash(),
             evidence_digest: *value.evidence_digest(),
-            observed_at: Instant::now(),
+            // XMR is observed before DOM in the concrete verifier. Retaining
+            // this older instant bounds both snapshots; promotion is not a scan.
+            observed_at: retain_external_observation_origin(value.xmr().facts())?,
         })
     }
+}
+
+fn retain_external_observation_origin(
+    facts: &ExternalFundingEvidenceV11,
+) -> Result<Instant, Error> {
+    if facts.age() > MAX_V11_EXTERNAL_ANCHOR_AGE {
+        return Err(Error::WindowClosed);
+    }
+    Ok(facts.observed_at)
 }
 
 /// Verify the selected live EVM/Solana funding with the actual DOM scanner.
@@ -155,7 +172,7 @@ pub fn verify_f7_anchor_authorization_v12(
         || facts.terms_hash() != &terms.terms_hash().map_err(|_| Error::Binding)?
         || facts.chain_registry_id() != &terms.counterparty_leg.chain_id.0
         || facts.confirmations() < terms.counterparty_leg.finality.min_confirmations
-        || facts.age() > Duration::from_secs(60)
+        || facts.age() > MAX_V11_EXTERNAL_ANCHOR_AGE
     {
         return Err(Error::Binding);
     }
@@ -181,7 +198,7 @@ pub fn verify_f7_anchor_authorization_v12(
             .checked_add(safety)
             .ok_or(Error::Bounds)?
             >= deadline
-        || facts.age() > Duration::from_secs(60)
+        || facts.age() > MAX_V11_EXTERNAL_ANCHOR_AGE
     {
         return Err(Error::WindowClosed);
     }
@@ -212,7 +229,9 @@ pub fn verify_f7_anchor_authorization_v12(
         xmr_setup_binding_hash: None,
         round_start_transcript_hash,
         evidence_digest: digest.finalize().into(),
-        observed_at: Instant::now(),
+        // External evidence preceded the DOM scan. Never give those older
+        // external facts another full validity interval after promotion.
+        observed_at: retain_external_observation_origin(facts)?,
     })
 }
 
@@ -232,6 +251,48 @@ fn map_dom_v12(error: crate::F7AnchorAuthorityError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn promotion_preserves_external_origin_for_every_family_without_a_new_lifetime() {
+        for family in [
+            F7ExternalFamilyV11::Bitcoin,
+            F7ExternalFamilyV11::Evm,
+            F7ExternalFamilyV11::Solana,
+            F7ExternalFamilyV11::Monero,
+        ] {
+            let origin = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+            // These are private test facts, not a public authorization
+            // constructor. Bitcoin's real M.8 token remains a separate path.
+            let mut facts = ExternalFundingEvidenceV11 {
+                family,
+                settlement_id: [1; 32],
+                terms_hash: [2; 32],
+                chain_registry_id: [3; 32],
+                funding_id: if family == F7ExternalFamilyV11::Solana {
+                    F7FundingIdV11::SolanaSignature([4; 64])
+                } else {
+                    F7FundingIdV11::Hash32([4; 32])
+                },
+                block_hash: [5; 32],
+                position: 10,
+                observed_tip_hash: [6; 32],
+                observed_tip_position: 12,
+                confirmations: 3,
+                evidence_digest: [7; 32],
+                observed_at: origin,
+            };
+            assert_eq!(retain_external_observation_origin(&facts).unwrap(), origin);
+            // Repeated promotion is not re-observation, even in the same process.
+            assert_eq!(retain_external_observation_origin(&facts).unwrap(), origin);
+            facts.observed_at = Instant::now()
+                .checked_sub(MAX_V11_EXTERNAL_ANCHOR_AGE + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(
+                retain_external_observation_origin(&facts),
+                Err(Error::WindowClosed)
+            );
+        }
+    }
 
     #[test]
     fn universal_dom_absence_does_not_hide_substituted_or_invalid_funding() {

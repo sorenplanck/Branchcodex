@@ -19,6 +19,12 @@ use std::rc::Rc;
 mod xmr_enrollment_v23;
 pub use xmr_enrollment_v23::ProductionXmrEnrollmentBundleV23;
 
+#[path = "production_inputs/enrollment_context_v23.rs"]
+pub(crate) mod enrollment_context_v23;
+
+#[path = "production_inputs/planning_context_v23.rs"]
+pub(crate) mod planning_context_v23;
+
 use adapter_btc::roster::{BitcoinSignerRoleV1, ParticipantKeyRosterV1, ParticipantKeyV1};
 use blake2::{
     digest::{Update, VariableOutput},

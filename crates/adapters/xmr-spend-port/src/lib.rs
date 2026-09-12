@@ -46,6 +46,23 @@ pub trait SweepBuildPort: Send {
 
 /// Broadcasts already-persisted exact bytes without reconstruction.
 pub trait ExactBroadcastPort: Send {
+    /// Absolute submission deadline installed by a caller's existing authority.
+    /// This is a restriction, never an economic or broadcast authorization.
+    fn submission_deadline_v24(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// Submit under the original deadline, including preparatory RPCs and the
+    /// final POST. Unsupported legacy ports fail closed instead of ignoring it.
+    fn submit_exact_before_v24(
+        &mut self,
+        _tx_hash: [u8; 32],
+        _raw_tx: &[u8],
+        _deadline: std::time::Instant,
+    ) -> Result<BroadcastAcceptance, SpendPortError> {
+        Err(SpendPortError::Retryable)
+    }
+
     /// Submits exact bytes or reconciles an ambiguous prior submission.
     fn submit_exact(
         &mut self,
