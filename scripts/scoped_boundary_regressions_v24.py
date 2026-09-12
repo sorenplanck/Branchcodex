@@ -172,6 +172,7 @@ SELECTIONS = (
     selection("store-terminal-ack-handoff-reopen", "dom-interopd", "",
               "crates/dom-interopd/tests/relay_worker.rs", (
                   "store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence",),
+              test_filter="store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence",
               features=("production",), integration="relay_worker"),
     selection("relay-expiry-original-store-replay", "route-transport", "",
               "crates/route-transport/tests/expiry_recovery_characterization_v23.rs", (

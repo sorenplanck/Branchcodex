@@ -116,10 +116,21 @@ fn signature_json(secp: &SecpContext, report: &PreparedPublicF6ReportV23) -> Vec
         .unwrap()
         .try_into()
         .unwrap();
+    let signatures = (0u8..2)
+        .map(|i| {
+            serde_json::json!({
+                "signer_index": i,
+                "signature_hex": hex::encode(
+                    secp.sign_bip340(&[10 + i; 32], &digest, &[45; 32])
+                        .unwrap()
+                        .0
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::to_vec(&serde_json::json!({"schema":SIGNATURE_SCHEMA,
         "signing_digest_hex":report.signing_digest_hex,
-        "signatures":[0,1].map(|i| serde_json::json!({"signer_index":i,
-            "signature_hex":hex::encode(secp.sign_bip340(&[10+i;32],&digest,&[45;32]).unwrap().0)}))})).unwrap()
+        "signatures":signatures})).unwrap()
 }
 
 #[test]

@@ -163,6 +163,7 @@ impl ProductionXmrEnrolledResourcesV23 {
                 funding_terms_v22: self.terms,
                 funding_profile_v22: self.profile,
                 funding_quorum_v22: None,
+                local_refund_v24: None,
             },
             nullifiers: self.nullifiers,
             recovery,

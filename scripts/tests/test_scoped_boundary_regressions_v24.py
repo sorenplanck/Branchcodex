@@ -97,6 +97,18 @@ class ClosedBoundaryListTests(unittest.TestCase):
             source = runner.ROOT / "crates/adapters" / item["package"] / "src/lib.rs"
             self.assertNotRegex(source.read_text(), r"#\[(?:test|tokio::test)\]")
 
+    def test_store_handoff_selection_cannot_run_the_whole_relay_integration_suite(self):
+        identifier = "store-terminal-ack-handoff-reopen"
+        name = "store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence"
+        selection = runner.spec_for(identifier)
+        self.assertEqual(selection["required_tests"], [name])
+        self.assertEqual(selection["filter"], name)
+        self.assertEqual(runner.command(identifier), [
+            "cargo", "test", "--locked", "--profile", "crypto-test", "-p", "dom-interopd",
+            "--no-default-features", "--features", "production", "--test", "relay_worker",
+            name, "--", "--nocapture", "--test-threads=1", "--color", "never",
+        ])
+
 
 class BoundaryEvidenceTests(unittest.TestCase):
     def transcript(self, identifier):
@@ -117,6 +129,16 @@ class BoundaryEvidenceTests(unittest.TestCase):
                                 body.split("test result:")[0], body + body,
                                 body.replace(item["required_tests"][0], "unrelated::test")):
                     self.assertEqual(runner.evaluate_output(identifier, 0, invalid)["status"], "failed")
+
+    def test_store_handoff_evidence_rejects_unrelated_integration_tests(self):
+        identifier = "store-terminal-ack-handoff-reopen"
+        expected = self.transcript(identifier)
+        self.assertEqual(runner.evaluate_output(identifier, 0, expected)["status"], "passed")
+        entire_suite = expected.replace("running 1 tests", "running 2 tests").replace(
+            "test result: ok. 1 passed;",
+            "test prepared_operational_signing ... ok\ntest result: ok. 2 passed;",
+        )
+        self.assertEqual(runner.evaluate_output(identifier, 0, entire_suite)["status"], "failed")
 
     def test_failed_selection_continues_only_after_proven_cleanup(self):
         for cleaned in (False, True):
