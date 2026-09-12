@@ -7,6 +7,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Verify offline tool isolation and mandatory test dispatch
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      run: |
+        set -euo pipefail
+        python3 -m unittest discover -s scripts/tests -p test_install_sidecar_tools.py
+        python3 -m unittest discover -s scripts/tests -p test_hardening_dispatch_v8.py
     - name: Compile production library, CLI and integration targets
       shell: bash
       working-directory: ${{ inputs.dom-path }}
@@ -33,7 +40,10 @@ runs:
         XMR_TEST_WORKSPACE: ${{ github.workspace }}/.ci-eigenwallet
       run: |
         set -euo pipefail
-        python3 scripts/install-sidecar-into-eigenwallet.py "$XMR_TEST_WORKSPACE"
+        # Cargo resolves every workspace member, even with -p. The Tor/UI
+        # applications are not dependencies of these offline crypto tools.
+        # Keep the pinned SDK source, dependency declarations and lockfile.
+        python3 scripts/install-sidecar-into-eigenwallet.py "$XMR_TEST_WORKSPACE" --tools-only
     - name: Restore GPL crypto compilation, including prior failed test runs
       uses: Swatinem/rust-cache@v2
       with:

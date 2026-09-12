@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 EXPECTED_COMMIT = "0e17c7f7cd8f0657af176c8852aa4c9949586051"
 HERE = Path(__file__).resolve().parents[1]
 SOURCE = HERE / "external-gpl/dom-xmr-sidecar"
+TOOL_MEMBERS = ("monero-wallet-ng", "dom-xmr-sidecar", "xmr-key-image-proof", "xmr-raw-tx-verify")
 
 
 def fail(message: str) -> None:
@@ -57,9 +59,33 @@ def verify_commit(root: Path) -> None:
         )
 
 
+def restrict_to_offline_tools(root: Path) -> None:
+    """Select only real tool packages; retain SDK sources, dependencies and lock."""
+    for member in TOOL_MEMBERS:
+        if not (root / member / "Cargo.toml").is_file():
+            fail(f"offline tool package is missing: {member}")
+    cargo = root / "Cargo.toml"
+    original = cargo.read_text()
+    # The pinned root has a multiline workspace.members array. Refuse drift
+    # instead of producing an ambiguous manifest or modifying another table.
+    workspace = re.search(r"(?m)^\[workspace\]\s*$", original)
+    if workspace is None:
+        fail("pinned workspace table is missing")
+    tail = original[workspace.end():]
+    next_table = re.search(r"(?m)^\[", tail)
+    table_end = workspace.end() + (next_table.start() if next_table else len(tail))
+    table = original[workspace.end():table_end]
+    members = re.search(r"(?ms)^members\s*=\s*\[.*?^\]", table)
+    if members is None or re.search(r"(?m)^default-members\s*=", table):
+        fail("pinned workspace member layout changed")
+    replacement = "members = [\n" + "".join(f'  "{name}",\n' for name in TOOL_MEMBERS) + "]"
+    start, end = workspace.end() + members.start(), workspace.end() + members.end()
+    cargo.write_text(original[:start] + replacement + original[end:])
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        fail(f"usage: {sys.argv[0]} /path/to/eigenwallet-core")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--tools-only"):
+        fail(f"usage: {sys.argv[0]} /path/to/eigenwallet-core [--tools-only]")
     root = Path(sys.argv[1]).resolve()
     cargo = root / "Cargo.toml"
     if not cargo.is_file() or not (root / "monero-wallet-ng").is_dir():
@@ -82,6 +108,8 @@ def main() -> None:
     insert_member(cargo, "xmr-key-image-proof")
     shutil.copytree(HERE / "crates/adapters/xmr-raw-tx-verify", raw_destination)
     insert_member(cargo, "xmr-raw-tx-verify")
+    if len(sys.argv) == 3:
+        restrict_to_offline_tools(root)
     print(f"installed sidecar at {destination}")
     print("run once without --locked to add the local package, then rerun with --locked")
 

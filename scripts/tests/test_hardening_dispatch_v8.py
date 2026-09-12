@@ -13,6 +13,17 @@ import test_interop_hardening as runner
 
 
 class HardeningDispatchTests(unittest.TestCase):
+    def test_bitcoin_actuator_live_gate_enables_rpc_and_rejects_zero_tests(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/heavy-tests.yml").read_text()
+        step = workflow.split("- name: btc-actuator — Bitcoin Core regtest daemon suite", 1)[1].split("- name:", 1)[0]
+        self.assertIn("--features rpc-http --test bitcoin_core_regtest", step)
+        self.assertIn("exact_transaction_is_persisted_broadcast_and_finalized_by_real_core", step)
+        self.assertIn("-- --ignored --exact --nocapture --test-threads=1 --color never", step)
+        self.assertIn("set -euo pipefail", step)
+        self.assertIn("1 passed; 0 failed; 0 ignored;", step)
+        self.assertIn("grep -Eq", step)
+
     def test_real_bitcoin_fixtures_own_and_reap_rpc_only_processes(self):
         root = Path(__file__).resolve().parents[2]
         for name in ("composed_route_live.rs", "f7_bitcoin_regtest.rs"):

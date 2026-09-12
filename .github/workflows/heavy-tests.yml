@@ -242,7 +242,12 @@ jobs:
       # Owns its throwaway bitcoind; ignored only because it needs the
       # installed Bitcoin Core on PATH.
       - name: btc-actuator — Bitcoin Core regtest daemon suite
-        run: cargo test --locked -p btc-actuator --test bitcoin_core_regtest -- --ignored --nocapture --test-threads=1
+        run: |
+          set -euo pipefail
+          cargo test --locked -p btc-actuator --features rpc-http --test bitcoin_core_regtest \
+            exact_transaction_is_persisted_broadcast_and_finalized_by_real_core \
+            -- --ignored --exact --nocapture --test-threads=1 --color never 2>&1 | tee btc-actuator-regtest.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' btc-actuator-regtest.log
 
       # The composed route needs a live Anvil at :8547 (the test's default
       # COMPOSED_EVM_RPC); it spawns its own bitcoind. Bounded readiness
