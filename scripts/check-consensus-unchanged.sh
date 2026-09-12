@@ -4,7 +4,11 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-consensus_base=38dd70536f088a467f2b7175978c5a6ebb4e5bd4
+# Re-pinned 2026-09-12: the previous baseline (38dd70536f088a467f2b7175978c5a6ebb4e5bd4)
+# no longer exists after the repository history was squashed into a single
+# root commit; the frozen consensus surfaces are unchanged in content and the
+# freeze now anchors at that root.
+consensus_base=37d9da730b1a765671d2500fed940aeb2ecb5edd
 consensus_paths=(
   crates/dom-consensus
   crates/dom-core
