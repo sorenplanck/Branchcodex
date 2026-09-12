@@ -628,6 +628,12 @@ fn run_noncooperative_exit_v23(
             thread::sleep(Duration::from_millis(100));
         }
         let after = observers[boundary.survivor].replay_stopped()?;
+        // Native confirmation happened while the aggregate remained Committed.
+        // Prove the restarted writer entered the exit-only lane through its
+        // full durable journal, without relying on catching a polling instant.
+        // Advancing chain heights is not evidence of wall-clock F6 expiration.
+        observers[boundary.survivor]
+            .require_exit_only_reopen_stopped_v24(funded_offline.revision)?;
         if !exit_proven(&after, &boundary, expected)
             || (expected == RecoveryExitV23::XmrRefund
                 && retained_refund_without_peer.map(|(aggregate, _)| aggregate)

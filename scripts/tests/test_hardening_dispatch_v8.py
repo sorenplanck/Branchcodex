@@ -23,7 +23,7 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", step)
         self.assertIn("[1-9][0-9]* passed; 0 failed; 0 ignored;", step)
         self.assertNotIn("--no-run", step)
-        self.assertNotIn("if:", step)
+        self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
         self.assertNotIn("continue-on-error", step)
         observation = (root / "crates/dom-interopd/src/production_xmr_native_observation_v23_tests.rs").read_text()
         self.assertIn('mod peer_sidecar_v23;', observation)
@@ -48,7 +48,7 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/dom-xmr-boundary-evidence/", evidence)
         self.assertIn("test_scoped_boundary_regressions_v24.py", action)
 
-    def test_shared_regressions_run_once_per_push_not_on_every_heavy_runner(self):
+    def test_shared_regressions_have_one_owner_per_push_or_manual_campaign(self):
         root = Path(__file__).resolve().parents[2]
         action = (root / ".github/actions/xmr-test-tools/action.yml").read_text()
         self.assertRegex(
@@ -57,14 +57,30 @@ class HardeningDispatchTests(unittest.TestCase):
         )
         for name in (
             "Verify Funding and Claim reservation audit purposes",
+            "Verify public refund authentication and durable Ready recovery",
             "Verify scoped funding, custody and transport regressions",
+            "Verify custody paths and real offline helper startup",
             "Verify XMR recovery participant ordering",
             "Verify offline operational artifact producers",
         ):
             step = action.split(f"- name: {name}", 1)[1].split("- name:", 1)[0]
             self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
         heavy = (root / ".github/workflows/heavy-tests.yml").read_text()
-        self.assertEqual(heavy.count("run-once-regressions: 'false'"), 4)
+        self.assertEqual(heavy.count("run-once-regressions: 'false'"), 2)
+        self.assertEqual(
+            heavy.count(
+                "run-once-regressions: ${{ github.event_name == 'workflow_dispatch' "
+                "&& inputs.suite == 'interop-full' }}"
+            ),
+            1,
+        )
+        self.assertEqual(
+            heavy.count(
+                "run-once-regressions: ${{ github.event_name == 'workflow_dispatch' "
+                "&& (inputs.suite == 'all' || inputs.suite == 'dom-xmr-native') }}"
+            ),
+            1,
+        )
         interop = (root / ".github/workflows/interop-hardening.yml").read_text()
         self.assertIn("uses: ./.github/actions/xmr-test-tools", interop)
         self.assertNotIn("run-once-regressions: 'false'", interop)
@@ -79,10 +95,10 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn("-- --nocapture --test-threads=1 --color never", step)
         self.assertIn("[1-9][0-9]* passed; 0 failed; 0 ignored;", step)
         self.assertIn("set -euo pipefail", step)
+        self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
         self.assertNotIn("--no-run", step)
         self.assertNotIn("cache-hit", step)
         self.assertNotIn("continue-on-error", step)
-        self.assertNotIn("if:", step)
         self.assertIn("test_native_daemon_campaign_v24.py", action)
 
     def test_bitcoin_actuator_live_gate_enables_rpc_and_rejects_zero_tests(self):

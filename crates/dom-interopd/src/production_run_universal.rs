@@ -430,19 +430,39 @@ pub(super) fn run(
     .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
     let f6_solver = f6_bundle.solver();
     let native_xmr_inventory_max_age_seconds = f6_bundle.inventory_proof_max_age_seconds();
+    let historical_f6_recovery_v24 = if options.mode == ProductionRunModeV1::ReopenExisting {
+        let retained = inputs
+            .historical_f6_recovery_v24()
+            .map_err(|_| ProductionRunErrorV1::Inputs)?;
+        match retained {
+            Some(recovery) => Some(recovery),
+            None => SelectedLegV11::recover_native_committed_funding_v24(
+                &mut selected,
+                &inputs,
+                &coordinator,
+                bootstrap.layout().state_dir(),
+            )?,
+        }
+    } else {
+        None
+    };
     // This is the non-test production consumer of the durable XMR inventory
     // source. On the solver of the authenticated native XMR/XMR enrollment
     // profile, F6 cannot proceed when the descriptor, V4-backed Store row,
     // sidecar, raw quorum, finality or key-image absence disagree. Mixed
     // routes use the bound profile and do not consume this two-leg artifact.
     let (native_xmr_inventory_required, native_xmr_inventory) =
-        SelectedLegV11::observe_native_xmr_inventory_v23(
-            &mut selected,
-            &inputs,
-            bootstrap.layout().state_dir(),
-            f6_solver.0,
-            native_xmr_inventory_max_age_seconds,
-        )?;
+        if historical_f6_recovery_v24.is_some() {
+            (false, None)
+        } else {
+            SelectedLegV11::observe_native_xmr_inventory_v23(
+                &mut selected,
+                &inputs,
+                bootstrap.layout().state_dir(),
+                f6_solver.0,
+                native_xmr_inventory_max_age_seconds,
+            )?
+        };
     let f6_route = ProductionF6AuthenticatedRouteContextV7::from_authenticated(&inputs);
     let composition_owner = inputs.composition_owner();
     let route_id = inputs.admission().route_id();
@@ -602,6 +622,11 @@ pub(super) fn run(
             },
         })
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    if let Some(recovery) = &historical_f6_recovery_v24 {
+        f6_pair_factory = f6_pair_factory
+            .with_historical_recovery_v24(recovery.clone())
+            .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    }
     let f6_final_claim_plan = f6_pair_factory
         .take_final_claim_plan()
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
@@ -1267,6 +1292,11 @@ pub(super) fn run(
         SystemClockV1,
     )
     .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
+    if let Some(recovery) = &historical_f6_recovery_v24 {
+        recovery
+            .restrict_runtime(&mut supervisor)
+            .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
+    }
     // Exact composed Unix deadlines were previously only admitted, never
     // scheduled. Stable identities preserve the original timers on restart.
     deadline_timer
@@ -1315,7 +1345,9 @@ pub(super) fn run(
     let mut retry_height_observation_v23: bool;
     macro_rules! refresh_funding_window_v23 {
         () => {
-            if retry_height_observation_v23 && !funding_window_v23.available() {
+            if historical_f6_recovery_v24.is_some() {
+                funding_window_v23.close();
+            } else if retry_height_observation_v23 && !funding_window_v23.available() {
                 funding_window_v23.close();
                 let observation_started = std::time::Instant::now();
                 let mut all_before_deadline = true;
@@ -1831,8 +1863,12 @@ enum SelectedLegV11 {
         funding_daemon_urls_v22: Vec<String>,
         observation: crate::production_children::QuorumXmrObservationPortV1,
         deployment: deployment_registry::ResolvedMoneroDeploymentV1,
-        authority:
+        authority: Option<
             crate::production_universal_leg_authority::ProductionUniversalXmrEnrollmentAuthorityV23,
+        >,
+        local_participant_v24: [u8; 32],
+        opened_v24:
+            Option<crate::production_universal_leg_authority::ProductionOpenedXmrEnrollmentV23>,
         local_store: Zeroizing<[u8; 32]>,
         sidecar_auth: Zeroizing<[u8; 32]>,
     },
@@ -1844,6 +1880,70 @@ enum DecodedLegV11 {
 }
 
 impl SelectedLegV11 {
+    /// A pending aggregate can conceal a confirmed native child after a crash.
+    /// This path is selected only for authenticated economic recovery, never
+    /// as a catch-all fallback from fresh F6 or live inventory errors.
+    fn recover_native_committed_funding_v24(
+        selected: &mut [Self; 2],
+        inputs: &AuthenticatedProductionInputsV1,
+        coordinator: &settlement_coordinator::DurableSettlementCoordinatorV1,
+        state_dir: &Path,
+    ) -> Result<
+        Option<crate::production_inputs::f6_recovery_v24::HistoricalF6RecoveryV24>,
+        ProductionRunErrorV1,
+    > {
+        for (selected, leg) in selected
+            .iter_mut()
+            .zip([LegIdV1::Upstream, LegIdV1::Downstream])
+        {
+            let Self::MoneroEnrollment {
+                authority,
+                opened_v24,
+                local_store,
+                sidecar_auth,
+                deployment,
+                funding_daemon_urls_v22,
+                ..
+            } = selected
+            else {
+                continue;
+            };
+            let Some(candidate) = inputs
+                .historical_xmr_funding_candidate_v24(coordinator, leg)
+                .map_err(|_| ProductionRunErrorV1::Inputs)?
+            else {
+                continue;
+            };
+            if opened_v24.is_some() {
+                return Err(ProductionRunErrorV1::SettlementChildAuthority);
+            }
+            let authority = authority
+                .take()
+                .ok_or(ProductionRunErrorV1::SettlementChildAuthority)?;
+            let opened = authority
+                .open_enrolled_resources_v23(
+                    inputs,
+                    leg,
+                    state_dir,
+                    std::mem::replace(local_store, Zeroizing::new([0; 32])),
+                    std::mem::replace(sidecar_auth, Zeroizing::new([0; 32])),
+                )
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            let funding = opened
+                .enrolled
+                .observe_reopen_funding_v24(deployment, funding_daemon_urls_v22)
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            let recovery = candidate
+                .authenticate(inputs, coordinator, funding)
+                .map_err(|_| ProductionRunErrorV1::Inputs)?;
+            // No reopen or scalar copy at activation: transfer these same
+            // authenticated resources into the selected child below.
+            *opened_v24 = Some(opened);
+            return Ok(Some(recovery));
+        }
+        Ok(None)
+    }
+
     /// On the local solver, reconstruct the independent inventory source for
     /// the authenticated native XMR/XMR enrollment profile. Mixed routes use
     /// the bound profile and cannot carry this two-leg enrollment artifact.
@@ -1895,6 +1995,12 @@ impl SelectedLegV11 {
             ),
             _ => return Ok((false, None)),
         };
+        let upstream_authority = upstream_authority
+            .as_ref()
+            .ok_or(ProductionRunErrorV1::F6Authorities)?;
+        let downstream_authority = downstream_authority
+            .as_ref()
+            .ok_or(ProductionRunErrorV1::F6Authorities)?;
         if upstream_authority.local_participant_id() != downstream_authority.local_participant_id()
         {
             return Err(ProductionRunErrorV1::F6Authorities);
@@ -2170,7 +2276,9 @@ impl SelectedLegV11 {
                         .ok_or(ProductionRunErrorV1::ChainServices)?,
                     observation,
                     deployment,
-                    authority,
+                    local_participant_v24: authority.local_participant_id(),
+                    authority: Some(authority),
+                    opened_v24: None,
                     local_store,
                     sidecar_auth,
                 },
@@ -2191,7 +2299,10 @@ impl SelectedLegV11 {
             Self::Evm { signers, .. } => signers.local_participant_id,
             Self::Solana { signers, .. } => signers.local_participant_id(),
             Self::Monero { authority, .. } => authority.local_participant_id(),
-            Self::MoneroEnrollment { authority, .. } => authority.local_participant_id(),
+            Self::MoneroEnrollment {
+                local_participant_v24,
+                ..
+            } => *local_participant_v24,
             // The selected native Bitcoin participant was checked against
             // this same retained Relay/DOM identity during Stage 8.
             Self::Bitcoin { .. } => return Ok(()),
@@ -3197,12 +3308,14 @@ impl SelectedLegV11 {
                     observation,
                     deployment,
                     authority,
+                    local_participant_v24,
+                    opened_v24,
                     local_store,
                     sidecar_auth,
                 },
                 ExternalActuatorV11::Monero(actuator),
             ) => {
-                let local_xmr_participant = authority.local_participant_id();
+                let local_xmr_participant = local_participant_v24;
                 let setup = inputs
                     .monero_session(leg)
                     .ok_or(ProductionRunErrorV1::Inputs)?
@@ -3222,15 +3335,19 @@ impl SelectedLegV11 {
                     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
                 // Only the authenticated late binding enables activation. The
                 // immutable enrollment input remains unchanged.
-                let opened = authority
-                    .open_enrolled_resources_v23(
-                        inputs,
-                        leg,
-                        bootstrap.layout().state_dir(),
-                        local_store,
-                        sidecar_auth,
-                    )
-                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                let opened = match (authority, opened_v24) {
+                    (None, Some(opened)) => opened,
+                    (Some(authority), None) => authority
+                        .open_enrolled_resources_v23(
+                            inputs,
+                            leg,
+                            bootstrap.layout().state_dir(),
+                            local_store,
+                            sidecar_auth,
+                        )
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
+                    _ => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                };
                 let activated = relay
                     .activate_enrolled_xmr_resources_v23(leg, opened.enrolled)
                     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;

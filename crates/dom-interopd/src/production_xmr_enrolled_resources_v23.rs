@@ -28,6 +28,53 @@ pub(crate) struct ActivatedXmrResourcesV23 {
 }
 
 impl ProductionXmrEnrolledResourcesV23 {
+    /// Read the exact deposit before F6 reopening. This uses only authenticated
+    /// enrollment and its retained view material, not a graph/F6/F7 capability.
+    /// The same sidecar and encrypted Store are later moved into activation.
+    pub(crate) fn observe_reopen_funding_v24(
+        &self,
+        deployment: &deployment_registry::ResolvedMoneroDeploymentV1,
+        urls: &[String],
+    ) -> Result<f7_anchor_authority::families_v11::VerifiedXmrFundingV11, Refusal> {
+        use f7_anchor_authority::families_v11::{
+            verify_xmr_funding_v11, F7FamilyAuthorityErrorV11 as E, XmrFundingObservationRequestV11,
+        };
+        if self.genesis != deployment.deployment().genesis_hash {
+            return Err(Refusal::Conflict);
+        }
+        let mut sidecar = self
+            .sidecar
+            .try_borrow_mut()
+            .map_err(|_| Refusal::Unavailable)?;
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Refusal::Unavailable)?;
+        executor
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    verify_xmr_funding_v11(
+                        XmrFundingObservationRequestV11 {
+                            terms: &self.terms,
+                            setup: self.enrollment.setup(),
+                            profile: &self.profile,
+                            deployment,
+                            daemon_urls: urls,
+                        },
+                        &mut sidecar,
+                        self.secrets.as_ref(),
+                    ),
+                )
+                .await
+                .unwrap_or(Err(E::Unavailable))
+            })
+            .map_err(|error| match error {
+                E::Unavailable | E::FundingAbsent | E::InsufficientFinality => Refusal::Unavailable,
+                _ => Refusal::Conflict,
+            })
+    }
+
     /// Read-only authentication of existing local custody. The caller opens
     /// each database once with open_existing; this path never initializes it.
     pub(crate) fn authenticate(

@@ -1001,6 +1001,44 @@ impl DurableRelaySenderV1 {
         expiry: TimelockSpec,
         aux_rand: [u8; 32],
     ) -> Result<RouteApplicationDispositionV2, DurableRelaySenderErrorV1> {
+        self.prepare_route_application_inner_v24(
+            application_id,
+            signed_dsc1,
+            expiry,
+            aux_rand,
+            None,
+        )
+    }
+
+    /// Adds a live-custody veto to the worker's authenticated Claim response
+    /// staging. The worker must first validate canonical 0x1a Claim; this
+    /// transport layer neither grants DSC1 authority nor interprets economics.
+    /// The veto runs inside SQLite after signing and before any frame write.
+    pub fn prepare_xmr_claim_application_guarded_v24(
+        &mut self,
+        application_id: Digest32,
+        signed_dsc1: &[u8],
+        expiry: TimelockSpec,
+        aux_rand: [u8; 32],
+        before_publication: &mut dyn FnMut() -> bool,
+    ) -> Result<RouteApplicationDispositionV2, DurableRelaySenderErrorV1> {
+        self.prepare_route_application_inner_v24(
+            application_id,
+            signed_dsc1,
+            expiry,
+            aux_rand,
+            Some(before_publication),
+        )
+    }
+
+    fn prepare_route_application_inner_v24(
+        &mut self,
+        application_id: Digest32,
+        signed_dsc1: &[u8],
+        expiry: TimelockSpec,
+        aux_rand: [u8; 32],
+        mut before_publication: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<RouteApplicationDispositionV2, DurableRelaySenderErrorV1> {
         if application_id == ZERO_DIGEST {
             return Err(DurableRelaySenderErrorV1::InvalidApplicationId);
         }
@@ -1020,6 +1058,9 @@ impl DurableRelaySenderV1 {
             {
                 return Err(DurableRelaySenderErrorV1::ApplicationConflict);
             }
+            if before_publication.as_mut().is_some_and(|guard| !guard()) {
+                return Err(DurableRelaySenderErrorV1::StorageUnavailable);
+            }
             return match application.state {
                 RouteApplicationStateV2::Acked => Ok(RouteApplicationDispositionV2::AlreadyAcked(
                     application.status(),
@@ -1028,7 +1069,11 @@ impl DurableRelaySenderV1 {
                     if self.row_exists("sender_pending")? {
                         Ok(RouteApplicationDispositionV2::Pending(application.status()))
                     } else if application.frame_count > 1 {
-                        self.prepare_next_application_frame(&application, *aux_rand)?;
+                        self.prepare_next_application_frame(
+                            &application,
+                            *aux_rand,
+                            &mut before_publication,
+                        )?;
                         Ok(RouteApplicationDispositionV2::Pending(application.status()))
                     } else {
                         Err(DurableRelaySenderErrorV1::CorruptState)
@@ -1153,11 +1198,17 @@ impl DurableRelaySenderV1 {
         {
             return Err(DurableRelaySenderErrorV1::ApplicationConflict);
         }
+        if before_publication.as_mut().is_some_and(|guard| !guard()) {
+            return Err(DurableRelaySenderErrorV1::StorageUnavailable);
+        }
         insert_route_application_tx(&transaction, &application)?;
         if let Some(frame) = frame.as_ref() {
             insert_frame_transfer_tx(&transaction, frame)?;
         }
         insert_pending_tx(&transaction, &pending)?;
+        if before_publication.as_mut().is_some_and(|guard| !guard()) {
+            return Err(DurableRelaySenderErrorV1::StorageUnavailable);
+        }
         transaction.commit()?;
         Ok(RouteApplicationDispositionV2::Pending(application.status()))
     }
@@ -1166,6 +1217,7 @@ impl DurableRelaySenderV1 {
         &mut self,
         application: &RouteApplicationRowV2,
         aux_rand: [u8; 32],
+        before_publication: &mut Option<&mut dyn FnMut() -> bool>,
     ) -> Result<(), DurableRelaySenderErrorV1> {
         if application.state != RouteApplicationStateV2::Pending
             || application.frame_count <= 1
@@ -1215,7 +1267,13 @@ impl DurableRelaySenderV1 {
         if !same_frame_transfer(&retained_frame, &frame) {
             return Err(DurableRelaySenderErrorV1::CorruptState);
         }
+        if before_publication.as_mut().is_some_and(|guard| !guard()) {
+            return Err(DurableRelaySenderErrorV1::StorageUnavailable);
+        }
         insert_pending_tx(&transaction, &pending)?;
+        if before_publication.as_mut().is_some_and(|guard| !guard()) {
+            return Err(DurableRelaySenderErrorV1::StorageUnavailable);
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -3855,6 +3913,178 @@ mod database_authority_tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn claim_next_frame_veto_after_ack_and_reopen_preserves_original_application(
+    ) -> Result<(), Box<dyn Error>> {
+        use std::cell::Cell;
+        let secret = [0x71; 32];
+        let key = SecpContext::new(&[0x19; 32])
+            .sign_bip340(&secret, &[0; 32], &[0; 32])?
+            .1;
+        let config = DurableRelaySenderConfigV1::new(
+            [0x81; 32],
+            RouteWireContextV1 {
+                network_id: [1; 32],
+                session_id: [2; 32],
+                route_id: [3; 32],
+                roster_snapshot: [4; 32],
+                policy_version: 1,
+            },
+            ParticipantId([5; 32]),
+            ParticipantId([6; 32]),
+            SenderRoleV1::Initiator,
+            key,
+            64,
+        )?;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("reopened-framed-sender");
+        let expiry = TimelockSpec::BlockHeight { value: 10_000 };
+        let raw = vec![0x5a; MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES + 1];
+        let application = [7; 32];
+        let mut queue = relay::server::RelayV1::default();
+        let mut sender = DurableRelaySenderV1::create(&root, config, secret, [0x19; 32])?;
+        sender.prepare_message(message_type::RFQ, b"rfq", expiry, [8; 32])?;
+        sender.submit_pending(&mut queue)?;
+        sender.prepare_xmr_claim_application_guarded_v24(
+            application,
+            &raw,
+            expiry,
+            [9; 32],
+            &mut || true,
+        )?;
+        sender.submit_pending(&mut queue)?;
+        assert!(sender.pending_envelope()?.is_none());
+        let checkpoint = sender.checkpoint()?;
+        let status = sender.route_application_status(application)?.unwrap();
+        let transfer = sender.frame_transfer_status()?.unwrap();
+        assert_eq!(status.acknowledged_frames(), 1);
+        assert_eq!(status.frame_count(), 2);
+        drop(sender);
+        let mut sender = DurableRelaySenderV1::open_existing(&root, config, secret, [0x20; 32])?;
+        // First guard is retained-application lookup, second is after next
+        // frame signing + SQL validation, third is the final commit veto.
+        for fail_at in [2, 3] {
+            let calls = Cell::new(0);
+            assert!(matches!(
+                sender.prepare_xmr_claim_application_guarded_v24(
+                    application,
+                    &raw,
+                    TimelockSpec::TimestampSeconds { value: 1 },
+                    [10; 32],
+                    &mut || {
+                        calls.set(calls.get() + 1);
+                        calls.get() != fail_at
+                    },
+                ),
+                Err(DurableRelaySenderErrorV1::StorageUnavailable)
+            ));
+            assert_eq!(calls.get(), fail_at);
+            assert_eq!(sender.checkpoint()?, checkpoint);
+            assert_eq!(sender.route_application_status(application)?, Some(status));
+            assert_eq!(sender.frame_transfer_status()?, Some(transfer));
+            assert!(sender.pending_envelope()?.is_none());
+        }
+        sender.prepare_xmr_claim_application_guarded_v24(
+            application,
+            &raw,
+            TimelockSpec::TimestampSeconds { value: 1 },
+            [10; 32],
+            &mut || true,
+        )?;
+        let exact = sender
+            .pending_envelope()?
+            .unwrap()
+            .canonical_bytes()
+            .to_vec();
+        let envelope = RelayEnvelopeV1::decode(&exact)?;
+        assert_eq!(envelope.expiry, expiry);
+        assert_eq!(envelope.sequence, checkpoint.next_sequence());
+        assert_eq!(sender.route_application_status(application)?, Some(status));
+        sender.submit_pending(&mut queue)?;
+        assert_eq!(
+            sender
+                .route_application_status(application)?
+                .unwrap()
+                .state(),
+            RouteApplicationStateV2::Acked
+        );
+        assert!(sender.pending_envelope()?.is_none());
+        assert!(sender.frame_transfer_status()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn claim_publication_veto_under_sql_lock_rolls_back_sequence_and_frames(
+    ) -> Result<(), Box<dyn Error>> {
+        use std::{cell::Cell, time::Duration};
+        let secret = [0x71; 32];
+        let key = SecpContext::new(&[0x19; 32])
+            .sign_bip340(&secret, &[0; 32], &[0; 32])?
+            .1;
+        let config = DurableRelaySenderConfigV1::new(
+            [0x81; 32],
+            RouteWireContextV1 {
+                network_id: [1; 32],
+                session_id: [2; 32],
+                route_id: [3; 32],
+                roster_snapshot: [4; 32],
+                policy_version: 1,
+            },
+            ParticipantId([5; 32]),
+            ParticipantId([6; 32]),
+            SenderRoleV1::Initiator,
+            key,
+            64,
+        )?;
+        // Opaque transport payloads: the worker's independent tests cover
+        // DSC1 Claim type validation; this proves actual SQLite rollback.
+        for size in [32, MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES * 2] {
+            for fail_at in [1, 2] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("sender");
+                let mut sender = DurableRelaySenderV1::create(&root, config, secret, [0x19; 32])?;
+                let checkpoint = sender.checkpoint()?;
+                let probe = Connection::open(root.join(DATABASE_FILE_NAME))?;
+                probe.busy_timeout(Duration::ZERO)?;
+                let calls = Cell::new(0);
+                let mut veto = || {
+                    // The signing and validation work is over, and the write
+                    // lock is already held when the live-lease veto executes.
+                    assert!(probe.execute_batch("BEGIN IMMEDIATE").is_err());
+                    calls.set(calls.get() + 1);
+                    calls.get() != fail_at
+                };
+                let raw = vec![0x5a; size];
+                assert!(matches!(
+                    sender.prepare_xmr_claim_application_guarded_v24(
+                        [7; 32],
+                        &raw,
+                        TimelockSpec::TimestampSeconds { value: 10_000 },
+                        [8; 32],
+                        &mut veto,
+                    ),
+                    Err(DurableRelaySenderErrorV1::StorageUnavailable)
+                ));
+                assert_eq!(calls.get(), fail_at);
+                assert_eq!(sender.checkpoint()?, checkpoint);
+                assert!(sender.pending_envelope()?.is_none());
+                assert!(sender.frame_transfer_status()?.is_none());
+                assert!(sender.route_application_status([7; 32])?.is_none());
+                assert!(matches!(
+                    sender.prepare_xmr_claim_application_guarded_v24(
+                        [7; 32],
+                        &raw,
+                        TimelockSpec::TimestampSeconds { value: 10_000 },
+                        [8; 32],
+                        &mut || true,
+                    )?,
+                    RouteApplicationDispositionV2::Pending(_)
+                ));
+            }
+        }
+        Ok(())
+    }
 
     fn sqlite_file(path: &Path, marker: i64) -> Result<(), Box<dyn Error>> {
         let connection = Connection::open(path)?;

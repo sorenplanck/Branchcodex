@@ -340,13 +340,6 @@ impl ProductionF6CandidateAttestationAuthorityStoreV2 {
     }
 
     /// Opens an existing complete producer and verifies its entire journal.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     pub(crate) fn open_production(
         path: &Path,
         binding: ProductionSolverF6BindingV2,

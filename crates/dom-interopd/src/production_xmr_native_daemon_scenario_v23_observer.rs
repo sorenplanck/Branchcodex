@@ -165,6 +165,43 @@ impl RouteObserverV23 {
     }
 
     /// Caller must stop/reap this database's daemon before taking its lock.
+    pub(super) fn require_exit_only_reopen_stopped_v24(&self, crash_revision: u64) -> Result<()> {
+        use route_executor::{ActionKindV1, HealthStateV1, RouteEventV1};
+        let expected = self.replay_stopped()?;
+        let store = DurableRouteStoreV1::open_existing(&self.database)?;
+        if store.audit_external_custody_only_v1(self.pins.route_id)? != expected {
+            return Err("quiescent recovery snapshot changed between full audits".into());
+        }
+        let journal = store.journal(self.pins.route_id)?;
+        let mut recovery_seen = false;
+        for entry in journal
+            .iter()
+            .filter(|entry| entry.resulting_revision > crash_revision)
+        {
+            match &entry.event {
+                RouteEventV1::SetHealth {
+                    target: HealthStateV1::RecoveryOnly,
+                    ..
+                } => {
+                    recovery_seen = true;
+                }
+                RouteEventV1::CommitAction(intent)
+                    if recovery_seen && intent.kind == ActionKindV1::Funding =>
+                {
+                    return Err(
+                        "new funding committed after durable recovery-only transition".into(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        if !recovery_seen {
+            return Err("reopened survivor never recorded authenticated RecoveryOnly".into());
+        }
+        Ok(())
+    }
+
+    /// Caller must stop/reap this database's daemon before taking its lock.
     pub(super) fn replay_stopped(&self) -> Result<RouteSnapshotV1> {
         let store = DurableRouteStoreV1::open_existing(&self.database)?;
         let snapshot = store.audit_external_custody_only_v1(self.pins.route_id)?;

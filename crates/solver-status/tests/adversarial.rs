@@ -22,6 +22,41 @@ const SECRETS: [[u8; 32]; 3] = [[0x51; 32], [0x52; 32], [0x53; 32]];
 
 type TestResult = core::result::Result<(), Box<dyn Error>>;
 
+#[test]
+fn historical_status_reopen_does_not_revive_active_or_accept_unretained_signature_v24() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+    let path = directory.path().join("historical.sqlite");
+    let secp = SecpContext::new(&[0x71; 32]);
+    let authorities = authorities(&secp)?;
+    let config = config(&secp, &authorities)?;
+    let original = signed(&secp, statement(1, SolverOperationalStateV1::Active, 1000)?)?;
+    let never_retained = signed(&secp, statement(2, SolverOperationalStateV1::Active, 2000)?)?;
+    let mut store =
+        DurableSolverStatusStoreV1::create_production(&path, config, authorities.clone(), &secp)?;
+    assert!(store
+        .authenticate_retained_signed_v24(&original, &secp)
+        .is_err());
+    store.install(&original, &secp, 1001)?;
+    drop(store);
+    let mut reopened =
+        DurableSolverStatusStoreV1::open_production(&path, config, authorities, &secp)?;
+    assert!(reopened.prove_current_active(&secp, 2000).is_err());
+    reopened.authenticate_retained_signed_v24(&original, &secp)?;
+    assert!(reopened
+        .authenticate_retained_signed_v24(&never_retained, &secp)
+        .is_err());
+    // The historical operation does not rewind the clock or install the new
+    // signed statement. Fresh activity remains refused and old time rolls back.
+    assert!(reopened.prove_current_active(&secp, 2000).is_err());
+    assert_eq!(
+        reopened.prove_current_active(&secp, 1002).err(),
+        Some(SolverStatusErrorV1::ClockRollback)
+    );
+    Ok(())
+}
+
 fn scope() -> SolverStatusScopeV1 {
     SolverStatusScopeV1 {
         network_id: NETWORK,

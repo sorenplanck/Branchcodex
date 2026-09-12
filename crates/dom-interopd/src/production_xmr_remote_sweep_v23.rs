@@ -133,6 +133,26 @@ pub(crate) trait ProductionXmrRemoteSweepResponderTransportV23 {
     /// Re-stage a response already present in the durable Store journal,
     /// requiring byte identity with the response retained by the actuator.
     fn reconcile_response_v23(&mut self, response: &[u8]) -> Result<(), ChildAuthorityRefusalV1>;
+
+    /// Claim-only publication requires the real actuator's live-custody veto
+    /// to reach the Store/Relay persistence boundaries, not only this caller.
+    fn publish_claim_response_guarded_v24(
+        &mut self,
+        _accepted: &AcceptedXmrRemoteSweepRequestV23,
+        _response: &[u8],
+        _before_publication: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        Err(ChildAuthorityRefusalV1::Conflict)
+    }
+
+    /// Reconcile the same retained Claim bytes under the same final veto.
+    fn reconcile_claim_response_guarded_v24(
+        &mut self,
+        _response: &[u8],
+        _before_publication: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        Err(ChildAuthorityRefusalV1::Conflict)
+    }
 }
 
 /// Restart-safe responder discovery. `RetainedResponse` is Store-authenticated
@@ -257,6 +277,98 @@ impl ProductionXmrRemoteClaimPinsV23 {
     }
 }
 
+/// Build the local economic projection only from authenticated route material
+/// and opaque, independently verified funding. Local effect identities never
+/// replace the requester identities in the accepted request or sidecar cache.
+fn local_claim_request_v24(
+    pins: &ProductionXmrRemoteClaimPinsV23,
+    setup: &ValidatedXmrSetup,
+    materialization: &ProductionChildMaterializationRequestV1,
+    scalar: &RouteScalar,
+    funding: &f7_anchor_authority::families_v11::VerifiedXmrFundingV11,
+) -> Result<RemoteSweepRequestV23, ChildAuthorityRefusalV1> {
+    pins.require_materialization(setup, materialization)?;
+    let f7_anchor_authority::families_v11::F7FundingIdV11::Hash32(funding_tx_hash) =
+        *funding.funding_id()
+    else {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    };
+    if funding_tx_hash != setup.funding_tx_hash()
+        || funding.setup_binding_hash() != &setup.binding_hash()
+        || funding.facts().settlement_id() != &setup.settlement_id()
+        || funding.facts().terms_hash() != &setup.terms_hash()
+        || funding.evidence_digest() == &[0; 32]
+        || funding.block_height() == 0
+    {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    let public_spend_share = revealed_dom_secret_to_xmr_scalar(*scalar.expose(), &setup.claim())
+        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+    let request = RemoteSweepRequestV23 {
+        network_genesis: pins.network_genesis,
+        route_id: pins.route_id,
+        session_id: pins.session_id,
+        settlement_id: setup.settlement_id(),
+        terms_digest: pins.terms_digest,
+        registry_digest: pins.registry_digest,
+        profile_digest: pins.profile_digest,
+        deployment_digest: pins.deployment_digest,
+        route_scope_digest: pins.route_scope_digest,
+        composition_digest: pins.composition_digest,
+        role_plan_digest: pins.role_plan_digest,
+        source_scope_digest: pins.source_scope_digest,
+        effect_id: materialization.effect_id,
+        semantic_digest: materialization.semantic_digest,
+        public_secret_evidence_digest: materialization.public_secret_evidence_digest,
+        funding_tx_hash,
+        funding_evidence_digest: *funding.evidence_digest(),
+        funding_output_index: u64::from(funding.output_index()),
+        funding_block_height: funding.block_height(),
+        funded_amount_piconero: setup.expected_amount_piconero(),
+        max_fee_piconero: pins.max_fee_piconero,
+        adapter_max_raw_transaction_bytes: pins.adapter_max_raw_transaction_bytes,
+        max_raw_transaction_bytes: pins.adapter_max_raw_transaction_bytes.min(
+            u32::try_from(xmr_remote_sweep_wire::MAX_RAW_SWEEP_BYTES_V23)
+                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+        ),
+        fencing_epoch: materialization.fencing_epoch,
+        action: RemoteSweepActionV23::Claim,
+        leg: match materialization.leg {
+            settlement_coordinator::SettlementLegV1::Upstream => RemoteSweepLegV23::Upstream,
+            settlement_coordinator::SettlementLegV1::Downstream => RemoteSweepLegV23::Downstream,
+        },
+        public_spend_share,
+        destination: setup.destination().to_owned(),
+    };
+    Ok(request)
+}
+
+/// Distinct actors have distinct journal effects and fencing epochs. This is
+/// a cross-actor Claim check, NOT the strict same-actor retry/cache check.
+/// All economics and public-secret bindings remain exact; the historical F7
+/// evidence may differ only because the independently observed tip advanced.
+fn require_shared_claim_economics_v24(
+    requester: &RemoteSweepRequestV23,
+    local: &RemoteSweepRequestV23,
+) -> Result<(), ChildAuthorityRefusalV1> {
+    if requester.action != RemoteSweepActionV23::Claim
+        || local.action != RemoteSweepActionV23::Claim
+    {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    requester
+        .encode()
+        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+    local
+        .encode()
+        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+    let mut projected = local.clone();
+    projected.effect_id = requester.effect_id;
+    projected.fencing_epoch = requester.fencing_epoch;
+    projected.semantic_digest = requester.semantic_digest;
+    require_stable_xmr_remote_request_retry_v23(requester, &projected)
+}
+
 /// Move-only signer authorization assembled from an accepted DSC1 request,
 /// the locally observed route scalar and a fresh signer-side F7 observation.
 /// No constructor accepts request bytes without the Store token.
@@ -284,60 +396,14 @@ impl<'scalar> AuthenticatedRemoteSweepBuildV23<'scalar> {
             .encode()
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
         let request_message_digest = *accepted.message_digest();
-        let f7_anchor_authority::families_v11::F7FundingIdV11::Hash32(funding_tx_hash) =
-            *funding.funding_id()
-        else {
-            return Err(ChildAuthorityRefusalV1::Conflict);
-        };
-        let public_spend_share =
-            revealed_dom_secret_to_xmr_scalar(*claim_scalar.expose(), &setup.claim())
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        let expected_leg = match materialization.leg {
-            settlement_coordinator::SettlementLegV1::Upstream => RemoteSweepLegV23::Upstream,
-            settlement_coordinator::SettlementLegV1::Downstream => RemoteSweepLegV23::Downstream,
-        };
         if accepted.session_id() != &pins.session_id
             || accepted.payload() != canonical
             || request_message_digest == [0; 32]
-            || request.network_genesis != pins.network_genesis
-            || request.route_id != pins.route_id
-            || request.session_id != pins.session_id
-            || request.settlement_id != setup.settlement_id()
-            || request.terms_digest != pins.terms_digest
-            || request.registry_digest != pins.registry_digest
-            || request.profile_digest != pins.profile_digest
-            || request.deployment_digest != pins.deployment_digest
-            || request.route_scope_digest != pins.route_scope_digest
-            || request.composition_digest != pins.composition_digest
-            || request.role_plan_digest != pins.role_plan_digest
-            || request.source_scope_digest != pins.source_scope_digest
-            || request.effect_id != materialization.effect_id
-            || request.semantic_digest != materialization.semantic_digest
-            || request.public_secret_evidence_digest
-                != materialization.public_secret_evidence_digest
-            || request.funding_tx_hash != funding_tx_hash
-            || request.funding_tx_hash != setup.funding_tx_hash()
-            || request.funding_evidence_digest == [0; 32]
-            || request.funding_output_index != u64::from(funding.output_index())
-            || request.funding_block_height != funding.block_height()
-            || request.funded_amount_piconero != setup.expected_amount_piconero()
-            || request.max_fee_piconero != pins.max_fee_piconero
-            || request.adapter_max_raw_transaction_bytes != pins.adapter_max_raw_transaction_bytes
-            || request.max_raw_transaction_bytes == 0
-            || request.max_raw_transaction_bytes > pins.adapter_max_raw_transaction_bytes
-            || request.fencing_epoch != materialization.fencing_epoch
-            || request.action != RemoteSweepActionV23::Claim
-            || request.leg != expected_leg
-            || request.public_spend_share != public_spend_share
-            || request.destination != setup.destination()
-            || funding.setup_binding_hash() != &setup.binding_hash()
-            || funding.facts().settlement_id() != &setup.settlement_id()
-            || funding.facts().terms_hash() != &setup.terms_hash()
-            || funding.evidence_digest() == &[0; 32]
-            || funding.block_height() == 0
         {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
+        let local = local_claim_request_v24(pins, setup, materialization, claim_scalar, &funding)?;
+        require_shared_claim_economics_v24(&request, &local)?;
         Ok(Self {
             accepted,
             request,
@@ -401,61 +467,8 @@ impl ProductionXmrRemoteClaimClientV23 {
         scalar: &RouteScalar,
         funding: f7_anchor_authority::families_v11::VerifiedXmrFundingV11,
     ) -> Result<XmrBuiltSweepV1, ChildAuthorityRefusalV1> {
-        self.pins
-            .require_materialization(&self.setup, materialization)?;
-        let f7_anchor_authority::families_v11::F7FundingIdV11::Hash32(funding_tx_hash) =
-            *funding.funding_id()
-        else {
-            return Err(ChildAuthorityRefusalV1::Conflict);
-        };
-        if funding_tx_hash != self.setup.funding_tx_hash()
-            || funding.setup_binding_hash() != &self.setup.binding_hash()
-            || funding.evidence_digest() == &[0; 32]
-            || funding.block_height() == 0
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
-        }
-        let public_spend_share =
-            revealed_dom_secret_to_xmr_scalar(*scalar.expose(), &self.setup.claim())
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        let request = RemoteSweepRequestV23 {
-            network_genesis: self.pins.network_genesis,
-            route_id: self.pins.route_id,
-            session_id: self.pins.session_id,
-            settlement_id: self.setup.settlement_id(),
-            terms_digest: self.pins.terms_digest,
-            registry_digest: self.pins.registry_digest,
-            profile_digest: self.pins.profile_digest,
-            deployment_digest: self.pins.deployment_digest,
-            route_scope_digest: self.pins.route_scope_digest,
-            composition_digest: self.pins.composition_digest,
-            role_plan_digest: self.pins.role_plan_digest,
-            source_scope_digest: self.pins.source_scope_digest,
-            effect_id: materialization.effect_id,
-            semantic_digest: materialization.semantic_digest,
-            public_secret_evidence_digest: materialization.public_secret_evidence_digest,
-            funding_tx_hash,
-            funding_evidence_digest: *funding.evidence_digest(),
-            funding_output_index: u64::from(funding.output_index()),
-            funding_block_height: funding.block_height(),
-            funded_amount_piconero: self.setup.expected_amount_piconero(),
-            max_fee_piconero: self.pins.max_fee_piconero,
-            adapter_max_raw_transaction_bytes: self.pins.adapter_max_raw_transaction_bytes,
-            max_raw_transaction_bytes: self.pins.adapter_max_raw_transaction_bytes.min(
-                u32::try_from(xmr_remote_sweep_wire::MAX_RAW_SWEEP_BYTES_V23)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
-            ),
-            fencing_epoch: materialization.fencing_epoch,
-            action: RemoteSweepActionV23::Claim,
-            leg: match materialization.leg {
-                settlement_coordinator::SettlementLegV1::Upstream => RemoteSweepLegV23::Upstream,
-                settlement_coordinator::SettlementLegV1::Downstream => {
-                    RemoteSweepLegV23::Downstream
-                }
-            },
-            public_spend_share,
-            destination: self.setup.destination().to_owned(),
-        };
+        let request =
+            local_claim_request_v24(&self.pins, &self.setup, materialization, scalar, &funding)?;
         let request_bytes = request
             .encode()
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
@@ -720,63 +733,16 @@ impl RemoteServingXmrSweepAuthorityV23 {
         request_bytes: &[u8],
         response_bytes: &[u8],
         retained: &XmrBuiltSweepV1,
+        before_publish: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
     ) -> Result<(), ChildAuthorityRefusalV1> {
         self.pins
             .require_materialization(&self.setup, materialization)?;
         let request = RemoteSweepRequestV23::decode_exact(request_bytes)
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        let public_spend_share =
-            revealed_dom_secret_to_xmr_scalar(*scalar.expose(), &self.setup.claim())
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-        let expected_leg = match materialization.leg {
-            settlement_coordinator::SettlementLegV1::Upstream => RemoteSweepLegV23::Upstream,
-            settlement_coordinator::SettlementLegV1::Downstream => RemoteSweepLegV23::Downstream,
-        };
         let funding = self.local.observe_verified_funding_v22()?;
-        let f7_anchor_authority::families_v11::F7FundingIdV11::Hash32(funding_tx_hash) =
-            *funding.funding_id()
-        else {
-            return Err(ChildAuthorityRefusalV1::Conflict);
-        };
-        if request.network_genesis != self.pins.network_genesis
-            || request.route_id != self.pins.route_id
-            || request.session_id != self.pins.session_id
-            || request.settlement_id != self.setup.settlement_id()
-            || request.terms_digest != self.pins.terms_digest
-            || request.registry_digest != self.pins.registry_digest
-            || request.profile_digest != self.pins.profile_digest
-            || request.deployment_digest != self.pins.deployment_digest
-            || request.route_scope_digest != self.pins.route_scope_digest
-            || request.composition_digest != self.pins.composition_digest
-            || request.role_plan_digest != self.pins.role_plan_digest
-            || request.source_scope_digest != self.pins.source_scope_digest
-            || request.effect_id != materialization.effect_id
-            || request.semantic_digest != materialization.semantic_digest
-            || request.fencing_epoch != materialization.fencing_epoch
-            || request.public_secret_evidence_digest
-                != materialization.public_secret_evidence_digest
-            || request.public_spend_share != public_spend_share
-            || request.action != RemoteSweepActionV23::Claim
-            || request.leg != expected_leg
-            || request.destination != self.setup.destination()
-            || request.funding_tx_hash != self.setup.funding_tx_hash()
-            || request.funding_tx_hash != funding_tx_hash
-            || request.funding_evidence_digest == [0; 32]
-            || request.funding_output_index != u64::from(funding.output_index())
-            || request.funding_block_height != funding.block_height()
-            || request.funded_amount_piconero != self.setup.expected_amount_piconero()
-            || request.max_fee_piconero != self.pins.max_fee_piconero
-            || request.adapter_max_raw_transaction_bytes
-                != self.pins.adapter_max_raw_transaction_bytes
-            || request.max_raw_transaction_bytes == 0
-            || request.max_raw_transaction_bytes > self.pins.adapter_max_raw_transaction_bytes
-            || funding.setup_binding_hash() != &self.setup.binding_hash()
-            || funding.facts().settlement_id() != &self.setup.settlement_id()
-            || funding.facts().terms_hash() != &self.setup.terms_hash()
-            || funding.evidence_digest() == &[0; 32]
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
-        }
+        let local =
+            local_claim_request_v24(&self.pins, &self.setup, materialization, scalar, &funding)?;
+        require_shared_claim_economics_v24(&request, &local)?;
         let response = RemoteSweepResponseV23::decode_exact(response_bytes)
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
         response
@@ -788,7 +754,9 @@ impl RemoteServingXmrSweepAuthorityV23 {
         {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
-        self.transport.reconcile_response_v23(response_bytes)
+        with_claim_publication_guard_v24(before_publish, || Ok(()))?;
+        self.transport
+            .reconcile_claim_response_guarded_v24(response_bytes, before_publish)
     }
 }
 
@@ -855,9 +823,21 @@ impl ScopedXmrSweepAuthorityV1 for RemoteServingXmrSweepAuthorityV23 {
 
     fn complete_claim_sweep_v23(
         &mut self,
+        _request: &ProductionChildMaterializationRequestV1,
+        _scalar: &RouteScalar,
+        _retained: &XmrBuiltSweepV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        // A caller without the real actuator's post-observation guard cannot
+        // publish, including after restart with an already signed response.
+        Err(ChildAuthorityRefusalV1::Conflict)
+    }
+
+    fn complete_claim_sweep_guarded_v24(
+        &mut self,
         request: &ProductionChildMaterializationRequestV1,
         scalar: &RouteScalar,
         retained: &XmrBuiltSweepV1,
+        before_publish: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
     ) -> Result<(), ChildAuthorityRefusalV1> {
         self.pins.require_materialization(&self.setup, request)?;
         if self.pending.is_none() {
@@ -878,6 +858,7 @@ impl ScopedXmrSweepAuthorityV1 for RemoteServingXmrSweepAuthorityV23 {
                         &retained_request,
                         &response,
                         retained,
+                        before_publish,
                     )
                 }
             }
@@ -912,11 +893,22 @@ impl ScopedXmrSweepAuthorityV1 for RemoteServingXmrSweepAuthorityV23 {
         }
         // Store re-reads the live session phase here. The child invokes this
         // hook only after fresh-time lease validation and durable retention.
-        let publish_result = self
-            .transport
-            .publish_response_v23(&pending.accepted, &pending.response);
+        with_claim_publication_guard_v24(before_publish, || Ok(()))?;
+        let publish_result = self.transport.publish_claim_response_guarded_v24(
+            &pending.accepted,
+            &pending.response,
+            before_publish,
+        );
         finish_remote_publish_v23(&mut self.pending, publish_result)
     }
+}
+
+fn with_claim_publication_guard_v24<T>(
+    before_publish: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    publish: impl FnOnce() -> Result<T, ChildAuthorityRefusalV1>,
+) -> Result<T, ChildAuthorityRefusalV1> {
+    before_publish()?;
+    publish()
 }
 
 fn response_from_sidecar_v23(
@@ -1295,6 +1287,188 @@ mod tests {
         refreshed.action = RemoteSweepActionV23::Refund;
         refreshed.funding_evidence_digest = [0; 32];
         assert!(digest(&refreshed, [40; 32], [41; 32]).is_err());
+    }
+
+    #[test]
+    fn claim_cross_actor_identity_differs_without_changing_request_or_local_retry() {
+        let requester = request();
+        let requester_bytes = requester.encode().unwrap();
+        for field in 0..4 {
+            let mut local = requester.clone();
+            if field == 0 || field == 3 {
+                local.effect_id = [41; 32];
+            }
+            if field == 1 || field == 3 {
+                local.fencing_epoch += 1;
+            }
+            if field == 2 || field == 3 {
+                local.semantic_digest = [42; 32];
+            }
+            local.funding_evidence_digest = [43; 32];
+            let original_local = local.encode().unwrap();
+            assert_eq!(
+                require_shared_claim_economics_v24(&requester, &local),
+                Ok(())
+            );
+            // The accepted requester/cache identity is never rewritten. Nor
+            // can this cross-actor projection authorize a same-actor retry.
+            assert_eq!(requester.encode().unwrap(), requester_bytes);
+            assert_eq!(local.encode().unwrap(), original_local);
+            assert_eq!(
+                require_stable_xmr_remote_request_retry_v23(&requester, &local),
+                Err(ChildAuthorityRefusalV1::Conflict)
+            );
+        }
+    }
+
+    #[test]
+    fn claim_cross_actor_projection_rejects_each_changed_economic_binding() {
+        let requester = request();
+        for field in 0..24 {
+            let mut local = requester.clone();
+            local.effect_id = [41; 32];
+            local.fencing_epoch += 1;
+            local.semantic_digest = [42; 32];
+            local.funding_evidence_digest = [43; 32];
+            match field {
+                0 => local.network_genesis[0] ^= 1,
+                1 => local.route_id[0] ^= 1,
+                2 => local.session_id[0] ^= 1,
+                3 => local.settlement_id[0] ^= 1,
+                4 => local.terms_digest[0] ^= 1,
+                5 => local.registry_digest[0] ^= 1,
+                6 => local.profile_digest[0] ^= 1,
+                7 => local.deployment_digest[0] ^= 1,
+                8 => local.route_scope_digest[0] ^= 1,
+                9 => local.composition_digest[0] ^= 1,
+                10 => local.role_plan_digest[0] ^= 1,
+                11 => local.source_scope_digest[0] ^= 1,
+                12 => local.public_secret_evidence_digest[0] ^= 1,
+                13 => local.funding_tx_hash[0] ^= 1,
+                14 => local.funding_output_index += 1,
+                15 => local.funding_block_height += 1,
+                16 => local.funded_amount_piconero += 1,
+                17 => local.max_fee_piconero += 1,
+                18 => local.adapter_max_raw_transaction_bytes -= 1,
+                19 => local.max_raw_transaction_bytes -= 1,
+                20 => local.action = RemoteSweepActionV23::Refund,
+                21 => local.leg = RemoteSweepLegV23::Upstream,
+                22 => local.public_spend_share[0] ^= 1,
+                23 => local.destination.push('x'),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                require_shared_claim_economics_v24(&requester, &local),
+                Err(ChildAuthorityRefusalV1::Conflict),
+                "economic field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_projection_requires_canonical_identities_and_never_admits_refund() {
+        let request = request();
+        for field in 0..4 {
+            let mut malformed = request.clone();
+            match field {
+                0 => malformed.effect_id = [0; 32],
+                1 => malformed.semantic_digest = [0; 32],
+                2 => malformed.fencing_epoch = 0,
+                3 => malformed.funding_evidence_digest = [0; 32],
+                _ => unreachable!(),
+            }
+            assert!(require_shared_claim_economics_v24(&request, &malformed).is_err());
+            assert!(require_shared_claim_economics_v24(&malformed, &request).is_err());
+        }
+        let mut refund = request;
+        refund.action = RemoteSweepActionV23::Refund;
+        assert!(require_shared_claim_economics_v24(&refund, &refund).is_err());
+    }
+
+    #[test]
+    fn claim_observation_expiring_real_lease_never_publishes_or_reconciles(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::cell::Cell;
+        use xmr_actuator::{
+            DurableXmrActuatorV1, XmrActuatorErrorV1, XmrActuatorLeaseV1, XmrOperationKindV1,
+            XmrOperationLocatorV1, XmrOperationStoreV1,
+        };
+        let directory = tempfile::tempdir()?;
+        let actuator = DurableXmrActuatorV1::new(XmrOperationStoreV1::open(
+            directory.path().join("claim-publication-lease.sqlite"),
+        )?);
+        let lease = XmrActuatorLeaseV1::new([1; 32], [2; 32], [3; 32], 1, 1100)?;
+        let locator = XmrOperationLocatorV1 {
+            settlement_id: [4; 32],
+            kind: XmrOperationKindV1::Claim,
+        };
+        // A Store/lease boundary fixture, not a cryptographic sweep fixture:
+        // these bytes never reach a signer, peer or broadcast port.
+        let retained = actuator.prepare_signed(&lease, locator, [5; 32], [6; 32], &[7, 8], 1000)?;
+        let now = Cell::new(1000);
+        let publications = Cell::new(0);
+        let mut guard = || {
+            let view = actuator
+                .checked_view_v23(&lease, locator, now.get())
+                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+            if view != retained {
+                return Err(ChildAuthorityRefusalV1::Conflict);
+            }
+            Ok(())
+        };
+        assert_eq!(guard(), Ok(()));
+        // The observation starts with a live lease and ends EXACTLY at its
+        // boundary. Both fresh publish and retained reconcile use this gate.
+        now.set(1100);
+        assert!(matches!(
+            actuator.checked_view_v23(&lease, locator, now.get()),
+            Err(XmrActuatorErrorV1::LeaseExpired)
+        ));
+        let mut pending = Some(vec![9, 10]);
+        for _ in 0..2 {
+            let result = with_claim_publication_guard_v24(&mut guard, || {
+                publications.set(publications.get() + 1);
+                Ok(())
+            });
+            assert_eq!(
+                finish_remote_publish_v23(&mut pending, result),
+                Err(ChildAuthorityRefusalV1::Conflict)
+            );
+            assert_eq!(pending, Some(vec![9, 10]));
+            assert_eq!(publications.get(), 0);
+            assert_eq!(actuator.view(locator)?, retained);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn claim_publication_guard_runs_before_handoff_and_propagates_owner_refusal() {
+        use std::cell::Cell;
+        let guarded = Cell::new(false);
+        assert_eq!(
+            with_claim_publication_guard_v24(
+                &mut || {
+                    guarded.set(true);
+                    Ok(())
+                },
+                || {
+                    assert!(guarded.get());
+                    Ok(())
+                }
+            ),
+            Ok(())
+        );
+        for error in [
+            ChildAuthorityRefusalV1::Conflict,
+            ChildAuthorityRefusalV1::Unavailable,
+        ] {
+            assert_eq!(
+                with_claim_publication_guard_v24(&mut || Err(error), || {
+                    panic!("failed fence/owner check must not hand off a response")
+                }),
+                Err::<(), _>(error)
+            );
+        }
     }
 
     #[test]

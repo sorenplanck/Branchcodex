@@ -350,6 +350,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
         let Some(body) = body else {
             return Ok(());
         };
+        let historical = self.historical_recovery_v24.is_some();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?
@@ -385,8 +386,9 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
                 || observation.registry_manifest_digest != self.bundle.registry_digest
                 || observation.profile_bundle_digest != self.bundle.profile_bundle_digest
                 || observation.asset_binding_digest != expected_asset
-                || observation.observed_at_unix_ms > now_ms
-                || observation.valid_until_unix_ms <= now_ms
+                || (!historical
+                    && (observation.observed_at_unix_ms > now_ms
+                        || observation.valid_until_unix_ms <= now_ms))
                 || observation
                     .valid_until_unix_ms
                     .saturating_sub(observation.observed_at_unix_ms)
@@ -401,15 +403,28 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
                         .pre_f6_limits
                         .expires_at_seconds
                         .saturating_mul(1000)
-                || now_ms.saturating_sub(observation.observed_at_unix_ms)
-                    > self
-                        .bundle
-                        .pre_f6_limits
-                        .max_evidence_age_seconds
-                        .saturating_mul(1000)
+                || (!historical
+                    && now_ms.saturating_sub(observation.observed_at_unix_ms)
+                        > self
+                            .bundle
+                            .pre_f6_limits
+                            .max_evidence_age_seconds
+                            .saturating_mul(1000))
             {
                 return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
             }
+        }
+        if historical {
+            // The original threshold-authenticated observations must already
+            // occur in each independent, fully audited status history. Neither
+            // wall clock nor inventory snapshot is rewritten on this branch.
+            upstream
+                .authenticate_retained_signed_v24(&body.statuses[0], secp)
+                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            downstream
+                .authenticate_retained_signed_v24(&body.statuses[1], secp)
+                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            return Ok(());
         }
         // Install authenticated status only; no boolean Active capability is
         // reconstructed. Each owner performs its own scope/epoch/freshness audit.

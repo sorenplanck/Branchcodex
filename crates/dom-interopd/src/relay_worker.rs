@@ -726,6 +726,96 @@ pub enum ContractsRelayIngressErrorV1 {
     SenderMismatch,
 }
 
+fn require_xmr_claim_response_payload_v24(
+    kind: dom_scriptless_transport::MessageTypeV1,
+    payload: &[u8],
+) -> Result<(), RelayWorkerOutboundErrorV1> {
+    if kind != dom_scriptless_transport::MessageTypeV1::XmrRemoteSweepResponseV23
+        || xmr_remote_sweep_wire::RemoteSweepResponseV23::decode_exact(payload)
+            .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?
+            .action()
+            != xmr_remote_sweep_wire::RemoteSweepActionV23::Claim
+    {
+        return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod claim_publication_type_tests_v24 {
+    use super::*;
+
+    #[test]
+    fn claim_publication_accepts_claim_framing_but_refuses_refund_framing() {
+        use xmr_remote_sweep_wire::*;
+        // Canonical public framing only, never a crypto/funding authority.
+        for action in [RemoteSweepActionV23::Claim, RemoteSweepActionV23::Refund] {
+            let bytes = RemoteSweepResponseV23::new(RemoteSweepResponseInputV23 {
+                request_digest: [1; 32],
+                request_message_digest: [2; 32],
+                signer_funding_evidence_digest: [3; 32],
+                network_genesis: [4; 32],
+                route_id: [5; 32],
+                session_id: [6; 32],
+                settlement_id: [7; 32],
+                terms_digest: [8; 32],
+                registry_digest: [9; 32],
+                profile_digest: [10; 32],
+                deployment_digest: [11; 32],
+                effect_id: [12; 32],
+                semantic_digest: [13; 32],
+                transaction_hash: [14; 32],
+                key_image: [15; 32],
+                funded_amount_piconero: 100,
+                fee_piconero: 1,
+                fencing_epoch: 1,
+                action,
+                leg: RemoteSweepLegV23::Upstream,
+                raw_transaction: vec![0x7a; 64],
+                input_spend_proof: [0x31; INPUT_SPEND_PROOF_BYTES_V23],
+                payout_proofs: vec![RemoteTxKeyDerivationProofV23::decode(
+                    &[0x41; TX_KEY_DERIVATION_PROOF_BYTES_V23],
+                )
+                .unwrap()],
+                ring_members: (0..16)
+                    .map(|i| RemoteRingMemberV23 {
+                        global_index: i + 1,
+                        key: [i as u8 + 1; 32],
+                        commitment: [i as u8 + 33; 32],
+                    })
+                    .collect(),
+            })
+            .unwrap()
+            .encode()
+            .unwrap();
+            assert_eq!(
+                require_xmr_claim_response_payload_v24(
+                    MessageTypeV1::XmrRemoteSweepResponseV23,
+                    &bytes
+                )
+                .is_ok(),
+                action == RemoteSweepActionV23::Claim
+            );
+        }
+    }
+
+    #[test]
+    fn claim_publication_never_admits_request_or_other_dsc1_types() {
+        for tag in 1..=0x19 {
+            if let Ok(kind) = MessageTypeV1::try_from(tag) {
+                assert!(matches!(
+                    require_xmr_claim_response_payload_v24(kind, &[]),
+                    Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope)
+                ));
+            }
+        }
+        assert!(matches!(
+            require_xmr_claim_response_payload_v24(MessageTypeV1::XmrRemoteSweepResponseV23, &[],),
+            Err(RelayWorkerOutboundErrorV1::InvalidDsc1)
+        ));
+    }
+}
+
 /// Redacted outbound worker failures.
 #[derive(Debug, thiserror::Error)]
 pub enum RelayWorkerOutboundErrorV1 {
@@ -2004,6 +2094,26 @@ where
         outbound: CommittedOutboundDsc1V1,
         expiry: TimelockSpec,
     ) -> Result<RouteApplicationDispositionV2, RelayWorkerOutboundErrorV1> {
+        self.stage_store_outbound_dsc1_inner_v24(outbound, expiry, None)
+    }
+
+    /// Stage only an authenticated Claim 0x1a, with a same-custody veto at the
+    /// sender's SQLite persistence boundary. No other DSC1 action may enter.
+    pub(crate) fn stage_xmr_claim_response_guarded_v24(
+        &mut self,
+        outbound: CommittedOutboundDsc1V1,
+        expiry: TimelockSpec,
+        before_publication: &mut dyn FnMut() -> bool,
+    ) -> Result<RouteApplicationDispositionV2, RelayWorkerOutboundErrorV1> {
+        self.stage_store_outbound_dsc1_inner_v24(outbound, expiry, Some(before_publication))
+    }
+
+    fn stage_store_outbound_dsc1_inner_v24(
+        &mut self,
+        outbound: CommittedOutboundDsc1V1,
+        expiry: TimelockSpec,
+        mut before_publication: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<RouteApplicationDispositionV2, RelayWorkerOutboundErrorV1> {
         let store = Rc::clone(&self.contracts.contracts_mut().store);
         store
             .revalidate_committed_outbound_dsc1(&outbound)
@@ -2011,6 +2121,12 @@ where
 
         let parsed = SignedMessageV1::decode_exact(outbound.signed_bytes())
             .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
+        if before_publication.is_some() {
+            require_xmr_claim_response_payload_v24(
+                parsed.unsigned().kind(),
+                parsed.unsigned().payload(),
+            )?;
+        }
         let checkpoint = self.sender.checkpoint()?;
         if parsed.unsigned().session_id() != outbound.session_id()
             || parsed.unsigned().sender_id() != outbound.sender_id()
@@ -2022,12 +2138,21 @@ where
             return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
         }
         let aux = os_random_32().map_err(|_| RelayWorkerOutboundErrorV1::EntropyUnavailable)?;
-        let disposition = self.sender.prepare_route_application(
-            *outbound.application_id(),
-            outbound.signed_bytes(),
-            expiry,
-            aux,
-        )?;
+        let disposition = match before_publication.as_mut() {
+            Some(guard) => self.sender.prepare_xmr_claim_application_guarded_v24(
+                *outbound.application_id(),
+                outbound.signed_bytes(),
+                expiry,
+                aux,
+                *guard,
+            ),
+            None => self.sender.prepare_route_application(
+                *outbound.application_id(),
+                outbound.signed_bytes(),
+                expiry,
+                aux,
+            ),
+        }?;
         if disposition.status().application_id() != outbound.application_id() {
             return Err(RelayWorkerOutboundErrorV1::WrongDsc1Scope);
         }

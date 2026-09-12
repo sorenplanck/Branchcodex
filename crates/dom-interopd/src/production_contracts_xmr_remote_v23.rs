@@ -3,8 +3,87 @@
 //! owner surface guard forbids raw payload bytes and direct SignedMessage
 //! decoding there, and this face is precisely the audited place where the
 //! canonical 0x19/0x1a transcripts are reconstructed from durable commits.
-//! Behaviour is unchanged; only the file boundary moved.
+//! Claim response publication additionally carries the live actuator veto
+//! through signing, Store commit and durable Relay staging.
 use super::*;
+fn with_xmr_claim_publication_veto_v24<T>(
+    guard: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    operation: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<T, ChildAuthorityRefusalV1>,
+) -> Result<T, ChildAuthorityRefusalV1> {
+    let mut refused = None;
+    let mut veto = || {
+        if refused.is_some() {
+            return false;
+        }
+        match guard() {
+            Ok(()) => true,
+            Err(error) => {
+                refused = Some(error);
+                false
+            }
+        }
+    };
+    let result = operation(&mut veto);
+    match refused {
+        Some(error) => Err(error),
+        None => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_commit_and_stage_xmr_response_v24<F: F6TransportPortV1>(
+    session_id: [u8; 32],
+    local_participant: [u8; 32],
+    store: &ContractsSessionStoreV1,
+    identity: &ContractsTransportIdentityStoreV1,
+    relay: &Rc<RefCell<DurableRelayWorkerV1<F>>>,
+    request: PreparedDsc1SigningRequestV1,
+    expiry: TimelockSpec,
+    guard: &mut Option<&mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>>,
+) -> Result<RouteApplicationDispositionV2, ChildAuthorityRefusalV1> {
+    if request.session_id() != &session_id
+        || request.sender_id() != &local_participant
+        || request.message_type() != 0x1a
+    {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    let outbound = match guard.as_mut() {
+        Some(guard) => with_xmr_claim_publication_veto_v24(*guard, |veto| {
+            identity
+                .sign_and_commit_xmr_claim_response_guarded_v24(store, request, veto)
+                .map_err(ProductionContractsOutboundErrorV1::from)
+                .map_err(map_remote_transport_error)
+        })?,
+        None => identity
+            .sign_and_commit_store_prepared_dsc1(store, request)
+            .map_err(ProductionContractsOutboundErrorV1::from)
+            .map_err(map_remote_transport_error)?,
+    };
+    stage_xmr_response_v24(relay, outbound, expiry, guard)
+}
+
+fn stage_xmr_response_v24<F: F6TransportPortV1>(
+    relay: &Rc<RefCell<DurableRelayWorkerV1<F>>>,
+    outbound: dom_scriptless_store::CommittedOutboundDsc1V1,
+    expiry: TimelockSpec,
+    guard: &mut Option<&mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>>,
+) -> Result<RouteApplicationDispositionV2, ChildAuthorityRefusalV1> {
+    let mut relay = relay
+        .try_borrow_mut()
+        .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
+    match guard.as_mut() {
+        Some(guard) => with_xmr_claim_publication_veto_v24(*guard, |veto| {
+            relay
+                .stage_xmr_claim_response_guarded_v24(outbound, expiry, veto)
+                .map_err(ProductionContractsOutboundErrorV1::from)
+                .map_err(map_remote_transport_error)
+        }),
+        None => relay
+            .stage_store_outbound_dsc1(outbound, expiry)
+            .map_err(ProductionContractsOutboundErrorV1::from)
+            .map_err(map_remote_transport_error),
+    }
+}
 use dom_scriptless_transport::{MessageTypeV1, SignedMessageV1};
 /// Move-only XMR transport face over the exact retained Contracts Store and
 /// Relay opening. It can stage only canonical 0x19 and import only the Store's
@@ -46,6 +125,55 @@ fn xmr_transport_expiry_v24(
 #[cfg(test)]
 mod transport_clock_tests_v24 {
     use super::*;
+
+    #[test]
+    fn claim_commit_veto_uses_post_signing_time_and_retains_original_error() {
+        use std::cell::Cell;
+        let now = Cell::new(1099);
+        let writes = Cell::new(0);
+        let mut guard = || {
+            if now.get() < 1100 {
+                Ok(())
+            } else {
+                Err(ChildAuthorityRefusalV1::Conflict)
+            }
+        };
+        assert_eq!(guard(), Ok(()));
+        let result = with_xmr_claim_publication_veto_v24(&mut guard, |veto| {
+            // Simulate the time consumed by identity signing and SQL/Store
+            // authentication. The producer must consult the guard HERE.
+            now.set(1100);
+            if !veto() {
+                return Err(ChildAuthorityRefusalV1::Unavailable);
+            }
+            writes.set(writes.get() + 1);
+            Ok(())
+        });
+        assert_eq!(result, Err(ChildAuthorityRefusalV1::Conflict));
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn a_failed_publication_veto_cannot_be_revived_inside_one_commit() {
+        let mut checks = 0;
+        let mut guard = || {
+            checks += 1;
+            if checks == 1 {
+                Err(ChildAuthorityRefusalV1::Unavailable)
+            } else {
+                Ok(())
+            }
+        };
+        assert_eq!(
+            with_xmr_claim_publication_veto_v24(&mut guard, |veto| {
+                assert!(!veto());
+                assert!(!veto());
+                Ok(())
+            }),
+            Err(ChildAuthorityRefusalV1::Unavailable)
+        );
+        assert_eq!(checks, 1);
+    }
 
     #[test]
     fn xmr_envelope_ttl_uses_relay_timestamp_not_chain_height() {
@@ -474,6 +602,50 @@ where
         accepted: &AcceptedXmrRemoteSweepRequestV23,
         response_bytes: &[u8],
     ) -> Result<(), ChildAuthorityRefusalV1> {
+        if self.action_v24 == xmr_remote_sweep_wire::RemoteSweepActionV23::Claim {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.publish_response_inner_v24(accepted, response_bytes, None)
+    }
+    fn reconcile_response_v23(
+        &mut self,
+        response_bytes: &[u8],
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        if self.action_v24 == xmr_remote_sweep_wire::RemoteSweepActionV23::Claim {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.reconcile_response_inner_v24(response_bytes, None)
+    }
+    fn publish_claim_response_guarded_v24(
+        &mut self,
+        accepted: &AcceptedXmrRemoteSweepRequestV23,
+        response_bytes: &[u8],
+        before_publication: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        if self.action_v24 != xmr_remote_sweep_wire::RemoteSweepActionV23::Claim {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.publish_response_inner_v24(accepted, response_bytes, Some(before_publication))
+    }
+    fn reconcile_claim_response_guarded_v24(
+        &mut self,
+        response_bytes: &[u8],
+        before_publication: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        if self.action_v24 != xmr_remote_sweep_wire::RemoteSweepActionV23::Claim {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.reconcile_response_inner_v24(response_bytes, Some(before_publication))
+    }
+}
+
+impl<F: F6TransportPortV1> ProductionXmrRemoteContractsAuthorityV23<F> {
+    fn publish_response_inner_v24(
+        &mut self,
+        accepted: &AcceptedXmrRemoteSweepRequestV23,
+        response_bytes: &[u8],
+        mut before_publication: Option<&mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>>,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
         let expiry = self.transport_expiry_v24()?;
         self.require_action_v24(accepted.payload())?;
         if accepted.session_id() != &self.session_id
@@ -490,6 +662,10 @@ where
         response
             .validate_for_authenticated_request(&request, *accepted.message_digest())
             .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        // This immutable SigningRequest is LOCAL preparation only. A later
+        // live-custody veto may leave it for byte-exact retry; it must not
+        // create a signed DSC1 transcript edge or Relay frame. The caller has
+        // already bound these public proof bytes to its retained XMR sweep.
         let prepared = self
             .store
             .prepare_xmr_remote_sweep_response_dsc1_signing_request(accepted, response_bytes)
@@ -504,7 +680,7 @@ where
         {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
-        sign_commit_and_stage_with_shared_relay(
+        sign_commit_and_stage_xmr_response_v24(
             self.session_id,
             self.local_participant,
             self.store.as_ref(),
@@ -512,14 +688,15 @@ where
             &self.relay,
             prepared,
             expiry,
-        )
-        .map_err(map_remote_transport_error)?;
+            &mut before_publication,
+        )?;
         Ok(())
     }
 
-    fn reconcile_response_v23(
+    fn reconcile_response_inner_v24(
         &mut self,
         response_bytes: &[u8],
+        mut before_publication: Option<&mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>>,
     ) -> Result<(), ChildAuthorityRefusalV1> {
         let expiry = self.transport_expiry_v24()?;
         let response = xmr_remote_sweep_wire::RemoteSweepResponseV23::decode_exact(response_bytes)
@@ -542,7 +719,7 @@ where
                 {
                     return Err(ChildAuthorityRefusalV1::Conflict);
                 }
-                sign_commit_and_stage_with_shared_relay(
+                sign_commit_and_stage_xmr_response_v24(
                     self.session_id,
                     self.local_participant,
                     self.store.as_ref(),
@@ -550,8 +727,8 @@ where
                     &self.relay,
                     *prepared,
                     expiry,
-                )
-                .map_err(map_remote_transport_error)?;
+                    &mut before_publication,
+                )?;
                 Ok(())
             }
             OutboundDsc1RecoveryV1::Committed(committed) => {
@@ -566,12 +743,7 @@ where
                 {
                     return Err(ChildAuthorityRefusalV1::Conflict);
                 }
-                self.relay
-                    .try_borrow_mut()
-                    .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?
-                    .stage_store_outbound_dsc1(*committed, expiry)
-                    .map_err(ProductionContractsOutboundErrorV1::from)
-                    .map_err(map_remote_transport_error)?;
+                stage_xmr_response_v24(&self.relay, *committed, expiry, &mut before_publication)?;
                 Ok(())
             }
             OutboundDsc1RecoveryV1::None => {
@@ -590,6 +762,9 @@ where
                     })?;
                 if prepared.response_payload() != response_bytes {
                     return Err(ChildAuthorityRefusalV1::Conflict);
+                }
+                if let Some(guard) = before_publication.as_mut() {
+                    guard()?;
                 }
                 Ok(())
             }

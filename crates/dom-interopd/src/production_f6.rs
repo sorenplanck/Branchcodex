@@ -838,6 +838,8 @@ fn observe_trusted_wall() -> Result<TrustedWallObservationV2, ProductionF6ErrorV
 /// Concrete V2 composition authority. Status/time stores and the secp context
 /// are retained physically for its whole lifetime.
 pub struct ProductionSolverF6AuthorityV2 {
+    historical_recovery_v24:
+        Option<crate::production_inputs::f6_recovery_v24::HistoricalF6RecoveryV24>,
     binding: ProductionSolverF6BindingV2,
     binding_log: DurableBindingV2<StoreLogV2>,
     receipts: Store,
@@ -858,6 +860,8 @@ impl core::fmt::Debug for ProductionSolverF6AuthorityV2 {
 
 /// Constructor materials shared by strict create/open/resume paths.
 pub(crate) struct ProductionF6AuthoritiesV2 {
+    pub historical_recovery_v24:
+        Option<crate::production_inputs::f6_recovery_v24::HistoricalF6RecoveryV24>,
     pub shared: ProductionF6LegSharedAuthoritiesV2,
     pub bond_attestation_authorities: AuthoritySetV1,
     pub remote_status_authorities: AuthoritySetV1,
@@ -938,6 +942,21 @@ impl ProductionSolverF6AuthorityV2 {
         mode: OpenModeV2,
     ) -> Result<Self, ProductionF6ErrorV2> {
         binding.validate()?;
+        if authorities
+            .historical_recovery_v24
+            .as_ref()
+            .is_some_and(|recovery| {
+                !recovery.require_scope(binding.wire.route_id, binding.composition_id)
+            })
+        {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
+        // Historical recovery cannot complete/create a missing authority file.
+        let mode = if authorities.historical_recovery_v24.is_some() {
+            OpenModeV2::Open
+        } else {
+            mode
+        };
         {
             let inventory = authorities.shared.inventory()?;
             validate_inventory(binding, &inventory, authorities.shared.inventory_lease())?;
@@ -1038,6 +1057,7 @@ impl ProductionSolverF6AuthorityV2 {
             binding,
             binding_log,
             receipts,
+            historical_recovery_v24: authorities.historical_recovery_v24,
             shared: authorities.shared,
             candidate_book,
             bond_attestation_authorities: authorities.bond_attestation_authorities,
@@ -1056,6 +1076,9 @@ impl ProductionSolverF6AuthorityV2 {
         quote: QuoteV2,
         request: &ReserveQuoteRequestV2,
     ) -> Result<ReservedProductionF6QuoteV2, ProductionF6ErrorV2> {
+        if self.historical_recovery_v24.is_some() {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
         let wall = observe_trusted_wall()?;
         let rfq = self.load_rfq()?;
         let (status_evidence, current) = self.prove_live_authorities(&rfq, wall.seconds)?;
@@ -1188,6 +1211,9 @@ impl ProductionSolverF6AuthorityV2 {
     pub fn execution_authority(
         &mut self,
     ) -> Result<ProductionF6ExecutionAuthorityV2, ProductionF6ErrorV2> {
+        if self.historical_recovery_v24.is_some() {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
         let wall = observe_trusted_wall()?;
         let quote = self.load_local_quote(wall.milliseconds)?;
         let capability = self
@@ -1255,6 +1281,9 @@ impl ProductionSolverF6AuthorityV2 {
         ),
         ProductionF6ErrorV2,
     > {
+        if self.historical_recovery_v24.is_some() {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
         let status = self
             .shared
             .status_mut()?
@@ -1485,6 +1514,11 @@ impl ProductionSolverF6AuthorityV2 {
             if existing == failed {
                 return durable_commit(&existing, DurablePayloadDispositionV1::FailedClosed, true);
             }
+            return Err(ProductionF6ErrorV2::Receipt);
+        }
+        // Only byte-exact previously committed receipts may replay. Do not
+        // revive QUOTE/ACCEPT/terms signing under a historical F6 opening.
+        if self.historical_recovery_v24.is_some() {
             return Err(ProductionF6ErrorV2::Receipt);
         }
         self.apply_delivery(delivery)?;
@@ -3302,6 +3336,7 @@ mod tests {
             },
             binding,
             ProductionF6AuthoritiesV2 {
+                historical_recovery_v24: None,
                 shared: upstream_shared,
                 bond_attestation_authorities: bond_authorities,
                 remote_status_authorities: status_authorities,

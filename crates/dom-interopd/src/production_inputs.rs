@@ -25,6 +25,9 @@ pub(crate) mod enrollment_context_v23;
 #[path = "production_inputs/planning_context_v23.rs"]
 pub(crate) mod planning_context_v23;
 
+#[path = "production_inputs/f6_recovery_v24.rs"]
+pub(crate) mod f6_recovery_v24;
+
 use adapter_btc::roster::{BitcoinSignerRoleV1, ParticipantKeyRosterV1, ParticipantKeyV1};
 use blake2::{
     digest::{Update, VariableOutput},
@@ -4304,6 +4307,116 @@ mod tests {
     }
 
     #[test]
+    fn historical_f6_recovery_requires_externalized_replayed_route_and_locks_runtime_v24() {
+        use crate::supervisor::{ManualClockV1, RouteSupervisorConfigV1, RouteSupervisorV1};
+        use route_executor::{
+            ActionIntentV1, ActionKindV1, EffectDispatchV1, HealthStateV1, RefundBindingsV1,
+        };
+        let prepared = prepare_inputs();
+        let create = load_production_create_bootstrap_v1(&prepared.root).unwrap();
+        let mut inputs =
+            load_authenticated_production_inputs_v1(&create, time_common::EVIDENCE_TIME).unwrap();
+        let now = time_common::EVIDENCE_TIME * 1000 + 1;
+        let owner = create.config().pins().process_owner_id;
+        assert!(inputs.historical_f6_recovery_v24().unwrap().is_none());
+        let store = inputs.route_store.as_mut().unwrap();
+        let lease = store
+            .acquire_lease(ROUTE_ID, owner, now, 60_000)
+            .unwrap()
+            .lease();
+        let snapshot = store.verify_replay(ROUTE_ID).unwrap();
+        store
+            .apply_event(
+                lease,
+                snapshot.revision,
+                [181; 32],
+                &RouteEventV1::ArmRefunds(RefundBindingsV1 {
+                    upstream_refund_digest: [182; 32],
+                    downstream_refund_digest: [183; 32],
+                }),
+                now,
+            )
+            .unwrap();
+        let snapshot = store.verify_replay(ROUTE_ID).unwrap();
+        store
+            .apply_event(
+                lease,
+                snapshot.revision,
+                [184; 32],
+                &RouteEventV1::CommitAction(ActionIntentV1 {
+                    leg: LegIdV1::Upstream,
+                    kind: ActionKindV1::Funding,
+                    semantic_digest: [185; 32],
+                    contains_route_secret: false,
+                    dispatch: EffectDispatchV1::ExternalCustody {
+                        custody_digest: [186; 32],
+                        transaction_id: [187; 32],
+                    },
+                }),
+                now,
+            )
+            .unwrap();
+        assert!(inputs.historical_f6_recovery_v24().unwrap().is_none());
+        let store = inputs.route_store.as_mut().unwrap();
+        let snapshot = store.verify_replay(ROUTE_ID).unwrap();
+        let effect_id = snapshot.upstream.funding.effect().unwrap().effect_id;
+        store
+            .apply_event(
+                lease,
+                snapshot.revision,
+                [188; 32],
+                &RouteEventV1::ActionExternalized {
+                    leg: LegIdV1::Upstream,
+                    kind: ActionKindV1::Funding,
+                    effect_id,
+                    transaction_id: [187; 32],
+                    exposure: None,
+                },
+                now,
+            )
+            .unwrap();
+        // Real externalization alone must not move a healthy restart out of
+        // Running: it may still complete normal Claim with fresh authorities.
+        assert!(inputs.current_time_ancestry_ready());
+        assert!(inputs.historical_f6_recovery_v24().unwrap().is_none());
+        assert_eq!(
+            inputs
+                .route_store
+                .as_ref()
+                .unwrap()
+                .verify_replay(ROUTE_ID)
+                .unwrap()
+                .health,
+            HealthStateV1::Running
+        );
+        // Model the authenticated loader's economic-expiry result, not an
+        // arbitrary fresh-path error: only this switches into the exit lane.
+        inputs.current_time_ancestry_ready = false;
+        let capability = inputs.historical_f6_recovery_v24().unwrap().unwrap();
+        assert!(capability.require_scope(ROUTE_ID, inputs.composition().binding_digest()));
+        assert!(!capability.require_scope([189; 32], inputs.composition().binding_digest()));
+        assert!(!capability.require_scope(ROUTE_ID, [190; 32]));
+        let store = inputs.take_route_store_for_f6().unwrap();
+        let mut supervisor = RouteSupervisorV1::acquire(
+            store,
+            ROUTE_ID,
+            owner,
+            RouteSupervisorConfigV1::new(60_000, 30_000, 10_000, 1).unwrap(),
+            ManualClockV1::new(now + 1).unwrap(),
+        )
+        .unwrap();
+        capability.restrict_runtime(&mut supervisor).unwrap();
+        let restricted = supervisor.snapshot().unwrap();
+        assert_eq!(restricted.health, HealthStateV1::RecoveryOnly);
+        capability.restrict_runtime(&mut supervisor).unwrap();
+        assert_eq!(supervisor.snapshot().unwrap(), restricted);
+        // Route reducer keeps funded RecoveryOnly locked against fresh Running.
+        assert!(supervisor
+            .set_health([191; 32], HealthStateV1::Running, [192; 32])
+            .is_err());
+    }
+
+    #[test]
     fn expired_original_proofs_recover_without_issuing_current_authorization() {
         let prepared = prepare_inputs();
         let create = load_production_create_bootstrap_v1(&prepared.root)
@@ -4332,6 +4445,9 @@ mod tests {
             checkpoint
         );
         assert!(!recovered.current_time_ancestry_ready());
+        // A historically authenticated checkpoint alone is not committed
+        // economics. The actual RouteStore replay must prove externalization.
+        assert!(recovered.historical_f6_recovery_v24().unwrap().is_none());
     }
 
     #[test]

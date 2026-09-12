@@ -152,6 +152,20 @@ pub(crate) trait ScopedXmrSweepAuthorityV1 {
         Ok(())
     }
 
+    /// Remote producers must invoke this guard AFTER their observations and
+    /// immediately before publishing/reconciling the public DSC1 response.
+    /// Local default hooks do not publish anything.
+    fn complete_claim_sweep_guarded_v24(
+        &mut self,
+        request: &ProductionChildMaterializationRequestV1,
+        scalar: &RouteScalar,
+        retained: &XmrBuiltSweepV1,
+        before_publish: &mut dyn FnMut() -> Result<(), ChildAuthorityRefusalV1>,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        before_publish()?;
+        self.complete_claim_sweep_v23(request, scalar, retained)
+    }
+
     /// Builds the exact refund sweep for this settlement from the refund
     /// share revealed by the DOM refund adaptor round.
     fn build_refund_sweep(
@@ -409,6 +423,18 @@ fn fresh_materialization_time_v23(before: u64, after: u64) -> Result<u64, ChildA
         return Err(ChildAuthorityRefusalV1::Conflict);
     }
     Ok(after)
+}
+
+fn fresh_live_materialization_time_v24(
+    before: u64,
+    after: u64,
+    original_deadline: u64,
+) -> Result<u64, ChildAuthorityRefusalV1> {
+    let now = fresh_materialization_time_v23(before, after)?;
+    if now >= original_deadline {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    Ok(now)
 }
 
 fn digest_parts(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, ChildAuthorityRefusalV1> {
@@ -1011,25 +1037,44 @@ where
             // F7/quorum/sidecar work may have consumed the original window.
             // Recheck the exact retained row, physical owner and unchanged
             // lease at fresh time; never renew a lease merely to publish 0x1a.
-            let completion_now = fresh_materialization_time_v23(now, self.clock.now_unix_ms()?)?;
-            if let Some(owner) = &self.lease_owner_v11 {
-                owner.require_scope(
-                    crate::production_config::ProductionChainFamilyV11::Xmr,
-                    self.setup.binding_hash(),
-                    self.deployment.deployment().genesis_hash,
-                    self.lease.fencing_epoch(),
+            let mut last_checked_time = now;
+            let mut before_publish = || {
+                let completion_now =
+                    fresh_materialization_time_v23(last_checked_time, self.clock.now_unix_ms()?)?;
+                last_checked_time = completion_now;
+                if let Some(owner) = &self.lease_owner_v11 {
+                    owner.require_scope(
+                        crate::production_config::ProductionChainFamilyV11::Xmr,
+                        self.setup.binding_hash(),
+                        self.deployment.deployment().genesis_hash,
+                        self.lease.fencing_epoch(),
+                    )?;
+                }
+                let checked = self
+                    .actuator
+                    .checked_view_v23(&self.lease, locator, completion_now)
+                    .map_err(map_actuator_error)?;
+                if checked != view {
+                    return Err(ChildAuthorityRefusalV1::Conflict);
+                }
+                // checked_view can wait for its SQLite lock. Its input time
+                // alone cannot prove that this same lease is still live once
+                // the audited row has actually returned.
+                let after_check = fresh_live_materialization_time_v24(
+                    last_checked_time,
+                    self.clock.now_unix_ms()?,
+                    self.lease.deadline_unix_ms_v24(),
                 )?;
-            }
-            let checked = self
-                .actuator
-                .checked_view_v23(&self.lease, locator, completion_now)
-                .map_err(map_actuator_error)?;
-            if checked != view {
-                return Err(ChildAuthorityRefusalV1::Conflict);
-            }
-            authority
-                .sweep_authority
-                .complete_claim_sweep_v23(request, scalar, &retained_sweep)?;
+                last_checked_time = after_check;
+                Ok(())
+            };
+            before_publish()?;
+            authority.sweep_authority.complete_claim_sweep_guarded_v24(
+                request,
+                scalar,
+                &retained_sweep,
+                &mut before_publish,
+            )?;
         }
         Ok(SettlementChildPlanV1 {
             face: SettlementFaceV1::Monero,
@@ -1489,6 +1534,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_guard_accounts_for_time_waiting_on_actuator_sql() {
+        assert_eq!(
+            fresh_live_materialization_time_v24(1000, 1099, 1100),
+            Ok(1099)
+        );
+        for after_sql in [1100, 1101, u64::MAX] {
+            assert_eq!(
+                fresh_live_materialization_time_v24(1000, after_sql, 1100),
+                Err(ChildAuthorityRefusalV1::Conflict)
+            );
+        }
+        assert_eq!(
+            fresh_live_materialization_time_v24(1099, 1098, 1100),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
+    }
 
     #[test]
     fn post_build_clock_rejects_regression_and_preserves_exact_boundary() {

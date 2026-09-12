@@ -9060,6 +9060,56 @@ impl ContractsSessionStoreV1 {
         request: PreparedDsc1SigningRequestV1,
         signed_bytes: &[u8],
     ) -> Result<CommittedOutboundDsc1V1, SessionStoreError> {
+        self.commit_prepared_outbound_dsc1_inner_v24(request, signed_bytes, None)
+    }
+
+    /// Revalidate an opaque Claim response request before identity signing.
+    /// This adds a restriction; it cannot authorize any other message/action.
+    pub fn revalidate_prepared_xmr_claim_response_v24(
+        &self,
+        request: &PreparedDsc1SigningRequestV1,
+    ) -> Result<(), SessionStoreError> {
+        if request.message_type() != 0x1a
+            || xmr_remote_sweep_wire::RemoteSweepResponseV23::decode_exact(request.payload())
+                .map_err(|_| SessionStoreError::InvalidTransition)?
+                .action()
+                != xmr_remote_sweep_wire::RemoteSweepActionV23::Claim
+        {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        self.revalidate_prepared_outbound_dsc1(request)
+    }
+
+    /// Commit only a Claim 0x1a, with an additional live-custody veto inside
+    /// the operation lock after authentication and before public persistence.
+    /// The callback supplies no Store authority and may only reject the write.
+    pub fn commit_prepared_xmr_claim_response_guarded_v24(
+        &self,
+        request: PreparedDsc1SigningRequestV1,
+        signed_bytes: &[u8],
+        before_publication: &mut dyn FnMut() -> bool,
+    ) -> Result<CommittedOutboundDsc1V1, SessionStoreError> {
+        if request.message_type() != 0x1a
+            || xmr_remote_sweep_wire::RemoteSweepResponseV23::decode_exact(request.payload())
+                .map_err(|_| SessionStoreError::InvalidTransition)?
+                .action()
+                != xmr_remote_sweep_wire::RemoteSweepActionV23::Claim
+        {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        self.commit_prepared_outbound_dsc1_inner_v24(
+            request,
+            signed_bytes,
+            Some(before_publication),
+        )
+    }
+
+    fn commit_prepared_outbound_dsc1_inner_v24(
+        &self,
+        request: PreparedDsc1SigningRequestV1,
+        signed_bytes: &[u8],
+        mut before_publication: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<CommittedOutboundDsc1V1, SessionStoreError> {
         let _guard = self.operation_lock()?;
         let retained = self.authenticate_prepared_outbound_dsc1_handle_locked(&request)?;
         self.require_downstream_claim_outbound_locked_v23(&retained)?;
@@ -9070,6 +9120,9 @@ impl ContractsSessionStoreV1 {
         ) {
             Ok(committed) => {
                 self.authenticate_committed_outbound_dsc1_record_locked(&committed, &retained)?;
+                if before_publication.as_mut().is_some_and(|guard| !guard()) {
+                    return Err(SessionStoreError::InvalidTransition);
+                }
                 return if committed.signed_bytes == signed_bytes {
                     Ok(committed.issued_handle(self.open_instance_id))
                 } else {
@@ -9202,10 +9255,14 @@ impl ContractsSessionStoreV1 {
             current.chain(),
             current.encrypted_payload(),
         )?;
-        match self.accept_transport_message_with_successor_locked(
+        if before_publication.as_mut().is_some_and(|guard| !guard()) {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        match self.accept_transport_message_with_successor_guarded_locked_v24(
             signed_bytes,
             &successor,
             Some(&failed),
+            &mut before_publication,
         )? {
             DurableTransportOutcomeV1::Accepted(receipt)
                 if receipt.message_digest == retained.unsigned_message_digest
@@ -11061,6 +11118,21 @@ impl ContractsSessionStoreV1 {
         successor: &SessionRecordV1,
         failed_closed_successor: Option<&SessionRecordV1>,
     ) -> Result<DurableTransportOutcomeV1, SessionStoreError> {
+        self.accept_transport_message_with_successor_guarded_locked_v24(
+            signed_bytes,
+            successor,
+            failed_closed_successor,
+            &mut None,
+        )
+    }
+
+    fn accept_transport_message_with_successor_guarded_locked_v24(
+        &self,
+        signed_bytes: &[u8],
+        successor: &SessionRecordV1,
+        failed_closed_successor: Option<&SessionRecordV1>,
+        before_publication: &mut Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<DurableTransportOutcomeV1, SessionStoreError> {
         let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
         let roster = self.load_transport_roster(envelope.session_id)?;
         let identity_binding = self.load_transport_identity_binding(envelope.session_id)?;
@@ -11165,6 +11237,9 @@ impl ContractsSessionStoreV1 {
                     if current.as_bytes() != accepted_predecessor.as_bytes() {
                         return Err(SessionStoreError::Quarantined);
                     }
+                    if before_publication.as_mut().is_some_and(|guard| !guard()) {
+                        return Err(SessionStoreError::InvalidTransition);
+                    }
                     self.persist_session_record(&accepted.successor)?;
                 }
 
@@ -11179,6 +11254,9 @@ impl ContractsSessionStoreV1 {
                             let current = self.load_session_locked(equivocation.session_id)?;
                             if current.as_bytes() != predecessor.as_bytes() {
                                 return Err(SessionStoreError::Quarantined);
+                            }
+                            if before_publication.as_mut().is_some_and(|guard| !guard()) {
+                                return Err(SessionStoreError::InvalidTransition);
                             }
                             self.persist_session_record(&equivocation.successor)?;
                         }
@@ -11207,6 +11285,9 @@ impl ContractsSessionStoreV1 {
                     true,
                 );
                 let staging_name = format!(".{final_name}.staging");
+                if before_publication.as_mut().is_some_and(|guard| !guard()) {
+                    return Err(SessionStoreError::InvalidTransition);
+                }
                 publish_immutable(
                     &self.messages,
                     &staging_name,
@@ -11259,6 +11340,9 @@ impl ContractsSessionStoreV1 {
             false,
         )?;
         let staging_name = format!(".{name}.staging");
+        if before_publication.as_mut().is_some_and(|guard| !guard()) {
+            return Err(SessionStoreError::InvalidTransition);
+        }
         publish_immutable(
             &self.messages,
             &staging_name,
@@ -53579,6 +53663,7 @@ mod tests {
             reopened.transport_message_count(session_id)?,
             message_count + 1
         );
+        assert_claim_response_publication_veto_v24(&reopened, &fixture, session_id)?;
         drop(reopened);
 
         // Keep the DOMSPPS1 codec internally self-consistent while changing
@@ -62359,6 +62444,220 @@ mod tests {
             &vec![0x02; EVM_SIGNED_ACTION_RAW_MAX_LEN + 1],
         )
         .is_err());
+        Ok(())
+    }
+
+    // Reuses the crypto-real post-anchor fixture: only transport custody is
+    // under test. The canonical wire below is NOT a verified Monero sweep.
+    fn assert_claim_response_publication_veto_v24(
+        store: &ContractsSessionStoreV1,
+        fixture: &EarlyTransportTestFixture,
+        session_id: [u8; 32],
+    ) -> Result<(), Box<dyn Error>> {
+        use std::cell::Cell;
+        use xmr_remote_sweep_wire::*;
+        let original = store.load_session(session_id)?;
+        assert_eq!(original.phase(), SessionPhaseV1::FundingConfirmed);
+        store.bind_local_transport_signer(session_id, [0x31; 32])?;
+        let request = RemoteSweepRequestV23 {
+            network_genesis: [1; 32],
+            route_id: [2; 32],
+            session_id,
+            settlement_id: [4; 32],
+            terms_digest: original.terms_hash(),
+            registry_digest: [6; 32],
+            profile_digest: [7; 32],
+            deployment_digest: [8; 32],
+            route_scope_digest: [9; 32],
+            composition_digest: [10; 32],
+            role_plan_digest: [11; 32],
+            source_scope_digest: [12; 32],
+            effect_id: [13; 32],
+            semantic_digest: [14; 32],
+            public_secret_evidence_digest: [15; 32],
+            funding_tx_hash: [16; 32],
+            funding_evidence_digest: [17; 32],
+            public_spend_share: [18; 32],
+            funding_output_index: 1,
+            funding_block_height: 100,
+            funded_amount_piconero: 10_000,
+            max_fee_piconero: 100,
+            adapter_max_raw_transaction_bytes: 512 * 1024,
+            max_raw_transaction_bytes: 128 * 1024,
+            fencing_epoch: 3,
+            action: RemoteSweepActionV23::Claim,
+            leg: RemoteSweepLegV23::Upstream,
+            destination: "48canonicalMainnetTransportFixture".to_owned(),
+        };
+        let signed_request = transport_signed_bytes(
+            fixture.identity_key(1),
+            *fixture.trusted_chain_id.as_bytes(),
+            session_id,
+            fixture.participant_ids[1],
+            store.next_transport_sequence(session_id, fixture.participant_ids[1])?,
+            original.transcript_hash(),
+            0x19,
+            &request.encode()?,
+        )?;
+        let accepted = store.accept_xmr_remote_sweep_request_transport_message(&signed_request)?;
+        let response = RemoteSweepResponseV23::new(RemoteSweepResponseInputV23 {
+            request_digest: request.digest()?,
+            request_message_digest: *accepted.message_digest(),
+            signer_funding_evidence_digest: [19; 32],
+            network_genesis: request.network_genesis,
+            route_id: request.route_id,
+            session_id,
+            settlement_id: request.settlement_id,
+            terms_digest: request.terms_digest,
+            registry_digest: request.registry_digest,
+            profile_digest: request.profile_digest,
+            deployment_digest: request.deployment_digest,
+            effect_id: request.effect_id,
+            semantic_digest: request.semantic_digest,
+            transaction_hash: [20; 32],
+            key_image: [21; 32],
+            funded_amount_piconero: request.funded_amount_piconero,
+            fee_piconero: 99,
+            fencing_epoch: request.fencing_epoch,
+            action: request.action,
+            leg: request.leg,
+            raw_transaction: vec![0x7a; 64],
+            input_spend_proof: [0x31; INPUT_SPEND_PROOF_BYTES_V23],
+            payout_proofs: vec![RemoteTxKeyDerivationProofV23::decode(
+                &[0x41; TX_KEY_DERIVATION_PROOF_BYTES_V23],
+            )?],
+            ring_members: (0..16)
+                .map(|i| RemoteRingMemberV23 {
+                    global_index: i + 1,
+                    key: [i as u8 + 1; 32],
+                    commitment: [i as u8 + 33; 32],
+                })
+                .collect(),
+        })?
+        .encode()?;
+        let before = store.load_session(session_id)?;
+        let count = store.transport_message_count(session_id)?;
+        let first = store
+            .prepare_xmr_remote_sweep_response_dsc1_signing_request(&accepted, &response)?
+            .ok_or(SessionStoreError::Quarantined)?;
+        let sequence = first.sequence();
+        let digest = *first.unsigned_message_digest();
+        let first_signed = sign_store_issued_request(fixture, &first)?;
+        // SigningRequest is allowed to survive locally. It is immutable and
+        // authenticated, not a committed signed object or public transcript.
+        for fail_at in [1, 2] {
+            let prepared = store
+                .prepare_xmr_remote_sweep_response_dsc1_signing_request(&accepted, &response)?
+                .ok_or(SessionStoreError::Quarantined)?;
+            assert_eq!(prepared.sequence(), sequence);
+            assert_eq!(prepared.unsigned_message_digest(), &digest);
+            assert_eq!(prepared.payload(), response);
+            store.revalidate_prepared_xmr_claim_response_v24(&prepared)?;
+            let calls = Cell::new(0);
+            assert!(matches!(
+                store.commit_prepared_xmr_claim_response_guarded_v24(
+                    prepared,
+                    &first_signed,
+                    &mut || {
+                        calls.set(calls.get() + 1);
+                        calls.get() != fail_at
+                    },
+                ),
+                Err(SessionStoreError::InvalidTransition)
+            ));
+            assert_eq!(calls.get(), fail_at);
+            assert_eq!(
+                store.load_session(session_id)?.as_bytes(),
+                before.as_bytes()
+            );
+            assert_eq!(store.transport_message_count(session_id)?, count);
+            assert_eq!(
+                store.next_transport_sequence(session_id, fixture.participant_ids[0])?,
+                sequence
+            );
+            assert!(matches!(
+                store.resume_xmr_remote_sweep_response_for_request(
+                    session_id,
+                    fixture.participant_ids[0],
+                    *accepted.message_digest(),
+                ),
+                Err(SessionStoreError::SessionNotFound)
+            ));
+            assert!(matches!(
+                store.load_committed_outbound_dsc1(
+                    session_id,
+                    fixture.participant_ids[0],
+                    sequence
+                ),
+                Err(SessionStoreError::SessionNotFound)
+            ));
+            match store.resume_outbound_dsc1(session_id)? {
+                OutboundDsc1RecoveryV1::SigningRequest(retained) => {
+                    assert_eq!(retained.unsigned_message_digest(), &digest);
+                    assert_eq!(retained.sequence(), sequence);
+                    assert_eq!(retained.payload(), response);
+                }
+                _ => return Err(Box::new(SessionStoreError::Quarantined)),
+            }
+        }
+        let prepared = store
+            .prepare_xmr_remote_sweep_response_dsc1_signing_request(&accepted, &response)?
+            .ok_or(SessionStoreError::Quarantined)?;
+        let committed = store.commit_prepared_xmr_claim_response_guarded_v24(
+            prepared,
+            &first_signed,
+            &mut || true,
+        )?;
+        assert_eq!(committed.message_digest(), &digest);
+        assert_eq!(committed.signed_bytes(), first_signed);
+        assert_eq!(store.transport_message_count(session_id)?, count + 1);
+        assert_eq!(
+            store.next_transport_sequence(session_id, fixture.participant_ids[0])?,
+            sequence + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn claim_response_commit_veto_cannot_admit_another_store_request_class(
+    ) -> Result<(), Box<dyn Error>> {
+        use std::cell::Cell;
+        let temporary = TestDirectory::create()?;
+        let evidence_policy = policy(BudgetPolicyProfileV1::EvidenceOnly)?;
+        let (store, initial, fixture) = early_transport_store(&temporary, &evidence_policy)?;
+        let local = fixture.index_for_direction(DirectionV1::Initiator)?;
+        store.bind_local_transport_signer(
+            initial.session_id(),
+            if local == 0 { [0x31; 32] } else { [0x32; 32] },
+        )?;
+        let authority = store.prepare_early_transport_authority(
+            fixture.trusted_chain_id,
+            [&fixture.shared_bindings[0], &fixture.shared_bindings[1]],
+        )?;
+        let request = store
+            .prepare_next_early_dsc1_signing_request(&authority, None)?
+            .ok_or(SessionStoreError::Quarantined)?;
+        assert!(store
+            .revalidate_prepared_xmr_claim_response_v24(&request)
+            .is_err());
+        let signed = sign_store_issued_request(&fixture, &request)?;
+        let invoked = Cell::new(false);
+        assert!(matches!(
+            store.commit_prepared_xmr_claim_response_guarded_v24(request, &signed, &mut || {
+                invoked.set(true);
+                true
+            }),
+            Err(SessionStoreError::InvalidTransition)
+        ));
+        assert!(!invoked.get());
+        assert_eq!(
+            store.load_session(initial.session_id())?.as_bytes(),
+            initial.as_bytes()
+        );
+        assert!(matches!(
+            store.resume_outbound_dsc1(initial.session_id())?,
+            OutboundDsc1RecoveryV1::SigningRequest(_)
+        ));
         Ok(())
     }
 

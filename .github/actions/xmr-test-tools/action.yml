@@ -98,6 +98,7 @@ runs:
         echo "DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar" >> "$GITHUB_ENV"
         echo "DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23" >> "$GITHUB_ENV"
     - name: Verify public refund authentication and durable Ready recovery
+      if: ${{ inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -143,6 +144,7 @@ runs:
         if-no-files-found: warn
         retention-days: 7
     - name: Verify custody paths and real offline helper startup
+      if: ${{ inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:

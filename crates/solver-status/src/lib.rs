@@ -798,6 +798,23 @@ impl DurableSolverStatusStoreV1 {
         Ok(SolverStatusInstallOutcomeV1::Installed)
     }
 
+    /// Authenticates exact membership in the retained signed history without
+    /// changing the trusted clock or issuing a current/active capability.
+    pub fn authenticate_retained_signed_v24(
+        &self,
+        signed: &SignedSolverStatusV1,
+        secp: &SecpContext,
+    ) -> Result<()> {
+        let bytes = signed.canonical_bytes()?;
+        // Audit authenticates signatures, scope, ordering and every retained
+        // row; an expired predecessor is historical evidence, NOT Active.
+        let history = self.audit(secp)?;
+        if !history.iter().any(|row| row.signed_bytes == bytes) {
+            return Err(SolverStatusErrorV1::Storage);
+        }
+        Ok(())
+    }
+
     /// Revalidates the complete retained history and issues a move-only active
     /// capability from its exact current head.
     pub fn prove_current_active(

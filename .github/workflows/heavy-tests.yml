@@ -172,7 +172,9 @@ jobs:
 
       - uses: ./.github/actions/xmr-test-tools
         with:
-          run-once-regressions: 'false'
+          # Pushes have a single owner in interop-hardening. A manual
+          # interop-full-only campaign must still execute these regressions.
+          run-once-regressions: ${{ github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}
 
       - name: Verify prepared operational integration ingress
         env:
@@ -429,7 +431,9 @@ jobs:
         with:
           dom-path: dom
           real-daemon: 'true'
-          run-once-regressions: 'false'
+          # Own the shared regressions exactly once when heavy-tests is
+          # dispatched manually for the complete DOM<->XMR campaign.
+          run-once-regressions: ${{ github.event_name == 'workflow_dispatch' && (inputs.suite == 'all' || inputs.suite == 'dom-xmr-native') }}
 
       # A debug or feature-less executable cannot satisfy NativeDaemonBinaryV23.
       # GPL tooling lives in the sibling checkout, outside this build's git state.

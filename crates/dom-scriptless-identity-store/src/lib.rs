@@ -416,6 +416,29 @@ impl ContractsTransportIdentityStoreV1 {
         store: &ContractsSessionStoreV1,
         request: PreparedDsc1SigningRequestV1,
     ) -> Result<CommittedOutboundDsc1V1, IdentityStoreError> {
+        self.sign_and_commit_store_prepared_dsc1_inner_v24(store, request, None)
+    }
+
+    /// Sign only a Store-authenticated XMR Claim response; the Store invokes
+    /// the additional custody veto after signing under its own commit lock.
+    pub fn sign_and_commit_xmr_claim_response_guarded_v24(
+        &self,
+        store: &ContractsSessionStoreV1,
+        request: PreparedDsc1SigningRequestV1,
+        before_publication: &mut dyn FnMut() -> bool,
+    ) -> Result<CommittedOutboundDsc1V1, IdentityStoreError> {
+        store
+            .revalidate_prepared_xmr_claim_response_v24(&request)
+            .map_err(|_| IdentityStoreError::StoreRejected)?;
+        self.sign_and_commit_store_prepared_dsc1_inner_v24(store, request, Some(before_publication))
+    }
+
+    fn sign_and_commit_store_prepared_dsc1_inner_v24(
+        &self,
+        store: &ContractsSessionStoreV1,
+        request: PreparedDsc1SigningRequestV1,
+        before_publication: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<CommittedOutboundDsc1V1, IdentityStoreError> {
         self.revalidate()?;
         store
             .revalidate_prepared_outbound_dsc1(&request)
@@ -458,9 +481,15 @@ impl ContractsTransportIdentityStoreV1 {
         if signed.digest() != request.unsigned_message_digest() {
             return Err(IdentityStoreError::AuthenticationFailed);
         }
-        store
-            .commit_prepared_outbound_dsc1(request, signed.as_bytes())
-            .map_err(|_| IdentityStoreError::StoreRejected)
+        match before_publication {
+            Some(guard) => store.commit_prepared_xmr_claim_response_guarded_v24(
+                request,
+                signed.as_bytes(),
+                guard,
+            ),
+            None => store.commit_prepared_outbound_dsc1(request, signed.as_bytes()),
+        }
+        .map_err(|_| IdentityStoreError::StoreRejected)
     }
 
     /// Signs one exact canonical DSC1 message after revalidating the retained

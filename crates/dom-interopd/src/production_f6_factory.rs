@@ -852,6 +852,8 @@ fn exact_inventory_fencing_epoch(
 
 /// Sole concrete implementation of the sealed pair-factory trait.
 pub(crate) struct ProductionF6PairAuthoritiesFactoryV7 {
+    historical_recovery_v24:
+        Option<crate::production_inputs::f6_recovery_v24::HistoricalF6RecoveryV24>,
     bundle: AuthenticatedProductionF6AuthorityBundleV7,
     route: ProductionF6AuthenticatedRouteContextV7,
     composition: Rc<ComposedBindingV2>,
@@ -932,6 +934,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             bundle,
             route,
             composition,
+            historical_recovery_v24: None,
             paths,
             prepared,
             inventory: Some(inventory),
@@ -958,6 +961,22 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
         self.final_claim_plan
             .take()
             .ok_or(ProductionF6ActivationRefusalV2::Unavailable)
+    }
+
+    pub(crate) fn with_historical_recovery_v24(
+        mut self,
+        recovery: crate::production_inputs::f6_recovery_v24::HistoricalF6RecoveryV24,
+    ) -> Result<Self, ProductionF6ActivationRefusalV2> {
+        if !recovery.require_scope(self.route.route_id, self.route.composition_digest)
+            || self.native_xmr_inventory.is_some()
+            || self.native_xmr_inventory_required
+            || self.bound.is_some()
+            || self.historical_recovery_v24.is_some()
+        {
+            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        }
+        self.historical_recovery_v24 = Some(recovery);
+        Ok(self)
     }
 
     fn bind_pair_inner(
@@ -1077,6 +1096,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
         let downstream_signers =
             open_signers(&self.bundle.downstream_signers, credentials.downstream)?;
         let upstream_candidate = open_candidate(
+            self.historical_recovery_v24.is_some(),
             &self.paths.upstream_candidate,
             self.prepared.upstream_candidate,
             upstream_binding,
@@ -1084,43 +1104,81 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             upstream_signers,
         )?;
         let downstream_candidate = open_candidate(
+            self.historical_recovery_v24.is_some(),
             &self.paths.downstream_candidate,
             self.prepared.downstream_candidate,
             downstream_binding,
             &self.bundle,
             downstream_signers,
         )?;
-        let mut upstream_status = DurableSolverStatusStoreV1::open_or_resume_prepared_production(
-            &self.paths.upstream_status,
-            self.prepared.upstream_status,
-            upstream_status_config,
-            self.bundle.status_authorities.clone(),
-            &upstream_secp,
-        )
+        let historical = self.historical_recovery_v24.is_some();
+        let mut upstream_status = if historical {
+            DurableSolverStatusStoreV1::open_production(
+                &self.paths.upstream_status,
+                upstream_status_config,
+                self.bundle.status_authorities.clone(),
+                &upstream_secp,
+            )
+        } else {
+            DurableSolverStatusStoreV1::open_or_resume_prepared_production(
+                &self.paths.upstream_status,
+                self.prepared.upstream_status,
+                upstream_status_config,
+                self.bundle.status_authorities.clone(),
+                &upstream_secp,
+            )
+        }
         .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
-        let mut downstream_status = DurableSolverStatusStoreV1::open_or_resume_prepared_production(
-            &self.paths.downstream_status,
-            self.prepared.downstream_status,
-            downstream_status_config,
-            self.bundle.status_authorities.clone(),
-            &downstream_secp,
-        )
+        let mut downstream_status = if historical {
+            DurableSolverStatusStoreV1::open_production(
+                &self.paths.downstream_status,
+                downstream_status_config,
+                self.bundle.status_authorities.clone(),
+                &downstream_secp,
+            )
+        } else {
+            DurableSolverStatusStoreV1::open_or_resume_prepared_production(
+                &self.paths.downstream_status,
+                self.prepared.downstream_status,
+                downstream_status_config,
+                self.bundle.status_authorities.clone(),
+                &downstream_secp,
+            )
+        }
         .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
-        let upstream_time = DurablePreF6TimeStoreV2::open_or_resume_prepared_production(
-            &self.paths.upstream_time,
-            self.prepared.upstream_time,
-            upstream_policy,
-            self.route.pre_f6_authorities.clone(),
-            &upstream_secp,
-        )
+        let upstream_time = if historical {
+            DurablePreF6TimeStoreV2::open_production(
+                &self.paths.upstream_time,
+                upstream_policy,
+                self.route.pre_f6_authorities.clone(),
+                &upstream_secp,
+            )
+        } else {
+            DurablePreF6TimeStoreV2::open_or_resume_prepared_production(
+                &self.paths.upstream_time,
+                self.prepared.upstream_time,
+                upstream_policy,
+                self.route.pre_f6_authorities.clone(),
+                &upstream_secp,
+            )
+        }
         .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
-        let downstream_time = DurablePreF6TimeStoreV2::open_or_resume_prepared_production(
-            &self.paths.downstream_time,
-            self.prepared.downstream_time,
-            downstream_policy,
-            self.route.pre_f6_authorities.clone(),
-            &downstream_secp,
-        )
+        let downstream_time = if historical {
+            DurablePreF6TimeStoreV2::open_production(
+                &self.paths.downstream_time,
+                downstream_policy,
+                self.route.pre_f6_authorities.clone(),
+                &downstream_secp,
+            )
+        } else {
+            DurablePreF6TimeStoreV2::open_or_resume_prepared_production(
+                &self.paths.downstream_time,
+                self.prepared.downstream_time,
+                downstream_policy,
+                self.route.pre_f6_authorities.clone(),
+                &downstream_secp,
+            )
+        }
         .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
         self.ingest_native_observations_v23(
             native_observations,
@@ -1217,6 +1275,7 @@ impl ProductionF6PairAuthoritiesFactoryV2 for ProductionF6PairAuthoritiesFactory
         }
         let (upstream_shared, downstream_shared) = bound.shared.into_two_legs();
         let upstream = ProductionF6AuthoritiesV2 {
+            historical_recovery_v24: self.historical_recovery_v24.clone(),
             shared: upstream_shared,
             bond_attestation_authorities: self.bundle.bond_authorities.clone(),
             remote_status_authorities: self.bundle.status_authorities.clone(),
@@ -1229,6 +1288,7 @@ impl ProductionF6PairAuthoritiesFactoryV2 for ProductionF6PairAuthoritiesFactory
             ),
         };
         let downstream = ProductionF6AuthoritiesV2 {
+            historical_recovery_v24: self.historical_recovery_v24.clone(),
             shared: downstream_shared,
             bond_attestation_authorities: self.bundle.bond_authorities.clone(),
             remote_status_authorities: self.bundle.status_authorities.clone(),
@@ -1693,6 +1753,7 @@ fn pins(
 }
 
 fn open_candidate(
+    historical: bool,
     path: &Path,
     prepared: Digest32,
     binding: ProductionSolverF6BindingV2,
@@ -1706,18 +1767,20 @@ fn open_candidate(
         bundle.reserved_chain_keys.clone(),
     )
     .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
-    ProductionF6CandidateAttestationAuthorityStoreV2::open_or_resume_prepared_production(
-        path,
-        prepared,
-        binding,
-        ProductionF6CandidateAuthorityInputsV2::new(
-            bundle.bond_authorities.clone(),
-            bundle.status_authorities.clone(),
-            reserved,
-            secp,
-            signers,
-        ),
-    )
+    let inputs = ProductionF6CandidateAuthorityInputsV2::new(
+        bundle.bond_authorities.clone(),
+        bundle.status_authorities.clone(),
+        reserved,
+        secp,
+        signers,
+    );
+    if historical {
+        ProductionF6CandidateAttestationAuthorityStoreV2::open_production(path, binding, inputs)
+    } else {
+        ProductionF6CandidateAttestationAuthorityStoreV2::open_or_resume_prepared_production(
+            path, prepared, binding, inputs,
+        )
+    }
     .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)
 }
 
