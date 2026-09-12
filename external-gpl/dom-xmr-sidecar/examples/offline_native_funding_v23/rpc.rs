@@ -60,7 +60,10 @@ impl Servers {
                             stream
                                 .set_write_timeout(Some(Duration::from_secs(5)))
                                 .map_err(|e| e.to_string())?;
-                            serve(&mut stream, &snapshot).map_err(|e| e.to_string())?;
+                            // Keep a valid HTTP/1.1 client connection available for
+                            // its successive wallet RPCs. A malformed request or an
+                            // EOF is confined to this socket, never the listener.
+                            while serve(&mut stream, &snapshot).is_ok() {}
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5))
@@ -168,8 +171,15 @@ fn serve(stream: &mut TcpStream, snapshot: &Snapshot) -> Result<()> {
     let (header_end, content_length) = loop {
         let mut buffer = [0; 2048];
         let count = stream.read(&mut buffer)?;
+        // HTTP clients may open and immediately abandon a pooled/preflight
+        // connection.  That is not a malformed RPC request and, critically,
+        // must not tear down this listener's worker before the next client
+        // connection can obtain the immutable snapshot.
+        if count == 0 {
+            return Err(anyhow!("fixture client closed connection"));
+        }
         ensure!(
-            count > 0 && bytes.len() + count <= MAX_REQUEST,
+            bytes.len() + count <= MAX_REQUEST,
             "bounded HTTP request required"
         );
         bytes.extend_from_slice(&buffer[..count]);
@@ -215,7 +225,7 @@ fn serve(stream: &mut TcpStream, snapshot: &Snapshot) -> Result<()> {
         if let Some(response) = epee::dispatch(path, body, snapshot)? {
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
                 response.len()
             )?;
             stream.write_all(&response)?;
@@ -258,7 +268,7 @@ fn serve(stream: &mut TcpStream, snapshot: &Snapshot) -> Result<()> {
         // Including send_raw_transaction: no network/payment API is available.
         _ => {
             stream.write_all(
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
             )?;
             return Ok(());
         }
@@ -266,7 +276,7 @@ fn serve(stream: &mut TcpStream, snapshot: &Snapshot) -> Result<()> {
     let response = serde_json::to_vec(&response)?;
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
         response.len()
     )?;
     stream.write_all(&response)?;
