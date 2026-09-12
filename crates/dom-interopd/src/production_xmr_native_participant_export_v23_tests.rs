@@ -11,11 +11,10 @@ impl NativeXmrCustodyFixtureV23 {
         position: ProductionRoutePositionV1,
         terms: &SettlementTermsV1,
     ) -> Result<ProductionXmrLegSetupV1> {
-        let setup = xmr_setup_profile::validate_setup(
+        let setup = registry_v23::validate_setup_v24(
             terms,
             &self.profile,
             self.public_binding_v23.clone(),
-            None,
         )?;
         if setup.binding_hash() != self.setup.binding_hash() {
             return Err("participant export differs from actual custody setup".into());

@@ -42,13 +42,19 @@ fail() { printf '%s\n' "$@" >&2; exit 1; }
 # The release commit is not in a shallow clone. Fetching it by SHA costs one
 # commit and its trees. Fail closed if it cannot be obtained: a guard that
 # quietly skips is not a guard.
+REL_REMOTE=${DOM_RELEASE_REMOTE:-https://github.com/sorenplanck/dom-protocol.git}
 if ! git cat-file -e "${REL}^{commit}" 2>/dev/null; then
   git fetch --depth=1 --quiet origin "$REL" 2>/dev/null || true
+fi
+# A branch-only origin need not contain the pinned node release. This fallback
+# still fetches the exact immutable commit and preserves every comparison below.
+if ! git cat-file -e "${REL}^{commit}" 2>/dev/null; then
+  git fetch --depth=1 --quiet "$REL_REMOTE" "$REL" 2>/dev/null || true
 fi
 git cat-file -e "${REL}^{commit}" 2>/dev/null || fail \
   "cannot reach the release commit ${REL}." \
   "This guard compares the working tree against the release line and refuses" \
-  "to pass without it. Fetch it (git fetch --depth=1 origin ${REL}) and re-run."
+  "to pass without it. Fetch it (git fetch --depth=1 ${REL_REMOTE} ${REL}) and re-run."
 
 release_blob=$(mktemp); trap 'rm -f "$release_blob"' EXIT
 git show "${REL}:${PATH_IN_TREE}" > "$release_blob"

@@ -13,6 +13,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Allocate private native fixture root
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      run: |
+        set -euo pipefail
+        umask 077
+        native_tmp="$(python3 -c 'from scripts.run_native_daemon_scenario_v23 import private_synthetic_tmp; print(private_synthetic_tmp())')"
+        [[ "$native_tmp" == "$HOME/.dx-v23"/dx-* ]]
+        [[ "$(realpath -e -- "$native_tmp")" == "$native_tmp" ]]
+        [[ "$(stat -c '%u:%a' -- "$native_tmp")" == "$(id -u):700" ]]
+        printf 'DOM_XMR_PRIVATE_TMP_V23=%s\n' "$native_tmp" >> "$GITHUB_ENV"
     - name: Reclaim hosted runner disk for both production build profiles
       if: ${{ inputs.real-daemon == 'true' }}
       shell: bash
@@ -22,22 +33,37 @@ runs:
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
         df -h /
     - name: Verify offline tool isolation and mandatory test dispatch
+      id: offline_dispatch
+      continue-on-error: true
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       run: |
-        set -euo pipefail
-        python3 -m unittest discover -s scripts/tests -p test_install_sidecar_tools.py
-        python3 -m unittest discover -s scripts/tests -p test_hardening_dispatch_v8.py
-        python3 -m unittest discover -s scripts/tests -p test_native_daemon_campaign_v24.py
-        python3 -m unittest discover -s scripts/tests -p test_scoped_boundary_regressions_v24.py
+        set -uo pipefail
+        failed=0
+        for pattern in \
+          test_install_sidecar_tools.py \
+          test_hardening_dispatch_v8.py \
+          test_full_interop_matrix_v24.py \
+          test_hardening_profile_cache_v24.py \
+          test_native_daemon_campaign_v24.py \
+          test_scoped_boundary_regressions_v24.py
+        do
+          python3 -m unittest discover -s scripts/tests -p "$pattern" || failed=1
+        done
+        python3 scripts/test_xmr_v7_installer_scope.py || failed=1
+        exit "$failed"
     - name: Compile production library, CLI and integration targets
+      id: compile_production
+      continue-on-error: true
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
         CARGO_BUILD_JOBS: '2'
       run: cargo test --locked -p dom-interopd --no-default-features --features production --lib --tests --profile crypto-test --no-run
     - name: Verify Funding and Claim reservation audit purposes
-      if: ${{ inputs.run-once-regressions == 'true' }}
+      id: reservation_audit
+      continue-on-error: true
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -98,7 +124,9 @@ runs:
         echo "DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/crypto-test/dom-xmr-sidecar" >> "$GITHUB_ENV"
         echo "DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/crypto-test/examples/offline_native_funding_v23" >> "$GITHUB_ENV"
     - name: Verify public refund authentication and durable Ready recovery
-      if: ${{ inputs.run-once-regressions == 'true' }}
+      id: refund_recovery
+      continue-on-error: true
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -106,12 +134,13 @@ runs:
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: |
-        set -euo pipefail
+        set -uo pipefail
+        failed=0
         # Reuse the tool compilation/profile. These targeted regressions do
         # not rerun the native signing graph or an economic daemon scenario.
         for filter in auth::local_refund_tests_v24 cache::build_v23_tests; do
           log="$RUNNER_TEMP/xmr-${filter//::/-}.log"
-          cargo test --locked --manifest-path "$XMR_TEST_WORKSPACE/Cargo.toml" \
+          if ! cargo test --locked --manifest-path "$XMR_TEST_WORKSPACE/Cargo.toml" \
             --profile crypto-test \
             --config 'profile.crypto-test.inherits="dev"' \
             --config 'profile.crypto-test.opt-level=2' \
@@ -122,11 +151,16 @@ runs:
             --config 'profile.crypto-test.codegen-units=16' \
             --config 'profile.crypto-test.incremental=false' \
             -p dom-xmr-sidecar --bin dom-xmr-sidecar "$filter" \
-            -- --nocapture --test-threads=1 --color never 2>&1 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
+            -- --nocapture --test-threads=1 --color never 2>&1 | tee "$log"; then
+            failed=1
+          fi
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
         done
+        exit "$failed"
     - name: Verify scoped funding, custody and transport regressions
-      if: ${{ inputs.run-once-regressions == 'true' }}
+      id: scoped_boundaries
+      continue-on-error: true
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -144,24 +178,32 @@ runs:
         if-no-files-found: warn
         retention-days: 7
     - name: Verify custody paths and real offline helper startup
-      if: ${{ inputs.run-once-regressions == 'true' }}
+      id: custody_startup
+      continue-on-error: true
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: |
-        set -euo pipefail
-        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test custody_startup_paths_v23 -- --nocapture
-        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test native_offline_funding_preflight_v23 -- --nocapture
+        set -uo pipefail
+        failed=0
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test custody_startup_paths_v23 -- --nocapture || failed=1
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test native_offline_funding_preflight_v23 -- --nocapture || failed=1
         # Exercise the restart path's ownership/authentication guards before
         # any long ceremony. These tests never start a native signing graph.
         log="$RUNNER_TEMP/xmr-sidecar-restart-guards.log"
-        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test peer_sidecar_v23:: \
-          -- --nocapture --test-threads=1 --color never 2>&1 | tee "$log"
-        grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
+        if ! cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test peer_sidecar_v23:: \
+          -- --nocapture --test-threads=1 --color never 2>&1 | tee "$log"; then
+          failed=1
+        fi
+        grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+        exit "$failed"
     - name: Verify XMR recovery participant ordering
-      if: ${{ inputs.run-once-regressions == 'true' }}
+      id: recovery_ordering
+      continue-on-error: true
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -169,18 +211,22 @@ runs:
         RUST_TEST_THREADS: '1'
       run: cargo test --locked -p dom-scriptless-store --lib --profile crypto-test xmr_round_audit_v11::tests -- --nocapture
     - name: Verify offline operational artifact producers
-      if: ${{ inputs.run-once-regressions == 'true' }}
+      id: artifact_producers
+      continue-on-error: true
+      if: ${{ always() && inputs.run-once-regressions == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: |
-        set -euo pipefail
-        cargo test --locked -p dom-interopd --no-default-features --features production --lib --tests --profile crypto-test production_prepare_ -- --nocapture --test-threads=1
-        cargo test --locked -p dom-interopd --no-default-features --features production --test route_services_cli --test xmr_enrollment_cli --test xmr_leg_cli --test f6_artifact_cli --test planning_cli --profile crypto-test --no-fail-fast -- --nocapture --test-threads=1
+        set -uo pipefail
+        failed=0
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --tests --profile crypto-test --no-fail-fast production_prepare_ -- --nocapture --test-threads=1 || failed=1
+        cargo test --locked -p dom-interopd --no-default-features --features production --test route_services_cli --test xmr_enrollment_cli --test xmr_leg_cli --test f6_artifact_cli --test planning_cli --profile crypto-test --no-fail-fast -- --nocapture --test-threads=1 || failed=1
+        exit "$failed"
     - name: Build and fingerprint the real release-production daemon
-      if: ${{ inputs.real-daemon == 'true' }}
+      if: ${{ always() && inputs.real-daemon == 'true' }}
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
@@ -201,3 +247,33 @@ runs:
             output.write(f'DOM_INTEROP_REAL_BINARY_V23={binary}\n')
             output.write(f'DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23={digest.hexdigest()}\n')
         PY
+    - name: Report every native-tool verification failure
+      if: always()
+      shell: bash
+      env:
+        OFFLINE_DISPATCH: ${{ steps.offline_dispatch.outcome }}
+        COMPILE_PRODUCTION: ${{ steps.compile_production.outcome }}
+        RESERVATION_AUDIT: ${{ steps.reservation_audit.outcome }}
+        REFUND_RECOVERY: ${{ steps.refund_recovery.outcome }}
+        SCOPED_BOUNDARIES: ${{ steps.scoped_boundaries.outcome }}
+        CUSTODY_STARTUP: ${{ steps.custody_startup.outcome }}
+        RECOVERY_ORDERING: ${{ steps.recovery_ordering.outcome }}
+        ARTIFACT_PRODUCERS: ${{ steps.artifact_producers.outcome }}
+      run: |
+        failed=0
+        for entry in \
+          "offline-dispatch=$OFFLINE_DISPATCH" \
+          "compile-production=$COMPILE_PRODUCTION" \
+          "reservation-audit=$RESERVATION_AUDIT" \
+          "refund-recovery=$REFUND_RECOVERY" \
+          "scoped-boundaries=$SCOPED_BOUNDARIES" \
+          "custody-startup=$CUSTODY_STARTUP" \
+          "recovery-ordering=$RECOVERY_ORDERING" \
+          "artifact-producers=$ARTIFACT_PRODUCERS"
+        do
+          printf '%s\n' "$entry"
+          case "$entry" in
+            *=failure|*=cancelled) failed=1 ;;
+          esac
+        done
+        exit "$failed"

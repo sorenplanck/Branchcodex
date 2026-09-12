@@ -26,6 +26,8 @@ use page_v23::scan_response;
 mod evolving_v23;
 #[path = "production_xmr_native_dom_ledger_v23_tests.rs"]
 mod ledger_v23;
+#[path = "production_xmr_native_dom_window_v24_tests.rs"]
+mod window_v24;
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 type PublicDomHistoryV24 = (ExpectedDomIdentityV1, Value, Vec<Value>);
 
@@ -393,7 +395,7 @@ impl Snapshot {
                         }
                         let response = if let Some(live) = &live {
                             let state = live.lock().map_err(|_| "evolving ledger lock")?;
-                            scan_response(first, state.identity_json(), state.blocks())
+                            state.scan_response(first)
                         } else {
                             scan_response(first, &identity_json, &blocks)
                         }
@@ -451,6 +453,9 @@ impl Snapshot {
 
     /// Atomic read of the public local ledger, never a signing/finality token.
     /// Only native-validated admissions populate this evolving history.
+    /// In explicit live-window mode the first entry is the original baseline
+    /// anchor, not genesis; heights are absolute, never vector indices. RPC
+    /// pagination still exposes the separately retained complete baseline.
     pub(crate) fn public_history_v24(&self) -> Result<Option<PublicDomHistoryV24>> {
         let live = match self
             .live
@@ -481,6 +486,31 @@ impl Snapshot {
             .lock()
             .map_err(|_| "local DOM ledger poisoned")?
             .advance_to_height(target)
+    }
+
+    /// Explicit local-scenario opt-in: preserve the complete baseline, then
+    /// retain at most 4096 evolving entries including its exact anchor. Neither
+    /// the native ledger nor any absolute block height is reset or rewritten.
+    pub(crate) fn enable_live_window_v24(
+        &self,
+        baseline_tip: u64,
+        maximum_span: u64,
+    ) -> Result<()> {
+        self.live
+            .as_ref()
+            .ok_or("immutable snapshot cannot enable live window")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .enable_live_window_v24(baseline_tip, maximum_span)
+    }
+
+    pub(crate) fn live_window_scope_v24(&self) -> Result<(u64, u64)> {
+        self.live
+            .as_ref()
+            .ok_or("immutable snapshot has no live window")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .live_window_scope_v24()
     }
 
     /// Move a baseline output once, without cloning a funded wallet or store.

@@ -2,6 +2,10 @@
 use super::*;
 use dom_scriptless_store::{F7ClaimObserverFactsV15, ObservedF7FinalClaimV15};
 
+#[path = "f7_claim_receiver_bounded_v24.rs"]
+mod bounded_v24;
+pub(super) use bounded_v24::F7ClaimScanProgressV24;
+
 impl RealDomRpcRuntimeV1 {
     /// Discover the canonical M.8 claim using the retained public verifier.
     /// A refund does not match the claim template; duplicate matches conflict.
@@ -93,48 +97,15 @@ impl RealDomRpcRuntimeV1 {
         &self,
         facts: &F7ClaimObserverFactsV15,
     ) -> Result<Option<VerifiedDomClaimObservationV1>, RealDomError> {
-        if self.adapter.expected_identity().chain_id != facts.chain_id() {
-            return Err(RealDomError::InvalidEvidence);
-        }
-        let (state, identity) = self.scan_through_with_tip(0)?;
-        let (_, identity) = self.scan_snapshot_to_tip(state, identity)?;
-        let candidates = {
-            let mut cache = self.cache()?;
-            cache
-                .blocks
-                .retain(|height, _| *height <= identity.tip_height);
-            let blocks = cache.blocks.clone();
-            cache.transactions.retain(|_, tx| {
-                tx.location().block_height() <= identity.tip_height
-                    && blocks
-                        .get(&tx.location().block_height())
-                        .is_some_and(|(hash, _)| *hash == tx.location().block_hash())
-            });
-            let mut candidates = Vec::new();
-            for tx in cache.transactions.values() {
-                if tx.spends_commitment(&facts.shared_commitment())
-                    && tx.template_hash()? == facts.template_hash()
-                {
-                    if !candidates.is_empty() {
-                        return Err(RealDomError::InvalidEvidence);
-                    }
-                    candidates.push(tx.clone());
-                }
-            }
-            candidates
-        };
-        let Some(transaction) = candidates.into_iter().next() else {
-            return Ok(None);
-        };
-        verify_f7_observation_v15(
-            facts,
-            &ProvedClaimObservationEvidenceV1::sealed(
-                transaction,
-                identity.tip_height,
-                identity.tip_hash,
-            ),
-        )
-        .map(Some)
+        // Existing receiver/downstream-gate consumers use the bounded path
+        // without creating another scanner or changing their authority API.
+        let deadline =
+            Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .ok_or(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))?;
+        self.find_f7_final_claim_until_v24(facts, deadline)
     }
 
     /// Refetch and revalidate after the native receiver observation is durable.

@@ -1,6 +1,9 @@
 """Lightweight campaign evidence checks: no Cargo, daemon or cryptographic run."""
 import hashlib
+import os
 from pathlib import Path
+import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -90,6 +93,31 @@ class DependencyProvenanceTests(unittest.TestCase):
                     runner.fingerprint_executable(str(path))
             with self.assertRaises(ValueError):
                 runner.fingerprint_executable("relative-path")
+
+
+class PrivateSyntheticDirectoryTests(unittest.TestCase):
+    def test_private_fixture_root_avoids_shared_tmp_and_is_owner_only(self):
+        path = runner.private_synthetic_tmp()
+        try:
+            self.assertNotEqual(path.parent, Path("/tmp"))
+            self.assertEqual(path.parent, Path.home() / ".dx-v23")
+            metadata = path.lstat()
+            self.assertEqual(metadata.st_uid, os.getuid())
+            self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+            self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o700)
+        finally:
+            shutil.rmtree(path)
+
+    def test_fixture_archive_is_complete_before_private_source_cleanup(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory) / "source"
+            case = Path(directory) / "case"
+            root.mkdir(mode=0o700)
+            case.mkdir(mode=0o700)
+            (root / "journal").write_bytes(b"durable evidence")
+            name = runner.preserve_fixture(case, root)
+            self.assertEqual(name, "synthetic-fixtures.tar.gz")
+            self.assertGreater((case / name).stat().st_size, 0)
 
 
 if __name__ == "__main__":

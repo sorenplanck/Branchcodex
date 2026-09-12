@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+chain-profile = { path = "../../chain-profile" }
 blake2 = { version = "=0.10.6", default-features = false }
 thiserror = { workspace = true }
 kaystra-core = { path = "../../kaystra-core" }

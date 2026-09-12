@@ -304,7 +304,7 @@ fn enrollment_cli_positive_authenticates_signed_public_context_without_f6_or_rou
     let claim = t.public_claim().unwrap();
     let refund_claim = u.public_claim().unwrap();
     terms[0].counterparty_leg.mechanism = LockMechanism::CrossCurveSharedSpend;
-    terms[0].counterparty_leg.adapter_profile_hash = profile.profile_hash();
+    registry_fixture::profile_for_terms_v24(&terms[0], &profile).unwrap();
     terms[0].adaptor_point_sec1 = claim.secp_compressed;
     // Negotiate the public compensation envelope BEFORE terms/proofs freeze.
     // This extends the existing two-proof CLI campaign, not a second graph.

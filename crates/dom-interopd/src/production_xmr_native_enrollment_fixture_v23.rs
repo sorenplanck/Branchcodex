@@ -71,12 +71,8 @@ impl NativeXmrEnrolledFixtureV23 {
         position: crate::production_inputs::ProductionRoutePositionV1,
         terms: &SettlementTermsV1,
     ) -> Result<crate::production_inputs::ProductionXmrLegSetupV1> {
-        let setup = xmr_setup_profile::validate_setup(
-            terms,
-            &self.profile,
-            self.public_binding.clone(),
-            None,
-        )?;
+        let setup =
+            registry_v23::validate_setup_v24(terms, &self.profile, self.public_binding.clone())?;
         self.enrollment.require_setup(&setup, &self.refund_proof)?;
         let public = xmr_dleq_sigma::verify_bound(
             &self.refund_proof,
@@ -179,7 +175,7 @@ impl NativeXmrRouteSecretsV23 {
         for (index, terms) in terms.iter().enumerate() {
             terms.validate()?;
             if terms.adaptor_point_sec1 != self.claim.public_claim()?.secp_compressed
-                || terms.counterparty_leg.adapter_profile_hash != self.profile.profile_hash()
+                || registry_v23::profile_for_terms_v24(terms, &self.profile).is_err()
                 || planned[index].funding_tx_hash == [0; 32]
                 || planned[index].funding_destination.is_empty()
                 || actors[index][0] == actors[index][1]
@@ -300,8 +296,7 @@ impl NativeXmrInitializerV23<'_> {
                 self.refund.public_claim()?.ed_compressed,
             )?,
         };
-        let setup =
-            xmr_setup_profile::validate_setup(terms, &self.profile, public_binding.clone(), None)?;
+        let setup = registry_v23::validate_setup_v24(terms, &self.profile, public_binding.clone())?;
         let enrollment = xmr_session_init::prepare_xmr_share_enrollment_v23(&setup, &refund_proof)?;
         let mut owners = Vec::with_capacity(2);
         for (index, master_key_v23) in self.master_keys_v23.into_iter().enumerate() {

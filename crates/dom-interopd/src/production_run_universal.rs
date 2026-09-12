@@ -29,6 +29,8 @@ use zeroize::Zeroizing;
 #[cfg(test)]
 #[path = "production_xmr_custody_startup_paths_v23_tests.rs"]
 mod custody_startup_paths_v23;
+#[path = "production_native_phase_ownership_v24.rs"]
+mod native_phase_ownership_v24;
 
 pub(super) fn run(
     options: &ProductionRunOptionsV1,
@@ -1331,14 +1333,39 @@ pub(super) fn run(
 
     // ------------------------------------------------------------------
     // Stages 30-31 — interleaved Relay/route execution until terminal or safe
-    // shutdown. Each invocation is bounded; budget exhaustion re-enters the
-    // same loop with the same owners, so the bound limits blocking, not the
-    // route. Every route step is a durable driver call; nothing here reports
-    // progress the Store has not recorded.
+    // shutdown. Bounded Relay/route invocations re-enter the same loop with
+    // the same owners after budget exhaustion. Native F7 phases below also
+    // checkpoint ownership separately; that is not a composite I/O timeout.
+    // Every route step is durable; nothing reports unrecorded progress.
     // ------------------------------------------------------------------
     // Physical SOL/XMR ownership remains alive until after the router drops;
     // the same per-position epochs fence every retained transaction mutation.
     let _retained_actuator_guards = (upstream_guard, downstream_guard);
+    // Native F7 observations/signing are outside RouteRuntime::step. Renewing
+    // only actuator ownership here lets several individually slow phases
+    // accumulate past the RouteStore lease. Check BOTH owners around each
+    // phase, including retryable outcomes, without retrying a phase or minting
+    // new funding/Claim authority. One millisecond describes this immediate
+    // ownership checkpoint, NOT a timeout for the operation it surrounds.
+    // Some legacy DOM scanners still lack a composite I/O deadline: if one
+    // phase alone outlives ownership, the post-check fails closed and reopen
+    // reconciles any durable work instead of pretending the lease survived.
+    macro_rules! owned_native_phase_v24 {
+        ($operation:expr) => {
+            native_phase_ownership_v24::with_ownership_checkpoints_v24(
+                || {
+                    route_runtime
+                        .prepare_bounded_external_block(Duration::from_millis(1))
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    actuator_heartbeat
+                        .renew()
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    Ok::<(), ProductionRunErrorV1>(())
+                },
+                || Ok($operation),
+            )?
+        };
+    }
     // Refresh before work which can create funding, not only before recovery
     // pumps (which may consume the entire previous observation's lifetime).
     // The shared gate independently rechecks expiry at authorization/dispatch.
@@ -1583,16 +1610,13 @@ pub(super) fn run(
             (LegIdV1::Downstream, downstream_dom_binding),
         ] {
             refresh_funding_window_v23!();
-            actuator_heartbeat
-                .renew()
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-            match relay_loop.stage12_owner_mut_v11().step_f7_funding_v20(
+            match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_funding_v20(
                 leg,
                 binding,
                 &dom_f7_scanner,
                 &funding_window_v23,
                 trusted_now_millis_v1()? / 1_000,
-            ) {
+            )) {
                 Ok(()) => {}
                 Err(error) if error.retryable() => {}
                 Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
@@ -1601,14 +1625,14 @@ pub(super) fn run(
                 LegIdV1::Upstream => 0,
                 LegIdV1::Downstream => 1,
             };
-            match relay_loop
+            match owned_native_phase_v24!(relay_loop
                 .stage12_owner_mut_v11()
                 .step_native_xmr_f7_claim_v23(
                     leg,
                     binding,
                     Rc::clone(&dom_f7_scanner),
                     trusted_now_millis_v1()? / 1_000,
-                ) {
+                )) {
                 Ok(()) => {}
                 Err(error) if error.retryable_v20() => {}
                 // Closed Claim windows must leave noncooperative recovery running.
@@ -1629,9 +1653,9 @@ pub(super) fn run(
                     bitcoin_calls[index].settlement_id,
                 ) {
                     Ok(Some(id)) => {
-                        match relay_loop.stage12_owner_mut_v11().step_f7_claim_v20(leg, binding,
+                        match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_claim_v20(leg, binding,
                             Rc::clone(&dom_f7_scanner), &mut claim_observers_v20[index], id,
-                            trusted_now_millis_v1()? / 1_000) {
+                            trusted_now_millis_v1()? / 1_000)) {
                             Ok(()) => {}
                             Err(error) if error.retryable_v20() => {}
                             // An elapsed signing window refuses claim, while
@@ -1646,11 +1670,11 @@ pub(super) fn run(
                     Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
                 }
             }
-            match relay_loop
+            match owned_native_phase_v24!(relay_loop
                 .stage12_owner_mut_v11()
                 .leg_mut(leg)
                 .contracts_mut()
-                .step_f7_claim_receiver_v15(binding, dom_trusted_chain_id, &dom_f7_scanner)
+                .step_f7_claim_receiver_v15(binding, dom_trusted_chain_id, &dom_f7_scanner))
             {
                 Ok(_) => {}
                 Err(error) if error.retryable() => {}

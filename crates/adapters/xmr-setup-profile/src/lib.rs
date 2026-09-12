@@ -33,7 +33,9 @@ pub enum XmrNetwork {
     Testnet = 3,
 }
 
-/// Frozen static adapter profile committed in `adapter_profile_hash`.
+/// Operational profile committed in the DLEQ context and setup binding.
+/// Legacy standalone terms also commit this hash directly; registry-bound
+/// terms instead commit the generic chain profile through the explicit V24 API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XmrAdapterProfileV1 {
     /// Monero network.
@@ -250,6 +252,90 @@ pub fn validate_setup(
     binding: XmrSetupBindingV1,
     admission: Option<V1MechanismAdmission>,
 ) -> Result<ValidatedXmrSetup, SetupError> {
+    validate_setup_inner(terms, profile, binding, admission, profile.profile_hash())
+}
+
+/// Validate a setup against a structured registry chain profile. This checks
+/// public bindings, not the registry signature: production callers must obtain
+/// the profile from their authenticated deployment capability. No raw digest
+/// override and no automatic fallback to the standalone profile are accepted.
+pub fn validate_setup_for_chain_profile_v24(
+    terms: &SettlementTermsV1,
+    profile: &XmrAdapterProfileV1,
+    binding: XmrSetupBindingV1,
+    registry_profile: &chain_profile::ChainProfileV1,
+) -> Result<ValidatedXmrSetup, SetupError> {
+    require_chain_profile_v24(terms, profile, registry_profile)?;
+    let digest = registry_profile
+        .profile_digest()
+        .map_err(|_| SetupError::BindingMismatch)?;
+    validate_setup_inner(terms, profile, binding, None, digest)
+}
+
+/// Exact public registry/profile boundary, without creating funding authority.
+pub fn require_chain_profile_v24(
+    terms: &SettlementTermsV1,
+    profile: &XmrAdapterProfileV1,
+    registry_profile: &chain_profile::ChainProfileV1,
+) -> Result<(), SetupError> {
+    registry_profile
+        .validate()
+        .map_err(|_| SetupError::BindingMismatch)?;
+    let digest = registry_profile
+        .profile_digest()
+        .map_err(|_| SetupError::BindingMismatch)?;
+    let network = match registry_profile.kind {
+        chain_profile::ChainKindV1::Monero { network } => network as u8,
+        _ => return Err(SetupError::BindingMismatch),
+    };
+    if network != profile.network as u8
+        || terms.counterparty_leg.adapter_profile_hash != digest
+        || terms.counterparty_leg.chain_id != registry_profile.chain_id
+        || terms.counterparty_leg.asset_id != registry_profile.native_asset
+        || terms.counterparty_leg.finality != registry_profile.finality
+        || terms.counterparty_leg.mechanism != LockMechanism::CrossCurveSharedSpend
+    {
+        return Err(SetupError::BindingMismatch);
+    }
+    Ok(())
+}
+
+/// Revalidate both independent profile identities against an opaque setup.
+/// A registry match cannot substitute the operational profile that was proved.
+pub fn require_setup_chain_profile_v24(
+    terms: &SettlementTermsV1,
+    profile: &XmrAdapterProfileV1,
+    setup: &ValidatedXmrSetup,
+    registry_profile: &chain_profile::ChainProfileV1,
+) -> Result<(), SetupError> {
+    require_chain_profile_v24(terms, profile, registry_profile)?;
+    let context = proof_context_hash(
+        profile,
+        &XmrProofContextV1 {
+            settlement_id: terms.settlement_id.0,
+            chain_id: terms.counterparty_leg.chain_id.0,
+            asset_id: terms.counterparty_leg.asset_id.0,
+            amount_piconero: terms.counterparty_leg.amount,
+            min_confirmations: terms.counterparty_leg.finality.min_confirmations,
+            max_reorg_depth: terms.counterparty_leg.finality.max_reorg_depth,
+        },
+    )?;
+    if setup.terms_hash() != terms.terms_hash()?
+        || setup.settlement_id() != terms.settlement_id.0
+        || setup.proof_context_hash() != &context
+    {
+        return Err(SetupError::BindingMismatch);
+    }
+    Ok(())
+}
+
+fn validate_setup_inner(
+    terms: &SettlementTermsV1,
+    profile: &XmrAdapterProfileV1,
+    binding: XmrSetupBindingV1,
+    admission: Option<V1MechanismAdmission>,
+    expected_terms_profile: [u8; 32],
+) -> Result<ValidatedXmrSetup, SetupError> {
     terms.validate()?;
     let terms_hash = terms.terms_hash()?;
     match (admission, terms.counterparty_leg.mechanism) {
@@ -278,7 +364,7 @@ pub fn validate_setup(
         &context_hash,
         ROLE_XMR_SHARED_SPEND,
     )?;
-    if terms.counterparty_leg.adapter_profile_hash != profile.profile_hash()
+    if terms.counterparty_leg.adapter_profile_hash != expected_terms_profile
         || terms.settlement_id.0 != binding.settlement_id
         || terms_hash != binding.terms_hash
         || terms.adaptor_point_sec1 != claim.secp_compressed

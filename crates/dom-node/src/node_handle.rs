@@ -2382,8 +2382,12 @@ mod tests {
             Transaction::from_bytes(&observed.canonical_bytes).expect("roundtrip"),
             tx
         );
-        assert_eq!(page.blocks[0].coinbase.kernel_excess_signature, [0xC5; 65]);
-        assert_eq!(page.blocks[0].coinbase.offset, [0xA5; 32]);
+        let coinbase = page.blocks[0]
+            .coinbase
+            .as_ref()
+            .expect("scanned block reports its coinbase metadata");
+        assert_eq!(coinbase.kernel_excess_signature, [0xC5; 65]);
+        assert_eq!(coinbase.offset, [0xA5; 32]);
     }
 
     #[test]

@@ -14,8 +14,12 @@ impl InputSpendContextV23 {
             return Err(InputSpendProofErrorV23::Encoding);
         }
         let mut at = 0;
+        // Every field is inside the exact length checked above.
         fn field<const N: usize>(bytes: &[u8], at: &mut usize) -> [u8; N] {
-            let value = bytes[*at..*at + N].try_into().unwrap();
+            let mut value = [0; N];
+            for (offset, slot) in value.iter_mut().enumerate() {
+                *slot = bytes[*at + offset];
+            }
             *at += N;
             value
         }

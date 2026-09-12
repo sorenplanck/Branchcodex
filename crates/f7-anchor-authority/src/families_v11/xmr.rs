@@ -256,11 +256,13 @@ fn validate_request(request: &XmrFundingObservationRequestV11<'_>) -> Result<(),
     let profile = request.profile;
     let deployment = request.deployment;
     terms.validate().map_err(|_| Error::Binding)?;
+    xmr_setup_profile::require_setup_chain_profile_v24(terms, profile, setup, deployment.profile())
+        .map_err(|_| Error::Binding)?;
     if terms.counterparty_leg.mechanism != LockMechanism::CrossCurveSharedSpend
         || terms.dom_leg.mechanism != LockMechanism::DomAdaptor2of2
         || terms.settlement_id.0 != setup.settlement_id()
         || terms.terms_hash().map_err(|_| Error::Binding)? != setup.terms_hash()
-        || terms.counterparty_leg.adapter_profile_hash != profile.profile_hash()
+        || terms.counterparty_leg.adapter_profile_hash != deployment.profile_digest()
         || terms.counterparty_leg.amount != u128::from(setup.expected_amount_piconero())
         || terms.adaptor_point_sec1 != setup.claim().secp_compressed
         || setup.funding_tx_hash() == [0; 32]

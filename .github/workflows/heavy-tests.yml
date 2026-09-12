@@ -118,10 +118,14 @@ jobs:
         run: cargo test --locked -p dom-pow --test miner_light_equivalence -- --ignored --nocapture
 
   interop-full:
-    name: "interop hardening — FULL mode (regtest + forge deep + anvil)"
+    name: "interop hardening — FULL / ${{ matrix.shard }}"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'interop-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [protocol, production-native, production-lib, production-integration, live]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -136,12 +140,15 @@ jobs:
           df -h /
 
       - name: Verify frozen consensus sources
+        id: interop_consensus
+        continue-on-error: true
         run: bash scripts/check-consensus-unchanged.sh
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
+          key: interop-full-${{ matrix.shard }}
           cache-workspace-crates: 'true'
           cache-on-failure: 'true'
           workspaces: |
@@ -151,47 +158,83 @@ jobs:
       - name: Build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
 
-      # The `full` extras over `components`: bitcoin-regtest needs a real
-      # pinned Bitcoin Core; evm-deep and evm-anvil need forge/anvil/cast
-      # plus the pinned Solidity dependencies (vendoring is intentionally
-      # absent — same audited tags ci.yml installs).
+      # Install each shard's actual dependencies. Protocol includes the
+      # composed Bitcoin test; live retains regtest, forge deep and anvil.
       - name: Install pinned Bitcoin Core
+        if: ${{ matrix.shard == 'protocol' || matrix.shard == 'live' }}
         run: |
           BITCOIN_PREFIX="$HOME/.local" bash scripts/f5-install-bitcoin-core.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - uses: foundry-rs/foundry-toolchain@v1
+        if: ${{ matrix.shard == 'live' }}
         with:
           version: 1.7.1
 
       - name: Install pinned Solidity dependencies
+        if: ${{ matrix.shard == 'live' }}
         working-directory: contracts
         run: |
           forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
           forge install foundry-rs/forge-std@v1.9.6 --no-git
 
       - uses: ./.github/actions/xmr-test-tools
+        id: interop_xmr_tools
+        if: ${{ startsWith(matrix.shard, 'production-') }}
+        continue-on-error: true
         with:
           # Pushes have a single owner in interop-hardening. A manual
-          # interop-full-only campaign must still execute these regressions.
-          run-once-regressions: ${{ github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}
+          # interop-full-only campaign runs these once in production-native.
+          run-once-regressions: ${{ matrix.shard == 'production-native' && github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}
 
       - name: Verify prepared operational integration ingress
+        id: interop_prepared_ingress
+        if: ${{ matrix.shard == 'production-integration' }}
+        continue-on-error: true
         env:
           CARGO_BUILD_JOBS: '2'
           RUST_TEST_THREADS: '1'
         run: cargo test --locked -p dom-interopd --no-default-features --features production --test relay_worker --profile crypto-test prepared_operational -- --nocapture
 
-      - name: Execute full interop graph (components + regtest + deep + anvil)
-        run: python3 scripts/test_interop_hardening.py --mode full
+      - name: Execute full interop shard
+        id: interop_full_graph
+        continue-on-error: true
+        run: python3 scripts/test_interop_hardening.py --mode full --full-shard ${{ matrix.shard }}
 
       - name: Retain actual outcomes including failures
+        id: interop_evidence
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: interop-hardening-full-${{ github.sha }}
+          name: interop-hardening-full-${{ matrix.shard }}-${{ github.sha }}
           path: artifacts/interop-hardening/
           if-no-files-found: error
+      - name: Fail after every full-interop check has reported
+        if: always()
+        env:
+          CONSENSUS: ${{ steps.interop_consensus.outcome }}
+          XMR_TOOLS: ${{ steps.interop_xmr_tools.outcome }}
+          PREPARED_INGRESS: ${{ steps.interop_prepared_ingress.outcome }}
+          FULL_GRAPH: ${{ steps.interop_full_graph.outcome }}
+          EVIDENCE: ${{ steps.interop_evidence.outcome }}
+        run: |
+          failed=0
+          for entry in \
+            "consensus=$CONSENSUS" \
+            "xmr-tools=$XMR_TOOLS" \
+            "prepared-ingress=$PREPARED_INGRESS" \
+            "full-graph=$FULL_GRAPH" \
+            "evidence=$EVIDENCE"
+          do
+            printf '%s\n' "$entry"
+            case "$entry" in
+              *=success|*=skipped) ;;
+              *=failure|*=cancelled) failed=1 ;;
+              *) failed=1 ;;
+            esac
+          done
+          exit "$failed"
 
   live-composed-route:
     name: "f5-e2e LIVE — anvil + Bitcoin Core composed route"
@@ -347,6 +390,7 @@ jobs:
           RUST_TEST_THREADS: "1"
           DOM_XMR_FAILED_FIXTURE_MARKER_V23: ${{ runner.temp }}/dom-xmr-failed-fixture-path.txt
         run: |
+          export TMPDIR="$DOM_XMR_PRIVATE_TMP_V23"
           cargo test --locked -p dom-interopd --no-default-features --features production \
             --lib --profile crypto-test \
             production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan \
@@ -364,7 +408,10 @@ jobs:
             exit 0
           fi
           IFS= read -r fixture < "$marker"
-          [[ "$fixture" == /tmp/.tmp* && -d "$fixture" && ! -L "$fixture" ]]
+          private_tmp="$(realpath -e -- "$DOM_XMR_PRIVATE_TMP_V23")"
+          [[ "$private_tmp" == "$HOME/.dx-v23"/dx-* ]]
+          [[ "$(stat -c '%u:%a' -- "$private_tmp")" == "$(id -u):700" ]]
+          [[ "$fixture" == "$private_tmp"/.tmp* && -d "$fixture" && ! -L "$fixture" ]]
           [[ "$(realpath -- "$fixture")" == "$fixture" ]]
           [[ "$(stat -c '%u:%a' -- "$fixture")" == "$(id -u):700" ]]
           tar -czf "$RUNNER_TEMP/dom-xmr-failed-fixture.tar.gz" -C "$fixture" .

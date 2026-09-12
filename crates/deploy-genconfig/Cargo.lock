@@ -4209,6 +4209,7 @@ name = "xmr-setup-profile"
 version = "0.2.0"
 dependencies = [
  "blake2",
+ "chain-profile",
  "kaystra-core",
  "thiserror 1.0.69",
  "xmr-dleq-sigma",

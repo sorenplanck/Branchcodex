@@ -17,6 +17,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       - name: Verify frozen consensus sources
+        id: consensus
+        continue-on-error: true
         run: bash scripts/check-consensus-unchanged.sh
       - uses: dtolnay/rust-toolchain@1.96.1
       - uses: Swatinem/rust-cache@v2
@@ -30,17 +32,48 @@ jobs:
       - name: Build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
       - uses: ./.github/actions/xmr-test-tools
+        id: xmr_tools
+        continue-on-error: true
       - name: Verify prepared operational integration ingress
+        id: prepared_ingress
+        continue-on-error: true
         env:
           CARGO_BUILD_JOBS: '2'
           RUST_TEST_THREADS: '1'
         run: cargo test --locked -p dom-interopd --no-default-features --features production --test relay_worker --profile crypto-test prepared_operational -- --nocapture
       - name: Execute changed components and production graph
+        id: component_graph
+        continue-on-error: true
         run: python3 scripts/test_interop_hardening.py --mode components
       - name: Retain actual outcomes including failures
+        id: evidence
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: interop-hardening-${{ github.sha }}
           path: artifacts/interop-hardening/
           if-no-files-found: error
+      - name: Fail after all interop checks have reported
+        if: always()
+        env:
+          CONSENSUS: ${{ steps.consensus.outcome }}
+          XMR_TOOLS: ${{ steps.xmr_tools.outcome }}
+          PREPARED_INGRESS: ${{ steps.prepared_ingress.outcome }}
+          COMPONENT_GRAPH: ${{ steps.component_graph.outcome }}
+          EVIDENCE: ${{ steps.evidence.outcome }}
+        run: |
+          failed=0
+          for entry in \
+            "consensus=$CONSENSUS" \
+            "xmr-tools=$XMR_TOOLS" \
+            "prepared-ingress=$PREPARED_INGRESS" \
+            "component-graph=$COMPONENT_GRAPH" \
+            "evidence=$EVIDENCE"
+          do
+            printf '%s\n' "$entry"
+            case "$entry" in
+              *=failure|*=cancelled) failed=1 ;;
+            esac
+          done
+          exit "$failed"

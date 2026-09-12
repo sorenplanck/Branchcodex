@@ -545,6 +545,7 @@ pub struct RealDomRpcRuntimeV1 {
     adapter: DomHttpChainAdapterV1,
     cache: Mutex<RuntimeCacheV1>,
     deadline_scan_v23: Mutex<CursorStateV1>,
+    f7_claim_scan_v24: Mutex<BTreeMap<[u8; 32], f7_claim_receiver_v15::F7ClaimScanProgressV24>>,
     funding_finality_scan_v23: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
     xmr_refund_reorg_scan_v23: Mutex<
         std::collections::BTreeMap<[u8; 32], xmr_recovery_finality::NativeGraphScanProgressV23>,
@@ -571,6 +572,7 @@ impl RealDomRpcRuntimeV1 {
             adapter,
             cache: Mutex::new(RuntimeCacheV1::default()),
             deadline_scan_v23: Mutex::new(CursorStateV1::genesis()),
+            f7_claim_scan_v24: Mutex::new(BTreeMap::new()),
             funding_finality_scan_v23: Mutex::new(BTreeMap::new()),
             xmr_refund_reorg_scan_v23: Mutex::new(std::collections::BTreeMap::new()),
             history_limit,

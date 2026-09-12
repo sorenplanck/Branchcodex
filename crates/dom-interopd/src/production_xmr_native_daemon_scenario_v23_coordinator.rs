@@ -17,13 +17,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) struct CoordinatorObserverV23 {
+pub(in super::super) struct CoordinatorObserverV23 {
     path: PathBuf,
     pins: ProductionRoutePinsV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct NativeActionV23 {
+pub(in super::super) struct NativeActionV23 {
     pub aggregate_id: [u8; 32],
     pub xmr_id: [u8; 32],
     pub dom_id: [u8; 32],
@@ -33,7 +33,7 @@ pub(super) struct NativeActionV23 {
 }
 
 impl NativeActionV23 {
-    pub(super) fn matches_xmr(&self, raw_hash: [u8; 32]) -> bool {
+    pub(in super::super) fn matches_xmr(&self, raw_hash: [u8; 32]) -> bool {
         raw_hash != [0; 32] && self.xmr_id == xmr_child_identity(raw_hash)
     }
 }
@@ -48,7 +48,7 @@ pub(super) fn xmr_child_identity(raw_hash: [u8; 32]) -> [u8; 32] {
 }
 
 impl CoordinatorObserverV23 {
-    pub(super) fn new(state: &Path) -> Result<Self> {
+    pub(in super::super) fn new(state: &Path) -> Result<Self> {
         let file = observer::owned_file(&state.join(PRODUCTION_CREATE_CONFIG_FILE_V11))?;
         let mut bytes = Vec::new();
         file.take(65537).read_to_end(&mut bytes)?;
@@ -65,7 +65,7 @@ impl CoordinatorObserverV23 {
         })
     }
 
-    pub(super) fn poll(
+    pub(in super::super) fn poll(
         &self,
         snapshot: &RouteSnapshotV1,
         leg: LegIdV1,

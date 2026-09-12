@@ -15,13 +15,13 @@ use std::{
 };
 
 #[path = "production_xmr_native_daemon_scenario_v23_observer.rs"]
-mod observer;
+pub(super) mod observer;
 use observer::RouteObserverV23;
 #[path = "production_xmr_native_daemon_scenario_v23_barrier.rs"]
 mod barrier;
 use barrier::{NativeBarrierV23, XmrLedgerPumpV23};
 #[path = "production_xmr_native_daemon_scenario_v23_coordinator.rs"]
-mod coordinator;
+pub(super) mod coordinator;
 use coordinator::{CoordinatorObserverV23, NativeActionV23};
 use route_executor::ActionKindV1;
 #[path = "production_xmr_native_refund_publication_v24_tests.rs"]

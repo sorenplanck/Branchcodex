@@ -301,9 +301,16 @@ fn open_archive(
         key,
         envelope,
     )?;
-    if archive.has_private_refund()
-        != matches!(scope.role, XmrRecoveryCustodyRoleV11::PrivateRefundOwner)
-    {
+    // Enumerate both authenticated roles; the shape itself grants no authority.
+    let expected_shape = match scope.role {
+        XmrRecoveryCustodyRoleV11::PrivateRefundOwner => {
+            dom_scriptless_crypto::XmrRecoveryArchiveShapeV11::WithPrivateRefund
+        }
+        XmrRecoveryCustodyRoleV11::PublicCounterparty => {
+            dom_scriptless_crypto::XmrRecoveryArchiveShapeV11::PublicGraphOnly
+        }
+    };
+    if archive.shape() != expected_shape {
         return Err(XmrRecoveryCustodyErrorV11::Conflict);
     }
     Ok(archive)

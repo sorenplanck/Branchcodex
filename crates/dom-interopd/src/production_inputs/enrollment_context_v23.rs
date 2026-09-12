@@ -217,8 +217,13 @@ pub(crate) fn load(
     if network as u8 != leg.profile.network as u8 || leg.refund.is_some() {
         return Err(Error::Context);
     }
-    let setup = validate_xmr_setup(terms, &leg.profile, leg.binding.clone(), None)
-        .map_err(|_| Error::Context)?;
+    let setup = xmr_setup_profile::validate_setup_for_chain_profile_v24(
+        terms,
+        &leg.profile,
+        leg.binding.clone(),
+        deployment.profile(),
+    )
+    .map_err(|_| Error::Context)?;
     let enrollment = leg
         .native_enrollment
         .as_ref()

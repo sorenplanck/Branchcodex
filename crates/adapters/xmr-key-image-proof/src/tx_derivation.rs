@@ -13,14 +13,25 @@ pub struct TxKeyDerivationProofV23 {
     pub derivation: [u8; 32],
     proof: [u8; 96],
 }
+
+/// The caller has checked the exact 160-byte encoding before reading this prefix.
+fn split_prefix_64_v23(bytes: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let mut first = [0; 32];
+    let mut second = [0; 32];
+    for index in 0..32 {
+        first[index] = bytes[index];
+        second[index] = bytes[32 + index];
+    }
+    (first, second)
+}
+
 impl TxKeyDerivationProofV23 {
     /// Decode exact public fields, rejecting malformed points/scalars.
     pub fn decode(bytes: &[u8]) -> Result<Self, InputSpendProofErrorV23> {
         if bytes.len() != 160 {
             return Err(InputSpendProofErrorV23::Encoding);
         }
-        let tx_public = bytes[..32].try_into().unwrap();
-        let derivation = bytes[32..64].try_into().unwrap();
+        let (tx_public, derivation) = split_prefix_64_v23(bytes);
         point(tx_public)?;
         point(derivation)?;
         let checked = InputSpendProofV23::decode(&bytes[64..])?;
@@ -112,11 +123,10 @@ pub fn verify_tx_key_derivation_v23(
     let a = point(destination_view)?;
     let r = point(proof.tx_public)?;
     let d = point(proof.derivation)?;
-    let rg_bytes = proof.proof[..32].try_into().unwrap();
-    let ra_bytes = proof.proof[32..64].try_into().unwrap();
+    let (rg_bytes, ra_bytes, s_bytes) = super::split_proof_96_v23(&proof.proof);
     let rg = point(rg_bytes)?;
     let ra = point(ra_bytes)?;
-    let s = scalar(proof.proof[64..].try_into().unwrap())?;
+    let s = scalar(s_bytes)?;
     let c = tx_challenge(
         &scope,
         destination_view,

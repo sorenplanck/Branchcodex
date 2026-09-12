@@ -2136,7 +2136,12 @@ impl DurableRelayInboxV1 {
                 .checked_add(count)
                 .ok_or(DurableInboxError::CorruptState)?;
             match (state, raw_len > 0) {
-                (0, true) => stats.unresolved_raw = count,
+                (0, true) => {
+                    stats.unresolved_raw = stats
+                        .unresolved_raw
+                        .checked_add(count)
+                        .ok_or(DurableInboxError::CorruptState)?
+                }
                 (1 | 2, true) => {
                     stats.resolved_raw = stats
                         .resolved_raw
@@ -4242,6 +4247,63 @@ mod applied_f6_replay_tests {
         assert_eq!((retry.quarantined, retry.quarantine_duplicates), (0, 1));
         assert_eq!(queue.relay.len()?, 0);
         assert_eq!(inbox.stats()?.quarantined, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_quarantine_stats_sum_distinct_raw_lengths_across_reopen(
+    ) -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
+        let relay_root = temporary.path().join("relay-quarantine-lengths");
+        let relay_config = RelayDatabaseConfigV1::new(RelayDatabaseIdV1::new([0x91; 32])?, 64)?;
+        let mut relay = ProductionRelayV1::create(&relay_root, relay_config)?;
+        let (first, first_digest) = envelope_with_snapshot(
+            message_type::RFQ,
+            0,
+            ZERO_DIGEST,
+            b"short",
+            0x44,
+            [0x97; 32],
+        )?;
+        let (second, _) = envelope_with_snapshot(
+            message_type::RFQ,
+            1,
+            first_digest,
+            b"a longer refused payload",
+            0x45,
+            [0x97; 32],
+        )?;
+        assert_ne!(first.len(), second.len(), "exercise separate SQL groups");
+        relay.submit(&first)?;
+        relay.submit(&second)?;
+        let inbox_root = temporary.path().join("inbox-quarantine-lengths");
+        let mut inbox = DurableRelayInboxV1::create(&inbox_root, config()?, &rosters()?)?;
+        for expected in 1..=2 {
+            let report = inbox.ingest(&mut relay, &rosters()?, now())?;
+            assert_eq!((report.quarantined, report.quarantine_duplicates), (1, 0));
+            let stats = inbox.stats()?;
+            assert_eq!(
+                (stats.quarantined, stats.quarantine_retained),
+                (expected, expected)
+            );
+            assert_eq!(
+                (stats.pending_route, stats.pending_f6, stats.delivered),
+                (0, 0, 0)
+            );
+        }
+        let retained = inbox.stats()?;
+        assert_eq!(relay.len()?, 0);
+        drop(inbox);
+        let inbox = DurableRelayInboxV1::open(&inbox_root, config()?, &rosters()?)?;
+        assert_eq!(inbox.stats()?, retained);
+        for (ordinal, raw) in [(1, first), (2, second)] {
+            let record = inbox
+                .load_quarantine_by_ordinal(ordinal)?
+                .ok_or("missing unresolved quarantine record")?;
+            assert_eq!(record.resolution_state, 0);
+            assert_eq!(record.canonical_bytes, raw);
+        }
         Ok(())
     }
 

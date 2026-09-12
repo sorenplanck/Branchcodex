@@ -110,7 +110,7 @@ impl NativeXmrRouteSecretsV23 {
         terms.adaptor_point_sec1 = self.claim.public_claim()?.secp_compressed;
         terms.counterparty_leg.amount = 1_000_000_000;
         terms.fee_limit.counterparty_max = u128::from(self.fee_cap);
-        terms.counterparty_leg.adapter_profile_hash = self.profile.profile_hash();
+        registry_v23::profile_for_terms_v24(terms, &self.profile)?;
         terms.validate()?;
         Ok(())
     }
@@ -153,7 +153,7 @@ impl NativeXmrRouteSecretsV23 {
         for (index, terms) in terms.iter().enumerate() {
             terms.validate()?;
             if terms.adaptor_point_sec1 != self.claim.public_claim()?.secp_compressed
-                || terms.counterparty_leg.adapter_profile_hash != self.profile.profile_hash()
+                || registry_v23::profile_for_terms_v24(terms, &self.profile).is_err()
                 || planned[index].refund_template_hash == [0; 32]
                 || planned[index].funding_tx_hash == [0; 32]
                 || planned[index].funding_destination.is_empty()

@@ -232,26 +232,34 @@ impl ProductionXmrSweepAuthorityV10 {
             view_scalar: view.expose(|bytes| SecretScalarBytes::new(*bytes)),
             auth_tag: [0; 32],
         };
-        let response = self
+        let build = BuildSweepRequestV23 {
+            api_version: 23,
+            build,
+            network_genesis: request.network_genesis,
+            route: request.route_id,
+            session: request.session_id,
+            authorization_digest: request.digest().map_err(|_| Refusal::Conflict)?,
+            request_message_digest: authorized.request_message_digest(),
+            terms: request.terms_digest,
+            output_index: request.funding_output_index,
+            funding_height: request.funding_block_height,
+            max_fee: request.max_fee_piconero,
+            action: request.action as u8,
+            auth_tag: [0; 32],
+        };
+        let mut sidecar = self
             .sidecar
             .try_borrow_mut()
-            .map_err(|_| Refusal::Unavailable)?
-            .build_sweep_with_proofs_v23(BuildSweepRequestV23 {
-                api_version: 23,
-                build,
-                network_genesis: request.network_genesis,
-                route: request.route_id,
-                session: request.session_id,
-                authorization_digest: request.digest().map_err(|_| Refusal::Conflict)?,
-                request_message_digest: authorized.request_message_digest(),
-                terms: request.terms_digest,
-                output_index: request.funding_output_index,
-                funding_height: request.funding_block_height,
-                max_fee: request.max_fee_piconero,
-                action: request.action as u8,
-                auth_tag: [0; 32],
-            })
-            .map_err(map_port)?;
+            .map_err(|_| Refusal::Unavailable)?;
+        // Custody reads and key preparation may consume the observation's
+        // original lifetime. Check again after that work, immediately before
+        // handing secret material to the signing client. The post-call check
+        // below alone cannot prevent a call made with already-expired evidence.
+        let response = with_recent_remote_build_v24(
+            || funding.facts().age(),
+            || sidecar.build_sweep_with_proofs_v23(build).map_err(map_port),
+        )?;
+        drop(sidecar);
         if response.sweep.raw_tx.len()
             > usize::try_from(request.max_raw_transaction_bytes).map_err(|_| Refusal::Conflict)?
         {
@@ -272,5 +280,71 @@ impl ProductionXmrSweepAuthorityV10 {
             return Err(Refusal::Unavailable);
         }
         Ok(response)
+    }
+}
+
+/// A veto at this module's secret-bearing client handoff, not a new authority
+/// or a renewal of the original observation. Once admitted, the synchronous
+/// client call may complete; the caller independently checks freshness again
+/// before returning its result. Durable sidecar cache bytes are never removed.
+fn with_recent_remote_build_v24<T>(
+    current_age: impl FnOnce() -> std::time::Duration,
+    build: impl FnOnce() -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    if current_age() > f7_anchor_authority::families_v11::MAX_V11_EXTERNAL_ANCHOR_AGE {
+        return Err(Refusal::Unavailable);
+    }
+    build()
+}
+
+#[cfg(test)]
+mod remote_build_freshness_tests_v24 {
+    use super::*;
+    use f7_anchor_authority::families_v11::MAX_V11_EXTERNAL_ANCHOR_AGE;
+    use std::{cell::Cell, time::Duration};
+
+    #[test]
+    fn expired_during_custody_preparation_never_reaches_remote_signing_client() {
+        // Models only elapsed time and call ordering, never a fabricated
+        // funding capability, signing request or native key.
+        let age = Cell::new(Duration::ZERO);
+        assert!(age.get() <= MAX_V11_EXTERNAL_ANCHOR_AGE);
+        age.set(MAX_V11_EXTERNAL_ANCHOR_AGE + Duration::from_nanos(1));
+        let calls = Cell::new(0);
+        let outcome = with_recent_remote_build_v24(
+            || age.get(),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(outcome, Err(Refusal::Unavailable));
+        assert_eq!(calls.get(), 0);
+        assert!(age.get() > MAX_V11_EXTERNAL_ANCHOR_AGE);
+    }
+
+    #[test]
+    fn remote_build_handoff_preserves_existing_boundary_and_client_refusals() {
+        for age in [Duration::ZERO, MAX_V11_EXTERNAL_ANCHOR_AGE] {
+            let calls = Cell::new(0);
+            let original_identity = ([7; 32], 9u64, [11; 32]);
+            assert_eq!(
+                with_recent_remote_build_v24(
+                    || age,
+                    || {
+                        calls.set(calls.get() + 1);
+                        Ok(original_identity)
+                    },
+                ),
+                Ok(original_identity)
+            );
+            assert_eq!(calls.get(), 1);
+            for refusal in [Refusal::Conflict, Refusal::Unavailable] {
+                assert_eq!(
+                    with_recent_remote_build_v24(|| age, || Err::<(), _>(refusal)),
+                    Err(refusal)
+                );
+            }
+        }
     }
 }

@@ -34,7 +34,8 @@ mod custody;
 mod ordinary_round;
 pub use custody::{
     open_xmr_recovery_archive_v11, seal_xmr_recovery_archive_v11, OpenedXmrRecoveryArchiveV11,
-    XmrRecoveryArchiveErrorV11, XmrRecoverySealKeyV11, XMR_RECOVERY_ARCHIVE_MAX_BYTES_V11,
+    XmrRecoveryArchiveErrorV11, XmrRecoveryArchiveShapeV11, XmrRecoverySealKeyV11,
+    XMR_RECOVERY_ARCHIVE_MAX_BYTES_V11,
 };
 pub use ordinary_round::{
     require_distinct_xmr_recovery_nonces_v12, require_ordinary_recovery_kind_admitted_v22,

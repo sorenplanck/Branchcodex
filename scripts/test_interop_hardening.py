@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,14 @@ import time
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
+FULL_SHARDS = ("protocol", "production-native", "production-lib", "production-integration", "live")
+NATIVE_TEST_PREFIX = ("production_contracts_bootstrap::producer_v13::native_ceremony_tests::"
+                      "xmr_graph_wallet_tests")
+PRODUCTION_INTEGRATION_TARGETS = (
+    "admission", "admission_v2", "driver", "f6_artifact_cli", "planning_cli",
+    "production_time_guard", "relay_worker", "route_services_cli", "supervisor",
+    "xmr_enrollment_cli", "xmr_leg_cli",
+)
 
 
 def sha256(path):
@@ -34,7 +43,46 @@ def source_digest():
     return digest.hexdigest()
 
 
-def commands(mode, evidence_directory):
+def production_environment_v24(env):
+    """Scope an existing private fixture root to the production child only.
+
+    Never allocate, repair permissions or fall back to shared /tmp. Keeping
+    this out of the parent environment preserves the cleanup contracts of the
+    Bitcoin/Forge scripts and every other independent command.
+    """
+    raw = env.get("DOM_XMR_PRIVATE_TMP_V23", "")
+    if not isinstance(raw, str) or not raw or "\0" in raw:
+        raise PermissionError("production requires its private fixture root")
+    try:
+        home = Path.home()
+        base = home / ".dx-v23"
+        directory = Path(raw)
+        if (not home.is_absolute() or home.resolve(strict=True) != home
+                or not directory.is_absolute() or str(directory) != raw
+                or directory.parent != base or not directory.name.startswith("dx-")
+                or len(directory.name) <= 3):
+            raise PermissionError("production private fixture scope is invalid")
+        owner = os.getuid()
+        root_owner = Path("/").lstat().st_uid
+        for ancestor in (directory, *directory.parents):
+            metadata = ancestor.lstat()
+            if (not stat.S_ISDIR(metadata.st_mode) or ancestor.resolve(strict=True) != ancestor
+                    or metadata.st_uid not in (owner, root_owner)
+                    or metadata.st_mode & 0o022):
+                raise PermissionError("production fixture ancestry is unsafe")
+            if ancestor in (directory, base):
+                if metadata.st_uid != owner or stat.S_IMODE(metadata.st_mode) != 0o700:
+                    raise PermissionError("production fixture must be an owned private directory")
+            if ancestor == home and metadata.st_uid != owner:
+                raise PermissionError("production fixture home has another owner")
+    except (ValueError, RuntimeError) as error:
+        raise PermissionError("production private fixture path is invalid") from error
+    return {**env, "TMPDIR": raw}
+
+
+def commands(mode, evidence_directory, full_shard="all"):
+    if full_shard not in ("all", *FULL_SHARDS) or (mode != "full" and full_shard != "all"):
+        raise ValueError("full shard requires full mode and a closed selection")
     offline = [("independent-oracles", [sys.executable, "-m", "unittest", "discover",
                  "-s", "scripts/tests", "-p", "test_*_oracle.py", "-v"], {})]
     if mode == "offline":
@@ -50,7 +98,12 @@ def commands(mode, evidence_directory):
         "--", "--nocapture", "--test-threads=1"], production_env)
     time_verification = ("rust-time-independent-verification", [sys.executable,
         "scripts/time_evidence_oracle.py", str(time_fixture)], {})
-    monero = ("monero-rpc-and-actuator-v5", ["cargo", "test", "--locked", "-p",
+    # The CI preflight already builds this workspace in crypto-test. Keep the
+    # component commands in that profile so compatible Cargo units can be
+    # reused instead of compiling a second dev tree. This retains debug
+    # assertions/overflow checks and executes every original target and oracle.
+    # The separate Solana program workspace has no such profile and is unchanged.
+    monero = ("monero-rpc-and-actuator-v5", ["cargo", "test", "--locked", "--profile", "crypto-test", "-p",
         "xmr-rpc-broadcast-blocking", "-p", "xmr-actuator"], {})
     driver_fixture = evidence_directory / "rust-driver-claim-v6.json"
     driver_env = {"DOM_INTEROP_V6_DRIVER_CLAIM": str(driver_fixture)}
@@ -75,12 +128,12 @@ def commands(mode, evidence_directory):
         ]
     specs = offline + [
         ("workspace-lock", ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"], {}),
-        ("bitcoin", ["cargo", "test", "--locked", "-p", "btc-crypto", "-p", "adapter-btc", "-p", "btc-actuator"],
+        ("bitcoin", ["cargo", "test", "--locked", "--profile", "crypto-test", "-p", "btc-crypto", "-p", "adapter-btc", "-p", "btc-actuator"],
          {**driver_env, "DOM_INTEROP_V3_PUBLIC_FIXTURE": str(evidence_directory / "rust-participant-round-v3.json")}),
         driver_verification,
         ("rust-participant-independent-verification", [sys.executable, "scripts/bitcoin_participant_oracle.py",
          str(evidence_directory / "rust-participant-round-v3.json")], {}),
-        ("solana-adapters", ["cargo", "test", "--locked", "-p", "kaystra-core", "-p", "solana-kaystra-source", "-p", "solana-escrow-wire", "-p", "solana-program-client", "-p", "solana-observer", "-p", "solana-evidence", "-p", "solana-observation-store", "-p", "solana-observer-pump"], {}),
+        ("solana-adapters", ["cargo", "test", "--locked", "--profile", "crypto-test", "-p", "kaystra-core", "-p", "solana-kaystra-source", "-p", "solana-escrow-wire", "-p", "solana-program-client", "-p", "solana-observer", "-p", "solana-evidence", "-p", "solana-observation-store", "-p", "solana-observer-pump"], {}),
         ("solana-program-host", ["cargo", "test", "--manifest-path", "programs/dom-solana-escrow/Cargo.toml", "--locked"], {}),
         monero,
         production,
@@ -93,7 +146,56 @@ def commands(mode, evidence_directory):
             ("evm-deep", ["forge", "test", "--root", "contracts"], {"FOUNDRY_PROFILE": "deep"}),
             ("evm-anvil", ["bash", "scripts/e2e_anvil.sh"], {}),
         ])
+        if full_shard != "all":
+            return full_shard_commands(specs, full_shard, trace_env, production_env)
     return specs
+
+
+def full_shard_commands(specs, shard, trace_env, production_env):
+    """Partition existing checks; each oracle stays with its actual producer."""
+    by_name = {name: (name, command, env) for name, command, env in specs}
+    if shard == "protocol":
+        return [by_name[name] for name in (
+            "independent-oracles", "workspace-lock", "bitcoin",
+            "rust-driver-final-signature-verification", "rust-participant-independent-verification",
+            "solana-adapters", "solana-program-host", "monero-rpc-and-actuator-v5",
+        )]
+    if shard == "production-native":
+        return [(shard, ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
+            "--features", "production", "--lib", "--locked", "--profile", "crypto-test",
+            "--no-fail-fast", NATIVE_TEST_PREFIX, "--", "--nocapture", "--test-threads=1"], {})]
+    if shard == "production-lib":
+        return [(shard, ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
+            "--features", "production", "--lib", "--locked", "--profile", "crypto-test",
+            "--no-fail-fast", "--", "--nocapture", "--test-threads=1", "--skip", NATIVE_TEST_PREFIX],
+            trace_env), by_name["rust-route-independent-verification"]]
+    if shard == "production-integration":
+        # `--tests` also selects library unit tests. Explicit integration and
+        # binary targets are the disjoint complement of the two --lib shards.
+        # Avoid glob selection of targets whose required-features are absent.
+        # The preflight contract compares this list with all tests/*.rs and
+        # verifies each excluded target's exact Cargo feature gate.
+        return [(shard, ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
+            "--features", "production",
+            *(arg for target in PRODUCTION_INTEGRATION_TARGETS for arg in ("--test", target)),
+            "--bins", "--locked", "--profile", "crypto-test",
+            "--no-fail-fast", "--", "--nocapture", "--test-threads=1"],
+            {"DOM_INTEROP_V5_TIME_FIXTURE": production_env["DOM_INTEROP_V5_TIME_FIXTURE"]}),
+            by_name["rust-time-independent-verification"]]
+    if shard == "live":
+        return [by_name[name] for name in ("bitcoin-regtest", "evm-deep", "evm-anvil")]
+    raise ValueError("unknown full shard")
+
+
+def required_tools(mode, full_shard="all"):
+    required = ["git"]
+    if mode != "offline":
+        required += ["cargo", "rustc", "cc", "clang", "cmake", "pkg-config"]
+    if mode == "full" and full_shard in ("all", "protocol", "live"):
+        required += ["bitcoind", "bitcoin-cli"]
+    if mode == "full" and full_shard in ("all", "live"):
+        required += ["forge", "anvil", "curl"]
+    return required
 
 
 def start_test_command(name, env, evidence_directory):
@@ -120,10 +222,19 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['python3', '-m', 'scripts.route_trace_oracle', 'rust-route-trace-v4.json'], cwd=evidence_directory, env=env, executable=sys.executable,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'monero-rpc-and-actuator-v5':
-        return subprocess.Popen(['cargo', 'test', '--locked', '-p', 'xmr-rpc-broadcast-blocking', '-p', 'xmr-actuator'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--locked', '--profile', 'crypto-test', '-p', 'xmr-rpc-broadcast-blocking', '-p', 'xmr-actuator'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production':
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--tests', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-native':
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-lib':
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests'], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-integration':
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--test', 'admission', '--test', 'admission_v2', '--test', 'driver', '--test', 'f6_artifact_cli', '--test', 'planning_cli', '--test', 'production_time_guard', '--test', 'relay_worker', '--test', 'route_services_cli', '--test', 'supervisor', '--test', 'xmr_enrollment_cli', '--test', 'xmr_leg_cli', '--bins', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'rust-time-independent-verification':
         # Fixed module import locations; an evidence file cannot choose code.
@@ -142,7 +253,7 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['cargo', 'metadata', '--locked', '--format-version', '1', '--no-deps'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'bitcoin':
-        return subprocess.Popen(['cargo', 'test', '--locked', '-p', 'btc-crypto', '-p', 'adapter-btc', '-p', 'btc-actuator'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--locked', '--profile', 'crypto-test', '-p', 'btc-crypto', '-p', 'adapter-btc', '-p', 'btc-actuator'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'rust-participant-independent-verification':
         # Fixed module import locations; an evidence file cannot choose code.
@@ -150,7 +261,7 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['python3', '-m', 'scripts.bitcoin_participant_oracle', 'rust-participant-round-v3.json'], cwd=evidence_directory, env=env, executable=sys.executable,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'solana-adapters':
-        return subprocess.Popen(['cargo', 'test', '--locked', '-p', 'kaystra-core', '-p', 'solana-kaystra-source', '-p', 'solana-escrow-wire', '-p', 'solana-program-client', '-p', 'solana-observer', '-p', 'solana-evidence', '-p', 'solana-observation-store', '-p', 'solana-observer-pump'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--locked', '--profile', 'crypto-test', '-p', 'kaystra-core', '-p', 'solana-kaystra-source', '-p', 'solana-escrow-wire', '-p', 'solana-program-client', '-p', 'solana-observer', '-p', 'solana-evidence', '-p', 'solana-observation-store', '-p', 'solana-observer-pump'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'solana-program-host':
         return subprocess.Popen(['cargo', 'test', '--manifest-path', 'programs/dom-solana-escrow/Cargo.toml', '--locked'], cwd=ROOT, env=env,
@@ -176,19 +287,24 @@ def start_test_command(name, env, evidence_directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("offline", "routing", "runtime", "v6", "components", "full"), default="components")
+    parser.add_argument("--full-shard", choices=("all", *FULL_SHARDS), default=None,
+                        help="full-mode partition; default all retains the complete serial campaign")
     parser.add_argument("--format", action="store_true", help="run rustfmt before testing; records the resulting source digest")
     args = parser.parse_args()
     if args.mode == "offline" and args.format:
         parser.error("--format requires a Rust test mode")
+    if args.full_shard is not None and args.mode != "full":
+        parser.error("--full-shard requires --mode full")
+    full_shard = args.full_shard or "all"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     evidence_root = ROOT / "artifacts" / "interop-hardening"
     evidence_root.mkdir(parents=True, exist_ok=True)
     # Separate PID namespaces may reuse pid/time. Exclusive random suffixes
     # keep concurrent runs from colliding or mixing their evidence.
-    out = Path(tempfile.mkdtemp(prefix=f"{stamp}-{args.mode}-{os.getpid()}-", dir=evidence_root))
+    out = Path(tempfile.mkdtemp(prefix=f"{stamp}-{args.mode}-{full_shard}-{os.getpid()}-", dir=evidence_root))
     report = {
         "schema_version": 1, "scope": "repository-test-commands",
-        "mode": args.mode, "started_utc": stamp, "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip(),
+        "mode": args.mode, "full_shard": full_shard, "started_utc": stamp, "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip(),
         "branch": subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT).decode().strip(), "source_sha256_before": source_digest(),
         "status": "incomplete", "checks": [],
         "limits": ["Offline checks use public BIP vectors and synthetic transactions, not production swaps.",
@@ -201,6 +317,9 @@ def main():
                    "Solana host tests are not SBF/validator execution.",
                    "This report does not estimate mainnet loss probability."],
     }
+    if full_shard != "all":
+        report["limits"].append(
+            "This report covers only the selected full-mode shard; the full campaign requires all five shard outcomes.")
     report_path = out / "report.json"
 
     def save():
@@ -209,11 +328,7 @@ def main():
         temporary.replace(report_path)
 
     save()
-    required = ["git"]
-    if args.mode != "offline":
-        required += ["cargo", "rustc", "cc", "clang", "cmake", "pkg-config"]
-    if args.mode == "full":
-        required += ["bitcoind", "bitcoin-cli", "forge", "anvil", "curl"]
+    required = required_tools(args.mode, full_shard)
     missing = [name for name in required if shutil.which(name) is None]
     if missing:
         report.update(status="blocked", missing_tools=missing)
@@ -221,7 +336,7 @@ def main():
         print("Missing tools: " + ", ".join(missing), file=sys.stderr)
         print(f"Observed report: {report_path}")
         return 2
-    specs = commands(args.mode, out)
+    specs = commands(args.mode, out, full_shard)
     if args.format:
         specs = [
             ("format-workspace", ["cargo", "fmt", "--all"], {}),
@@ -240,6 +355,10 @@ def main():
         env["CARGO_TERM_COLOR"] = "never"
         try:
             with log.open("wb") as stream:
+                if name == "production" or name.startswith("production-"):
+                    env = production_environment_v24(env)
+                    entry["private_fixture_root"] = env["TMPDIR"]
+                    save()
                 process = start_test_command(name, env, out)
                 entry["executed_command"] = process.args
                 save()

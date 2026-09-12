@@ -20,11 +20,12 @@ class HardeningDispatchTests(unittest.TestCase):
         step = action.split("- name: Verify custody paths and real offline helper startup", 1)[1].split("- name:", 1)[0]
         self.assertIn("--lib --profile crypto-test peer_sidecar_v23::", step)
         self.assertIn("-- --nocapture --test-threads=1 --color never", step)
-        self.assertIn("set -euo pipefail", step)
+        self.assertIn("set -uo pipefail", step)
         self.assertIn("[1-9][0-9]* passed; 0 failed; 0 ignored;", step)
         self.assertNotIn("--no-run", step)
-        self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
-        self.assertNotIn("continue-on-error", step)
+        self.assertIn("if: ${{ always() && inputs.run-once-regressions == 'true' }}", step)
+        self.assertIn("continue-on-error: true", step)
+        self.assertIn('exit "$failed"', step)
         observation = (root / "crates/dom-interopd/src/production_xmr_native_observation_v23_tests.rs").read_text()
         self.assertIn('mod peer_sidecar_v23;', observation)
         source = (root / "crates/dom-interopd/src/production_xmr_native_peer_sidecar_v23_tests.rs").read_text()
@@ -40,8 +41,8 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn('--evidence-dir "$RUNNER_TEMP/dom-xmr-boundary-evidence"', step)
         self.assertIn("CARGO_BUILD_JOBS: '2'", step)
         self.assertIn("RUST_TEST_THREADS: '1'", step)
-        self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
-        self.assertNotIn("continue-on-error", step)
+        self.assertIn("if: ${{ always() && inputs.run-once-regressions == 'true' }}", step)
+        self.assertIn("continue-on-error: true", step)
         evidence = action.split("- name: Preserve scoped boundary regression outcomes", 1)[1].split("- name:", 1)[0]
         self.assertIn("if: ${{ always() && inputs.run-once-regressions == 'true' }}", evidence)
         self.assertIn("actions/upload-artifact@v4", evidence)
@@ -64,13 +65,13 @@ class HardeningDispatchTests(unittest.TestCase):
             "Verify offline operational artifact producers",
         ):
             step = action.split(f"- name: {name}", 1)[1].split("- name:", 1)[0]
-            self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
+            self.assertIn("if: ${{ always() && inputs.run-once-regressions == 'true' }}", step)
         heavy = (root / ".github/workflows/heavy-tests.yml").read_text()
         self.assertEqual(heavy.count("run-once-regressions: 'false'"), 2)
         self.assertEqual(
             heavy.count(
-                "run-once-regressions: ${{ github.event_name == 'workflow_dispatch' "
-                "&& inputs.suite == 'interop-full' }}"
+                "run-once-regressions: ${{ matrix.shard == 'production-native' "
+                "&& github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}"
             ),
             1,
         )
@@ -94,12 +95,14 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn('-p dom-xmr-sidecar --bin dom-xmr-sidecar "$filter"', step)
         self.assertIn("-- --nocapture --test-threads=1 --color never", step)
         self.assertIn("[1-9][0-9]* passed; 0 failed; 0 ignored;", step)
-        self.assertIn("set -euo pipefail", step)
-        self.assertIn("if: ${{ inputs.run-once-regressions == 'true' }}", step)
+        self.assertIn("set -uo pipefail", step)
+        self.assertIn("if: ${{ always() && inputs.run-once-regressions == 'true' }}", step)
         self.assertNotIn("--no-run", step)
         self.assertNotIn("cache-hit", step)
-        self.assertNotIn("continue-on-error", step)
+        self.assertIn("continue-on-error: true", step)
+        self.assertIn('exit "$failed"', step)
         self.assertIn("test_native_daemon_campaign_v24.py", action)
+        self.assertIn("python3 scripts/test_xmr_v7_installer_scope.py", action)
 
     def test_bitcoin_actuator_live_gate_enables_rpc_and_rejects_zero_tests(self):
         root = Path(__file__).resolve().parents[2]
@@ -136,7 +139,9 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertLess(action.index("Install pinned offline tool sources"), action.index("Restore GPL crypto compilation"))
         self.assertLess(action.index("Restore GPL crypto compilation"), action.index("Build pinned offline tools"))
         self.assertNotIn("cache-hit", action)
-        self.assertNotIn("continue-on-error:", action)
+        self.assertIn("Report every native-tool verification failure", action)
+        self.assertIn("SCOPED_BOUNDARIES: ${{ steps.scoped_boundaries.outcome }}", action)
+        self.assertIn('exit "$failed"', action)
         for filename, job_name in (("heavy-tests.yml", "dom-xmr-native"),
                                    ("heavy-tests.yml", "interop-full"),
                                    ("interop-hardening.yml", "components")):
@@ -147,6 +152,23 @@ class HardeningDispatchTests(unittest.TestCase):
             self.assertIn("cache-workspace-crates: 'true'", job)
             self.assertIn("cache-on-failure: 'true'", job)
             self.assertNotIn("cache-hit", job)
+
+    def test_native_claim_uses_private_fixture_root_and_archives_only_its_child(self):
+        root = Path(__file__).resolve().parents[2]
+        action = (root / ".github/actions/xmr-test-tools/action.yml").read_text()
+        workflow = (root / ".github/workflows/heavy-tests.yml").read_text()
+        jobs = dict(re.findall(r"^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+                               workflow, re.MULTILINE | re.DOTALL))
+        job = jobs["dom-xmr-native"]
+        self.assertIn("from scripts.run_native_daemon_scenario_v23 import private_synthetic_tmp", action)
+        self.assertIn("DOM_XMR_PRIVATE_TMP_V23=%s\\n", action)
+        self.assertNotIn("TMPDIR=%s\\nDOM_XMR_PRIVATE_TMP_V23", action)
+        self.assertLess(action.index("Allocate private native fixture root"),
+                        action.index("Compile production library, CLI and integration targets"))
+        self.assertIn("DOM_XMR_PRIVATE_TMP_V23", job)
+        self.assertIn('export TMPDIR="$DOM_XMR_PRIVATE_TMP_V23"', job)
+        self.assertIn('[[ "$fixture" == "$private_tmp"/.tmp*', job)
+        self.assertNotIn('[[ "$fixture" == /tmp/.tmp*', job)
 
     def test_gpl_children_are_optimized_without_disabling_debug_safety(self):
         action = (Path(__file__).resolve().parents[2]
@@ -166,7 +188,7 @@ class HardeningDispatchTests(unittest.TestCase):
     def test_offline_producers_compile_all_targets_and_run_before_long_graphs(self):
         action = (Path(__file__).resolve().parents[2]
                   / ".github/actions/xmr-test-tools/action.yml").read_text()
-        self.assertNotIn("continue-on-error:", action)
+        self.assertIn("Report every native-tool verification failure", action)
         compile_command = (
             "cargo test --locked -p dom-interopd --no-default-features --features production "
             "--lib --tests --profile crypto-test --no-run"
@@ -174,7 +196,7 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn(compile_command, action)
         self.assertLess(action.index(compile_command), action.index("Build pinned offline tools"))
         self.assertIn(
-            "--lib --tests --profile crypto-test production_prepare_ -- --nocapture --test-threads=1",
+            "--lib --tests --profile crypto-test --no-fail-fast production_prepare_ -- --nocapture --test-threads=1",
             action,
         )
         self.assertIn(
@@ -187,6 +209,21 @@ class HardeningDispatchTests(unittest.TestCase):
             "reservation_binding::public_audit_v23::tests -- --nocapture --test-threads=1",
             action,
         )
+
+    def test_interop_jobs_run_independent_checks_then_fail_in_one_summary(self):
+        root = Path(__file__).resolve().parents[2]
+        for filename, graph_id, summary_name in (
+            ("interop-hardening.yml", "component_graph", "Fail after all interop checks have reported"),
+            ("heavy-tests.yml", "interop_full_graph", "Fail after every full-interop check has reported"),
+        ):
+            workflow = (root / ".github/workflows" / filename).read_text()
+            self.assertIn(f"id: {graph_id}", workflow)
+            self.assertIn(summary_name, workflow)
+            self.assertIn(f"steps.{graph_id}.outcome", workflow)
+            self.assertIn("continue-on-error: true", workflow)
+            summary = workflow.split(f"- name: {summary_name}", 1)[1][:1600]
+            self.assertIn("if: always()", summary)
+            self.assertIn('exit "$failed"', summary)
 
     def test_f7_regtest_and_boundaries_are_mandatory_in_heavy_gate(self):
         workflow = (Path(__file__).resolve().parents[2]
@@ -224,7 +261,7 @@ class HardeningDispatchTests(unittest.TestCase):
         action = (Path(__file__).resolve().parents[2]
                   / ".github/actions/xmr-test-tools/action.yml").read_text()
         self.assertIn("cargo build --locked --release -p dom-interopd --no-default-features --features production --bin dom-interopd", action)
-        self.assertIn("if: ${{ inputs.real-daemon == 'true' }}", action)
+        self.assertIn("if: ${{ always() && inputs.real-daemon == 'true' }}", action)
         self.assertIn("DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23", job)
         self.assertEqual(job.count("python3 scripts/run_native_daemon_scenario_v23.py"), 1)
         self.assertIn("if: always()", job)

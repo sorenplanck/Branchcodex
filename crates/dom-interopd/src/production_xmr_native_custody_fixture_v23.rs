@@ -124,7 +124,7 @@ impl NativeXmrSecretsFixtureV23 {
         if let Some(cap) = self.funding_fee_cap_v23 {
             terms.fee_limit.counterparty_max = u128::from(cap);
         }
-        terms.counterparty_leg.adapter_profile_hash = self.profile.profile_hash();
+        registry_v23::profile_for_terms_v24(terms, &self.profile)?;
         terms.validate()?;
         Ok(())
     }
@@ -198,7 +198,7 @@ impl NativeXmrInitializerV23<'_> {
         let claim = self.claim.public_claim()?;
         let refund_claim = self.refund.public_claim()?;
         if terms.adaptor_point_sec1 != claim.secp_compressed
-            || terms.counterparty_leg.adapter_profile_hash != self.profile.profile_hash()
+            || registry_v23::profile_for_terms_v24(terms, &self.profile).is_err()
             || claim == refund_claim
             || actors[0] == actors[1]
             || refund_template_hash == [0; 32]
@@ -253,12 +253,8 @@ impl NativeXmrInitializerV23<'_> {
                 refund_claim.ed_compressed,
             )?,
         };
-        let setup = xmr_setup_profile::validate_setup(
-            terms,
-            &self.profile,
-            public_binding_v23.clone(),
-            None,
-        )?;
+        let setup =
+            registry_v23::validate_setup_v24(terms, &self.profile, public_binding_v23.clone())?;
         let executor = DomRefundAdaptorExecutor::new(refund_claim);
         let deadline = match terms.counterparty_leg.deadline {
             TimelockSpec::BlockHeight { value } => value,

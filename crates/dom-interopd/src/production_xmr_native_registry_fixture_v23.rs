@@ -22,6 +22,66 @@ pub(crate) fn configure_network(
     terms: [&mut SettlementTermsV1; 2],
     selected: xmr_setup_profile::XmrNetwork,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let entry = chain_for_network_v24(selected, terms[0].counterparty_leg.finality)?;
+    let chain = entry.profile.chain_id;
+    let asset = entry.profile.native_asset;
+    let finality = entry.profile.finality;
+    let digest = entry.profile.profile_digest()?;
+    manifest.chains = vec![entry];
+    manifest
+        .assets
+        .retain(|entry| entry.chain_id == manifest.dom.chain_id);
+    manifest.assets.push(AssetBindingV1 {
+        chain_id: chain,
+        asset_id: asset,
+        decimals: 12,
+        representation: AssetRepresentationV1::Native,
+    });
+    manifest
+        .assets
+        .sort_by_key(|entry| (entry.chain_id.0, entry.asset_id.0));
+    for terms in terms {
+        terms.counterparty_leg.chain_id = chain;
+        terms.counterparty_leg.asset_id = asset;
+        terms.counterparty_leg.finality = finality;
+        terms.counterparty_leg.mechanism =
+            kaystra_core::types::LockMechanism::CrossCurveSharedSpend;
+        terms.counterparty_leg.adapter_profile_hash = digest;
+        terms.counterparty_leg.deadline = TimelockSpec::BlockHeight { value: 100_000 };
+    }
+    manifest.validate()?;
+    Ok(())
+}
+
+/// The exact public profile used by this fixture's registry producer, not a
+/// digest supplied by the terms. Reopening never changes these chain facts.
+pub(crate) fn profile_for_terms_v24(
+    terms: &SettlementTermsV1,
+    operational: &xmr_setup_profile::XmrAdapterProfileV1,
+) -> Result<ChainProfileV1, Box<dyn std::error::Error>> {
+    let profile =
+        chain_for_network_v24(operational.network, terms.counterparty_leg.finality)?.profile;
+    xmr_setup_profile::require_chain_profile_v24(terms, operational, &profile)?;
+    Ok(profile)
+}
+
+pub(crate) fn validate_setup_v24(
+    terms: &SettlementTermsV1,
+    operational: &xmr_setup_profile::XmrAdapterProfileV1,
+    binding: xmr_setup_profile::XmrSetupBindingV1,
+) -> Result<xmr_setup_profile::ValidatedXmrSetup, Box<dyn std::error::Error>> {
+    Ok(xmr_setup_profile::validate_setup_for_chain_profile_v24(
+        terms,
+        operational,
+        binding,
+        &profile_for_terms_v24(terms, operational)?,
+    )?)
+}
+
+fn chain_for_network_v24(
+    selected: xmr_setup_profile::XmrNetwork,
+    finality: kaystra_core::types::FinalityPolicyV1,
+) -> Result<RegistryChainProfileV1, Box<dyn std::error::Error>> {
     let (network, genesis_hex, chain_domain) = match selected {
         xmr_setup_profile::XmrNetwork::Mainnet => (
             MoneroNetworkV1::Mainnet,
@@ -46,8 +106,7 @@ pub(crate) fn configure_network(
         )
         .as_bytes(),
     );
-    let finality = terms[0].counterparty_leg.finality;
-    manifest.chains = vec![RegistryChainProfileV1 {
+    Ok(RegistryChainProfileV1 {
         profile: ChainProfileV1 {
             chain_id: chain,
             kind: ChainKindV1::Monero { network },
@@ -66,25 +125,33 @@ pub(crate) fn configure_network(
             genesis_hash: genesis,
             max_fee_piconero: 3,
         }),
-    }];
-    manifest
-        .assets
-        .retain(|entry| entry.chain_id == manifest.dom.chain_id);
-    manifest.assets.push(AssetBindingV1 {
-        chain_id: chain,
-        asset_id: asset,
-        decimals: 12,
-        representation: AssetRepresentationV1::Native,
-    });
-    manifest
-        .assets
-        .sort_by_key(|entry| (entry.chain_id.0, entry.asset_id.0));
-    for terms in terms {
-        terms.counterparty_leg.chain_id = chain;
-        terms.counterparty_leg.asset_id = asset;
-        terms.counterparty_leg.finality = finality;
-        terms.counterparty_leg.deadline = TimelockSpec::BlockHeight { value: 100_000 };
+    })
+}
+
+#[test]
+fn registry_terms_pin_chain_profile_without_reinterpreting_operational_hash_v24() {
+    let fixture = crate::route_time_test_common::fixture();
+    for network in [
+        xmr_setup_profile::XmrNetwork::Mainnet,
+        xmr_setup_profile::XmrNetwork::Stagenet,
+    ] {
+        let mut manifest = fixture.registry.manifest().clone();
+        let mut terms = [fixture.upstream.clone(), fixture.downstream.clone()];
+        let [up, down] = &mut terms;
+        configure_network(&mut manifest, [up, down], network).unwrap();
+        let operational = xmr_setup_profile::XmrAdapterProfileV1::new(network, 3, 2).unwrap();
+        let digest = manifest.chains[0].profile.profile_digest().unwrap();
+        assert_ne!(digest, operational.profile_hash());
+        for terms in &mut terms {
+            assert_eq!(terms.counterparty_leg.adapter_profile_hash, digest);
+            let before = terms.terms_hash().unwrap();
+            assert_eq!(
+                profile_for_terms_v24(terms, &operational).unwrap(),
+                manifest.chains[0].profile
+            );
+            assert_eq!(terms.terms_hash().unwrap(), before);
+            terms.counterparty_leg.adapter_profile_hash = operational.profile_hash();
+            assert!(profile_for_terms_v24(terms, &operational).is_err());
+        }
     }
-    manifest.validate()?;
-    Ok(())
 }

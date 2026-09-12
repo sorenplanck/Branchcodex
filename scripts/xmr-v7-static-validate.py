@@ -8,6 +8,47 @@ import tomllib
 from pathlib import Path
 
 
+def installer_template_dependency(
+    root: Path, manifest: Path, package: str | None, section: str,
+    dependency: str, spec: dict,
+) -> bool:
+    """Recognize only the source template's exact installer-owned siblings.
+
+    Installed checkouts receive real directories and are never exempted here.
+    The two local libraries must exist at the exact origins copied by
+    install-sidecar-into-eigenwallet.py, with their matching package identities.
+    monero-wallet-ng is the upstream sibling required by that pinned installer.
+    """
+    template = root / 'external-gpl/dom-xmr-sidecar/Cargo.toml'
+    if (
+        manifest != template
+        or manifest.resolve() != template
+        or package != 'dom-xmr-sidecar'
+        or section != 'dependencies'
+        or spec.get('path') != f'../{dependency}'
+        or spec.get('package', dependency) != dependency
+    ):
+        return False
+    if dependency == 'monero-wallet-ng':
+        return True
+    origins = {
+        'xmr-key-image-proof': 'crates/adapters/xmr-key-image-proof/Cargo.toml',
+        'xmr-raw-tx-verify': 'crates/adapters/xmr-raw-tx-verify/Cargo.toml',
+    }
+    origin = origins.get(dependency)
+    if origin is None:
+        return False
+    source = root / origin
+    if not source.is_file() or source.resolve() != source:
+        return False
+    try:
+        data = tomllib.loads(source.read_text())
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return False
+    source_package = data.get('package')
+    return isinstance(source_package, dict) and source_package.get('name') == dependency
+
+
 def balanced_rust(text: str) -> bool:
     stack: list[str] = []
     pairs = {')': '(', ']': '[', '}': '{'}
@@ -122,9 +163,8 @@ def main() -> int:
                     continue
                 target = (manifest.parent / spec['path']).resolve()
                 rel = str(manifest.relative_to(root)).replace('\\', '/')
-                external_sidecar = (
-                    ('sidecar-gpl/' in rel or 'external-gpl/' in rel)
-                    and dep == 'monero-wallet-ng'
+                external_sidecar = installer_template_dependency(
+                    root, manifest, name, section, dep, spec,
                 )
                 overlay_dom_dep = (
                     not (root / 'Cargo.toml').exists()

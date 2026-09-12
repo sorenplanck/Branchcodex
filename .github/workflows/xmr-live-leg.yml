@@ -1,0 +1,111 @@
+name: xmr-live-leg
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Complementary startup/custody/restart evidence (not economic settlement)
+        type: choice
+        default: all
+        options: [all, startup, funding, refund, custody]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xmr-live-leg-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  RUST_TEST_THREADS: '1'
+  RUST_BACKTRACE: '1'
+
+jobs:
+  selection:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: select
+        env:
+          GROUP: ${{ inputs.scenario }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from run_xmr_live_leg_v23 import GROUPS, SCENARIOS
+          group = os.environ['GROUP']
+          cases = SCENARIOS if group == 'all' else GROUPS[group]
+          assert cases and len(cases) == len(set(cases))
+          matrix = {'include': [{'case': case, 'index': index, 'shared': index == 0}
+                                for index, case in enumerate(cases)]}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps(matrix) + '\n')
+          PY
+
+  live-leg:
+    needs: selection
+    name: DOM-XMR complementary ${{ matrix.case }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.selection.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dom
+          submodules: recursive
+          persist-credentials: false
+      - name: Record not-run outcome before prerequisites
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/dom-xmr-live-evidence"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-live-evidence'
+          (root / 'campaign.json').write_text(json.dumps({
+              'schema': 'DOM-XMR-LIVE-SUPPLEMENTAL-V24', 'status': 'not-run',
+              'reason': 'prerequisites have not completed'}) + '\n')
+          PY
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dom -> target
+          key: dom-xmr-live-v24
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+      - name: Verify frozen consensus sources
+        working-directory: dom
+        run: bash scripts/check-consensus-unchanged.sh
+      - uses: ./dom/.github/actions/xmr-test-tools
+        with:
+          dom-path: dom
+          real-daemon: 'true'
+          run-once-regressions: ${{ matrix.shared }}
+      - name: Verify complementary dispatch contract
+        working-directory: dom
+        run: python3 -m unittest discover -s scripts/tests -p test_xmr_live_leg_dispatch_v23.py
+      - name: Run the one selected real-daemon scenario
+        working-directory: dom
+        env:
+          SELECTED_CASE: ${{ matrix.case }}
+        run: >-
+          bash scripts/run-xmr-live-leg-v23.sh --scenario "$SELECTED_CASE"
+          --evidence-dir "$RUNNER_TEMP/dom-xmr-live-evidence" --timeout-seconds 9000
+      - name: Preserve actual outcome and original synthetic journals
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-xmr-live-${{ matrix.index }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dom-xmr-live-evidence
+          if-no-files-found: error
+          retention-days: 7

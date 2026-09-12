@@ -17,7 +17,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
-pub(super) struct RouteObserverV23 {
+pub(in super::super) struct RouteObserverV23 {
     database: PathBuf,
     pins: ProductionRoutePinsV1,
     previous: Option<RouteSnapshotV1>,
@@ -39,7 +39,7 @@ impl RouteHeartbeatV23 {
 }
 
 impl RouteObserverV23 {
-    pub(super) fn new(state: &Path) -> Result<Self> {
+    pub(in super::super) fn new(state: &Path) -> Result<Self> {
         crate::production_config::validate_state_dir(state)?;
         let path = state.join(PRODUCTION_CREATE_CONFIG_FILE_V11);
         let file = owned_file(&path)?;
@@ -60,7 +60,7 @@ impl RouteObserverV23 {
         })
     }
 
-    pub(super) fn route_id(&self) -> [u8; 32] {
+    pub(in super::super) fn route_id(&self) -> [u8; 32] {
         self.pins.route_id
     }
 
@@ -93,7 +93,7 @@ impl RouteObserverV23 {
         })
     }
 
-    pub(super) fn poll(&mut self) -> Result<Option<RouteSnapshotV1>> {
+    pub(in super::super) fn poll(&mut self) -> Result<Option<RouteSnapshotV1>> {
         match std::fs::symlink_metadata(&self.database) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),

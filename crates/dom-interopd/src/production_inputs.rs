@@ -68,10 +68,7 @@ use solana_profile::{
 };
 use solana_types::SolanaPubkey;
 use xmr_dleq_sigma::{BoundCrossCurveProofV1, CrossCurveProofBytes, CrossCurvePublicClaim};
-use xmr_setup_profile::{
-    validate_setup as validate_xmr_setup, ValidatedXmrSetup, XmrAdapterProfileV1, XmrNetwork,
-    XmrSetupBindingV1,
-};
+use xmr_setup_profile::{ValidatedXmrSetup, XmrAdapterProfileV1, XmrNetwork, XmrSetupBindingV1};
 
 use crate::admission::{
     AuthenticatedRouteAdmissionV1, RegistryRouteAdmissionAuthorityV1, RouteRosterSnapshotsV1,
@@ -3466,9 +3463,8 @@ fn authenticate_participant_bundle(
                     .iter()
                     .find(|candidate| candidate.position == position)
                     .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
-                // The registry names the network; Monero mainnet is
-                // unrepresentable there, so an adapter profile claiming
-                // mainnet can never authenticate.
+                // The authenticated registry selects the exact Monero network;
+                // the operational profile must agree before proof validation.
                 if leg.profile.network as u8 != network as u8 {
                     return Err(ProductionInputErrorV1::InvalidParticipantBundle);
                 }
@@ -3483,8 +3479,13 @@ fn authenticate_participant_bundle(
                 // validate_setup verifies it against the frozen terms, the
                 // adaptor point and the closed shared-spend role, under the
                 // ratified mechanism (no admission token).
-                let setup = validate_xmr_setup(terms, &leg.profile, leg.binding.clone(), None)
-                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let setup = xmr_setup_profile::validate_setup_for_chain_profile_v24(
+                    terms,
+                    &leg.profile,
+                    leg.binding.clone(),
+                    deployment.profile(),
+                )
+                .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
                 if let Some(refund) = &leg.refund {
                     authenticate_xmr_refund_share_v10(terms, &leg.profile, &setup, refund)?;
                 }

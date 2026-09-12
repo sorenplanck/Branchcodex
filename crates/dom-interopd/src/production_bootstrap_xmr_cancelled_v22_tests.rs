@@ -8,16 +8,15 @@ pub(super) fn configure_terms(
 ) -> [Option<PathBuf>; 2] {
     let mut paths = [None, None];
     for (leg, terms) in terms.iter_mut().enumerate() {
-        use kaystra_core::types::{FinalityPolicyV1, LockMechanism, TimelockSpec};
+        use kaystra_core::types::{LockMechanism, TimelockSpec};
         terms.dom_leg.mechanism = LockMechanism::DomAdaptor2of2;
         terms.counterparty_leg.mechanism = LockMechanism::CrossCurveSharedSpend;
         terms.dom_leg.amount = 152;
         terms.counterparty_leg.amount = 152;
         terms.dom_leg.deadline = TimelockSpec::BlockHeight { value: 100 };
-        terms.dom_leg.finality = FinalityPolicyV1 {
-            min_confirmations: 3,
-            max_reorg_depth: 6,
-        };
+        // Preserve the DOM finality inherited from the signed registry. The
+        // old synthetic 3/6 override made these terms structurally
+        // inadmissible against the registry's authenticated policy.
         terms.recovery.refund_before_funding = true;
         terms.fee_limit.dom_max = 10;
         terms.fee_limit.counterparty_max = 3;

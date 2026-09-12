@@ -142,15 +142,31 @@ impl InputSpendContextV23 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputSpendProofV23([u8; 96]);
 
+/// Split the three fixed-width components without fallible conversions.
+const fn split_proof_96_v23(bytes: &[u8; 96]) -> ([u8; 32], [u8; 32], [u8; 32]) {
+    let mut first = [0; 32];
+    let mut second = [0; 32];
+    let mut third = [0; 32];
+    let mut index = 0;
+    while index < 32 {
+        first[index] = bytes[index];
+        second[index] = bytes[32 + index];
+        third[index] = bytes[64 + index];
+        index += 1;
+    }
+    (first, second, third)
+}
+
 impl InputSpendProofV23 {
     /// Decode canonical prime-order points and canonical scalar; reject trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, InputSpendProofErrorV23> {
         let bytes: [u8; 96] = bytes
             .try_into()
             .map_err(|_| InputSpendProofErrorV23::Encoding)?;
-        point(bytes[..32].try_into().unwrap())?;
-        point(bytes[32..64].try_into().unwrap())?;
-        scalar(bytes[64..].try_into().unwrap())?;
+        let (first, second, third) = split_proof_96_v23(&bytes);
+        point(first)?;
+        point(second)?;
+        scalar(third)?;
         Ok(Self(bytes))
     }
     /// Public wire bytes; no secret scalar is included.
@@ -263,11 +279,10 @@ pub fn verify_input_spend_v23(
     let p = point(output)?;
     let i = point(image)?;
     let hp = hash_point(output)?;
-    let rg_bytes = proof.0[..32].try_into().unwrap();
-    let rh_bytes = proof.0[32..64].try_into().unwrap();
+    let (rg_bytes, rh_bytes, s_bytes) = split_proof_96_v23(&proof.0);
     let rg = point(rg_bytes)?;
     let rh = point(rh_bytes)?;
-    let s = scalar(proof.0[64..].try_into().unwrap())?;
+    let s = scalar(s_bytes)?;
     let c = challenge(&scope, output, image, rg_bytes, rh_bytes);
     if s * ED25519_BASEPOINT_POINT != rg + c * p || s * hp != rh + c * i {
         return Err(InputSpendProofErrorV23::Equation);

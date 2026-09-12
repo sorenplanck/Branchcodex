@@ -1,5 +1,8 @@
 //! Fresh signed time evidence from the actual local DOM/XMR scenario RPCs.
 //! RPC canonicality is an explicitly trusted boundary, not a PoW audit.
+use super::xmr_graph_wallet_tests::native_observation_v23::{
+    NativeDomSnapshotV23, RouteFundingOwnerV23,
+};
 use super::NativeXmrColdStartV23;
 use crate::production_node::ProductionNodeConfigV1;
 use btc_crypto::SecpContext;
@@ -26,9 +29,20 @@ impl ColdStartSignedTimeV23 {
     pub(crate) fn observe(
         cold: &NativeXmrColdStartV23,
         node: &ProductionNodeConfigV1,
+        bearer: Zeroizing<String>,
+        xmr_addresses: Vec<SocketAddr>,
+        limits: RouteTimePolicyLimitsV2,
+    ) -> Result<Self> {
+        Self::observe_mode_v24(cold, node, bearer, xmr_addresses, limits, None)
+    }
+
+    fn observe_mode_v24(
+        cold: &NativeXmrColdStartV23,
+        node: &ProductionNodeConfigV1,
         mut bearer: Zeroizing<String>,
         xmr_addresses: Vec<SocketAddr>,
         limits: RouteTimePolicyLimitsV2,
+        live_window: Option<(u64, u64)>,
     ) -> Result<Self> {
         let identity = node.expected_identity();
         identity.validate()?;
@@ -100,17 +114,24 @@ impl ColdStartSignedTimeV23 {
         if profile.network != xmr_setup_profile::XmrNetwork::Mainnet
             || profile != cold.enrolled[1].profile()
             || xmr_addresses.len() != usize::from(profile.rpc_node_count)
-            || cold
-                .terms
-                .iter()
-                .any(|terms| terms.counterparty_leg.adapter_profile_hash != profile.profile_hash())
+            || cold.terms.iter().any(|terms| {
+                crate::production_xmr_native_registry_fixture_v23::profile_for_terms_v24(
+                    terms, profile,
+                )
+                .is_err()
+            })
             || bindings[0].genesis_hash() != node.expected_identity().genesis_hash
             || bindings[1].chain_id() != bindings[2].chain_id()
             || bindings[1].genesis_hash() != bindings[2].genesis_hash()
         {
             return Err("time producer changed the signed selected-chain profile".into());
         }
-        let dom_observation = observations::dom(&dom, bindings[0], limits)?;
+        let dom_observation = match live_window {
+            None => observations::dom(&dom, bindings[0], limits)?,
+            Some((baseline, span)) => {
+                observations::dom_live_window_v24(&dom, bindings[0], limits, baseline, span)?
+            }
+        };
         // A single agreed observation is projected into both roles. Same XMR
         // chain cannot acquire two contradictory clocks merely by position.
         let xmr_observation = observations::monero(
@@ -185,6 +206,38 @@ impl ColdStartSignedTimeV23 {
             evidence: signed_evidence,
             observed_at_seconds,
         })
+    }
+}
+
+impl NativeXmrColdStartV23 {
+    /// Live test-only observation requires the enabled original snapshot owner,
+    /// not an operator-supplied switch or a replacement node identity.
+    pub(crate) fn observe_mainnet_time_live_v24(
+        &self,
+        node: &ProductionNodeConfigV1,
+        bearer: Zeroizing<String>,
+        funding: &RouteFundingOwnerV23,
+        limits: RouteTimePolicyLimitsV2,
+        baseline: &NativeDomSnapshotV23,
+    ) -> Result<ColdStartSignedTimeV23> {
+        if node.endpoint().as_str().trim_end_matches('/')
+            != baseline.endpoint().trim_end_matches('/')
+            || &node.expected_identity() != baseline.adapter().expected_identity()
+        {
+            return Err("live time observer differs from enabled snapshot owner".into());
+        }
+        let scope = baseline.live_window_scope_v24()?;
+        let urls = funding
+            .urls()
+            .iter()
+            .map(|url| -> Result<SocketAddr> {
+                Ok(url
+                    .strip_prefix("http://")
+                    .ok_or("local XMR scheme")?
+                    .parse()?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ColdStartSignedTimeV23::observe_mode_v24(self, node, bearer, urls, limits, Some(scope))
     }
 }
 

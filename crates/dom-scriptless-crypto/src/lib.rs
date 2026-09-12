@@ -23,8 +23,9 @@ pub use xmr_recovery_graph::{
     CompletedXmrOrdinaryRecoveryRoundV12, OpenedXmrRecoveryArchiveV11,
     PrivateXmrRefundTransactionV11, VerifiedXmrRecoveryGraphV11, XmrCompensationFundingWitnessV22,
     XmrOrdinaryRecoveryErrorV12, XmrOrdinaryRecoveryKindV12, XmrOrdinaryRecoveryRoundV12,
-    XmrRecoveryArchiveErrorV11, XmrRecoveryGraphBindingV11, XmrRecoveryGraphErrorV11,
-    XmrRecoveryGraphRequestV11, XmrRecoverySealKeyV11, XMR_RECOVERY_ARCHIVE_MAX_BYTES_V11,
+    XmrRecoveryArchiveErrorV11, XmrRecoveryArchiveShapeV11, XmrRecoveryGraphBindingV11,
+    XmrRecoveryGraphErrorV11, XmrRecoveryGraphRequestV11, XmrRecoverySealKeyV11,
+    XMR_RECOVERY_ARCHIVE_MAX_BYTES_V11,
 };
 
 pub use claim_adaptor::{

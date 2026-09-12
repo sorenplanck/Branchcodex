@@ -995,6 +995,13 @@ fn bind_monero_face(
     settlement: &SettlementTermsV1,
     pins: AdmissionFacePinsV1,
 ) -> Result<Box<dyn ProductionRefundFaceVerifierV1>, ProductionRefundArmingOpenErrorV1> {
+    xmr_setup_profile::require_setup_chain_profile_v24(
+        settlement,
+        &inner.profile,
+        &inner.setup,
+        inner.deployment.profile(),
+    )
+    .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
     let terms_digest = settlement
         .terms_hash()
         .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
@@ -1007,7 +1014,7 @@ fn bind_monero_face(
     if inner.setup.terms_hash() != terms_digest
         || inner.setup.settlement_id() != settlement.settlement_id.0
         || u128::from(inner.setup.expected_amount_piconero()) != settlement.counterparty_leg.amount
-        || inner.profile.profile_hash() != settlement.counterparty_leg.adapter_profile_hash
+        || inner.deployment.profile_digest() != settlement.counterparty_leg.adapter_profile_hash
         || inner.deployment.registry_digest() != pins.registry_digest
         || inner.deployment.registry_epoch() != pins.registry_epoch
         || inner.deployment.profile().chain_id.0 != settlement.counterparty_leg.chain_id.0

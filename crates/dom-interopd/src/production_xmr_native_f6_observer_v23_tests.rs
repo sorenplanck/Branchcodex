@@ -79,8 +79,8 @@ impl NativeF6XmrInventorySourceV23
                 != downstream.deployment().deployment().genesis_hash
             || terms[0].counterparty_leg.chain_id != terms[1].counterparty_leg.chain_id
             || terms[0].counterparty_leg.asset_id != terms[1].counterparty_leg.asset_id
-            || terms[0].counterparty_leg.adapter_profile_hash != upstream.profile().profile_hash()
-            || terms[1].counterparty_leg.adapter_profile_hash != upstream.profile().profile_hash()
+            || terms[0].counterparty_leg.adapter_profile_hash != upstream.deployment().profile_digest()
+            || terms[1].counterparty_leg.adapter_profile_hash != downstream.deployment().profile_digest()
         {
             return Err("XMR inventory authenticated Mainnet scope mismatch".into());
         }

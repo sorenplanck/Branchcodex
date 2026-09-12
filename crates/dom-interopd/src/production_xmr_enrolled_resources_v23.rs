@@ -10,6 +10,7 @@ pub(crate) struct ProductionXmrEnrolledResourcesV23 {
     local_participant: [u8; 32],
     terms: SettlementTermsV1,
     profile: XmrAdapterProfileV1,
+    registry_profile: chain_profile::ChainProfileV1,
     genesis: [u8; 32],
     enrollment: PreparedXmrShareEnrollmentV23,
     constraints: crate::production_inputs::ProductionXmrEnrollmentBundleV23,
@@ -130,6 +131,7 @@ impl ProductionXmrEnrolledResourcesV23 {
             local_participant,
             terms: terms.clone(),
             profile: session.profile().clone(),
+            registry_profile: session.deployment().profile().clone(),
             genesis: session.deployment().deployment().genesis_hash,
             enrollment,
             constraints: constraints.clone(),
@@ -184,6 +186,7 @@ impl ProductionXmrEnrolledResourcesV23 {
             &self.terms,
             graph.setup(),
             &self.profile,
+            &self.registry_profile,
             refund,
             self.local_participant,
         )?;

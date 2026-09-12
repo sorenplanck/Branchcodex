@@ -175,6 +175,48 @@ fn native_height_refuses_cross_chain_face_and_profile_substitution() {
 }
 
 #[test]
+fn xmr_registry_height_identity_refuses_operational_hash_and_preserves_replay() {
+    let mut authority = authority();
+    let profile = chain_profile::ChainProfileV1 {
+        chain_id: kaystra_core::types::ChainId([8; 32]),
+        kind: ChainKindV1::Monero {
+            network: MoneroNetworkV1::Mainnet,
+        },
+        timing: adapter_btc::timelock::ChainTimingBoundsV1 {
+            min_block_seconds: 60,
+            max_block_seconds: 180,
+            max_reorg_seconds: 1080,
+            observation_seconds: 5,
+            broadcast_seconds: 5,
+        },
+        finality: kaystra_core::types::FinalityPolicyV1 {
+            min_confirmations: 2,
+            max_reorg_depth: 3,
+        },
+        native_asset: kaystra_core::types::AssetId([12; 32]),
+        allowed_assets: vec![],
+    };
+    let digest = profile.profile_digest().unwrap();
+    let operational =
+        XmrAdapterProfileV1::new(xmr_setup_profile::XmrNetwork::Mainnet, 3, 2).unwrap();
+    authority.bindings[1].adapter_profile = digest;
+    assert_ne!(digest, operational.profile_hash());
+    assert!(matches!(
+        authority.due([8; 32], false, Some(operational.profile_hash()), 1000),
+        Err(Error::Refused)
+    ));
+    assert!(authority
+        .due([8; 32], false, Some(digest), 999)
+        .unwrap()
+        .is_empty());
+    let first = authority.due([8; 32], false, Some(digest), 1000).unwrap();
+    let replay = authority.due([8; 32], false, Some(digest), 1001).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].event_id(), replay[0].event_id());
+    assert_eq!(first[0].reason_digest(), replay[0].reason_digest());
+}
+
+#[test]
 fn same_chain_different_leg_profiles_keep_their_selected_observer_scope() {
     let mut authority = authority();
     let mut downstream = authority.bindings[1].clone();

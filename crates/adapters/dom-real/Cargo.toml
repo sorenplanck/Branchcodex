@@ -29,6 +29,8 @@ dom-scriptless-primitives = { path = "../../dom-scriptless-primitives" }
 dom-scriptless-consensus = { path = "../../dom-scriptless-consensus" }
 dom-core.workspace = true
 dom-crypto = { workspace = true, features = ["test-helpers"] }
+hex.workspace = true
+serde_json.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

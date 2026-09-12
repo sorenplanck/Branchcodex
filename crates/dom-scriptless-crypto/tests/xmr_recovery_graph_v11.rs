@@ -555,7 +555,10 @@ fn v11_encrypted_recovery_archive_reverifies_native_graph_and_private_refund() -
         &envelope,
     )
     .map_err(|e| e.to_string())?;
-    assert!(opened.has_private_refund());
+    assert_eq!(
+        opened.shape(),
+        dom_scriptless_crypto::XmrRecoveryArchiveShapeV11::WithPrivateRefund
+    );
     assert_eq!(opened.graph().graph_digest(), graph.graph_digest());
     assert_eq!(opened.graph().cancel_bytes(), graph.cancel_bytes());
     assert_eq!(opened.graph().punish_bytes(), graph.punish_bytes());
@@ -686,7 +689,10 @@ fn v11_counterparty_recovery_archive_contains_no_completed_refund() -> TestResul
         &envelope,
     )
     .map_err(|e| e.to_string())?;
-    assert!(!opened.has_private_refund());
+    assert_eq!(
+        opened.shape(),
+        dom_scriptless_crypto::XmrRecoveryArchiveShapeV11::PublicGraphOnly
+    );
     opened.with_private_refund(|private| assert!(private.is_none()));
     Ok(())
 }

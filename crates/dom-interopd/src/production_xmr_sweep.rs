@@ -188,6 +188,7 @@ impl SweepBinding {
         terms: &SettlementTermsV1,
         setup: &ValidatedXmrSetup,
         profile: &XmrAdapterProfileV1,
+        registry_profile: &chain_profile::ChainProfileV1,
         refund: &ProductionXmrRefundBundleV1,
         local_participant: [u8; 32],
     ) -> Result<Self, Refusal> {
@@ -210,9 +211,8 @@ impl SweepBinding {
             refund.deadline,
         )
         .map_err(|_| Refusal::Conflict)?;
-        if profile.profile_hash() != terms.counterparty_leg.adapter_profile_hash {
-            return Err(Refusal::Conflict);
-        }
+        xmr_setup_profile::require_setup_chain_profile_v24(terms, profile, setup, registry_profile)
+            .map_err(|_| Refusal::Conflict)?;
         let context = proof_context_hash(
             profile,
             &XmrProofContextV1 {
@@ -401,6 +401,7 @@ impl ProductionXmrSweepAuthorityV10 {
             terms,
             session.setup(),
             session.profile(),
+            session.deployment().profile(),
             session.refund_bundle().ok_or(Refusal::Conflict)?,
             local_participant,
         )?;
@@ -744,7 +745,7 @@ mod tests {
     use xmr_dleq_sigma::{
         prove_bound, CrossCurveSecret252, ROLE_XMR_REFUND_SHARE, ROLE_XMR_SHARED_SPEND,
     };
-    use xmr_setup_profile::{validate_setup, XmrNetwork, XmrSetupBindingV1};
+    use xmr_setup_profile::{validate_setup_for_chain_profile_v24, XmrNetwork, XmrSetupBindingV1};
 
     #[test]
     fn route_refund_waits_without_invoking_nonreceiver_secret_or_builder() {
@@ -841,6 +842,23 @@ mod tests {
             policy_version: 1,
             metadata: vec![],
         };
+        let registry_profile = chain_profile::ChainProfileV1 {
+            chain_id: terms.counterparty_leg.chain_id,
+            kind: chain_profile::ChainKindV1::Monero {
+                network: chain_profile::MoneroNetworkV1::Stagenet,
+            },
+            timing: adapter_btc::timelock::ChainTimingBoundsV1 {
+                min_block_seconds: 60,
+                max_block_seconds: 180,
+                max_reorg_seconds: 3600,
+                observation_seconds: 5,
+                broadcast_seconds: 5,
+            },
+            finality: terms.counterparty_leg.finality,
+            native_asset: terms.counterparty_leg.asset_id,
+            allowed_assets: vec![],
+        };
+        terms.counterparty_leg.adapter_profile_hash = registry_profile.profile_digest().unwrap();
         let context = proof_context_hash(
             &profile,
             &XmrProofContextV1 {
@@ -880,8 +898,54 @@ mod tests {
             destination: "5ClaimDestinationFixture".to_owned(),
             combined_spend_public_key: combined,
         };
-        let setup = validate_setup(&terms, &profile, setup_input.clone(), None)
-            .expect("real verified setup");
+        let setup = validate_setup_for_chain_profile_v24(
+            &terms,
+            &profile,
+            setup_input.clone(),
+            &registry_profile,
+        )
+        .expect("real verified setup");
+        // Reuse this ceremony: registry and operational identities are both
+        // required, but occupy different domains. Legacy acceptance stays strict.
+        assert_ne!(
+            registry_profile.profile_digest().unwrap(),
+            profile.profile_hash()
+        );
+        assert!(
+            xmr_setup_profile::validate_setup(&terms, &profile, setup_input.clone(), None).is_err()
+        );
+        let replay = validate_setup_for_chain_profile_v24(
+            &terms,
+            &profile,
+            setup_input.clone(),
+            &registry_profile,
+        )
+        .unwrap();
+        assert_eq!(replay.binding_hash(), setup.binding_hash());
+        assert_eq!(replay.proof_context_hash(), setup.proof_context_hash());
+        for field in 0..7 {
+            let mut changed = registry_profile.clone();
+            match field {
+                0 => changed.chain_id.0[0] ^= 1,
+                1 => changed.native_asset.0[0] ^= 1,
+                2 => changed.finality.min_confirmations += 1,
+                3 => changed.finality.max_reorg_depth += 1,
+                4 => changed.timing.observation_seconds += 1,
+                5 => {
+                    changed.kind = chain_profile::ChainKindV1::Monero {
+                        network: chain_profile::MoneroNetworkV1::Mainnet,
+                    }
+                }
+                _ => changed.allowed_assets.push(AssetId([0x71; 32])),
+            }
+            assert!(
+                xmr_setup_profile::require_setup_chain_profile_v24(
+                    &terms, &profile, &setup, &changed,
+                )
+                .is_err(),
+                "registry field {field}"
+            );
+        }
         let refund = ProductionXmrRefundBundleV1::new_v10(
             refund_proof,
             [16; 32],
@@ -891,10 +955,61 @@ mod tests {
             "5RefundDestinationFixture".to_owned(),
         )
         .expect("refund bundle");
-        let receiver = SweepBinding::authenticate(&terms, &setup, &profile, &refund, a.0)
-            .expect("claim receiver");
-        let funder = SweepBinding::authenticate(&terms, &setup, &profile, &refund, b.0)
-            .expect("refund receiver");
+        let receiver =
+            SweepBinding::authenticate(&terms, &setup, &profile, &registry_profile, &refund, a.0)
+                .expect("claim receiver");
+        let funder =
+            SweepBinding::authenticate(&terms, &setup, &profile, &registry_profile, &refund, b.0)
+                .expect("refund receiver");
+        for field in 0..5 {
+            let mut changed = profile;
+            match field {
+                0 => changed.network = XmrNetwork::Mainnet,
+                1 => changed.sidecar_api_version += 1,
+                2 => changed.rpc_node_count += 1,
+                3 => changed.rpc_quorum += 1,
+                _ => changed.max_raw_tx_bytes -= 1,
+            }
+            assert!(
+                SweepBinding::authenticate(
+                    &terms,
+                    &setup,
+                    &changed,
+                    &registry_profile,
+                    &refund,
+                    a.0,
+                )
+                .is_err(),
+                "operational field {field}"
+            );
+        }
+        let mut old_terms = terms.clone();
+        old_terms.counterparty_leg.adapter_profile_hash = profile.profile_hash();
+        // Legacy standalone setups remain supported only through their own
+        // explicit API; a registry-bound consumer cannot reinterpret them.
+        let mut old_binding = setup_input.clone();
+        old_binding.terms_hash = old_terms.terms_hash().unwrap();
+        let legacy =
+            xmr_setup_profile::validate_setup(&old_terms, &profile, old_binding.clone(), None)
+                .unwrap();
+        assert!(validate_setup_for_chain_profile_v24(
+            &old_terms,
+            &profile,
+            old_binding,
+            &registry_profile
+        )
+        .is_err());
+        assert_ne!(legacy.binding_hash(), setup.binding_hash());
+        assert_eq!(legacy.proof_context_hash(), setup.proof_context_hash());
+        assert!(SweepBinding::authenticate(
+            &old_terms,
+            &setup,
+            &profile,
+            &registry_profile,
+            &refund,
+            a.0,
+        )
+        .is_err());
         assert_eq!(receiver.max_fee_piconero, 10);
         assert_eq!(funder.max_fee_piconero, 10);
         let local_u = XmrSecretMaterial::new(u.xmr_share_little_endian(), v).expect("local U");
@@ -932,54 +1047,115 @@ mod tests {
             combined
         );
         assert_ne!(receiver.setup.destination(), funder.refund_destination);
-        assert!(SweepBinding::authenticate(&terms, &setup, &profile, &refund, [99; 32]).is_err());
+        assert!(SweepBinding::authenticate(
+            &terms,
+            &setup,
+            &profile,
+            &registry_profile,
+            &refund,
+            [99; 32]
+        )
+        .is_err());
         let mut bad = refund.clone();
         bad.refund_destination = None;
-        assert!(SweepBinding::authenticate(&terms, &setup, &profile, &bad, a.0).is_err());
+        assert!(
+            SweepBinding::authenticate(&terms, &setup, &profile, &registry_profile, &bad, a.0)
+                .is_err()
+        );
         let mut bad = refund.clone();
         bad.deadline += 1;
-        assert!(SweepBinding::authenticate(&terms, &setup, &profile, &bad, a.0).is_err());
+        assert!(
+            SweepBinding::authenticate(&terms, &setup, &profile, &registry_profile, &bad, a.0)
+                .is_err()
+        );
         let mut bad = refund.clone();
         bad.proof.role = ROLE_XMR_SHARED_SPEND;
-        assert!(SweepBinding::authenticate(&terms, &setup, &profile, &bad, a.0).is_err());
+        assert!(
+            SweepBinding::authenticate(&terms, &setup, &profile, &registry_profile, &bad, a.0)
+                .is_err()
+        );
         // Changing only the deadline unit, even with the same integer, cannot
         // reuse a setup bound to the original signed terms.
         let mut height_terms = terms.clone();
         height_terms.counterparty_leg.deadline = TimelockSpec::BlockHeight {
             value: refund.deadline,
         };
-        assert!(SweepBinding::authenticate(&height_terms, &setup, &profile, &refund, a.0).is_err());
+        assert!(SweepBinding::authenticate(
+            &height_terms,
+            &setup,
+            &profile,
+            &registry_profile,
+            &refund,
+            a.0
+        )
+        .is_err());
         let mut height_input = setup_input.clone();
         height_input.terms_hash = height_terms.terms_hash().expect("height terms");
-        let height_setup = validate_setup(&height_terms, &profile, height_input, None)
-            .expect("setup bound to height terms");
+        let height_setup = validate_setup_for_chain_profile_v24(
+            &height_terms,
+            &profile,
+            height_input,
+            &registry_profile,
+        )
+        .expect("setup bound to height terms");
         assert!(matches!(
             crate::production_inputs::authenticate_xmr_refund_deadline_v23(
                 &height_terms, &height_setup, refund.deadline,
             ),
             Ok(TimelockSpec::BlockHeight { value }) if value == refund.deadline
         ));
-        assert!(
-            SweepBinding::authenticate(&height_terms, &height_setup, &profile, &refund, a.0)
-                .is_ok()
-        );
-        assert!(SweepBinding::authenticate(&terms, &height_setup, &profile, &refund, a.0).is_err());
+        assert!(SweepBinding::authenticate(
+            &height_terms,
+            &height_setup,
+            &profile,
+            &registry_profile,
+            &refund,
+            a.0
+        )
+        .is_ok());
+        assert!(SweepBinding::authenticate(
+            &terms,
+            &height_setup,
+            &profile,
+            &registry_profile,
+            &refund,
+            a.0
+        )
+        .is_err());
         let mut height_bad = refund.clone();
         height_bad.deadline += 1;
         assert!(SweepBinding::authenticate(
             &height_terms,
             &height_setup,
             &profile,
+            &registry_profile,
             &height_bad,
             a.0
         )
         .is_err());
         let mut wrong_sum = setup_input;
         wrong_sum.combined_spend_public_key = claim.ed_compressed;
-        let wrong_sum = validate_setup(&terms, &profile, wrong_sum, None)
-            .expect("old setup alone does not bind U");
-        assert!(SweepBinding::authenticate(&terms, &wrong_sum, &profile, &refund, a.0).is_err());
+        let wrong_sum =
+            validate_setup_for_chain_profile_v24(&terms, &profile, wrong_sum, &registry_profile)
+                .expect("old setup alone does not bind U");
+        assert!(SweepBinding::authenticate(
+            &terms,
+            &wrong_sum,
+            &profile,
+            &registry_profile,
+            &refund,
+            a.0
+        )
+        .is_err());
         terms.counterparty_leg.amount += 1;
-        assert!(SweepBinding::authenticate(&terms, &setup, &profile, &refund, a.0).is_err());
+        assert!(SweepBinding::authenticate(
+            &terms,
+            &setup,
+            &profile,
+            &registry_profile,
+            &refund,
+            a.0
+        )
+        .is_err());
     }
 }

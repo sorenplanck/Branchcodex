@@ -4,6 +4,8 @@
 use super::*;
 #[path = "production_xmr_native_daemon_scenario_v23_tests.rs"]
 mod daemon_scenario_v23;
+#[path = "production_xmr_native_live_route_v23_tests.rs"]
+mod live_route_v23;
 #[path = "production_xmr_native_mainnet_startup_v23_tests.rs"]
 mod mainnet_startup_v23;
 pub(crate) use mainnet_startup_v23::{NativeMainnetStartupV23, MAINNET_BASELINE_TIP_V23};
@@ -255,9 +257,36 @@ impl NativeXmrColdStartV23 {
         Self,
         xmr_graph_wallet_tests::native_observation_v23::RouteFundingOwnerV23,
     )> {
+        Self::prepare_mainnet_funded_mode_v24(
+            secrets,
+            configuration,
+            credentials,
+            limits,
+            dom_baseline_tip,
+            false,
+        )
+    }
+
+    pub(super) fn prepare_mainnet_funded_mode_v24(
+        secrets: NativeXmrRouteSecretsV23,
+        configuration: &xmr_graph_wallet_tests::native_observation_v23::Configuration,
+        credentials: &NativeXmrDaemonCredentialsV23,
+        limits: route_time_anchor::RouteTimePolicyLimitsV2,
+        dom_baseline_tip: u64,
+        live: bool,
+    ) -> ColdStartResult<(
+        Self,
+        xmr_graph_wallet_tests::native_observation_v23::RouteFundingOwnerV23,
+    )> {
+        if live {
+            deadline_plan_v23::NativeDeadlinePlanV23::validate_live_limits_v24(
+                limits,
+                dom_baseline_tip,
+            )?;
+        }
         let (cold, mut owner) = Self::prepare_with_funding_and_time_v23(
             secrets,
-            Some((limits, dom_baseline_tip)),
+            Some((limits, dom_baseline_tip, live)),
             |spends, terms, work, _actors, solver| {
                 let owner = configuration.start_mutable_mainnet_route_v23(
                     spends,
@@ -341,7 +370,7 @@ impl NativeXmrColdStartV23 {
 
     fn prepare_with_funding_and_time_v23<T>(
         secrets: NativeXmrRouteSecretsV23,
-        time: Option<(route_time_anchor::RouteTimePolicyLimitsV2, u64)>,
+        time: Option<(route_time_anchor::RouteTimePolicyLimitsV2, u64, bool)>,
         provision: impl FnOnce(
             [[u8; 32]; 2],
             &[SettlementTermsV1; 2],
@@ -357,14 +386,21 @@ impl NativeXmrColdStartV23 {
         let mut deadlines = None;
         let fixture = fixture_with_registry_configuration_v23(true, |manifest, terms| {
             secrets.configure_registry(manifest, terms).unwrap();
-            if let Some((limits, tip)) = time {
+            if let Some((limits, tip, live)) = time {
                 // This is the initial local negotiation, not a lease refresh.
                 // Registry and time policy must cover the same campaign; the
                 // fixture defaults must not truncate it after configuration.
                 manifest.valid_from = limits.valid_from_seconds;
                 manifest.expires_at = limits.expires_at_seconds;
                 deadlines = Some(
-                    deadline_plan_v23::NativeDeadlinePlanV23::new(manifest, limits, tip).unwrap(),
+                    if live {
+                        deadline_plan_v23::NativeDeadlinePlanV23::new_live_v24(
+                            manifest, limits, tip,
+                        )
+                    } else {
+                        deadline_plan_v23::NativeDeadlinePlanV23::new(manifest, limits, tip)
+                    }
+                    .unwrap(),
                 );
             }
         });

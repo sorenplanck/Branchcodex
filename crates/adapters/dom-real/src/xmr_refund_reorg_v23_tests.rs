@@ -28,7 +28,7 @@ fn checkpoint() -> Vec<u8> {
     for value in [0u32, 3, 3, 6] {
         bytes.extend_from_slice(&value.to_be_bytes());
     }
-    for height in 14..=20 {
+    for height in 14u64..=20 {
         bytes.extend_from_slice(&height.to_be_bytes());
         bytes.extend_from_slice(&block(height));
     }

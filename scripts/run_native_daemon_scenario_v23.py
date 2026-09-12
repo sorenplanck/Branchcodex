@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -39,6 +40,47 @@ DEPENDENCIES = (
     "DOM_XMR_OFFLINE_FUNDING_HELPER_V23",
 )
 CANCELLED = False
+
+
+def private_synthetic_tmp():
+    """Allocate a short private fixture root without traversing shared /tmp.
+
+    The native sidecar intentionally rejects a writable ancestor such as
+    /tmp.  Validate the complete HOME ancestry before creating our owned,
+    reusable base and validate the new case directory before handing it to a
+    child process.
+    """
+    home = Path.home()
+    if not home.is_absolute() or home.resolve() != home:
+        raise ValueError("canonical home required for the private fixture base")
+    root_owner = Path("/").lstat().st_uid
+    chain = (home, *home.parents)
+    for ancestor in chain:
+        metadata = ancestor.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or ancestor.resolve() != ancestor:
+            raise ValueError("fixture ancestor must be a canonical directory")
+        if metadata.st_uid not in (root_owner, os.getuid()) or metadata.st_mode & 0o022:
+            raise ValueError("fixture ancestor ownership or write scope is unsafe")
+    home_metadata = home.lstat()
+    if home_metadata.st_uid != os.getuid():
+        raise ValueError("fixture home is not owned by the current user")
+    base = home / ".dx-v23"
+    base.mkdir(mode=0o700, exist_ok=True)
+    base_metadata = base.lstat()
+    if (not stat.S_ISDIR(base_metadata.st_mode)
+            or base_metadata.st_uid != os.getuid()
+            or base_metadata.st_mode & 0o077
+            or base.resolve() != base):
+        raise ValueError("fixture base is not an original private directory")
+    # Leave room in sockaddr_un for actor, sidecar and socket suffixes.
+    if len(os.fsencode(base / "dx-00000000")) > 48:
+        raise ValueError("private fixture base exceeds the native UDS path budget")
+    path = Path(tempfile.mkdtemp(prefix="dx-", dir=base))
+    metadata = path.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077 or path.resolve() != path):
+        raise ValueError("private case allocation ownership or mode refused")
+    return path
 
 
 def interrupted(signum, _frame):
@@ -227,6 +269,16 @@ def preserve_fixture(case, root):
     with tarfile.open(archive, "w:gz", dereference=False) as output:
         for path in entries:
             output.add(path, arcname=str(path.relative_to(root)), recursive=False)
+    descriptor = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = os.open(case, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     return archive.name
 
 
@@ -234,8 +286,8 @@ def run_one(root, evidence, name, timeout):
     case = evidence / name
     case.mkdir(mode=0o700)
     # Unix-domain sockets have a small pathname limit. Do not put their
-    # parent under the long artifact/scenario name. mkdtemp creates mode 0700.
-    synthetic_tmp = Path(tempfile.mkdtemp(prefix="dx-", dir="/tmp"))
+    # parent under the long artifact/scenario name or shared /tmp.
+    synthetic_tmp = private_synthetic_tmp()
     result_path = case / "result.json"
     result = {"scenario": PREFIX + name, "status": "starting", "command": command(name),
               "cleanup_verified": False, "returncode": None,
@@ -297,6 +349,10 @@ def run_one(root, evidence, name, timeout):
                 result["cleanup_error"] = "descendants remain; next scenario MUST NOT start"
             else:
                 record_fixture_evidence(result, preserve_fixture(case, synthetic_tmp))
+                shutil.rmtree(synthetic_tmp)
+                result["fixture_cleanup_verified"] = not synthetic_tmp.exists()
+                if not result["fixture_cleanup_verified"]:
+                    raise RuntimeError("private synthetic fixture directory remains")
         except BaseException as error:
             result["status"] = "failed"
             result["cleanup_verified"] = False
@@ -307,6 +363,7 @@ def run_one(root, evidence, name, timeout):
 
 
 def main():
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=9_000)

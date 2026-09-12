@@ -189,6 +189,27 @@ impl NativeMainnetStartupV23 {
         limits: route_time_anchor::RouteTimePolicyLimitsV2,
         fee_cap: u64,
     ) -> ColdStartResult<Self> {
+        Self::prepare_mode_v24(configuration, limits, fee_cap, false)
+    }
+
+    pub(crate) fn prepare_live_bounded_v24(
+        configuration: &Configuration,
+        limits: route_time_anchor::RouteTimePolicyLimitsV2,
+        fee_cap: u64,
+    ) -> ColdStartResult<Self> {
+        deadline_plan_v23::NativeDeadlinePlanV23::validate_live_limits_v24(
+            limits,
+            MAINNET_BASELINE_TIP_V23,
+        )?;
+        Self::prepare_mode_v24(configuration, limits, fee_cap, true)
+    }
+
+    fn prepare_mode_v24(
+        configuration: &Configuration,
+        limits: route_time_anchor::RouteTimePolicyLimitsV2,
+        fee_cap: u64,
+        live: bool,
+    ) -> ColdStartResult<Self> {
         let (credentials, master_keys) = NativeXmrDaemonCredentialsV23::create()?;
         let profile = xmr_setup_profile::XmrAdapterProfileV1::new(
             xmr_setup_profile::XmrNetwork::Mainnet,
@@ -196,12 +217,13 @@ impl NativeMainnetStartupV23 {
             2,
         )?;
         let secrets = NativeXmrRouteSecretsV23::new(profile, fee_cap, master_keys)?;
-        let (cold, mut funding) = NativeXmrColdStartV23::prepare_mainnet_funded_v23(
+        let (cold, mut funding) = NativeXmrColdStartV23::prepare_mainnet_funded_mode_v24(
             secrets,
             configuration,
             &credentials,
             limits,
             MAINNET_BASELINE_TIP_V23,
+            live,
         )?;
         let inventory = funding.take_inventory_source_v23()?;
         let mut owner = Self {
@@ -218,6 +240,9 @@ impl NativeMainnetStartupV23 {
         owner.baseline =
             Some(cold.start_mainnet_baseline_v23(MAINNET_BASELINE_TIP_V23, credentials)?);
         let baseline = owner.baseline.as_ref().ok_or("startup baseline")?;
+        if live {
+            baseline.enable_live_window_v24(MAINNET_BASELINE_TIP_V23, 4095)?;
+        }
         let funding = owner.funding.as_ref().ok_or("startup funding owner")?;
         let inventory = owner
             .inventory
@@ -227,12 +252,22 @@ impl NativeMainnetStartupV23 {
             cold.mainnet_node_config_v23(baseline)?,
             cold.mainnet_node_config_v23(baseline)?,
         ];
-        let time = cold.observe_mainnet_time_v23(
-            &nodes[0],
-            zeroize::Zeroizing::new(std::str::from_utf8(&credentials.bearer[0])?.to_owned()),
-            funding,
-            limits,
-        )?;
+        let time = if live {
+            cold.observe_mainnet_time_live_v24(
+                &nodes[0],
+                zeroize::Zeroizing::new(std::str::from_utf8(&credentials.bearer[0])?.to_owned()),
+                funding,
+                limits,
+                baseline,
+            )?
+        } else {
+            cold.observe_mainnet_time_v23(
+                &nodes[0],
+                zeroize::Zeroizing::new(std::str::from_utf8(&credentials.bearer[0])?.to_owned()),
+                funding,
+                limits,
+            )?
+        };
         let (prepared, f6) = cold.prepare_mainnet_f6_pair_v23(
             nodes,
             funding,

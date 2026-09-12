@@ -58,6 +58,15 @@ pub enum RemoteSweepActionV23 {
     Refund = 2,
 }
 
+/// Copy a field only after the decoder has checked its complete fixed prefix.
+fn field32_v23(bytes: &[u8], at: usize) -> [u8; 32] {
+    let mut value = [0; 32];
+    for (offset, slot) in value.iter_mut().enumerate() {
+        *slot = bytes[at + offset];
+    }
+    value
+}
+
 impl TryFrom<u8> for RemoteSweepActionV23 {
     type Error = RemoteSweepWireErrorV23;
 
@@ -194,9 +203,7 @@ impl RemoteSweepRequestV23 {
         let fencing_epoch = read_u64(bytes, 12)?;
         let mut at = 20;
         let mut field = || {
-            let value: [u8; 32] = bytes[at..at + 32]
-                .try_into()
-                .expect("fixed prefix was length checked");
+            let value = field32_v23(bytes, at);
             at += 32;
             value
         };
@@ -224,9 +231,7 @@ impl RemoteSweepRequestV23 {
             max_fee_piconero: read_u64(bytes, at + 24)?,
             adapter_max_raw_transaction_bytes: read_u32(bytes, at + 32)?,
             max_raw_transaction_bytes: read_u32(bytes, at + 36)?,
-            public_spend_share: bytes[at + 40..at + 72]
-                .try_into()
-                .expect("fixed prefix was length checked"),
+            public_spend_share: field32_v23(bytes, at + 40),
             destination: {
                 let length = usize::from(read_u16(bytes, at + 72)?);
                 let start = at + 74;
@@ -495,9 +500,7 @@ impl RemoteSweepResponseV23 {
         let fencing_epoch = read_u64(bytes, 12)?;
         let mut at = 20;
         let mut field = || {
-            let value: [u8; 32] = bytes[at..at + 32]
-                .try_into()
-                .expect("response prefix was length checked");
+            let value = field32_v23(bytes, at);
             at += 32;
             value
         };

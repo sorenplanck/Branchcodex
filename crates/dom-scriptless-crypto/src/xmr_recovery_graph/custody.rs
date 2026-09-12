@@ -76,6 +76,15 @@ impl core::fmt::Display for XmrRecoveryArchiveErrorV11 {
 impl std::error::Error for XmrRecoveryArchiveErrorV11 {}
 type Result<T> = core::result::Result<T, XmrRecoveryArchiveErrorV11>;
 
+/// Public description of an opened archive, not a custody authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XmrRecoveryArchiveShapeV11 {
+    /// The T owner's public graph, without the completed refund.
+    PublicGraphOnly,
+    /// The U owner's graph and privately retained completed refund.
+    WithPrivateRefund,
+}
+
 /// Authenticated, freshly reverified native graph and optional private refund.
 /// No Clone, Debug, Deserialize or network operation is exposed.
 pub struct OpenedXmrRecoveryArchiveV11 {
@@ -89,10 +98,12 @@ impl OpenedXmrRecoveryArchiveV11 {
         &self.graph
     }
 
-    /// Whether this is the U owner's private archive. The T owner must retain
-    /// an archive without the completed signature before the refund is public.
-    pub const fn has_private_refund(&self) -> bool {
-        self.private_refund.is_some()
+    /// Archive shape, which the caller must match to its authenticated custody role.
+    pub const fn shape(&self) -> XmrRecoveryArchiveShapeV11 {
+        match &self.private_refund {
+            Some(_) => XmrRecoveryArchiveShapeV11::WithPrivateRefund,
+            None => XmrRecoveryArchiveShapeV11::PublicGraphOnly,
+        }
     }
 
     /// Private custody access only. A Store execution capability and fresh

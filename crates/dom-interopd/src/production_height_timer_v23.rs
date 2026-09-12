@@ -375,7 +375,7 @@ impl ProductionXmrDeadlineSourceV23 {
             leg,
             chain_id: deployment.profile().chain_id.0,
             genesis: deployment.deployment().genesis_hash,
-            adapter_profile: profile.profile_hash(),
+            adapter_profile: deployment.profile_digest(),
             pool,
             executor,
         })

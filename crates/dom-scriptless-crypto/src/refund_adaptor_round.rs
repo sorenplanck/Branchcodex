@@ -459,17 +459,17 @@ impl RefundAdaptorRoundV1 {
         &self,
         bytes: &[u8],
     ) -> Result<VerifiedRefundPreSignatureV1, RefundAdaptorRoundError> {
-        let pre = AdaptorPreSignatureV1::from_bytes(bytes)
+        let pre_signature = AdaptorPreSignatureV1::from_bytes(bytes)
             .map_err(|_| RefundAdaptorRoundError::PreSignatureRejected)?;
-        if pre.to_bytes().as_slice() != bytes
-            || pre.adaptor_point().to_compressed_bytes()
+        if pre_signature.to_bytes().as_slice() != bytes
+            || pre_signature.adaptor_point().to_compressed_bytes()
                 != self.refund_adaptor_point.to_compressed_bytes()
-            || pre.aggregate_nonce_hat().to_compressed_bytes()
+            || pre_signature.aggregate_nonce_hat().to_compressed_bytes()
                 != self.aggregate_nonce_hat.to_compressed_bytes()
         {
             return Err(RefundAdaptorRoundError::PreSignatureRejected);
         }
-        match pre.verify(
+        match pre_signature.verify(
             &self.template_hash,
             &self.transcript_hash,
             &self.aggregate_signing_key,
@@ -481,7 +481,7 @@ impl RefundAdaptorRoundV1 {
             Err(_) => return Err(RefundAdaptorRoundError::BackendRefused),
         }
         Ok(VerifiedRefundPreSignatureV1 {
-            pre,
+            pre: pre_signature,
             participants: self.participants.clone(),
             aggregate_signing_key: self.aggregate_signing_key.clone(),
             chain_id: self.chain_id,

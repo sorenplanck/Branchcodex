@@ -9,6 +9,13 @@ impl ProductionXmrF6TermsOwnerV7 {
         composition: &ComposedBindingV2,
         enrollment: crate::production_inputs::ProductionXmrEnrollmentBundleV23,
     ) -> Result<AdapterAuthenticatedRefundFaceV2, ProductionF6ErrorV2> {
+        xmr_setup_profile::require_setup_chain_profile_v24(
+            terms,
+            &self.profile,
+            &self.setup,
+            self.deployment.profile(),
+        )
+        .map_err(|_| ProductionF6ErrorV2::InvalidTerms)?;
         let epoch = self.deployment.registry_epoch();
         let mut record = self.scope.check(
             binding,
@@ -17,7 +24,7 @@ impl ProductionXmrF6TermsOwnerV7 {
             self.deployment.registry_digest(),
             epoch,
         )?;
-        if self.profile.profile_hash() != terms.counterparty_leg.adapter_profile_hash
+        if self.deployment.profile_digest() != terms.counterparty_leg.adapter_profile_hash
             || self.deployment.profile().chain_id != terms.counterparty_leg.chain_id
             || self.deployment.asset_binding().asset_id != terms.counterparty_leg.asset_id
             || !matches!(

@@ -7,6 +7,8 @@ pub(super) struct EvolvingDomV23 {
     identity: ExpectedDomIdentityV1,
     public: Value,
     blocks: Vec<Value>,
+    baseline_v24: Option<Vec<Value>>,
+    maximum_span_v24: u64,
     confirmations: u32,
     hold_submissions: bool,
     pending: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
@@ -24,6 +26,8 @@ impl EvolvingDomV23 {
             identity,
             public,
             blocks,
+            baseline_v24: None,
+            maximum_span_v24: 4095,
             confirmations,
             hold_submissions: false,
             pending: std::collections::BTreeMap::new(),
@@ -34,6 +38,111 @@ impl EvolvingDomV23 {
     }
     pub(super) fn blocks(&self) -> &[Value] {
         &self.blocks
+    }
+
+    pub(super) fn enable_live_window_v24(
+        &mut self,
+        baseline_tip: u64,
+        maximum_span: u64,
+    ) -> Result<()> {
+        if self.baseline_v24.is_some()
+            || self.hold_submissions
+            || !self.pending.is_empty()
+            || baseline_tip == 0
+            || baseline_tip >= 4096
+            || maximum_span == 0
+            || maximum_span >= 4096
+            || self.public["tip_height"].as_u64() != Some(baseline_tip)
+            || self.blocks.len()
+                != usize::try_from(baseline_tip.checked_add(1).ok_or("baseline overflow")?)?
+            || self
+                .blocks
+                .first()
+                .and_then(|block| block["height"].as_u64())
+                != Some(0)
+            || self.blocks.iter().any(|block| {
+                block["transactions"]
+                    .as_array()
+                    .is_none_or(|txs| !txs.is_empty())
+            })
+        {
+            return Err(
+                "live window requires the original empty-transaction baseline and bounded span"
+                    .into(),
+            );
+        }
+        let anchor = self.blocks.last().ok_or("baseline anchor absent")?;
+        if anchor["height"].as_u64() != Some(baseline_tip)
+            || anchor["block_hash"] != self.public["tip_hash"]
+        {
+            return Err("baseline tip identity mismatch".into());
+        }
+        let window = vec![anchor.clone()];
+        self.baseline_v24 = Some(std::mem::replace(&mut self.blocks, window));
+        self.maximum_span_v24 = maximum_span;
+        Ok(())
+    }
+
+    pub(super) fn scan_response(&self, request: &str) -> Result<Vec<u8>> {
+        match &self.baseline_v24 {
+            None => super::scan_response(request, &self.public, &self.blocks),
+            Some(baseline) => {
+                window_v24::scan_response(request, &self.public, baseline, &self.blocks)
+            }
+        }
+    }
+
+    pub(super) fn live_window_scope_v24(&self) -> Result<(u64, u64)> {
+        let baseline = self
+            .baseline_v24
+            .as_ref()
+            .ok_or("live DOM window is not enabled")?;
+        let anchor = baseline.last().ok_or("live DOM baseline anchor absent")?;
+        let height = anchor["height"]
+            .as_u64()
+            .ok_or("live DOM baseline height")?;
+        let maximum = height
+            .checked_add(self.maximum_span_v24)
+            .ok_or("live DOM height overflow")?;
+        if self.blocks.first() != Some(anchor)
+            || baseline.len() > 4096
+            || self.blocks.len() > 4096
+            || self.public["tip_height"]
+                .as_u64()
+                .is_none_or(|tip| tip < height || tip > maximum)
+        {
+            return Err("live DOM window no longer matches original baseline".into());
+        }
+        Ok((height, self.maximum_span_v24))
+    }
+
+    fn maximum_height_v24(&self) -> Result<u64> {
+        match &self.baseline_v24 {
+            None => Ok(4095),
+            Some(baseline) => baseline
+                .last()
+                .and_then(|block| block["height"].as_u64())
+                .and_then(|height| height.checked_add(self.maximum_span_v24))
+                .ok_or_else(|| "live window height overflow".into()),
+        }
+    }
+
+    fn next_height_v24(&self) -> Result<u64> {
+        let previous = self.blocks.last().ok_or("local predecessor")?;
+        let height = previous["height"]
+            .as_u64()
+            .and_then(|height| height.checked_add(1))
+            .ok_or("local height overflow")?;
+        if self.blocks.len() >= 4096
+            || height > self.maximum_height_v24()?
+            || self.public["tip_height"]
+                .as_u64()
+                .and_then(|tip| tip.checked_add(1))
+                != Some(height)
+        {
+            return Err("local finality history bound or discontinuity".into());
+        }
+        Ok(height)
     }
 
     /// Scenario-owner control only, never reachable through the HTTP server.
@@ -69,7 +178,11 @@ impl EvolvingDomV23 {
 
     pub(super) fn advance_to_height(&mut self, target: u64) -> Result<()> {
         let current = self.public["tip_height"].as_u64().ok_or("local tip")?;
-        if target < current || target >= 4096 || self.hold_submissions || !self.pending.is_empty() {
+        if target < current
+            || target > self.maximum_height_v24()?
+            || self.hold_submissions
+            || !self.pending.is_empty()
+        {
             return Err(
                 "local recovery advance must be monotonic, bounded and after inclusion".into(),
             );
@@ -119,10 +232,7 @@ impl EvolvingDomV23 {
     }
 
     fn append_empty(&mut self) -> Result<()> {
-        let height = u64::try_from(self.blocks.len())?;
-        if height >= 4096 {
-            return Err("local finality history bound".into());
-        }
+        let height = self.next_height_v24()?;
         let (validated, projection) =
             baseline_coinbase_v23::material_v23(&self.identity.chain_id, height, 0)?;
         let previous = self.blocks.last().ok_or("local predecessor")?;
@@ -183,10 +293,7 @@ impl EvolvingDomV23 {
             if prepared.hash() != hash {
                 return Err("native ledger hash mismatch".into());
             }
-            let height = u64::try_from(self.blocks.len())?;
-            if height >= 4096 {
-                return Err("evolving DOM history bound".into());
-            }
+            let height = self.next_height_v24()?;
             let tx = prepared.transaction();
             let fees = tx.total_fee()?;
             let (coinbase, projection) =
