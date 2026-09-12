@@ -1,0 +1,312 @@
+# Heavy test suites that need more RAM/CPU/disk than a constrained local
+# machine (WSL, <8 GB) can provide. Everything here already exists in the
+# tree and is simply not executed anywhere else:
+#
+#   * integration-heavy — the `env-blocked-wsl` `#[ignore]` suite of
+#     dom-integration-tests (two/three node, reorg, IBD, late join, mempool
+#     relay, wallet flow) plus the dom-pow fast/light equivalence test that
+#     builds a second ~2 GB RandomX dataset.
+#   * interop-full — scripts/test_interop_hardening.py in `--mode full`:
+#     the components graph PLUS bitcoin-regtest (real Bitcoin Core),
+#     `FOUNDRY_PROFILE=deep forge test` and the Anvil cross-chain gate.
+#     interop-hardening.yml only ever runs `--mode components`.
+#   * live-composed-route — the `#[ignore]`d f5-e2e LIVE tests: one route
+#     scalar revealed on a real Anvil chain and claimed on a real Bitcoin
+#     Core regtest node (composed_route_live), and the F7 regtest anchor
+#     leg (f7_bitcoin_regtest). They spawn their own bitcoind; this job
+#     provides bitcoind/bitcoin-cli/cast on PATH, a live Anvil on :8547
+#     and the forge artifact they read.
+#   * bp-soak — the DSC-F4 collaborative Bulletproof soak at its full
+#     10 000-case requirement (seconds per case locally; hours of CPU).
+#
+# Deliberately NOT here: `#[ignore]`d subprocess crash helpers (only their
+# parent tests may invoke them), golden-vector printers ("run only when
+# re-freezing on purpose"), fixture-gated XMR replay tests
+# (DOM_XMR_REPLAY_FIXTURE_V23), and the Sepolia workflows that spend real
+# testnet funds — those stay operator-dispatched in f3/f4-sepolia.yml.
+
+name: heavy-tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which heavy suite to run
+        type: choice
+        default: all
+        options:
+          - all
+          - integration-heavy
+          - interop-full
+          - live-composed-route
+          - bp-soak
+  push:
+    branches: [claude/branchcodex-test-workflow-q7kd31]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heavy-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  integration-heavy:
+    name: "env-blocked integration suite + 2 GB RandomX dataset"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'integration-heavy' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Same reclaim as ci.yml build-test: the workspace test binaries plus
+      # the RandomX dataset exhaust the runner's ~14 GB free disk otherwise.
+      - name: Free disk space
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          sudo docker image prune -af || true
+          echo "Disk after cleanup:"; df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-heavy-integration-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-heavy-integration-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # The env-blocked-wsl multi-node suite. Same regtest fast-mining
+      # environment the release-blocker-integration-tests job proves out,
+      # serial because the nodes bind real local ports.
+      - name: dom-integration-tests — full `#[ignore]` suite
+        env:
+          DOM_NETWORK: regtest
+          DOM_REGTEST_FAST_MINING: "1"
+          CARGO_PROFILE_TEST_OPT_LEVEL: "3"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo test --locked -p dom-integration-tests -- --ignored --test-threads=1
+
+      # Builds the second ~2 GB RandomX dataset and pins fast mode to the
+      # frozen consensus vector — minutes of CPU, well beyond an 8 GB WSL.
+      - name: dom-pow — fast/light dataset equivalence (2 GB dataset)
+        run: cargo test --locked -p dom-pow --test miner_light_equivalence -- --ignored --nocapture
+
+  interop-full:
+    name: "interop hardening — FULL mode (regtest + forge deep + anvil)"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'interop-full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          df -h /
+
+      - name: Verify frozen consensus sources
+        run: bash scripts/check-consensus-unchanged.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            programs/dom-solana-escrow -> target
+
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+
+      # The `full` extras over `components`: bitcoin-regtest needs a real
+      # pinned Bitcoin Core; evm-deep and evm-anvil need forge/anvil/cast
+      # plus the pinned Solidity dependencies (vendoring is intentionally
+      # absent — same audited tags ci.yml installs).
+      - name: Install pinned Bitcoin Core
+        run: |
+          BITCOIN_PREFIX="$HOME/.local" bash scripts/f5-install-bitcoin-core.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: 1.7.1
+
+      - name: Install pinned Solidity dependencies
+        working-directory: contracts
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          forge install foundry-rs/forge-std@v1.9.6 --no-git
+
+      - name: Execute full interop graph (components + regtest + deep + anvil)
+        run: python3 scripts/test_interop_hardening.py --mode full
+
+      - name: Retain actual outcomes including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-hardening-full-${{ github.sha }}
+          path: artifacts/interop-hardening/
+          if-no-files-found: error
+
+  live-composed-route:
+    name: "f5-e2e LIVE — anvil + Bitcoin Core composed route"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'live-composed-route' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-heavy-live-route-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-heavy-live-route-${{ steps.rust.outputs.cachekey }}-
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+
+      - name: Install pinned Bitcoin Core
+        run: |
+          BITCOIN_PREFIX="$HOME/.local" bash scripts/f5-install-bitcoin-core.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: 1.7.1
+
+      # composed_route_live reads the ConditionLockV2 creation bytecode from
+      # contracts/out/, so the artifact must exist before the test runs.
+      - name: Build the forge artifact the test reads
+        working-directory: contracts
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          forge install foundry-rs/forge-std@v1.9.6 --no-git
+          forge build
+
+      # The F7 regtest anchor leg owns its throwaway bitcoind entirely.
+      - name: F7 Bitcoin regtest anchor leg
+        run: cargo test --locked -p f5-e2e --test f7_bitcoin_regtest -- --ignored --nocapture --test-threads=1
+
+      # Also owns its throwaway bitcoind; ignored for the same PATH reason.
+      - name: btc-actuator — Bitcoin Core regtest daemon suite
+        run: cargo test --locked -p btc-actuator --test bitcoin_core_regtest -- --ignored --nocapture --test-threads=1
+
+      # The composed route needs a live Anvil at :8547 (the test's default
+      # COMPOSED_EVM_RPC); it spawns its own bitcoind. Bounded readiness
+      # poll, and the trap stops the node whatever the tests did.
+      - name: Composed cross-chain route — LIVE on both chains
+        run: |
+          set -euo pipefail
+          anvil --port 8547 --silent &
+          ANVIL_PID=$!
+          trap 'kill "$ANVIL_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if cast chain-id --rpc-url http://127.0.0.1:8547 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          cast chain-id --rpc-url http://127.0.0.1:8547
+          cargo test --locked -p f5-e2e --test composed_route_live -- --ignored --nocapture --test-threads=1
+
+  bp-soak:
+    name: "DSC-F4 collaborative Bulletproof soak (10 000 cases)"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'bp-soak' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-heavy-bp-soak-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-heavy-bp-soak-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # The soak test's own note: "set DSC_F4_SOAK_CASES=10000 for the full
+      # requirement". Release profile: the cases are constant-factor crypto,
+      # not timing-semantic, and 10 000 debug cases would blow the budget.
+      - name: Run the full soak requirement
+        env:
+          DSC_F4_SOAK_CASES: "10000"
+        run: cargo test --locked --release -p dom-adaptor --test collaborative_bp_soak -- --ignored --nocapture
+
+  heavy-gate:
+    name: heavy suites gate
+    runs-on: ubuntu-latest
+    needs: [integration-heavy, interop-full, live-composed-route, bp-soak]
+    if: always()
+    steps:
+      # skipped is acceptable (a dispatch may select one suite); failure and
+      # cancellation are not.
+      - name: Require every selected suite to pass
+        run: |
+          for r in "${{ needs.integration-heavy.result }}" \
+                   "${{ needs.interop-full.result }}" \
+                   "${{ needs.live-composed-route.result }}" \
+                   "${{ needs.bp-soak.result }}"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "a selected heavy suite did not pass: $r"; exit 1 ;;
+            esac
+          done
