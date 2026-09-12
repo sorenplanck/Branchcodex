@@ -101,7 +101,10 @@ impl Configuration {
         })
     }
     pub(super) fn start(&self, spend: [u8; 32], amount: u64, max_fee: u64) -> Result<FundingOwner> {
-        self.start_selected_v23(spend, amount, max_fee, 3, None, [0x79; 32])
+        // XmrSetupProfile tags Stagenet as 2 (3 is Testnet). Keep this
+        // fixture's public address encoding aligned with the profile used by
+        // the native graph rather than relying on the helper's old tag.
+        self.start_selected_v23(spend, amount, max_fee, 2, None, [0x79; 32])
     }
 
     pub(crate) fn start_mainnet_at_v23(

@@ -53,7 +53,7 @@ struct PublicEnvelope {
 }
 
 fn legacy_network_tag() -> u8 {
-    3
+    2
 }
 
 fn point(value: u64) -> Point {
@@ -104,7 +104,7 @@ fn build(request: &Request) -> Result<(Transaction, Point, String)> {
     let address = MoneroAddress::new(
         match request.network_tag {
             1 => Network::Mainnet,
-            3 => Network::Stagenet,
+            2 => Network::Stagenet,
             _ => return Err(anyhow!("unsupported explicit offline network")),
         },
         AddressType::Legacy,

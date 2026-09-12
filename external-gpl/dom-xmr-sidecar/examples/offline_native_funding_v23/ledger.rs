@@ -42,7 +42,7 @@ impl Snapshot {
         );
         let genesis = match network_tag {
             1 => "418015bb9ae982a1975da7d79277c2705727a56894ba0fb246adaabb1f4632e3",
-            3 => "76ee3cc98646292206cd3e86f74d88b4dcc1d937088645e9b0cbca84b7ce74eb",
+            2 => "76ee3cc98646292206cd3e86f74d88b4dcc1d937088645e9b0cbca84b7ce74eb",
             _ => return Err(anyhow!("unsupported offline snapshot network")),
         };
         ensure!(
