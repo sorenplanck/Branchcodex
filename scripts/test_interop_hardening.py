@@ -46,7 +46,7 @@ def commands(mode, evidence_directory):
     time_fixture = evidence_directory / "rust-time-evidence-v5.json"
     production_env = {**trace_env, "DOM_INTEROP_V5_TIME_FIXTURE": str(time_fixture)}
     production = ("production", ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
-        "--features", "production", "--lib", "--tests", "--locked", "--profile", "crypto-test",
+        "--features", "production", "--lib", "--tests", "--locked", "--profile", "crypto-test", "--no-fail-fast",
         "--", "--nocapture", "--test-threads=1"], production_env)
     time_verification = ("rust-time-independent-verification", [sys.executable,
         "scripts/time_evidence_oracle.py", str(time_fixture)], {})
@@ -123,7 +123,7 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['cargo', 'test', '--locked', '-p', 'xmr-rpc-broadcast-blocking', '-p', 'xmr-actuator'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production':
-        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--tests', '--locked', '--profile', 'crypto-test', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--tests', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'rust-time-independent-verification':
         # Fixed module import locations; an evidence file cannot choose code.

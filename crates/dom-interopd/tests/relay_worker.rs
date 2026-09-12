@@ -1510,44 +1510,69 @@ fn signed_prepared_signing_position(
     )
 }
 
+fn refund_test_stage<T, E: std::fmt::Display>(
+    stage: &str,
+    result: Result<T, E>,
+) -> Result<T, Box<dyn Error>> {
+    result.map_err(|error| format!("prepared operational Refund {stage}: {error}").into())
+}
+
 fn complete_crypto_real_refund_signing_transport(
     store: &ContractsSessionStoreV1,
     initial: &SessionRecordV1,
     fixture: &EarlyFixture,
 ) -> Result<(SessionRecordV1, ParticipantRosterV1), Box<dyn Error>> {
-    let (mut current, _operational, transactions) =
-        complete_crypto_real_template_transport(store, initial, fixture)?;
+    let (mut current, _operational, transactions) = refund_test_stage(
+        "complete templates before signing",
+        complete_crypto_real_template_transport(store, initial, fixture),
+    )?;
 
     let roster = signing_roster(fixture)?;
     if roster.entries()[0].direction() != DirectionV1::Responder {
         return Err(Box::new(SessionStoreError::Canonical));
     }
-    store.bind_operational_signing_session(
-        fixture.trusted_chain,
-        SESSION,
-        ContractKindV1::WitnessOrTimeout,
-        PurposeV1::Refund,
-        roster.clone(),
-        transactions[2].clone(),
-        0,
-        None,
+    refund_test_stage(
+        "bind signing session",
+        store.bind_operational_signing_session(
+            fixture.trusted_chain,
+            SESSION,
+            ContractKindV1::WitnessOrTimeout,
+            PurposeV1::Refund,
+            roster.clone(),
+            transactions[2].clone(),
+            0,
+            None,
+        ),
     )?;
-    let payloads = prepared_signing_payloads(fixture, &roster, &transactions[2])?;
-    let signing_authority = store.prepare_operational_signing_transport_authority(
-        fixture.trusted_chain,
-        SESSION,
-        PurposeV1::Refund,
+    let payloads = refund_test_stage(
+        "construct signing payloads",
+        prepared_signing_payloads(fixture, &roster, &transactions[2]),
     )?;
+    let signing_authority = refund_test_stage(
+        "prepare signing authority",
+        store.prepare_operational_signing_transport_authority(
+            fixture.trusted_chain,
+            SESSION,
+            PurposeV1::Refund,
+        ),
+    )?;
+    eprintln!("prepared operational Refund: authority prepared; admitting six signing messages");
     for (position, payload) in payloads.into_iter().enumerate() {
         let signed =
             signed_prepared_signing_position(fixture, &roster, &current, position, payload)?;
-        match store
-            .accept_prepared_operational_signing_transport_message(&signing_authority, &signed)?
-        {
+        match refund_test_stage(
+            &format!("accept signing position={position}"),
+            store
+                .accept_prepared_operational_signing_transport_message(&signing_authority, &signed),
+        )? {
             DurableTransportOutcomeV1::Accepted(receipt) if !receipt.duplicate => {}
             _ => return Err(Box::new(SessionStoreError::Quarantined)),
         }
-        current = store.load_session(SESSION)?;
+        current = refund_test_stage(
+            &format!("load after signing position={position}"),
+            store.load_session(SESSION),
+        )?;
+        eprintln!("prepared operational Refund: signing position={position} accepted");
     }
     Ok((current, roster))
 }
@@ -1557,17 +1582,26 @@ fn complete_crypto_real_template_transport(
     initial: &SessionRecordV1,
     fixture: &EarlyFixture,
 ) -> Result<(SessionRecordV1, OperationalBpFixture, [Transaction; 3]), Box<dyn Error>> {
-    let (mut current, operational) = complete_operational_bp_transport(store, initial, fixture)?;
-    let transactions = crypto_real_final_refund_transactions(initial, fixture, &operational)?;
-    let template_authority = store.prepare_operational_template_transport_authority(
-        fixture.trusted_chain,
-        SESSION,
-        initial.terms_hash(),
-        &transactions[0],
-        &transactions[1],
-        &transactions[2],
-        &operational.statement,
-        &fixture.recovery_capsule,
+    let (mut current, operational) = refund_test_stage(
+        "complete BP before templates",
+        complete_operational_bp_transport(store, initial, fixture),
+    )?;
+    let transactions = refund_test_stage(
+        "construct real refund templates",
+        crypto_real_final_refund_transactions(initial, fixture, &operational),
+    )?;
+    let template_authority = refund_test_stage(
+        "prepare real template authority",
+        store.prepare_operational_template_transport_authority(
+            fixture.trusted_chain,
+            SESSION,
+            initial.terms_hash(),
+            &transactions[0],
+            &transactions[1],
+            &transactions[2],
+            &operational.statement,
+            &fixture.recovery_capsule,
+        ),
     )?;
     for direction in [DirectionV1::Initiator, DirectionV1::Responder] {
         let participant = fixture.index_for_direction(direction)?;
@@ -1582,14 +1616,22 @@ fn complete_crypto_real_template_transport(
             current.transcript_hash(),
             template_authority.template_commit_payload().to_vec(),
         )?;
-        match store
-            .accept_prepared_operational_template_transport_message(&template_authority, &signed)?
-        {
+        match refund_test_stage(
+            &format!("accept template direction={direction:?}"),
+            store.accept_prepared_operational_template_transport_message(
+                &template_authority,
+                &signed,
+            ),
+        )? {
             DurableTransportOutcomeV1::Accepted(receipt) if !receipt.duplicate => {}
             _ => return Err(Box::new(SessionStoreError::Quarantined)),
         }
-        current = store.load_session(SESSION)?;
+        current = refund_test_stage(
+            &format!("load after template direction={direction:?}"),
+            store.load_session(SESSION),
+        )?;
     }
+    eprintln!("prepared operational Refund: real templates committed");
     Ok((current, operational, transactions))
 }
 
@@ -2172,36 +2214,49 @@ fn prepared_operational_template_stays_closed_then_reissues_across_worker_restar
 #[test]
 fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart(
 ) -> Result<(), Box<dyn Error>> {
+    eprintln!("prepared operational Refund signing/restart: fixture setup");
     let temporary = secure_tempdir()?;
     let initial = initial_record()?;
     let fixture = EarlyFixture::new_responder_first_signing_compatible(&initial)?;
     let initiator_store = create_contracts_store(temporary.path(), "contracts-a", &fixture)?;
     let responder_store = create_contracts_store(temporary.path(), "contracts-b", &fixture)?;
-    let (round_start, _operational, transactions) =
-        complete_crypto_real_template_transport(&responder_store, &initial, &fixture)?;
+    let (round_start, _operational, transactions) = refund_test_stage(
+        "signing/restart complete templates",
+        complete_crypto_real_template_transport(&responder_store, &initial, &fixture),
+    )?;
     assert_eq!(round_start.revision(), 19);
     assert_eq!(round_start.phase(), SessionPhaseV1::TemplatesCommitted);
 
     let roster = signing_roster(&fixture)?;
     assert_eq!(roster.entries()[0].direction(), DirectionV1::Responder);
     assert_eq!(roster.entries()[1].direction(), DirectionV1::Initiator);
-    responder_store.bind_operational_signing_session(
-        fixture.trusted_chain,
-        SESSION,
-        ContractKindV1::WitnessOrTimeout,
-        PurposeV1::Refund,
-        roster.clone(),
-        transactions[2].clone(),
-        0,
-        None,
+    refund_test_stage(
+        "signing/restart bind signing session",
+        responder_store.bind_operational_signing_session(
+            fixture.trusted_chain,
+            SESSION,
+            ContractKindV1::WitnessOrTimeout,
+            PurposeV1::Refund,
+            roster.clone(),
+            transactions[2].clone(),
+            0,
+            None,
+        ),
     )?;
-    let payloads = prepared_signing_payloads(&fixture, &roster, &transactions[2])?;
+    let payloads = refund_test_stage(
+        "signing/restart construct payloads",
+        prepared_signing_payloads(&fixture, &roster, &transactions[2]),
+    )?;
     assert_eq!(payloads.len(), 6);
-    let signing_authority = responder_store.prepare_operational_signing_transport_authority(
-        fixture.trusted_chain,
-        SESSION,
-        PurposeV1::Refund,
+    let signing_authority = refund_test_stage(
+        "signing/restart prepare authority",
+        responder_store.prepare_operational_signing_transport_authority(
+            fixture.trusted_chain,
+            SESSION,
+            PurposeV1::Refund,
+        ),
     )?;
+    eprintln!("prepared operational Refund signing/restart: initial authority prepared");
     assert_eq!(signing_authority.session_id(), &SESSION);
     assert_eq!(signing_authority.purpose(), PurposeV1::Refund);
     let first =
@@ -2233,7 +2288,10 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
     worker.install_contracts_ingress(PreparedContractsIngressV1::operational_signing(
         signing_authority,
     ))?;
-    let first_report = worker.dispatch_inbound()?;
+    let first_report = refund_test_stage(
+        "signing/restart dispatch first message",
+        worker.dispatch_inbound(),
+    )?;
     assert_eq!(first_report.contracts.applied, 1);
     assert_eq!(first_report.contracts.duplicate_commits, 0);
     let first_status = worker.contracts_session_status()?;
@@ -2255,12 +2313,22 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
 
     let mut last_remote = first;
     for (position, payload) in payloads.iter().enumerate().skip(1) {
-        let responder_store = open_contracts_store(temporary.path(), "contracts-b")?;
-        let current = responder_store.load_session(SESSION)?;
-        let reissued = responder_store.prepare_operational_signing_transport_authority(
-            fixture.trusted_chain,
-            SESSION,
-            PurposeV1::Refund,
+        eprintln!("prepared operational Refund signing/restart: reopening position={position}");
+        let responder_store = refund_test_stage(
+            &format!("signing/restart open position={position}"),
+            open_contracts_store(temporary.path(), "contracts-b"),
+        )?;
+        let current = refund_test_stage(
+            &format!("signing/restart load position={position}"),
+            responder_store.load_session(SESSION),
+        )?;
+        let reissued = refund_test_stage(
+            &format!("signing/restart reissue authority position={position}"),
+            responder_store.prepare_operational_signing_transport_authority(
+                fixture.trusted_chain,
+                SESSION,
+                PurposeV1::Refund,
+            ),
         )?;
         let signed = signed_prepared_signing_position(
             &fixture,
@@ -2279,10 +2347,10 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
             // alternating positions are fixture-local transitions and never
             // re-enter through Relay as self-messages.
             assert!(matches!(
-                responder_store.accept_prepared_operational_signing_transport_message(
+                refund_test_stage(&format!("signing/restart local accept position={position}"), responder_store.accept_prepared_operational_signing_transport_message(
                     &reissued,
                     &signed,
-                )?,
+                ))?,
                 DurableTransportOutcomeV1::Accepted(receipt) if !receipt.duplicate
             ));
             let status = responder_store.load_session(SESSION)?;
@@ -2296,7 +2364,10 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
             ))?;
             peer.prepare_signed_dsc1(&signed, expiry())?;
             peer.submit_outbound_once(&mut relay)?;
-            let report = worker.poll_inbound(&mut relay.relay, now())?;
+            let report = refund_test_stage(
+                &format!("signing/restart relay accept position={position}"),
+                worker.poll_inbound(&mut relay.relay, now()),
+            )?;
             assert_eq!(report.dispatch.contracts.applied, 1);
             assert_eq!(report.dispatch.contracts.duplicate_commits, 0);
             let status = worker.contracts_session_status()?;
@@ -2330,18 +2401,25 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
 #[test]
 fn prepared_operational_final_refund_is_exact_linear_and_restart_safe() -> Result<(), Box<dyn Error>>
 {
+    eprintln!("prepared operational final Refund: fixture setup");
     let temporary = secure_tempdir()?;
     let initial = initial_record()?;
     let fixture = EarlyFixture::new_responder_first_signing_compatible(&initial)?;
     let initiator_store = create_contracts_store(temporary.path(), "contracts-a", &fixture)?;
     let responder_store = create_contracts_store(temporary.path(), "contracts-b", &fixture)?;
-    let (refund_terminal, roster) =
-        complete_crypto_real_refund_signing_transport(&responder_store, &initial, &fixture)?;
+    let (refund_terminal, roster) = refund_test_stage(
+        "final-refund complete signing transport",
+        complete_crypto_real_refund_signing_transport(&responder_store, &initial, &fixture),
+    )?;
     assert_eq!(refund_terminal.revision(), 25);
     assert_eq!(refund_terminal.phase(), SessionPhaseV1::RefundSigning);
 
-    let final_refund_authority = responder_store
-        .prepare_operational_final_refund_transport_authority(fixture.trusted_chain, SESSION)?;
+    let final_refund_authority = refund_test_stage(
+        "prepare final-refund authority",
+        responder_store
+            .prepare_operational_final_refund_transport_authority(fixture.trusted_chain, SESSION),
+    )?;
+    eprintln!("prepared operational final Refund: exact authority prepared");
     let final_refund_payload = final_refund_authority.final_refund_payload().to_vec();
     assert_eq!(
         final_refund_authority.refund_tx_hash(),
@@ -2405,7 +2483,7 @@ fn prepared_operational_final_refund_is_exact_linear_and_restart_safe() -> Resul
     worker.install_contracts_ingress(PreparedContractsIngressV1::operational_final_refund(
         final_refund_authority,
     ))?;
-    let accepted = worker.dispatch_inbound()?;
+    let accepted = refund_test_stage("dispatch exact final refund", worker.dispatch_inbound())?;
     assert_eq!(accepted.contracts.applied, 1);
     assert_eq!(accepted.contracts.duplicate_commits, 0);
     let accepted_status = worker.contracts_session_status()?;
@@ -2424,8 +2502,11 @@ fn prepared_operational_final_refund_is_exact_linear_and_restart_safe() -> Resul
     drop(worker);
 
     let responder_store = open_contracts_store(temporary.path(), "contracts-b")?;
-    let reissued = responder_store
-        .prepare_operational_final_refund_transport_authority(fixture.trusted_chain, SESSION)?;
+    let reissued = refund_test_stage(
+        "reissue final-refund authority after restart",
+        responder_store
+            .prepare_operational_final_refund_transport_authority(fixture.trusted_chain, SESSION),
+    )?;
     assert_eq!(reissued.final_refund_payload(), final_refund_payload);
     let mut worker = open_worker_for(temporary.path(), true, responder_store, participants)?;
     worker.install_contracts_ingress(PreparedContractsIngressV1::operational_final_refund(

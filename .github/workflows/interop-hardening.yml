@@ -8,7 +8,9 @@ concurrency:
 jobs:
   components:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # A native graph already takes over 40 minutes. Leave room for all three
+    # independent heavy graphs plus the remaining serial integration checks.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,6 +27,11 @@ jobs:
       - name: Build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
       - uses: ./.github/actions/xmr-test-tools
+      - name: Verify prepared operational integration ingress
+        env:
+          CARGO_BUILD_JOBS: '2'
+          RUST_TEST_THREADS: '1'
+        run: cargo test --locked -p dom-interopd --no-default-features --features production --test relay_worker --profile crypto-test prepared_operational -- --nocapture
       - name: Execute changed components and production graph
         run: python3 scripts/test_interop_hardening.py --mode components
       - name: Retain actual outcomes including failures

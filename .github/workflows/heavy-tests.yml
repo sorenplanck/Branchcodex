@@ -168,6 +168,12 @@ jobs:
 
       - uses: ./.github/actions/xmr-test-tools
 
+      - name: Verify prepared operational integration ingress
+        env:
+          CARGO_BUILD_JOBS: '2'
+          RUST_TEST_THREADS: '1'
+        run: cargo test --locked -p dom-interopd --no-default-features --features production --test relay_worker --profile crypto-test prepared_operational -- --nocapture
+
       - name: Execute full interop graph (components + regtest + deep + anvil)
         run: python3 scripts/test_interop_hardening.py --mode full
 

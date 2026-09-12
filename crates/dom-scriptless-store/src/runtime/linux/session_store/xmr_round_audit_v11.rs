@@ -206,16 +206,16 @@ impl ContractsSessionStoreV1 {
         let parent_roster = self.load_transport_roster(parent_session)?;
         let parent_identities = self.load_transport_identity_binding(parent_session)?;
         require_transport_identity_binding(&parent_roster, &parent_identities)?;
-        if parent_roster.chain_id != binding.chain_id
-            || parent_roster.participants.len() != 2
-            || parent_roster
-                .participants
-                .iter()
-                .enumerate()
-                .any(|(index, participant)| participant.participant_id != terms.roster[index].0)
-        {
+        if parent_roster.chain_id != binding.chain_id || parent_roster.participants.len() != 2 {
             return Err(SessionStoreError::Quarantined);
         }
+        // Terms use canonical participant-ID order; the authenticated transport
+        // roster uses Initiator/Responder order. Require the same two identities
+        // without confusing those orders or rewriting either retained record.
+        require_exact_recovery_participants(
+            terms.roster.map(|participant| participant.0),
+            std::array::from_fn(|index| parent_roster.participants[index].participant_id),
+        )?;
         let local = self.authenticate_local_transport_signer_binding(parent_session)?;
         let custody_owner_matches = match custody.scope().role {
             XmrRecoveryCustodyRoleV11::PrivateRefundOwner => {
@@ -372,6 +372,21 @@ impl ContractsSessionStoreV1 {
     }
 }
 
+fn require_exact_recovery_participants(
+    terms: [[u8; 32]; 2],
+    transport: [[u8; 32]; 2],
+) -> Result<(), SessionStoreError> {
+    if terms.contains(&[0; 32])
+        || transport.contains(&[0; 32])
+        || terms[0] == terms[1]
+        || transport[0] == transport[1]
+        || (terms != transport && terms != [transport[1], transport[0]])
+    {
+        return Err(SessionStoreError::Quarantined);
+    }
+    Ok(())
+}
+
 fn require_distinct_recovery_sessions(
     parent: [u8; 32],
     cancel: [u8; 32],
@@ -392,6 +407,47 @@ mod tests {
     use super::*;
     use static_assertions::assert_not_impl_any;
     assert_not_impl_any!(VerifiedXmrOrdinaryRecoveryRoundsV11: Clone, Copy, core::fmt::Debug);
+
+    #[test]
+    fn recovery_participants_match_in_both_transport_direction_orders() {
+        let terms = [[0x32; 32], [0xdb; 32]];
+        assert!(require_exact_recovery_participants(terms, terms).is_ok());
+        // The failing native fixture's Initiator ID sorts after its Responder:
+        // this is the same participant set, not a different custody authority.
+        assert!(require_exact_recovery_participants(terms, [terms[1], terms[0]]).is_ok());
+    }
+
+    #[test]
+    fn recovery_participants_refuse_foreign_duplicate_or_zero_ids() {
+        let expected = [[0x32; 32], [0xdb; 32]];
+        for invalid in [
+            [[0x41; 32], expected[1]],
+            [expected[0], [0x41; 32]],
+            [expected[0], expected[0]],
+            [expected[1], expected[1]],
+            [[0; 32], expected[1]],
+            [expected[0], [0; 32]],
+            [[0; 32], [0; 32]],
+        ] {
+            assert!(matches!(
+                require_exact_recovery_participants(expected, invalid),
+                Err(SessionStoreError::Quarantined)
+            ));
+            assert!(matches!(
+                require_exact_recovery_participants(invalid, expected),
+                Err(SessionStoreError::Quarantined)
+            ));
+            if invalid.contains(&[0; 32]) || invalid[0] == invalid[1] {
+                // Matching malformed inputs must not be accepted merely because
+                // their arrays compare equal.
+                assert!(matches!(
+                    require_exact_recovery_participants(invalid, invalid),
+                    Err(SessionStoreError::Quarantined)
+                ));
+            }
+        }
+    }
+
     #[test]
     fn a_parent_plain_refund_or_one_reused_round_cannot_stand_for_two_recovery_rounds() {
         assert!(require_distinct_recovery_sessions([1; 32], [2; 32], [3; 32]).is_ok());

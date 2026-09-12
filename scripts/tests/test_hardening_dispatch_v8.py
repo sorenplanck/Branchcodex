@@ -12,6 +12,21 @@ import test_interop_hardening as runner
 
 
 class HardeningDispatchTests(unittest.TestCase):
+    def test_production_keeps_all_targets_and_continues_after_a_failed_target(self):
+        root = Path(".")
+        for mode in ("components", "full", "runtime", "v6"):
+            with self.subTest(mode=mode):
+                declared = next(args for name, args, _ in runner.commands(mode, root)
+                                if name == "production")
+                with mock.patch.object(runner.subprocess, "Popen") as spawn:
+                    runner.start_test_command("production", {}, root)
+                actual = spawn.call_args.args[0]
+                self.assertEqual(actual, declared)
+                cargo_args, test_args = actual[:actual.index("--")], actual[actual.index("--") + 1:]
+                for flag in ("--lib", "--tests", "--locked", "--no-fail-fast"):
+                    self.assertIn(flag, cargo_args)
+                self.assertEqual(test_args, ["--nocapture", "--test-threads=1"])
+
     def test_unknown_command_names_never_spawn_a_process(self):
         with mock.patch.object(runner.subprocess, "Popen") as spawn:
             for name in ("", "bash", "bitcoin-regtest;echo injected", "scripts/f5-signet-e2e.sh"):

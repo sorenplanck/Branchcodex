@@ -1,5 +1,5 @@
 name: Prepare native XMR test tools
-description: Build pinned GPL helper and sidecar, then verify custody and process startup
+description: Build pinned GPL tools, then verify custody participants, paths and process startup
 inputs:
   dom-path:
     description: DOM checkout path relative to the workspace
@@ -36,3 +36,10 @@ runs:
         set -euo pipefail
         cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test custody_startup_paths_v23 -- --nocapture
         cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test native_offline_funding_preflight_v23 -- --nocapture
+    - name: Verify XMR recovery participant ordering
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+        RUST_TEST_THREADS: '1'
+      run: cargo test --locked -p dom-scriptless-store --lib --profile crypto-test xmr_round_audit_v11::tests -- --nocapture
