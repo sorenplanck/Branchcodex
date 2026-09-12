@@ -287,7 +287,7 @@ impl Actor {
             return Err("sender inode changed".into());
         }
         let transaction = connection.unchecked_transaction()?;
-        let count: usize =
+        let count: i64 =
             transaction.query_row("SELECT count(*) FROM route_application", [], |r| r.get(0))?;
         if count > 4096 {
             return Err("sender observation exceeded bound".into());

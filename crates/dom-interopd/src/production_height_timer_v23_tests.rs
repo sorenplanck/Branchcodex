@@ -285,7 +285,7 @@ fn timestamp_schedule_delivers_once_and_reopen_does_not_replace_it() {
     use route_executor::{DurableRouteStoreV1, HealthStateV1, RouteEventV1, SecretVisibilityV1};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("route.sqlite3");
-    let mut store = DurableRouteStoreV1::open(&path).unwrap();
+    let mut store = DurableRouteStoreV1::create(&path).unwrap();
     store.create_route([4; 32], 90).unwrap();
     let setup = store
         .acquire_lease([4; 32], [11; 32], 90, 100_000)

@@ -108,7 +108,7 @@ impl CoordinatorObserverV23 {
             "SELECT child_index,face_tag,expected_tx_id,stage_tag,externalization_evidence,finality_evidence,chain_id,exposure_tag,pending_attempt_id,pending_call_digest FROM settlement_children WHERE plan_id=?1 ORDER BY child_index LIMIT 3")?;
         let rows = statement.query_map([plan_id.as_slice()], |row| {
             Ok((
-                row.get::<_, usize>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, u8>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, u8>(3)?,
@@ -125,9 +125,11 @@ impl CoordinatorObserverV23 {
         let mut count = 0;
         for row in rows {
             let (index, face, id, stage, external, finality, chain, exposure, attempt, call) = row?;
-            if index != count || index >= 2 || !(1..=5).contains(&stage) {
+            if index != count || !(0..2).contains(&index) || !(1..=5).contains(&stage) {
                 return Err("coordinator child cardinality/stage".into());
             }
+            let index = usize::try_from(index)
+                .map_err(|_| "coordinator child index outside canonical range")?;
             let id = digest32(id)?;
             let chain = digest32(chain)?;
             let exposure = match exposure {
