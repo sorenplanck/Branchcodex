@@ -40,6 +40,7 @@ on:
           - interop-full
           - live-composed-route
           - bp-soak
+          - dom-xmr-native
   push:
     branches: [codex/domxmr]
 
@@ -299,10 +300,53 @@ jobs:
           DSC_F4_SOAK_CASES: "10000"
         run: cargo test --locked --release -p dom-adaptor --test collaborative_bp_soak -- --ignored --nocapture
 
+  dom-xmr-native:
+    name: "DOM↔XMR native claim — real GPL scan"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dom
+
+      # The helper is compiled against this exact upstream checkout. The test
+      # drives only signed local fixtures and loopback RPC; it cannot submit a
+      # transaction or contact a mainnet daemon.
+      - uses: actions/checkout@v4
+        with:
+          repository: eigenwallet/core
+          ref: 0e17c7f7cd8f0657af176c8852aa4c9949586051
+          path: eigenwallet
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned GPL sidecar and offline funding helper
+        working-directory: dom
+        run: |
+          set -euo pipefail
+          python3 scripts/install-sidecar-into-eigenwallet.py ../eigenwallet
+          cargo build --manifest-path ../eigenwallet/Cargo.toml -p dom-xmr-sidecar
+          cargo build --manifest-path ../eigenwallet/Cargo.toml -p dom-xmr-sidecar --example offline_native_funding_v23
+          chmod go-w ../eigenwallet/target/debug/dom-xmr-sidecar \
+            ../eigenwallet/target/debug/examples/offline_native_funding_v23
+
+      - name: DOM↔XMR native claim, real scanner and durable signing graph
+        working-directory: dom
+        env:
+          DOM_XMR_OFFLINE_FUNDING_HELPER_V23: ${{ github.workspace }}/eigenwallet/target/debug/examples/offline_native_funding_v23
+          DOM_XMR_REAL_SIDECAR_V23: ${{ github.workspace }}/eigenwallet/target/debug/dom-xmr-sidecar
+          RUST_TEST_THREADS: "1"
+        run: |
+          cargo test --locked -p dom-interopd --no-default-features --features production \
+            --lib --profile crypto-test \
+            production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan \
+            -- --exact --nocapture
+
   heavy-gate:
     name: heavy suites gate
     runs-on: ubuntu-latest
-    needs: [integration-heavy, interop-full, live-composed-route, bp-soak]
+    needs: [integration-heavy, interop-full, live-composed-route, bp-soak, dom-xmr-native]
     if: always()
     steps:
       # skipped is acceptable (a dispatch may select one suite); failure and
@@ -312,7 +356,8 @@ jobs:
           for r in "${{ needs.integration-heavy.result }}" \
                    "${{ needs.interop-full.result }}" \
                    "${{ needs.live-composed-route.result }}" \
-                   "${{ needs.bp-soak.result }}"; do
+                   "${{ needs.bp-soak.result }}" \
+                   "${{ needs.dom-xmr-native.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "a selected heavy suite did not pass: $r"; exit 1 ;;
