@@ -343,7 +343,12 @@ impl Configuration {
         let root = tempfile::Builder::new()
             .prefix("xmr-peer-v23-")
             .tempdir_in(parent)?;
-        use std::os::unix::fs::DirBuilderExt;
+        // `tempdir_in` follows the process umask. GitHub runners commonly use
+        // 0002, which can leave this original cache owner group-accessible.
+        // Tighten the actual directory before either the cache or sidecar is
+        // created; restart_original_v24 then verifies the same inode/mode.
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(root.path().join("cache"))?;
