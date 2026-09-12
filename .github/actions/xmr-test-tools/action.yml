@@ -26,6 +26,23 @@ runs:
         ref: 0e17c7f7cd8f0657af176c8852aa4c9949586051
         path: .ci-eigenwallet
         persist-credentials: false
+    - name: Install pinned offline tool sources
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        XMR_TEST_WORKSPACE: ${{ github.workspace }}/.ci-eigenwallet
+      run: |
+        set -euo pipefail
+        python3 scripts/install-sidecar-into-eigenwallet.py "$XMR_TEST_WORKSPACE"
+    - name: Restore GPL crypto compilation, including prior failed test runs
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: .ci-eigenwallet -> target
+        shared-key: xmr-gpl-crypto-test-v23-0e17c7f7cd8f0657af176c8852aa4c9949586051
+        key: ${{ hashFiles(format('{0}/.github/actions/xmr-test-tools/action.yml', inputs.dom-path), format('{0}/external-gpl/dom-xmr-sidecar/**', inputs.dom-path), format('{0}/crates/adapters/xmr-key-image-proof/**', inputs.dom-path), format('{0}/crates/adapters/xmr-raw-tx-verify/**', inputs.dom-path)) }}
+        cache-all-crates: 'true'
+        cache-on-failure: 'true'
+        save-if: ${{ github.event_name != 'pull_request' }}
     - name: Build pinned offline tools
       shell: bash
       working-directory: ${{ inputs.dom-path }}
@@ -34,7 +51,6 @@ runs:
         CARGO_BUILD_JOBS: '2'
       run: |
         set -euo pipefail
-        python3 scripts/install-sidecar-into-eigenwallet.py "$XMR_TEST_WORKSPACE"
         # The parent Rust tests already use crypto-test, but a child executable
         # does not inherit that profile. Previously both GPL crypto producers
         # ran unoptimized debug code throughout every native graph. Configure

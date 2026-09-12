@@ -13,6 +13,30 @@ import test_interop_hardening as runner
 
 
 class HardeningDispatchTests(unittest.TestCase):
+    def test_crypto_caches_survive_test_failure_but_never_skip_test_execution(self):
+        root = Path(__file__).resolve().parents[2]
+        action = (root / ".github/actions/xmr-test-tools/action.yml").read_text()
+        cache = action.split("- name: Restore GPL crypto compilation", 1)[1].split("- name:", 1)[0]
+        for setting in ("workspaces: .ci-eigenwallet -> target", "cache-all-crates: 'true'",
+                        "cache-on-failure: 'true'", "github.event_name != 'pull_request'",
+                        "xmr-gpl-crypto-test-v23-0e17c7f7cd8f0657af176c8852aa4c9949586051"):
+            self.assertIn(setting, cache)
+        self.assertLess(action.index("Install pinned offline tool sources"), action.index("Restore GPL crypto compilation"))
+        self.assertLess(action.index("Restore GPL crypto compilation"), action.index("Build pinned offline tools"))
+        self.assertNotIn("cache-hit", action)
+        self.assertNotIn("continue-on-error:", action)
+        for filename, job_name in (("heavy-tests.yml", "dom-xmr-native"),
+                                   ("heavy-tests.yml", "interop-full"),
+                                   ("interop-hardening.yml", "components")):
+            workflow = (root / ".github/workflows" / filename).read_text()
+            jobs = dict(re.findall(r"^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+                                   workflow, re.MULTILINE | re.DOTALL))
+            job = jobs[job_name]
+            self.assertIn("cache-workspace-crates: 'true'", job)
+            self.assertIn("cache-on-failure: 'true'", job)
+            self.assertNotIn("cache-hit", job)
+
+
     def test_gpl_children_are_optimized_without_disabling_debug_safety(self):
         action = (Path(__file__).resolve().parents[2]
                   / ".github/actions/xmr-test-tools/action.yml").read_text()

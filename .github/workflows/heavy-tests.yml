@@ -140,6 +140,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
           workspaces: |
             . -> target
             programs/dom-solana-escrow -> target
@@ -313,6 +315,14 @@ jobs:
           path: dom
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Reuse native DOM compilation even after a failed test
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dom -> target
+          key: dom-xmr-native-crypto-test-v23
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
 
       - uses: ./dom/.github/actions/xmr-test-tools
         with:
