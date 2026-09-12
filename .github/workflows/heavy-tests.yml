@@ -166,6 +166,8 @@ jobs:
           forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
           forge install foundry-rs/forge-std@v1.9.6 --no-git
 
+      - uses: ./.github/actions/xmr-test-tools
+
       - name: Execute full interop graph (components + regtest + deep + anvil)
         run: python3 scripts/test_interop_hardening.py --mode full
 
@@ -310,32 +312,16 @@ jobs:
         with:
           path: dom
 
-      # The helper is compiled against this exact upstream checkout. The test
-      # drives only signed local fixtures and loopback RPC; it cannot submit a
-      # transaction or contact a mainnet daemon.
-      - uses: actions/checkout@v4
-        with:
-          repository: eigenwallet/core
-          ref: 0e17c7f7cd8f0657af176c8852aa4c9949586051
-          path: eigenwallet
-
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build pinned GPL sidecar and offline funding helper
-        working-directory: dom
-        run: |
-          set -euo pipefail
-          python3 scripts/install-sidecar-into-eigenwallet.py ../eigenwallet
-          cargo build --manifest-path ../eigenwallet/Cargo.toml -p dom-xmr-sidecar
-          cargo build --manifest-path ../eigenwallet/Cargo.toml -p dom-xmr-sidecar --example offline_native_funding_v23
-          chmod go-w ../eigenwallet/target/debug/dom-xmr-sidecar \
-            ../eigenwallet/target/debug/examples/offline_native_funding_v23
+      - uses: ./dom/.github/actions/xmr-test-tools
+        with:
+          dom-path: dom
 
       - name: DOM↔XMR native claim, real scanner and durable signing graph
         working-directory: dom
         env:
-          DOM_XMR_OFFLINE_FUNDING_HELPER_V23: ${{ github.workspace }}/eigenwallet/target/debug/examples/offline_native_funding_v23
-          DOM_XMR_REAL_SIDECAR_V23: ${{ github.workspace }}/eigenwallet/target/debug/dom-xmr-sidecar
+          CARGO_BUILD_JOBS: "2"
           RUST_TEST_THREADS: "1"
         run: |
           cargo test --locked -p dom-interopd --no-default-features --features production \

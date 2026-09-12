@@ -29,6 +29,23 @@ pub(crate) use route_funding_v23::{
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_ENVELOPE: usize = 4 * 1024 * 1024;
 
+/// Exercise the exact GPL helper/address/parser/socket boundary before any
+/// expensive native graph. Both networks use only the helper's loopback ledger.
+#[test]
+fn native_offline_funding_preflight_v23() -> Result<()> {
+    let config = Configuration::require()?;
+    let mut scalar = [0; 32];
+    scalar[0] = 7;
+    let spend = xmr_crypto::XmrSpendShare::from_canonical_bytes(scalar)?.public_share()?;
+    for network_tag in [1, 2] {
+        let mut owner =
+            config.start_selected_v23(spend, 100, 10_000, network_tag, None, [0x79; 32])?;
+        owner.require_alive()?;
+        assert_ne!(owner.hash(), [0; 32]);
+    }
+    Ok(())
+}
+
 pub(crate) struct Configuration {
     helper: PathBuf,
     sidecar: PathBuf,
@@ -145,7 +162,7 @@ impl Configuration {
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Preserve sidecar diagnostics in CI: a startup failure is part of
+            // Preserve helper diagnostics in CI: a startup failure is part of
             // the integration boundary and must not be reduced to a generic
             // unavailable error after the expensive signing graph completed.
             .stderr(Stdio::inherit())
@@ -256,8 +273,10 @@ impl Configuration {
         {
             return Err("offline funding destination/hash mismatch".into());
         }
+        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::Builder::new()
             .prefix("xmr-v23-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(parent.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR"))))?;
         let socket = directory.path().join("sidecar.sock");
         let child = Command::new(&self.sidecar)
@@ -269,13 +288,16 @@ impl Configuration {
             .env("DOM_XMR_SIDECAR_UDS", &socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()?;
         let mut sidecar = ProcessOwner { child, input: None };
         let deadline = Instant::now() + Duration::from_secs(10);
         while !socket.exists() {
-            if sidecar.child.try_wait()?.is_some() || Instant::now() >= deadline {
-                return Err("real sidecar unavailable".into());
+            if let Some(status) = sidecar.child.try_wait()? {
+                return Err(format!("real sidecar exited before readiness: {status}").into());
+            }
+            if Instant::now() >= deadline {
+                return Err("real sidecar readiness timeout".into());
             }
             thread::sleep(Duration::from_millis(10));
         }

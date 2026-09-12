@@ -323,49 +323,36 @@ async fn side_chain_block_does_not_rewrite_canonical_tip_after_restart() {
     init_tracing();
 
     let data_dir = "/tmp/dom-sidechain-canonical-restart".to_string();
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let (genesis_bytes, mut blocks) =
+        produce_block_sequence("sidechain-canonical-source", free_local_port(), 1).await;
+    let first_bytes = blocks.pop().expect("first height-1 block");
+    let first = Block::from_bytes(&first_bytes).expect("decode first block");
+    let first_hash = replay_block_hash(&first.header);
+    let (second_bytes, second_hash) =
+        produce_single_block("sidechain-source", free_local_port()).await;
+    assert_ne!(first_hash, second_hash, "two distinct height-1 blocks");
 
-    let mut config = test_config("sidechain-canonical-restart", 43402, false);
-    config.wallet_path = Some("/tmp/dom-sidechain-canonical-restart.dom".into());
-    config.wallet_password = Some("replay".into());
-    config.data_dir = data_dir.clone();
-    let _ = std::fs::remove_file(config.wallet_path.as_ref().unwrap());
-
-    let node = spawn_node(config.clone()).await;
-    mine_blocks(&node, 1).await.expect("canonical mining");
-
-    let (canonical_tip, canonical_height, canonical_diff) = {
-        let chain = node.chain.lock().await;
-        (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
+    // Select which of two valid equal-work blocks loses the equal-work tie-break
+    // BEFORE admitting either. Retrying against a fixed random canonical hash
+    // has a 1/17 failure probability with 16 candidates, not 1/65536.
+    let (canonical_bytes, side_bytes, side_hash) = if first_hash.as_bytes() < second_hash.as_bytes()
+    {
+        (first_bytes, second_bytes, second_hash)
+    } else {
+        (second_bytes, first_bytes, first_hash)
     };
-
-    // The node's fork choice breaks an equal-work tie by the lexicographically
-    // smaller hash (dom_chain::is_better_fork_choice_tip), and both blocks are at
-    // height 1 on regtest with the same fixed target — equal total difficulty by
-    // construction. This test is about a side block that LOSES that tie-break; one
-    // that wins exercises the reorg path and invalidates everything below.
-    let (side_bytes, side_hash) = {
-        let mut attempt = 0;
-        loop {
-            let (bytes, hash) = produce_single_block("sidechain-source", 43403).await;
-            assert_ne!(
-                hash, canonical_tip,
-                "test requires two distinct height-1 blocks"
-            );
-            if hash.as_bytes() > canonical_tip.as_bytes() {
-                break (bytes, hash);
-            }
-            attempt += 1;
-            assert!(
-                attempt < 16,
-                "could not mine a height-1 block that loses the equal-work tie-break"
-            );
-        }
-    };
+    let canonical = Block::from_bytes(&canonical_bytes).expect("decode canonical block");
     let side_block = Block::from_bytes(&side_bytes).expect("decode side block");
+    assert_eq!(canonical.header.height, side_block.header.height);
+    assert_eq!(canonical.header.target, side_block.header.target);
+    let mut node = fresh_chain(&data_dir, &genesis_bytes, dom_core::NETWORK_MAGIC_REGTEST);
+    node.connect_block(&canonical, Timestamp(now_secs()))
+        .expect("canonical block validates");
+    let (canonical_tip, canonical_height, canonical_diff) =
+        (node.tip_hash, node.tip_height, node.tip_difficulty);
 
     {
-        let mut chain = node.chain.lock().await;
+        let chain = &mut node;
         let result = chain
             .connect_block(&side_block, Timestamp(now_secs()))
             .expect("side block should validate as known side chain");

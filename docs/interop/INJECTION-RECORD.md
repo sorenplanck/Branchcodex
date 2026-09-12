@@ -33,14 +33,14 @@ git diff release/mainnetv2 -- crates/dom-cli crates/dom-core \
   crates/dom-wallet-app crates/dom-test-runner crates/dom-agent-runner
 ```
 
-It prints exactly one hunk, in `replay_determinism.rs`, and nothing else.
+It changes only the named final test in `replay_determinism.rs`.
 Outside `crates/`, the only pre-existing files that changed at all are
 `Cargo.toml` and `deny.toml`, and both changed by addition only —
 `git diff release/mainnetv2 -- Cargo.toml deny.toml | grep '^-[^-]'` is empty.
 
 ### The exception, its reason, and its death condition
 
-`crates/dom-integration-tests/tests/replay_determinism.rs` carries one hunk
+`crates/dom-integration-tests/tests/replay_determinism.rs` carries one changed test
 that the release line does not. It repairs a defect of the release line, not
 of the injection.
 
@@ -65,26 +65,24 @@ August, the last of them green: with a 50% coin, three runs reveal nothing.
 The defect is live on the release line and has simply never been exercised
 enough to surface.
 
-The fix makes the **scenario** deterministic rather than the result
-conditional: it re-mines the competitor until it loses the tie-break. That is
-the scenario the test's name already describes. Accepting either result would
-make the test incapable of failing; writing the reorg branch would be dozens
-of new lines in a node file. Selecting the fixture keeps the test's subject,
-leaves its body untouched, and holds the diff to one hunk.
+The fixture mines two independent height-1 blocks, orders their hashes, and
+admits the smaller into a fresh chain before testing the larger as a side
+block. Both pass the real chain validator; equal height and target are checked.
+The persistence and restart assertions remain unchanged. Only this test's
+scenario changes; no chain, node, mining, or consensus implementation changes.
 
-Two preconditions of the loop were verified before it was written, not
-assumed. `produce_single_block` yields distinct hashes on repeated in-process
-calls — 16 of 16 distinct, measured — because `test_config` derives a fresh
-data directory per call from pid, port and nanoseconds, and the node identity
-follows the directory. And port 43403 cannot collide across attempts because
-`spawn_node` only calls `DomNode::init`; the P2P bind lives in `run()`
-(`crates/dom-node/src/node.rs:678`), which this path never invokes. The loop
-is bounded at 16 attempts, so a spurious failure has probability 2⁻¹⁶.
+On 2026-09-12 the previous retry-based fixture failed in Actions job
+103526195397. Its stated probability of 2⁻¹⁶ was incorrect: with one random
+canonical hash fixed across 16 independent competitors, it is the maximum
+of 17 hashes with probability 1/17. Selecting the canonical block from the
+pair removes that probabilistic search instead of increasing its retry limit.
+The named exception remains one test and its source hash is
+updated alongside this record. Validation runs remotely in GitHub Actions.
 
 **This exception dies when the node line adopts the same text.**
 `scripts/check-node-test-exception.sh` enforces both halves: it pins the
 release-line blob and the fixed text by sha256, asserts the difference is
-exactly one hunk, and **fails** the moment the release line contains the fix —
+confined to the named final test, and **fails** the moment the release line contains the fix —
 telling whoever sees it to restore byte identity with `git checkout`, delete
 the guard and its CI wiring, and remove this section. It fails closed if it
 cannot reach the release commit; it does not skip. All four failure modes were

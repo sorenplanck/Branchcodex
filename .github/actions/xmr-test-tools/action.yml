@@ -1,0 +1,38 @@
+name: Prepare native XMR test tools
+description: Build pinned GPL helper and sidecar, then verify custody and process startup
+inputs:
+  dom-path:
+    description: DOM checkout path relative to the workspace
+    default: '.'
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: eigenwallet/core
+        ref: 0e17c7f7cd8f0657af176c8852aa4c9949586051
+        path: .ci-eigenwallet
+        persist-credentials: false
+    - name: Build pinned offline tools
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        XMR_TEST_WORKSPACE: ${{ github.workspace }}/.ci-eigenwallet
+        CARGO_BUILD_JOBS: '2'
+      run: |
+        set -euo pipefail
+        python3 scripts/install-sidecar-into-eigenwallet.py "$XMR_TEST_WORKSPACE"
+        cargo build --manifest-path "$XMR_TEST_WORKSPACE/Cargo.toml" -p dom-xmr-sidecar --bin dom-xmr-sidecar --example offline_native_funding_v23
+        chmod go-w "$XMR_TEST_WORKSPACE/target/debug/dom-xmr-sidecar" "$XMR_TEST_WORKSPACE/target/debug/examples/offline_native_funding_v23"
+        echo "DOM_XMR_REAL_SIDECAR_V23=$XMR_TEST_WORKSPACE/target/debug/dom-xmr-sidecar" >> "$GITHUB_ENV"
+        echo "DOM_XMR_OFFLINE_FUNDING_HELPER_V23=$XMR_TEST_WORKSPACE/target/debug/examples/offline_native_funding_v23" >> "$GITHUB_ENV"
+    - name: Verify custody paths and real offline helper startup
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      env:
+        CARGO_BUILD_JOBS: '2'
+        RUST_TEST_THREADS: '1'
+      run: |
+        set -euo pipefail
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test custody_startup_paths_v23 -- --nocapture
+        cargo test --locked -p dom-interopd --no-default-features --features production --lib --profile crypto-test native_offline_funding_preflight_v23 -- --nocapture

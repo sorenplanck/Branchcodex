@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target
+/.ci-eigenwallet/
 **/*.rs.bk
 Cargo.lock.bak
 

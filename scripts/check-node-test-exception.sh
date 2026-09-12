@@ -19,8 +19,8 @@
 # commit's Cargo.toml and Cargo.lock: 8 failures in 16 runs.
 #
 # The fix makes the SCENARIO deterministic rather than the result conditional:
-# it re-mines the competitor until it loses the tie-break, which is the scenario
-# the test's name and its ten subsequent assertions already describe.
+# it orders two mined competitors before admitting the smaller as canonical,
+# then checks the larger loses the tie-break and cannot overwrite persistence.
 #
 # This guard pins both sides so neither can drift in silence, and it is designed
 # to FAIL on the day the node line adopts the same fix — at which point the
@@ -35,7 +35,7 @@ MARKER='loses the equal-work tie-break'
 # against; the working-tree side is the exact text that is meant to go to the
 # node line unchanged.
 SHA_RELEASE=a9aae799dad5556b4c8d883b5b6fbd2d2acbb2db1182430f1b28185ad1bd2738
-SHA_FIXED=61e82510cad6780baa5b22bbec78a5d6a6e3afcbd13296af61dd40f65fffb670
+SHA_FIXED=493c73a4da0ae94cb7bab90a8cb1b606ec79d4f9e1ba8b25e07a364af9b1cf6c
 
 fail() { printf '%s\n' "$@" >&2; exit 1; }
 
@@ -84,14 +84,16 @@ grep -qF "$MARKER" "$PATH_IN_TREE" || fail \
   "${PATH_IN_TREE} drifted from the pinned exception text." \
   "  expected ${SHA_FIXED}" \
   "  got      ${got_fixed}" \
-  "The exception is ONE hunk. Anything else in this file is node code that must" \
+  "The exception is ONE test. Anything else in this file is node code that must" \
   "stay byte-identical to the release line. Re-pin only with the coordinator's" \
   "decision, and update docs/interop/INJECTION-RECORD.md in the same commit."
 
-# 4. The exception really is one hunk and nothing else.
-hunks=$(diff "$release_blob" "$PATH_IN_TREE" | grep -c '^[0-9]' || true)
-[ "$hunks" = "1" ] || fail \
-  "the exception spans ${hunks} hunks, not 1." \
-  "A second hunk means node code drifted beyond the named exception."
+# 4. Everything before the named final test is byte-identical. The exact
+# whole-file hash above also pins its complete body and the end of the file.
+# Diff hunk counts depend on how many unchanged lines separate fixture edits;
+# checking the actual boundary preserves the restriction to this one test.
+boundary='/^async fn side_chain_block_does_not_rewrite_canonical_tip_after_restart()/,$d'
+cmp -s <(sed "$boundary" "$release_blob") <(sed "$boundary" "$PATH_IN_TREE") || fail \
+  "node code outside the named final replay test drifted from the release line."
 
-echo "node-test exception OK: 1 hunk, release line still unrepaired at ${REL:0:7}"
+echo "node-test exception OK: one pinned test, release line still unrepaired at ${REL:0:7}"
