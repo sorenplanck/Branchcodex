@@ -249,7 +249,8 @@ impl Snapshot {
         Ok(Value::Array((0..3usize).map(|position| {
             let index = position * 8;
             let output = &self.outputs[index];
-            json!({"position":["upstream","downstream","inventory"][position],"tx_hash":hex::encode(output.txid),
+            let label = ["upstream", "downstream", "inventory"][position];
+            json!({"position":label,"tx_hash":hex::encode(output.txid),
                 "block_height":output.height,"global_output_index":index,"amount_piconero":amounts[position],
                 "public_key":hex::encode(output.key),"commitment":hex::encode(output.mask)})
         }).collect()))
