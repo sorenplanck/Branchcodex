@@ -145,7 +145,10 @@ impl Configuration {
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Preserve sidecar diagnostics in CI: a startup failure is part of
+            // the integration boundary and must not be reduced to a generic
+            // unavailable error after the expensive signing graph completed.
+            .stderr(Stdio::inherit())
             .spawn()?;
         let mut helper = ProcessOwner { child, input: None };
         helper.input = Some(helper.child.stdin.take().ok_or("missing helper stdin")?);
