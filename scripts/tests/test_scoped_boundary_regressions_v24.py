@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 55)
+        self.assertEqual(len(ids), 59)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -47,6 +47,15 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/rfq/src/lib.rs", "native_reconfirmation_v25"),
             ("crates/rfq/src/native_reconfirmation_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6.rs", "initiator_v25"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store.rs", "xmr_graph_proposal_v22"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_proposal_v22.rs", "public_signing_semantics_cache_v25"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store/public_signing_semantics_cache_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_f6.rs", "native_acceptance_v25"),
+            ("crates/dom-interopd/src/production_f6/native_acceptance_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_f6.rs", "native_commitment_v25"),
+            ("crates/dom-interopd/src/production_f6/native_commitment_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_f6/terms.rs", "native_reconfirmation_terms_v25"),
+            ("crates/dom-interopd/src/production_f6/terms/native_reconfirmation_terms_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6/initiator_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6.rs", "native_reconfirmation_v25"),
             ("crates/dom-interopd/src/production_f6/native_reconfirmation_v25.rs", "tests"),
@@ -185,6 +194,32 @@ class ClosedBoundaryListTests(unittest.TestCase):
             runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
             self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
             process.assert_called_once()
+
+    def test_public_signing_memo_preserves_real_oracle_and_refusal_matrix(self):
+        spec = runner.spec_for("store-public-signing-semantics-cache")
+        self.assertEqual(len(spec["required_tests"]), 8)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_native_consent_proposal_and_commitment_boundaries_are_explicit(self):
+        for identifier, count in (
+            ("native-f6-real-terms-proposal", 2),
+            ("native-f6-original-acceptance-boundary", 6),
+            ("native-f6-solver-postcommit-confirmation", 11),
+        ):
+            with self.subTest(selection=identifier):
+                spec = runner.spec_for(identifier)
+                self.assertEqual(len(spec["required_tests"]), count)
+                self.assertEqual(spec["filter"], spec["module_prefix"])
+                self.assertNotIn("--ignored", runner.command(identifier))
+                with mock.patch.object(runner.subprocess, "Popen") as process:
+                    runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
+                    self.assertEqual(process.call_args.args[0], runner.command(identifier))
+                    process.assert_called_once()
 
     def test_bound_partial_cache_keeps_seven_real_oracle_regressions(self):
         spec = runner.spec_for("adaptor-bound-partial-equation-cache")

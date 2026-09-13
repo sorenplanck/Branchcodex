@@ -34,6 +34,26 @@ use crate::production_refund_arming::production_bitcoin_refund_route_binding_v1;
 mod native_xmr_dom_face_v25;
 pub(crate) use native_xmr_dom_face_v25::ProductionNativeXmrDomFaceOwnerV25;
 
+#[path = "terms/native_reconfirmation_terms_v25.rs"]
+mod native_reconfirmation_terms_v25;
+#[cfg(test)]
+pub(crate) use native_reconfirmation_terms_v25::tests::{
+    native_terms_proposal_fixture_v25, NativeTermsProposalFixtureV25,
+};
+pub(crate) use native_reconfirmation_terms_v25::{
+    PreparedNativeF6TermsProposalV25, ProductionNativeF6TermsProposalOwnerV25,
+};
+
+/// Private choice of cross-object intention check, never a caller-selected
+/// bypass flag. The native branch also requires a rederived complete record.
+enum TermsIntentCheckV25<'a> {
+    Legacy,
+    NativeReconfirmation {
+        composition: &'a ComposedBindingV2,
+        record: &'a super::native_reconfirmation_v25::PreparedNativeReconfirmationRecordV25,
+    },
+}
+
 const ZERO_DIGEST: Digest32 = [0; 32];
 const DOM_RECORD_DOMAIN: &[u8] = b"DOM-INTEROP/F6/ADAPTER-REFUND-FACE/DOM/V2\0";
 const EVM_RECORD_DOMAIN: &[u8] = b"DOM-INTEROP/F6/ADAPTER-REFUND-FACE/EVM/V2\0";
@@ -635,6 +655,16 @@ impl ProductionAdapterF6TermsAuthorityV2 {
         rfq: &rfq::v2::RfqV2,
         quote: &rfq::v2::QuoteV2,
     ) -> Result<(), ProductionF6ErrorV2> {
+        self.validate_cross_objects_with_intent(binding, rfq, quote, TermsIntentCheckV25::Legacy)
+    }
+
+    fn validate_cross_objects_with_intent(
+        &self,
+        binding: &ProductionSolverF6BindingV2,
+        rfq: &rfq::v2::RfqV2,
+        quote: &rfq::v2::QuoteV2,
+        intent: TermsIntentCheckV25<'_>,
+    ) -> Result<(), ProductionF6ErrorV2> {
         binding.validate()?;
         rfq.validate()
             .map_err(|_| ProductionF6ErrorV2::InvalidTerms)?;
@@ -711,7 +741,22 @@ impl ProductionAdapterF6TermsAuthorityV2 {
             || self.time_proof_digest == ZERO_DIGEST
             || self.time_evidence_sequence == 0
             || self.settlement.session_id.0 != rfq.session_id
-            || self.settlement.intent_hash != IntentHash(rfq.rfq_id)
+            || match intent {
+                TermsIntentCheckV25::Legacy => {
+                    self.settlement.intent_hash != IntentHash(rfq.rfq_id)
+                }
+                TermsIntentCheckV25::NativeReconfirmation {
+                    composition,
+                    record,
+                } => !native_reconfirmation_terms_v25::matches_original_record(
+                    self,
+                    binding,
+                    composition,
+                    record,
+                    rfq,
+                    quote,
+                ),
+            }
             || self.settlement.solver_id != SolverId(quote.solver.0)
             || self.settlement.roster != expected_roster
             || self.settlement.fee_limit != rfq.fee_limit

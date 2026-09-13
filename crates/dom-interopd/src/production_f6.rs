@@ -7,10 +7,13 @@
 
 pub(crate) mod candidate_attestation;
 pub(crate) mod initiator_v25;
+pub(crate) mod native_acceptance_v25;
+pub(crate) mod native_commitment_v25;
 pub(crate) mod native_reconfirmation_v25;
 pub(crate) mod terminal_release;
 pub(crate) mod terms;
 
+use native_acceptance_v25::ProductionF6TermsSourceV25;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -404,7 +407,7 @@ impl core::fmt::Debug for TerminalInventoryReleaseV2 {
 
 /// Production sources that cannot be replaced by public boolean/digest input.
 pub(crate) struct ProductionF6SourcesV2 {
-    terms: Box<dyn ProductionF6TermsAuthorityV2>,
+    terms: ProductionF6TermsSourceV25,
     terminal: Box<dyn ProductionF6TerminalAuthorityV2>,
     candidate_attestation: Box<dyn ProductionF6CandidateAttestationAuthorityV2>,
 }
@@ -416,7 +419,21 @@ impl ProductionF6SourcesV2 {
         candidate_attestation: Box<dyn ProductionF6CandidateAttestationAuthorityV2>,
     ) -> Self {
         Self {
-            terms,
+            terms: ProductionF6TermsSourceV25::legacy(terms),
+            terminal,
+            candidate_attestation,
+        }
+    }
+
+    /// Explicit native proposal source. Only a complete authenticated V25
+    /// acceptance can bind it; legacy acceptance cannot opt in implicitly.
+    pub(crate) fn new_native_v25(
+        terms: terms::ProductionNativeF6TermsProposalOwnerV25,
+        terminal: Box<dyn ProductionF6TerminalAuthorityV2>,
+        candidate_attestation: Box<dyn ProductionF6CandidateAttestationAuthorityV2>,
+    ) -> Self {
+        Self {
+            terms: ProductionF6TermsSourceV25::native(terms),
             terminal,
             candidate_attestation,
         }
@@ -977,7 +994,13 @@ impl ProductionSolverF6AuthorityV2 {
             let pre_f6_time = authorities.shared.pre_f6_time();
             (pre_f6_time.scope_digest(), pre_f6_time.negotiation_clock())
         };
-        let log_binding = binding.authority_digest(LOG_BINDING_DOMAIN)?;
+        let (log_domain, receipts_domain) = authorities.sources.terms.store_domains(
+            LOG_BINDING_DOMAIN,
+            RECEIPT_BINDING_DOMAIN,
+            native_acceptance_v25::NATIVE_SOLVER_LOG_DOMAIN_V25,
+            native_acceptance_v25::NATIVE_SOLVER_RECEIPTS_DOMAIN_V25,
+        );
+        let log_binding = binding.authority_digest(log_domain)?;
         let log = after_exact_leg_time_preflight(
             binding,
             authorities.shared.position(),
@@ -1006,7 +1029,7 @@ impl ProductionSolverF6AuthorityV2 {
         )?;
         let binding_log = DurableBindingV2::open(log).map_err(map_engine)?;
         let receipt_binding =
-            ProductionStoreBindingV1::new(binding.authority_digest(RECEIPT_BINDING_DOMAIN)?)
+            ProductionStoreBindingV1::new(binding.authority_digest(receipts_domain)?)
                 .map_err(|_| ProductionF6ErrorV2::Receipt)?;
         let receipts = match mode {
             OpenModeV2::Create => Store::create_production(paths.receipt_store, receipt_binding),
@@ -1218,6 +1241,13 @@ impl ProductionSolverF6AuthorityV2 {
         }
         let wall = observe_trusted_wall()?;
         let quote = self.load_local_quote(wall.milliseconds)?;
+        let native_rfq = if self.sources.terms.is_native() {
+            let rfq = self.load_rfq()?;
+            self.prove_live_authorities(&rfq, wall.seconds)?;
+            Some(rfq)
+        } else {
+            None
+        };
         let capability = self
             .shared
             .inventory_mut()?
@@ -1227,6 +1257,10 @@ impl ProductionSolverF6AuthorityV2 {
                 wall.milliseconds,
             )
             .map_err(map_inventory)?;
+        if let Some(rfq) = native_rfq {
+            validate_capability(self.binding, &rfq, &quote, capability.quote_capability())?;
+            self.require_native_execution_binding_v25(&capability)?;
+        }
         Ok(ProductionF6ExecutionAuthorityV2 { capability })
     }
 
@@ -1480,6 +1514,9 @@ impl ProductionSolverF6AuthorityV2 {
         rfq: &RfqV2,
         quote: &QuoteV2,
     ) -> Result<TermsBindingV2, ProductionF6ErrorV2> {
+        // Check the selected profile BEFORE consulting a legacy receipt.
+        // Reopening public V2 terms must not downgrade explicit V25 consent.
+        self.sources.terms.require_legacy()?;
         if let Some(bytes) = self
             .receipts
             .opaque(TERMS_NAMESPACE, &self.binding.rfq_id)
@@ -1511,6 +1548,7 @@ impl ProductionSolverF6AuthorityV2 {
             .map_err(|_| ProductionF6ErrorV2::Receipt)?
         {
             if existing == applied {
+                self.retain_native_accepted_delivery_v25(delivery)?;
                 return durable_commit(&existing, DurablePayloadDispositionV1::Applied, true);
             }
             if existing == failed {
@@ -1527,7 +1565,28 @@ impl ProductionSolverF6AuthorityV2 {
         self.receipts
             .put_opaque(DELIVERY_NAMESPACE, delivery.envelope_digest(), &applied)
             .map_err(|_| ProductionF6ErrorV2::Receipt)?;
+        // A crash between Applied and this exact retained identity is repaired
+        // by the duplicate branch above, never by fabricating a new delivery.
+        self.retain_native_accepted_delivery_v25(delivery)?;
         durable_commit(&applied, DurablePayloadDispositionV1::Applied, false)
+    }
+
+    fn retain_native_accepted_delivery_v25(
+        &mut self,
+        delivery: &F6PayloadDeliveryV1<'_>,
+    ) -> Result<(), ProductionF6ErrorV2> {
+        if self.sources.terms.is_native()
+            && delivery.message_type() == relay::auth::message_type::ACCEPTANCE
+        {
+            native_commitment_v25::retain_native_acceptance_v25(
+                self.binding,
+                native_commitment_v25::NativeAcceptanceReceiptRoleV25::Solver,
+                &mut self.receipts,
+                &self.binding_log,
+                delivery,
+            )?;
+        }
+        Ok(())
     }
 
     fn apply_delivery(
@@ -1686,11 +1745,6 @@ impl ProductionSolverF6AuthorityV2 {
         let quote = self.load_local_quote(wall.milliseconds)?;
         let candidates =
             self.prove_candidate_authority(&rfq, status_evidence.capability(), wall)?;
-        let acceptance = AcceptanceV2::decode(delivery.payload())
-            .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
-        if acceptance.accepted_by != self.binding.initiator {
-            return Err(ProductionF6ErrorV2::WrongRole);
-        }
         let selected = self
             .binding_log
             .ledger()
@@ -1718,10 +1772,27 @@ impl ProductionSolverF6AuthorityV2 {
         // Adapter authentication can consult wallets/chains and persist its
         // own durable evidence. Never invoke that authority for a solver that
         // did not win the exact still-current candidate snapshot.
-        let terms = self.load_or_authenticate_terms(&rfq, &quote)?;
-        acceptance
-            .validate_against(&terms)
-            .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
+        let acceptance = if self.sources.terms.is_native() {
+            native_acceptance_v25::validate_original_native_acceptance_v25(
+                self.binding,
+                &mut self.sources.terms,
+                &mut self.receipts,
+                &rfq,
+                &quote,
+                delivery,
+            )?
+        } else {
+            let acceptance = AcceptanceV2::decode(delivery.payload())
+                .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
+            if acceptance.accepted_by != self.binding.initiator {
+                return Err(ProductionF6ErrorV2::WrongRole);
+            }
+            let terms = self.load_or_authenticate_terms(&rfq, &quote)?;
+            acceptance
+                .validate_against(&terms)
+                .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
+            acceptance
+        };
         if self
             .binding_log
             .ledger()

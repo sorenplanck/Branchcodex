@@ -436,6 +436,54 @@ SELECTIONS += (
               features=("production",)),
 )
 
+SELECTIONS += (
+    selection("native-f6-real-terms-proposal", "dom-interopd",
+              "production_f6::terms::native_reconfirmation_terms_v25::tests::",
+              "crates/dom-interopd/src/production_f6/terms/native_reconfirmation_terms_v25_tests.rs", (
+                  "real_faces_and_signed_time_prepare_only_native_proposal_legacy_still_refuses",
+                  "public_economic_and_scope_failures_preserve_real_faces_for_exact_retry"),
+              features=("production",)),
+    selection("native-f6-original-acceptance-boundary", "dom-interopd",
+              "production_f6::native_acceptance_v25::tests::",
+              "crates/dom-interopd/src/production_f6/native_acceptance_v25_tests.rs", (
+                  "opaque_native_proposal_exact_repeat_is_stable_and_never_legacy_authority",
+                  "changed_binding_rfq_quote_or_signature_never_replaces_cached_real_proposal",
+                  "physical_proposal_receipt_reopen_is_immutable_and_not_an_owner_decoder",
+                  "native_proposal_refuses_legacy_foreign_and_development_stores_without_replacing_bytes",
+                  "signed_outer_native_acceptance_reaches_boundary_unchanged_via_real_inbox",
+                  "malformed_legacy_wrong_record_role_and_signature_never_authorize_native_boundary"),
+              features=("production",)),
+    selection("native-f6-solver-postcommit-confirmation", "dom-interopd",
+              "production_f6::native_commitment_v25::tests::",
+              "crates/dom-interopd/src/production_f6/native_commitment_v25_tests.rs", (
+                  "native_commitment_public_codec_roundtrip_commits_complete_outer_acceptance_v25",
+                  "native_commitment_never_decodes_legacy_acceptance_ready_or_ack_v25",
+                  "native_commitment_header_bounds_truncations_suffixes_and_every_byte_are_closed_v25",
+                  "native_commitment_zero_commit_revision_fence_or_scope_is_not_a_certificate_v25",
+                  "native_commitment_matches_original_envelope_record_snapshot_and_all_wire_fields_v25",
+                  "retained_native_acceptance_record_rejects_changed_payload_sequence_or_receipt_v25",
+                  "native_commitment_receipts_are_role_scoped_immutable_and_missing_applied_refuses_v25",
+                  "native_commitment_physical_store_reopen_rejects_legacy_downgrade_and_other_role_v25",
+                  "native_commitment_producer_requires_real_solver_owner_not_caller_commit_fields_v25",
+                  "native_commitment_sequence_zero_is_valid_but_exactly_bound_v25",
+                  "native_commitment_uses_only_existing_solver_quote_role_and_receipt_kind_v25"),
+              features=("production",)),
+)
+
+SELECTIONS += (
+    selection("store-public-signing-semantics-cache", "dom-scriptless-store",
+              "runtime::linux::session_store::xmr_graph_proposal_v22::public_signing_semantics_cache_v25::tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/public_signing_semantics_cache_v25_tests.rs", (
+                  "public_signing_replay_cold_plus_warm64_matches_original_for_all_native_purposes_v25",
+                  "every_public_signing_key_field_changes_identity_and_preserves_original_result_v25",
+                  "bounded_transaction_key_matches_complete_original_codec_v25",
+                  "unsigned_candidate_and_authenticated_envelope_never_alias_in_public_memo_v25",
+                  "malformed_prefix_purpose_and_missing_fields_preserve_uncached_errors_v25",
+                  "public_signing_memo_capacity_evicts_without_replacing_original_semantics_v25",
+                  "busy_or_poisoned_public_signing_memo_always_calls_original_v25",
+                  "oversized_public_operands_fall_back_without_new_protocol_limits_v25")),
+)
+
 COMPILE_ONLY = (
     {"package": "xmr-live-sidecar-api", "native_test_count": 0,
      "compiled_by": "xmr-private-uds-authentication",
@@ -594,10 +642,34 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-public-signing-semantics-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_proposal_v22::public_signing_semantics_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_proposal_v22::public_signing_semantics_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "adaptor-native-round1-continuation":
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::round1_continuation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::round1_continuation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-real-terms-proposal":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::terms::native_reconfirmation_terms_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::terms::native_reconfirmation_terms_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-original-acceptance-boundary":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::native_acceptance_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::native_acceptance_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-solver-postcommit-confirmation":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::native_commitment_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::native_commitment_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "native-f6-versioned-acceptance-codec":

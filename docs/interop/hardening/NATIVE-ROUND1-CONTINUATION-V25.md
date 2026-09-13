@@ -27,7 +27,13 @@ statement/framing mutations, consumed and poisoned states, dropping the holder,
 oversize fallback and failed durable round-two persistence. The comparison uses
 an isolated test-only snapshot of the same nonce-vault fixture; production cannot
 export or clone these holders. Existing nonce-vault and full restart tests remain.
-These new regressions are written but have not yet executed at this handoff.
+All eight passed on commit `f418d20acce5affdc9aedf0b7cbf8db9d5c0e4ac` in
+[GitHub preflight job 103687850889](https://github.com/sorenplanck/Branchcodex/actions/runs/34743791959/job/103687850889).
+The real two-actor comparison reported six original calls in 5,797 microseconds
+versus two cold calls plus reuse in 1,937 microseconds. This is explicitly
+`measurement=round1_only_not_swap`: about 3.9 milliseconds saved in this primitive
+measurement does **not** explain or remove the restart-heavy fixture's minutes.
+The deliberate caught lock-poison panics both completed `ok`; no test was ignored.
 
 ## Why the restart fixture is not a swap stopwatch
 
@@ -39,7 +45,7 @@ Those recovery checks are not removed or made cheaper by weakening custody.
 The fixture now reports actual tick/mount/identity-open counts and disjoint setup,
 mount, identity-open, remaining-tick, terminal-mount and terminal-audit durations.
 Its report explicitly says `fixture_restart_only=true` and
-`actual_daemon_latency=false`. Two cheap regressions check the accounting.
+`actual_daemon_latency=false`. Both accounting regressions also passed in that job.
 
 The normal daemon's full funding/claim/refund/recovery scenarios remain the
 required end-to-end evidence. Neither reduced primitive counts nor the duration

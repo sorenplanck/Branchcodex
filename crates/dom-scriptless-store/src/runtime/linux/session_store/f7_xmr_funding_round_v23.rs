@@ -1,5 +1,8 @@
 //! Graph-origin signing replay. No synthetic early/BP/template-commit records.
 use super::*;
+use xmr_graph_proposal_v22::public_signing_semantics_cache_v25::{
+    verify_v25, PublicSigningScopeV25,
+};
 #[path = "f7_xmr_funding_transport_v23.rs"]
 mod transport_v23;
 #[path = "f7_xmr_funding_vault_v23.rs"]
@@ -479,7 +482,12 @@ impl ContractsSessionStoreV1 {
         }
         let (_, template_hash) = canonical_template_v1(&origin.template)
             .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
-        let plain_signature = validate_signing_round_semantics_v23(
+        let plain_signature = verify_v25(
+            PublicSigningScopeV25::funding(
+                binding.digest,
+                *binding.start.digest(),
+                binding.start.terms_hash(),
+            ),
             origin.chain.as_bytes(),
             origin.session,
             origin.purpose,
@@ -548,7 +556,12 @@ impl ContractsSessionStoreV1 {
         }
         let (_, template_hash) = canonical_template_v1(&origin.template)
             .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
-        validate_signing_round_semantics_v23(
+        verify_v25(
+            PublicSigningScopeV25::funding(
+                binding.digest,
+                *binding.start.digest(),
+                binding.start.terms_hash(),
+            ),
             origin.chain.as_bytes(),
             origin.session,
             origin.purpose,

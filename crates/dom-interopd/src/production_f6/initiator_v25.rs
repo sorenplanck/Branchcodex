@@ -22,7 +22,7 @@ pub(crate) struct ProductionInitiatorF6AuthoritiesV25 {
     pub remote_status_authorities: AuthoritySetV1,
     pub secp: SecpContext,
     pub rosters: RosterRegistryV1,
-    pub terms: Box<dyn ProductionF6TermsAuthorityV2>,
+    pub terms: ProductionF6TermsSourceV25,
 }
 
 /// Receives the authenticated negotiation for the initiator of one position.
@@ -39,7 +39,7 @@ pub(crate) struct ProductionInitiatorF6AuthorityV25 {
     remote_status_authorities: AuthoritySetV1,
     secp: SecpContext,
     rosters: RosterRegistryV1,
-    terms: Box<dyn ProductionF6TermsAuthorityV2>,
+    terms: ProductionF6TermsSourceV25,
 }
 
 impl core::fmt::Debug for ProductionInitiatorF6AuthorityV25 {
@@ -125,7 +125,13 @@ impl ProductionInitiatorF6AuthorityV25 {
         } else {
             mode
         };
-        let log_binding = binding.authority_digest(INITIATOR_LOG_DOMAIN)?;
+        let (log_domain, receipts_domain) = authorities.terms.store_domains(
+            INITIATOR_LOG_DOMAIN,
+            INITIATOR_RECEIPTS_DOMAIN,
+            native_acceptance_v25::NATIVE_INITIATOR_LOG_DOMAIN_V25,
+            native_acceptance_v25::NATIVE_INITIATOR_RECEIPTS_DOMAIN_V25,
+        );
+        let log_binding = binding.authority_digest(log_domain)?;
         let log = match mode {
             OpenModeV2::Create => StoreLogV2::create_production(paths.binding_log, log_binding),
             OpenModeV2::Open => StoreLogV2::open_production(paths.binding_log, log_binding),
@@ -141,7 +147,7 @@ impl ProductionInitiatorF6AuthorityV25 {
         .map_err(map_engine)?;
         let binding_log = DurableBindingV2::open(log).map_err(map_engine)?;
         let receipt_binding =
-            ProductionStoreBindingV1::new(binding.authority_digest(INITIATOR_RECEIPTS_DOMAIN)?)
+            ProductionStoreBindingV1::new(binding.authority_digest(receipts_domain)?)
                 .map_err(|_| ProductionF6ErrorV2::Receipt)?;
         let receipts = match mode {
             OpenModeV2::Create => Store::create_production(paths.receipt_store, receipt_binding),
@@ -229,6 +235,23 @@ impl ProductionInitiatorF6AuthorityV25 {
         let terms = self.load_or_authenticate_terms(&rfq, &quote)?;
         AcceptanceV2::from_terms(&terms, self.binding.initiator)
             .map_err(|_| ProductionF6ErrorV2::InvalidTerms)
+    }
+
+    /// Explicit V25 outer payload, unsigned and unapplied. The caller must
+    /// retain/sign/deliver these complete bytes through its real Relay owner;
+    /// the V2 inner object is never substituted into an authenticated delivery.
+    pub(crate) fn prepare_native_acceptance_v25(
+        &mut self,
+    ) -> Result<rfq::native_reconfirmation_v25::NativeAcceptanceV25, ProductionF6ErrorV2> {
+        let rfq = self.load_rfq()?;
+        let quote = self.current_selected_quote(&rfq)?;
+        native_acceptance_v25::prepare_native_acceptance_v25(
+            self.binding,
+            &mut self.terms,
+            &mut self.receipts,
+            &rfq,
+            &quote,
+        )
     }
 
     fn load_rfq(&self) -> Result<RfqV2, ProductionF6ErrorV2> {
@@ -359,6 +382,7 @@ impl ProductionInitiatorF6AuthorityV25 {
         rfq: &RfqV2,
         quote: &QuoteV2,
     ) -> Result<TermsBindingV2, ProductionF6ErrorV2> {
+        self.terms.require_legacy()?;
         if let Some(bytes) = self
             .receipts
             .opaque(TERMS_NAMESPACE, &self.binding.rfq_id)
@@ -389,6 +413,9 @@ impl ProductionInitiatorF6AuthorityV25 {
             .opaque(DELIVERY_NAMESPACE, delivery.envelope_digest())
             .map_err(|_| ProductionF6ErrorV2::Receipt)?
         {
+            if existing == applied {
+                self.retain_native_accepted_delivery_v25(delivery)?;
+            }
             return exact_delivery_replay(&existing, &applied, &failed);
         }
         if self.historical_recovery_v24.is_some() {
@@ -401,7 +428,42 @@ impl ProductionInitiatorF6AuthorityV25 {
             delivery.envelope_digest(),
             &applied,
         )?;
+        self.retain_native_accepted_delivery_v25(delivery)?;
         durable_commit(&applied, DurablePayloadDispositionV1::Applied, false)
+    }
+
+    fn retain_native_accepted_delivery_v25(
+        &mut self,
+        delivery: &F6PayloadDeliveryV1<'_>,
+    ) -> Result<(), ProductionF6ErrorV2> {
+        if self.terms.is_native()
+            && delivery.message_type() == relay::auth::message_type::ACCEPTANCE
+            && delivery.sender_id() == self.binding.initiator
+        {
+            native_commitment_v25::retain_native_acceptance_v25(
+                self.binding,
+                native_commitment_v25::NativeAcceptanceReceiptRoleV25::Initiator,
+                &mut self.receipts,
+                &self.binding_log,
+                delivery,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Historical agreement only. This does not replace current time, custody
+    /// or role checks and cannot become a solver inventory capability.
+    pub(crate) fn retained_native_commitment_v25(
+        &self,
+    ) -> Result<native_commitment_v25::RetainedNativeCommitmentV25, ProductionF6ErrorV2> {
+        if !self.terms.is_native() {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
+        native_commitment_v25::reopen_native_commitment_v25(
+            self.binding,
+            &self.receipts,
+            &self.binding_log,
+        )
     }
 
     fn apply_delivery(
@@ -433,6 +495,26 @@ impl ProductionInitiatorF6AuthorityV25 {
         &mut self,
         delivery: &F6PayloadDeliveryV1<'_>,
     ) -> Result<(), ProductionF6ErrorV2> {
+        if self.terms.is_native()
+            && delivery
+                .payload()
+                .starts_with(native_commitment_v25::NATIVE_COMMITMENT_MAGIC_V25)
+        {
+            // A solver may send QUOTE, never ACCEPTANCE, under the unchanged
+            // Relay role policy. This explicit V25 post-commit confirmation
+            // is not a candidate and cannot replace/reselect the Bound quote.
+            let verified = native_commitment_v25::verify_native_commitment_v25(
+                self.binding,
+                &self.receipts,
+                &self.binding_log,
+                delivery,
+            )?;
+            return native_commitment_v25::retain_verified_native_commitment_v25(
+                self.binding,
+                &mut self.receipts,
+                &verified,
+            );
+        }
         if self
             .binding_log
             .ledger()
@@ -567,15 +649,27 @@ impl ProductionInitiatorF6AuthorityV25 {
         delivery: &F6PayloadDeliveryV1<'_>,
     ) -> Result<(), ProductionF6ErrorV2> {
         require_initiator_sender(self.binding, delivery.sender_id())?;
-        let acceptance = AcceptanceV2::decode(delivery.payload())
-            .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
-        require_initiator_sender(self.binding, acceptance.accepted_by)?;
         let rfq = self.load_rfq()?;
         let quote = self.current_selected_quote(&rfq)?;
-        let terms = self.load_or_authenticate_terms(&rfq, &quote)?;
-        acceptance
-            .validate_against(&terms)
-            .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
+        let acceptance = if self.terms.is_native() {
+            native_acceptance_v25::validate_original_native_acceptance_v25(
+                self.binding,
+                &mut self.terms,
+                &mut self.receipts,
+                &rfq,
+                &quote,
+                delivery,
+            )?
+        } else {
+            let acceptance = AcceptanceV2::decode(delivery.payload())
+                .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
+            require_initiator_sender(self.binding, acceptance.accepted_by)?;
+            let terms = self.load_or_authenticate_terms(&rfq, &quote)?;
+            acceptance
+                .validate_against(&terms)
+                .map_err(|_| ProductionF6ErrorV2::InvalidPayload)?;
+            acceptance
+        };
         match self.binding_log.ledger().binding(
             self.binding.composition_id,
             self.binding.position,

@@ -1,5 +1,8 @@
 //! Six real Claim envelopes with authenticated projection-only refresh gaps.
 use super::*;
+use xmr_graph_proposal_v22::public_signing_semantics_cache_v25::{
+    verify_v25, PublicSigningScopeV25,
+};
 
 pub(in super::super) struct NativeXmrClaimRoundV23 {
     pub(in super::super) accepted: Vec<Vec<u8>>,
@@ -107,7 +110,16 @@ impl ContractsSessionStoreV1 {
             reveal,
             pre_signature: None,
         };
-        validate_signing_round_semantics_v23(
+        verify_v25(
+            PublicSigningScopeV25::claim(
+                binding.digest,
+                *binding.start.digest(),
+                binding.issued.terms_hash,
+                binding.issued.digest,
+                binding.issued.consumption_digest,
+                binding.issued.issuance_id,
+                binding.issued.gate_digest,
+            ),
             binding.chain.as_bytes(),
             binding.issued.session_id,
             PurposeV1::ClaimAdaptor,
@@ -164,7 +176,16 @@ impl ContractsSessionStoreV1 {
         if position == 3 {
             round.reveal = Some(transcript);
         }
-        validate_signing_round_semantics_v23(
+        verify_v25(
+            PublicSigningScopeV25::claim(
+                binding.digest,
+                *binding.start.digest(),
+                binding.issued.terms_hash,
+                binding.issued.digest,
+                binding.issued.consumption_digest,
+                binding.issued.issuance_id,
+                binding.issued.gate_digest,
+            ),
             binding.chain.as_bytes(),
             binding.issued.session_id,
             PurposeV1::ClaimAdaptor,

@@ -1,4 +1,5 @@
 //! Graph-origin signing replay. No synthetic early/BP/template-commit records.
+use super::public_signing_semantics_cache_v25::{verify_v25, PublicSigningScopeV25};
 use super::signing_origin_v23::ReconstructedXmrGraphSigningOriginV23;
 use super::signing_session_v23::GraphSigningSessionBindingV23;
 use super::*;
@@ -172,7 +173,16 @@ impl ContractsSessionStoreV1 {
         }
         let (_, template_hash) = canonical_template_v1(&origin.template)
             .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
-        let plain_signature = validate_signing_round_semantics_v23(
+        let plain_signature = verify_v25(
+            PublicSigningScopeV25::graph(
+                origin.route,
+                origin.parent,
+                origin.terms,
+                origin.input_session,
+                origin.digest,
+                binding.digest,
+                *binding.start.digest(),
+            ),
             origin.chain.as_bytes(),
             origin.session,
             origin.purpose,
@@ -240,7 +250,16 @@ impl ContractsSessionStoreV1 {
         }
         let (_, template_hash) = canonical_template_v1(&origin.template)
             .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
-        validate_signing_round_semantics_v23(
+        verify_v25(
+            PublicSigningScopeV25::graph(
+                origin.route,
+                origin.parent,
+                origin.terms,
+                origin.input_session,
+                origin.digest,
+                binding.digest,
+                *binding.start.digest(),
+            ),
             origin.chain.as_bytes(),
             origin.session,
             origin.purpose,
