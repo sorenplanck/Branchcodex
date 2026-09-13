@@ -17,8 +17,11 @@ impl ContractsSessionStoreV1 {
     ) -> Result<ProducedXmrRecoveryGraphV12, SessionStoreError> {
         let context = self.load_xmr_graph_commit_context_v23(parent)?;
         let chain = self.require_process_trusted_chain_v23(&context.chain)?;
+        // `complete` consumes the templates (the frozen shared outputs move
+        // into the produced graph), so this reconstruction is deliberately
+        // uncached and owned: identical bytes, identical checks, per call.
         let (templates, _) =
-            self.reconstruct_xmr_graph_evidence_core_v23(chain, context.route, parent, false)?;
+            self.reconstruct_xmr_graph_evidence_verified_v24(chain, context.route, parent, false)?;
         let cancel = dom_scriptless_crypto::xmr_ordinary_recovery_session_v12(
             templates.binding(),
             XmrOrdinaryRecoveryKindV12::Cancel,

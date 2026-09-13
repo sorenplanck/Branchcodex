@@ -178,13 +178,7 @@ impl ContractsSessionStoreV1 {
         chain: TrustedChainIdV1,
         route: [u8; 32],
         session: [u8; 32],
-    ) -> Result<
-        (
-            xmr_refund_policy::graph_builder::XmrRecoveryGraphTemplatesV12,
-            xmr_refund_policy::graph_signing_keys_v22::XmrGraphSigningKeysV22,
-        ),
-        SessionStoreError,
-    > {
+    ) -> Result<super::super::XmrGraphReconstructionV24, SessionStoreError> {
         let _guard = self.operation_lock()?;
         self.audit_transport()?;
         self.reconstruct_xmr_graph_under_lock_v23(chain, route, session)
@@ -198,13 +192,7 @@ impl ContractsSessionStoreV1 {
         chain: TrustedChainIdV1,
         route: [u8; 32],
         session: [u8; 32],
-    ) -> Result<
-        (
-            xmr_refund_policy::graph_builder::XmrRecoveryGraphTemplatesV12,
-            xmr_refund_policy::graph_signing_keys_v22::XmrGraphSigningKeysV22,
-        ),
-        SessionStoreError,
-    > {
+    ) -> Result<super::super::XmrGraphReconstructionV24, SessionStoreError> {
         self.reconstruct_xmr_graph_evidence_core_v23(chain, route, session, true)
     }
 
@@ -216,15 +204,107 @@ impl ContractsSessionStoreV1 {
         session: [u8; 32],
     ) -> Result<[u8; 32], SessionStoreError> {
         self.audit_xmr_graph_commit_context_v23(session)?;
-        let (_, keys) =
+        let reconstructed =
             self.reconstruct_xmr_graph_evidence_core_v23(chain, route, session, false)?;
-        Ok(keys
+        Ok(reconstructed
+            .1
             .proposal()
             .map_err(|_| SessionStoreError::Conflict)?
             .digest())
     }
 
     pub(in super::super) fn reconstruct_xmr_graph_evidence_core_v23(
+        &self,
+        chain: TrustedChainIdV1,
+        route: [u8; 32],
+        session: [u8; 32],
+        require_live: bool,
+    ) -> Result<super::super::XmrGraphReconstructionV24, SessionStoreError> {
+        // Process-local memo of the pure, read-only reverification below. The
+        // key commits to every retained byte that verification reads (session
+        // record, transport roster, identity binding, evidence frame, pin
+        // frame) and to the exact scope arguments, so only byte-identical
+        // inputs are served the instance an earlier COMPLETED verification of
+        // those same bytes produced. Any changed byte, missing file or lock
+        // failure takes the uncached path and its canonical errors; no check
+        // is weakened and no new state is ever accepted without full
+        // cryptographic verification.
+        let key = self.xmr_graph_reconstruction_key_v24(chain, route, session, require_live);
+        if let Some(key) = &key {
+            if let Ok(cache) = self.xmr_graph_reconstruction_cache_v24.lock() {
+                if let Some((_, hit)) = cache.iter().find(|(retained, _)| retained == key) {
+                    return Ok(std::sync::Arc::clone(hit));
+                }
+            }
+        }
+        let value = std::sync::Arc::new(self.reconstruct_xmr_graph_evidence_verified_v24(
+            chain,
+            route,
+            session,
+            require_live,
+        )?);
+        if let Some(key) = key {
+            if let Ok(mut cache) = self.xmr_graph_reconstruction_cache_v24.lock() {
+                if cache.len() >= 16 {
+                    cache.remove(0);
+                }
+                cache.push((key, std::sync::Arc::clone(&value)));
+            }
+        }
+        Ok(value)
+    }
+
+    /// Digest of every input `reconstruct_xmr_graph_evidence_verified_v24`
+    /// reads. `None` (unreadable input, oversized file) means "do not cache":
+    /// the uncached verification then reports the canonical refusal.
+    fn xmr_graph_reconstruction_key_v24(
+        &self,
+        chain: TrustedChainIdV1,
+        route: [u8; 32],
+        session: [u8; 32],
+        require_live: bool,
+    ) -> Option<[u8; 32]> {
+        let read = |name: String, limit: usize| -> Option<Vec<u8>> {
+            let component = ValidatedComponent::registered(&name).ok()?;
+            self.rosters.read_bounded_file(&component, limit).ok()
+        };
+        let record = self.load_session_locked(session).ok()?;
+        let roster = read(roster_name(session), TRANSPORT_ROSTER_LEN)?;
+        let identities = read(
+            transport_identity_binding_name(session),
+            TRANSPORT_IDENTITY_BINDING_LEN,
+        )?;
+        let evidence = read(format!("{}{EVIDENCE_SUFFIX_V23}", hex_lower(&session)), MAX)?;
+        let pin = read(
+            format!("{}{}", hex_lower(&session), super::pin_v23::PIN_SUFFIX_V23),
+            808,
+        )?;
+        let mut bytes = Vec::with_capacity(
+            97 + 40 * 5
+                + record.as_bytes().len()
+                + roster.len()
+                + identities.len()
+                + evidence.len()
+                + pin.len(),
+        );
+        bytes.extend_from_slice(chain.as_bytes());
+        bytes.extend_from_slice(&route);
+        bytes.extend_from_slice(&session);
+        bytes.push(u8::from(require_live));
+        for field in [
+            record.as_bytes(),
+            roster.as_slice(),
+            identities.as_slice(),
+            evidence.as_slice(),
+            pin.as_slice(),
+        ] {
+            bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(field);
+        }
+        Some(tagged_hash("DOM:xmr-graph-reconstruction-key:v24", &bytes))
+    }
+
+    pub(in super::super) fn reconstruct_xmr_graph_evidence_verified_v24(
         &self,
         chain: TrustedChainIdV1,
         route: [u8; 32],

@@ -274,7 +274,8 @@ impl ContractsSessionStoreV1 {
         session: [u8; 32],
         context: &Context,
     ) -> Result<(), SessionStoreError> {
-        let (_, keys) = self.reconstruct_xmr_graph_under_lock_v23(chain, route, session)?;
+        let reconstructed = self.reconstruct_xmr_graph_under_lock_v23(chain, route, session)?;
+        let keys = &reconstructed.1;
         let proposal = keys.proposal().map_err(|_| SessionStoreError::Conflict)?;
         if proposal.digest() != context.bindings[5] {
             return Err(SessionStoreError::Conflict);

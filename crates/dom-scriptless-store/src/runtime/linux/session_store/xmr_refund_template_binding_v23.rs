@@ -179,8 +179,9 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::Conflict);
         }
-        let (templates, keys) =
+        let reconstructed =
             self.reconstruct_xmr_graph_evidence_core_v23(chain, route, session, false)?;
+        let (templates, keys) = (&reconstructed.0, &reconstructed.1);
         if keys
             .proposal()
             .map_err(|_| SessionStoreError::Conflict)?

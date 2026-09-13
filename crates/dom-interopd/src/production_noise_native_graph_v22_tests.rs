@@ -327,17 +327,18 @@ impl ProductionNoiseGraphOfferV22 {
                     expected_pin,
                 );
                 if reopen == 1 {
-                    let (retained_templates, retained_keys) = parent
+                    let retained = parent
                         .reconstruct_retained_xmr_graph_v23(
                             chain,
                             graphs[actor].route_id,
                             templates.binding().session_id,
                         ).map_err(|error| format!("graph formation reconstruct actor={actor} reopen={reopen}: {error}"))?;
+                    let (retained_templates, retained_keys) = (&retained.0, &retained.1);
                     assert_eq!(retained_keys.proposal()?.digest(), expected_pin);
                     for (kind, stage) in rounds {
                         require_xmr_recovery_signing_scope_v23(
-                            &retained_keys,
-                            &retained_templates,
+                            retained_keys,
+                            retained_templates,
                             &chain,
                             &roster_for(stage, false, false)?,
                             kind,
