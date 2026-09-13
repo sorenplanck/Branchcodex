@@ -101,12 +101,23 @@ const PUBLIC: &[(&str, &str)] = &[
     ("production route runtime failed", "route_runtime"),
 ];
 
+fn composite_line_v25(line: &[u8]) -> Option<crate::production_run::ProductionCompositeFailureV25> {
+    let detail = line.strip_prefix(b"production composite relay loop failed: ")?;
+    crate::production_run::ProductionCompositeFailureV25::classify_exact_display_v25(detail)
+}
+
 pub(super) fn classify(bytes: &[u8]) -> &'static str {
     if bytes.len() > super::MAX_CAPTURE {
         return "unknown";
     }
     let mut found = None;
     for line in bytes.split(|byte| *byte == b'\n') {
+        if composite_line_v25(line).is_some() {
+            if found.is_some() {
+                return "multiple_public_errors";
+            }
+            found = Some("composite_loop");
+        }
         for (message, code) in PUBLIC {
             if line == message.as_bytes() {
                 if found.is_some() {
@@ -119,9 +130,72 @@ pub(super) fn classify(bytes: &[u8]) -> &'static str {
     found.unwrap_or("unknown")
 }
 
+/// Return only a closed typed diagnostic from a unique recognized error line.
+/// The source buffer, dynamic errors and partial matches never leave this module.
+pub(super) fn composite_detail_v25(
+    bytes: &[u8],
+) -> Option<crate::production_run::ProductionCompositeFailureV25> {
+    if classify(bytes) != "composite_loop" {
+        return None;
+    }
+    bytes
+        .split(|byte| *byte == b'\n')
+        .find_map(composite_line_v25)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn composite_message_v25() -> String {
+        let failure =
+            crate::production_composite_loop::ProductionCompositeLoopErrorV1::InvalidConfiguration
+                .failure_v25();
+        crate::production_run::ProductionRunErrorV1::CompositeLoopDetail(failure).to_string()
+    }
+
+    #[test]
+    fn composite_detail_uses_exact_typed_production_display_v25() {
+        let message = composite_message_v25();
+        let expected =
+            crate::production_composite_loop::ProductionCompositeLoopErrorV1::InvalidConfiguration
+                .failure_v25();
+        assert_eq!(classify(message.as_bytes()), "composite_loop");
+        assert_eq!(composite_detail_v25(message.as_bytes()), Some(expected));
+        assert_eq!(
+            composite_detail_v25(format!("{message}\n").as_bytes()),
+            Some(expected)
+        );
+        for decorated in [
+            format!("prefix {message}"),
+            format!(" {message}"),
+            format!("{message}\r"),
+            format!("{message}: private material"),
+            "production composite relay loop failed: unknown/secret".to_owned(),
+        ] {
+            assert_eq!(classify(decorated.as_bytes()), "unknown");
+            assert!(composite_detail_v25(decorated.as_bytes()).is_none());
+        }
+    }
+
+    #[test]
+    fn composite_detail_refuses_ambiguous_and_oversized_capture_v25() {
+        let message = composite_message_v25();
+        for mixed in [
+            format!("{message}\n{message}"),
+            format!("{message}\nproduction composite relay loop failed"),
+            format!("production inputs refused\n{message}"),
+        ] {
+            assert_eq!(classify(mixed.as_bytes()), "multiple_public_errors");
+            assert!(composite_detail_v25(mixed.as_bytes()).is_none());
+        }
+        let mut oversized = vec![b'\n'; super::super::MAX_CAPTURE];
+        oversized.extend_from_slice(message.as_bytes());
+        assert_eq!(classify(&oversized), "unknown");
+        assert!(composite_detail_v25(&oversized).is_none());
+        assert!(composite_detail_v25(b"production composite relay loop failed").is_none());
+        assert!(composite_detail_v25(b"\xff\x00private").is_none());
+    }
 
     #[test]
     fn exact_public_messages_map_only_to_fixed_codes_v24() {

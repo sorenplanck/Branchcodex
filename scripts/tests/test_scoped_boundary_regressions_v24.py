@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 66)
+        self.assertEqual(len(ids), 67)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -88,6 +88,8 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-interopd/src/lib.rs", "production_xmr_native_binary_v23_tests"),
             ("crates/dom-interopd/src/production_xmr_native_binary_v23_tests.rs", "process"),
             ("crates/dom-interopd/src/production_xmr_native_binary_v23_tests/process.rs", "exit_diagnostic_v24"),
+            ("crates/dom-interopd/src/lib.rs", "production_composite_loop"),
+            ("crates/dom-interopd/src/production_composite_loop.rs", "failure_v25"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "deadline_plan_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_wallet_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_f6_v23"),
@@ -489,7 +491,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
 
     def test_safe_exit_and_leg_codec_preflights_remain_closed_pure_tests(self):
         for identifier, count in (("native-preflight-leg-parameters", 3),
-                                  ("native-preflight-exit-diagnostic", 6)):
+                                  ("native-preflight-exit-diagnostic", 8)):
             with self.subTest(selection=identifier):
                 spec = runner.spec_for(identifier)
                 self.assertEqual(len(spec["required_tests"]), count)
@@ -499,6 +501,19 @@ class ClosedBoundaryListTests(unittest.TestCase):
                     runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
                     self.assertEqual(process.call_args.args[0], runner.command(identifier))
                     process.assert_called_once()
+
+    def test_composite_failure_projection_requires_closed_production_dispatch(self):
+        spec = runner.spec_for("native-composite-failure-projection")
+        self.assertEqual(len(spec["required_tests"]), 5)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(spec["features"], ["production"])
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        leaf = (runner.ROOT / spec["source"]).read_text()
+        self.assertRegex(leaf, r"#\[cfg\(test\)\]\s*mod tests\s*\{")
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
 
     def test_xmr_rpc_budget_preflight_runs_only_the_selected_bound_regression(self):
         spec = runner.spec_for("native-preflight-xmr-rpc-budget")

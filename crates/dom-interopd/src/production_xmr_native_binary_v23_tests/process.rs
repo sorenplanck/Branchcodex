@@ -141,7 +141,21 @@ impl NativeDaemonProcessV23 {
                 Some(Ok(bytes)) => exit_diagnostic_v24::classify(bytes),
                 _ => "unknown",
             };
-            eprintln!("DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code={code}");
+            let detail = self.captured_stderr.as_ref().and_then(|capture| {
+                capture
+                    .as_ref()
+                    .ok()
+                    .and_then(|bytes| exit_diagnostic_v24::composite_detail_v25(bytes))
+            });
+            if let Some(detail) = detail {
+                eprintln!(
+                    "DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code={code} stage={} cause={}",
+                    detail.stage_code(),
+                    detail.cause_code(),
+                );
+            } else {
+                eprintln!("DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code={code}");
+            }
             self.failure_reported = true;
         }
         Ok(self.status)

@@ -10,6 +10,10 @@
 mod noise_recovery_v23;
 use noise_recovery_v23::attach_xmr_signing_noise_v23;
 
+#[path = "production_composite_failure_v25.rs"]
+mod failure_v25;
+pub use failure_v25::ProductionCompositeFailureV25;
+
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kaystra_core::types::TimelockSpec;
@@ -164,11 +168,25 @@ impl ProductionCompositeLoopConfigV1 {
     }
 }
 
+/// Exact composite call site, not input supplied by a peer or caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductionCompositeBootstrapContextV25 {
+    LocalBootstrap,
+    GraphCandidate,
+    PostExchangeBootstrap,
+}
+
 /// Redacted failure from composite activation or interleaved execution.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProductionCompositeLoopErrorV1 {
     #[error("native early/BP bootstrap could not advance")]
     Bootstrap(#[source] crate::production_contracts::ProductionBootstrapRuntimeErrorV16),
+    #[error("native early/BP bootstrap could not advance at the retained composite stage")]
+    BootstrapAtV25 {
+        context: ProductionCompositeBootstrapContextV25,
+        #[source]
+        error: crate::production_contracts::ProductionBootstrapRuntimeErrorV16,
+    },
     #[error("production F7 bilateral readiness failed")]
     F7Readiness(#[source] crate::production_contracts::ProductionF7ReadinessErrorV19),
     #[error("production composite loop configuration is invalid")]
@@ -179,6 +197,10 @@ pub(crate) enum ProductionCompositeLoopErrorV1 {
     Outbound(#[source] RelayWorkerOutboundErrorV1),
     #[error("production composite authenticated Relay exchange failed")]
     Network(#[source] ProductionRelayNetworkRuntimeErrorV1),
+    #[error("production composite Noise setup failed")]
+    Noise(#[source] ProductionNoiseRelayErrorV1),
+    #[error("production composite network configuration failed")]
+    NetworkConfiguration(#[source] ProductionRelayNetworkConfigErrorV1),
     #[error("production composite inbound Relay step failed")]
     Inbound(#[source] ProductionContractsPollErrorV1<ProductionF6LifecycleErrorV2>),
     #[error("production composite cancelled-output inbound Relay step failed")]
@@ -430,9 +452,12 @@ impl ProductionCompositeRelayLoopV1 {
         let TimelockSpec::TimestampSeconds { value: now } = self.fresh_relay_time()? else {
             return Err(ProductionCompositeLoopErrorV1::ClockUnavailable);
         };
-        self.owner
-            .step_bootstrap_v16(leg, now)
-            .map_err(ProductionCompositeLoopErrorV1::Bootstrap)?;
+        self.owner.step_bootstrap_v16(leg, now).map_err(|error| {
+            ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+                context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
+                error,
+            }
+        })?;
         if self
             .owner
             .recovery_mounted_for_readiness_v23(leg)
@@ -504,7 +529,10 @@ impl ProductionCompositeRelayLoopV1 {
             if let Some(candidate) = exchange.and_then(|report| report.graph_candidate_v22.take()) {
                 self.owner
                     .receive_xmr_graph_candidate_v22(leg, candidate)
-                    .map_err(ProductionCompositeLoopErrorV1::Bootstrap)?;
+                    .map_err(|error| ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+                        context: ProductionCompositeBootstrapContextV25::GraphCandidate,
+                        error,
+                    })?;
             }
             self.poll_retained_inbound_v23(leg)
         })?;
@@ -535,7 +563,10 @@ impl ProductionCompositeRelayLoopV1 {
         };
         self.owner
             .step_bootstrap_v16(leg, after_exchange)
-            .map_err(ProductionCompositeLoopErrorV1::Bootstrap)?;
+            .map_err(|error| ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+                context: ProductionCompositeBootstrapContextV25::PostExchangeBootstrap,
+                error,
+            })?;
         if self
             .owner
             .recovery_mounted_for_readiness_v23(leg)
@@ -619,10 +650,6 @@ pub(crate) enum ProductionCompositeActivationExitV1 {
     Failed {
         #[expect(dead_code, reason = "retains the Relay owner across a non-ready exit")]
         activation: ProductionCompositeActivationV1,
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "retains the Relay owner across a non-ready exit")
-        )]
         error: ProductionCompositeLoopErrorV1,
     },
 }
@@ -1175,13 +1202,13 @@ const fn relay_index(leg: LegIdV1) -> usize {
 }
 
 fn map_network_config_error(
-    _error: ProductionRelayNetworkConfigErrorV1,
+    error: ProductionRelayNetworkConfigErrorV1,
 ) -> ProductionCompositeLoopErrorV1 {
-    ProductionCompositeLoopErrorV1::InvalidConfiguration
+    ProductionCompositeLoopErrorV1::NetworkConfiguration(error)
 }
 
-fn map_noise_error(_error: ProductionNoiseRelayErrorV1) -> ProductionCompositeLoopErrorV1 {
-    ProductionCompositeLoopErrorV1::InvalidConfiguration
+fn map_noise_error(error: ProductionNoiseRelayErrorV1) -> ProductionCompositeLoopErrorV1 {
+    ProductionCompositeLoopErrorV1::Noise(error)
 }
 
 fn is_f6_activation_awaiting(error: &ProductionCompositeLoopErrorV1) -> bool {

@@ -110,7 +110,9 @@ SELECTIONS = (
                   "multiple_exact_errors_are_ambiguous_without_echoing_input_v24",
                   "diagnostic_respects_capture_bound_and_never_truncates_into_match_v24",
                   "allowlist_is_pinned_to_literal_production_errors_v24",
-                  "stderr_capture_timeout_and_repeat_preserve_the_single_owned_result_v24"),
+                  "stderr_capture_timeout_and_repeat_preserve_the_single_owned_result_v24",
+                  "composite_detail_uses_exact_typed_production_display_v25",
+                  "composite_detail_refuses_ambiguous_and_oversized_capture_v25"),
               features=("production",)),
     selection("native-preflight-xmr-rpc-budget", "dom-interopd",
               "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::",
@@ -556,6 +558,18 @@ SELECTIONS += (
                   "transport_sequence_scan_tamper_is_fresh_and_decoded_before_revision_filter_v25")),
 )
 
+SELECTIONS += (
+    selection("native-composite-failure-projection", "dom-interopd",
+              "production_composite_loop::failure_v25::tests::",
+              "crates/dom-interopd/src/production_composite_failure_v25.rs", (
+                  "composite_failure_v25_preserves_bootstrap_store_and_ingress_causes",
+                  "composite_failure_v25_preserves_f6_and_noise_without_changing_refusal",
+                  "composite_failure_v25_exact_decoder_refuses_foreign_and_injected_text",
+                  "composite_failure_v25_never_formats_generic_error_payload",
+                  "composite_failure_v25_bootstrap_contexts_preserve_cause_and_terminal_class"),
+              features=("production",)),
+)
+
 COMPILE_ONLY = (
     {"package": "xmr-live-sidecar-api", "native_test_count": 0,
      "compiled_by": "xmr-private-uds-authentication",
@@ -742,6 +756,12 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::transport_sequence_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::transport_sequence_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-composite-failure-projection":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_composite_loop::failure_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_composite_loop::failure_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "store-readonly-physical-inventory":

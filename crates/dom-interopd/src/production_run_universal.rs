@@ -733,14 +733,14 @@ pub(super) fn run(
         // while the counterparty is still negotiating F6.
         1,
     )
-    .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+    .map_err(|error| ProductionRunErrorV1::CompositeLoopDetail(error.failure_v25()))?;
     let mut activation = ProductionCompositeActivationV1::new(
         relay_stage12_owner,
         f6_runtime_receiver,
         relay_network_config,
         composite_config,
     )
-    .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+    .map_err(|error| ProductionRunErrorV1::CompositeLoopDetail(error.failure_v25()))?;
     let (mut relay_loop, route_store) = loop {
         dom_lease = dom_actuator_store
             .renew_lease(
@@ -762,8 +762,10 @@ pub(super) fn run(
                 // stores are closed by drop in reverse construction order.
                 return Ok(());
             }
-            ProductionCompositeActivationExitV1::Failed { .. } => {
-                return Err(ProductionRunErrorV1::CompositeLoop);
+            ProductionCompositeActivationExitV1::Failed { error, .. } => {
+                return Err(ProductionRunErrorV1::CompositeLoopDetail(
+                    error.failure_v25(),
+                ));
             }
         }
     };

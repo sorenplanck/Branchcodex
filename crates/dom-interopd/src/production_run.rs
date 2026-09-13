@@ -152,6 +152,8 @@ pub struct ProductionRunOptionsV1 {
     pub mode: ProductionRunModeV1,
 }
 
+pub use crate::production_composite_loop::ProductionCompositeFailureV25;
+
 /// Redacted refusal from the composition root. No variant carries a path, a
 /// credential, or any byte of either.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
@@ -300,6 +302,10 @@ pub enum ProductionRunErrorV1 {
     /// driven under the retained Stage-12 owner.
     #[error("production composite relay loop failed")]
     CompositeLoop,
+    /// Closed stage/cause tags only; never the original error's Display or
+    /// Debug output, paths, endpoints, peer bytes or signing material.
+    #[error("production composite relay loop failed: {0}")]
+    CompositeLoopDetail(ProductionCompositeFailureV25),
     /// The activated route store could not be acquired under the production
     /// lease/fencing authority, or its journal contradicts the closed runner
     /// policy.
@@ -1481,14 +1487,14 @@ fn run_legacy_production_v3(
         relay_backoff,
         PRODUCTION_ACTIVATION_ROUND_BUDGET_V1,
     )
-    .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+    .map_err(|error| ProductionRunErrorV1::CompositeLoopDetail(error.failure_v25()))?;
     let mut activation = ProductionCompositeActivationV1::new(
         relay_stage12_owner,
         f6_runtime_receiver,
         relay_network_config,
         composite_config,
     )
-    .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+    .map_err(|error| ProductionRunErrorV1::CompositeLoopDetail(error.failure_v25()))?;
     let (mut relay_loop, route_store) = loop {
         match activation.activate_bounded(&mut _run_control) {
             ProductionCompositeActivationExitV1::Ready { relay, route_store } => {
@@ -1503,8 +1509,10 @@ fn run_legacy_production_v3(
                 // stores are closed by drop in reverse construction order.
                 return Ok(());
             }
-            ProductionCompositeActivationExitV1::Failed { .. } => {
-                return Err(ProductionRunErrorV1::CompositeLoop);
+            ProductionCompositeActivationExitV1::Failed { error, .. } => {
+                return Err(ProductionRunErrorV1::CompositeLoopDetail(
+                    error.failure_v25(),
+                ));
             }
         }
     };
