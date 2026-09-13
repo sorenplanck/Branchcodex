@@ -325,7 +325,11 @@ fn timestamp_schedule_delivers_once_and_reopen_does_not_replace_it() {
     use super::super::{ProductionDeadlineBindingV1, ProductionDeadlineTimerAuthorityV1};
     use crate::supervisor::{ManualClockV1, RouteSupervisorConfigV1, RouteSupervisorV1};
     use route_executor::{DurableRouteStoreV1, HealthStateV1, RouteEventV1, SecretVisibilityV1};
+    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
+    // The durable route store refuses any parent that is not an owner-only
+    // directory; tempdir() inherits the umask, so pin the mode explicitly.
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = directory.path().join("route.sqlite3");
     let mut store = DurableRouteStoreV1::create(&path).unwrap();
     store.create_route([4; 32], 90).unwrap();

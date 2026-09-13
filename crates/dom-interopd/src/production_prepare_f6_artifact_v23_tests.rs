@@ -130,7 +130,8 @@ fn signature_json(secp: &SecpContext, report: &PreparedPublicF6ReportV23) -> Vec
         .collect::<Vec<_>>();
     serde_json::to_vec(&serde_json::json!({"schema":SIGNATURE_SCHEMA,
         "signing_digest_hex":report.signing_digest_hex,
-        "signatures":signatures})).unwrap()
+        "signatures":signatures}))
+    .unwrap()
 }
 
 #[test]

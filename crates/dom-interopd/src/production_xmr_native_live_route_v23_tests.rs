@@ -71,7 +71,11 @@ fn live_limits_v23() -> ColdStartResult<route_time_anchor::RouteTimePolicyLimits
         max_upstream_funding_anchor_delay_seconds: 14400,
         max_downstream_funding_anchor_delay_seconds: 14400,
         hub_margin_seconds: 300,
-        counterparty_margin_seconds: 300,
+        // The signed policy refuses any counterparty margin below the additive
+        // floor of the selected Monero registry profile: both checkpoints carry
+        // its 1080 s reorg plus 5 s observation and 5 s broadcast budgets, so
+        // the floor is 2180 s. 300 s is only enough for the DOM hub rung.
+        counterparty_margin_seconds: 2_400,
     })
 }
 
