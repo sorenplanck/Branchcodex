@@ -18,10 +18,8 @@ pub struct TxKeyDerivationProofV23 {
 fn split_prefix_64_v23(bytes: &[u8]) -> ([u8; 32], [u8; 32]) {
     let mut first = [0; 32];
     let mut second = [0; 32];
-    for index in 0..32 {
-        first[index] = bytes[index];
-        second[index] = bytes[32 + index];
-    }
+    first.copy_from_slice(&bytes[..32]);
+    second.copy_from_slice(&bytes[32..64]);
     (first, second)
 }
 
