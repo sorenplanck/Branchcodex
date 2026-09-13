@@ -3,14 +3,20 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 concurrency:
-  group: interop-hardening-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve the previous commit's running checks while publishing a fix.
+  group: interop-hardening-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 jobs:
   components:
+    name: "components / ${{ matrix.shard }}"
     runs-on: ubuntu-latest
-    # A native graph already takes over 40 minutes. Leave room for all three
-    # independent heavy graphs plus the remaining serial integration checks.
+    # The native graphs run on separate machines, while every selected shard
+    # still reports and uploads its own complete outcome.
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [protocol, production-native, production-native-funding, production-native-claim, production-lib, production-integration]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,6 +29,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.1
       - uses: Swatinem/rust-cache@v2
         with:
+          # Matrix jobs retain the existing `components` job cache key, so the
+          # split can restore compilation produced before this matrix existed.
           cache-workspace-crates: 'true'
           cache-on-failure: 'true'
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -31,27 +39,39 @@ jobs:
             programs/dom-solana-escrow -> target
       - name: Build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+
+      - name: Install pinned Bitcoin Core
+        if: ${{ matrix.shard == 'protocol' }}
+        run: |
+          BITCOIN_PREFIX="$HOME/.local" bash scripts/f5-install-bitcoin-core.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - uses: ./.github/actions/xmr-test-tools
         id: xmr_tools
+        if: ${{ startsWith(matrix.shard, 'production-') }}
         continue-on-error: true
+        with:
+          # interop-hardening owns these shared regressions once per campaign.
+          run-once-regressions: ${{ matrix.shard == 'production-native' }}
       - name: Verify prepared operational integration ingress
         id: prepared_ingress
+        if: ${{ matrix.shard == 'production-integration' }}
         continue-on-error: true
         env:
           CARGO_BUILD_JOBS: '2'
           RUST_TEST_THREADS: '1'
         run: cargo test --locked -p dom-interopd --no-default-features --features production --test relay_worker --profile crypto-test prepared_operational -- --nocapture
-      - name: Execute changed components and production graph
+      - name: Execute changed component or production shard
         id: component_graph
         continue-on-error: true
-        run: python3 scripts/test_interop_hardening.py --mode components
+        run: python3 scripts/test_interop_hardening.py --mode full --full-shard ${{ matrix.shard }}
       - name: Retain actual outcomes including failures
         id: evidence
         continue-on-error: true
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: interop-hardening-${{ github.sha }}
+          name: interop-hardening-${{ matrix.shard }}-${{ github.sha }}
           path: artifacts/interop-hardening/
           if-no-files-found: error
       - name: Fail after all interop checks have reported
@@ -73,7 +93,9 @@ jobs:
           do
             printf '%s\n' "$entry"
             case "$entry" in
+              *=success|*=skipped) ;;
               *=failure|*=cancelled) failed=1 ;;
+              *) failed=1 ;;
             esac
           done
           exit "$failed"

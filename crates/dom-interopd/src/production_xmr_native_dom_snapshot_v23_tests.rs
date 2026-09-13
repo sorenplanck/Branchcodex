@@ -24,12 +24,15 @@ mod recovery_capture_v23;
 use page_v23::scan_response;
 #[path = "production_xmr_native_dom_evolving_v23_tests.rs"]
 mod evolving_v23;
+#[path = "production_xmr_native_dom_history_v24_tests.rs"]
+mod history_v24;
 #[path = "production_xmr_native_dom_ledger_v23_tests.rs"]
 mod ledger_v23;
 #[path = "production_xmr_native_dom_window_v24_tests.rs"]
 mod window_v24;
+pub(crate) use history_v24::PublicDomHistoryPagesV24;
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
-type PublicDomHistoryV24 = (ExpectedDomIdentityV1, Value, Vec<Value>);
+type PublicDomHistoryV24 = (ExpectedDomIdentityV1, Value, PublicDomHistoryPagesV24);
 
 pub(crate) struct Snapshot {
     adapter: DomHttpChainAdapterV1,
@@ -41,6 +44,24 @@ pub(crate) struct Snapshot {
     worker: Option<thread::JoinHandle<core::result::Result<(), String>>>,
 }
 impl Snapshot {
+    pub(crate) const MAX_CAMPAIGN_HEIGHT_V24: u64 = 65_535;
+    /// Shared only by the local snapshot producer and its deadline regression.
+    /// This is the simulated history spacing, not a registry timing override.
+    pub(crate) const BASELINE_BLOCK_SECONDS_V24: u64 = 60;
+
+    pub(crate) fn baseline_timestamp_v24(tip: u64, observed_at: u64, height: u64) -> Result<u64> {
+        if height > tip {
+            return Err("snapshot timestamp height exceeds tip".into());
+        }
+        let age = tip
+            .checked_sub(height)
+            .and_then(|blocks| blocks.checked_mul(Self::BASELINE_BLOCK_SECONDS_V24))
+            .ok_or("snapshot clock overflow")?;
+        observed_at
+            .checked_sub(age)
+            .ok_or_else(|| "snapshot clock before baseline".into())
+    }
+
     /// A read-only pre-C/D chain with native coinbase proofs and no contract
     /// transactions. It cannot grant wallet funding or consensus admission.
     pub(crate) fn start_baseline_v23(
@@ -172,9 +193,8 @@ impl Snapshot {
         let observed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
-        let first_timestamp = observed_at
-            .checked_sub(tip.checked_mul(60).ok_or("snapshot clock overflow")?)
-            .ok_or("snapshot clock before baseline")?;
+        // Retain the original whole-history underflow check, including genesis.
+        Self::baseline_timestamp_v24(tip, observed_at, 0)?;
         let mut previous = [0u8; 32];
         let mut blocks = Vec::new();
         let mut live_ledger = if bearer_tokens.len() == 2 {
@@ -188,7 +208,7 @@ impl Snapshot {
                 previous = identity.genesis_hash;
                 continue;
             }
-            let timestamp = first_timestamp + height * 60;
+            let timestamp = Self::baseline_timestamp_v24(tip, observed_at, height)?;
             let coinbase = if let Some((coinbase_transaction, ..)) = parsed.first() {
                 json!({
                     "output_commitment":hex::encode(coinbase_transaction.outputs[0].commitment.as_bytes()),
@@ -474,18 +494,62 @@ impl Snapshot {
         }
         Ok(Some((
             self.adapter.expected_identity().clone(),
-            live.identity_json().clone(),
-            live.blocks().to_vec(),
+            live.identity_json()?.clone(),
+            live.public_history_pages_v24()?,
         )))
     }
 
     pub(crate) fn advance_to_height_v23(&self, target: u64) -> Result<()> {
+        let live = self
+            .live
+            .as_ref()
+            .ok_or("immutable DOM snapshot cannot advance")?;
+        let mut admitted = false;
+        loop {
+            let mut state = live.lock().map_err(|_| "local DOM ledger poisoned")?;
+            let tip = state.identity_json()?["tip_height"]
+                .as_u64()
+                .ok_or("local tip")?;
+            let maximum = state.maximum_height_v24()?;
+            if (!admitted && target < tip) || target > maximum || tip > maximum {
+                return Err("local history advance outside original negotiated bound".into());
+            }
+            if tip >= target {
+                return Ok(());
+            }
+            admitted = true;
+            // One small atomic page per lock/transaction. RPC observers can
+            // progress between batches; neither all headers nor their proofs
+            // are generated or fsynced as one giant uninterruptible campaign.
+            state.advance_to_height(
+                target.min(tip.checked_add(8).ok_or("history batch overflow")?),
+            )?;
+            drop(state);
+            std::thread::yield_now();
+        }
+    }
+
+    pub(crate) fn enable_campaign_history_v24(
+        &self,
+        baseline: u64,
+        maximum: u64,
+        parent: &std::path::Path,
+    ) -> Result<()> {
         self.live
             .as_ref()
-            .ok_or("immutable DOM snapshot cannot advance")?
+            .ok_or("campaign history requires mutable native ledger")?
             .lock()
             .map_err(|_| "local DOM ledger poisoned")?
-            .advance_to_height(target)
+            .enable_campaign_history_v24(baseline, maximum, parent)
+    }
+
+    pub(crate) fn maximum_history_height_v24(&self) -> Result<u64> {
+        self.live
+            .as_ref()
+            .ok_or("mutable native ledger required")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?
+            .maximum_height_v24()
     }
 
     /// Explicit local-scenario opt-in: preserve the complete baseline, then

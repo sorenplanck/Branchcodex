@@ -22,12 +22,16 @@ class FullInteropMatrixV24Tests(unittest.TestCase):
         self.assertEqual(len(matches), 1, unique_text)
         return matches[0]
 
-    def test_five_exact_shards_run_independently_with_the_full_mode(self):
+    def test_seven_exact_shards_run_independently_with_the_full_mode(self):
         self.assertIn("fail-fast: false", self.job)
         self.assertIn(
-            "shard: [protocol, production-native, production-lib, production-integration, live]",
+            "shard: [protocol, production-native, production-native-funding, production-native-claim, production-lib, production-integration, live]",
             self.job)
         self.assertIn("timeout-minutes: 240", self.job)
+        self.assertIn(
+            "key: interop-full-${{ startsWith(matrix.shard, 'production-native') "
+            "&& 'production-native' || matrix.shard }}",
+            self.job)
         step = self.step("id: interop_full_graph")
         self.assertIn(
             "python3 scripts/test_interop_hardening.py --mode full --full-shard ${{ matrix.shard }}",
@@ -52,7 +56,7 @@ class FullInteropMatrixV24Tests(unittest.TestCase):
         self.assertIn("run: bash scripts/check-consensus-unchanged.sh", consensus)
         self.assertNotIn("if:", consensus)
         self.assertIn("cache-on-failure: 'true'", self.job)
-        self.assertIn("key: interop-full-${{ matrix.shard }}", self.job)
+        self.assertIn("startsWith(matrix.shard, 'production-native')", self.job)
         evidence = self.step("id: interop_evidence")
         self.assertIn("if: always()", evidence)
         self.assertIn("name: interop-hardening-full-${{ matrix.shard }}-${{ github.sha }}", evidence)

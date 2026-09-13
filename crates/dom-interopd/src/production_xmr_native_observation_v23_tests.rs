@@ -16,7 +16,7 @@ mod refund_fixture_v23;
 mod claim_capture;
 #[path = "production_xmr_native_dom_snapshot_v23_tests.rs"]
 mod dom_snapshot;
-pub(crate) use dom_snapshot::Snapshot as NativeDomSnapshotV23;
+pub(crate) use dom_snapshot::{PublicDomHistoryPagesV24, Snapshot as NativeDomSnapshotV23};
 #[path = "production_xmr_native_peer_sidecar_v23_tests.rs"]
 mod peer_sidecar_v23;
 pub(crate) use peer_sidecar_v23::PeerSidecarOwnerV23;

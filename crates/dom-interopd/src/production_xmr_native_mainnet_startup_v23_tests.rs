@@ -4,7 +4,7 @@ use super::*;
 type PublicDomHistoryV24 = (
     dom_scriptless_chain_adapter::ExpectedDomIdentityV1,
     serde_json::Value,
-    Vec<serde_json::Value>,
+    xmr_graph_wallet_tests::native_observation_v23::PublicDomHistoryPagesV24,
 );
 use crate::production_config::ProductionUniversalBootstrapFieldsV11;
 use crate::production_inputs::native_daemon_planning_v23::NativeDaemonPlanningContextV23;
@@ -242,6 +242,12 @@ impl NativeMainnetStartupV23 {
         let baseline = owner.baseline.as_ref().ok_or("startup baseline")?;
         if live {
             baseline.enable_live_window_v24(MAINNET_BASELINE_TIP_V23, 4095)?;
+        } else {
+            baseline.enable_campaign_history_v24(
+                MAINNET_BASELINE_TIP_V23,
+                cold.negotiated_dom_history_maximum_v24()?,
+                cold.root(),
+            )?;
         }
         let funding = owner.funding.as_ref().ok_or("startup funding owner")?;
         let inventory = owner
@@ -422,6 +428,12 @@ impl NativeXmrRunningColdStartV23 {
         self.mainnet_dependencies_v23()?
             ._baseline
             .public_history_v24()
+    }
+
+    pub(crate) fn maximum_dom_history_height_v24(&self) -> ColdStartResult<u64> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .maximum_history_height_v24()
     }
 
     pub(crate) fn release_dom_submissions_v23(&self) -> ColdStartResult<()> {

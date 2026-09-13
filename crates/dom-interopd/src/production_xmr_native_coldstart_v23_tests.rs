@@ -242,9 +242,17 @@ pub(crate) struct NativeXmrColdStartV23 {
     /// Position, then actor. These are original private databases, never copies.
     pub(crate) custody_roots: [[PathBuf; 2]; 2],
     pub(crate) participant_setups: [crate::production_inputs::ProductionXmrLegSetupV1; 2],
+    /// Maximum derived before ceremony signing, never from an RPC request or
+    /// refreshed clock. Untimed component fixtures cannot enable this history.
+    negotiated_dom_history_maximum_v24: Option<u64>,
 }
 
 impl NativeXmrColdStartV23 {
+    pub(crate) fn negotiated_dom_history_maximum_v24(&self) -> ColdStartResult<u64> {
+        self.negotiated_dom_history_maximum_v24
+            .ok_or_else(|| "cold-start has no original negotiated DOM history bound".into())
+    }
+
     /// Real offline route producer: one XMR history, original actor directories,
     /// two candidates and four independently credentialed sidecars.
     pub(crate) fn prepare_mainnet_funded_v23(
@@ -500,6 +508,9 @@ impl NativeXmrColdStartV23 {
                 enrolled,
                 custody_roots,
                 participant_setups,
+                negotiated_dom_history_maximum_v24: deadlines
+                    .as_ref()
+                    .map(deadline_plan_v23::NativeDeadlinePlanV23::maximum_dom_height_v24),
             },
             funding_owner,
         ))

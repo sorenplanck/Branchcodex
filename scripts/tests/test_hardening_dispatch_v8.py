@@ -77,7 +77,7 @@ class HardeningDispatchTests(unittest.TestCase):
         )
         self.assertEqual(
             heavy.count(
-                "run-once-regressions: ${{ github.event_name == 'workflow_dispatch' "
+                "run-once-regressions: ${{ matrix.owns_regressions && github.event_name == 'workflow_dispatch' "
                 "&& (inputs.suite == 'all' || inputs.suite == 'dom-xmr-native') }}"
             ),
             1,
@@ -85,6 +85,27 @@ class HardeningDispatchTests(unittest.TestCase):
         interop = (root / ".github/workflows/interop-hardening.yml").read_text()
         self.assertIn("uses: ./.github/actions/xmr-test-tools", interop)
         self.assertNotIn("run-once-regressions: 'false'", interop)
+        self.assertIn("run-once-regressions: ${{ matrix.shard == 'production-native' }}", interop)
+
+    def test_interop_components_are_six_independent_non_live_shards(self):
+        workflow = (Path(__file__).resolve().parents[2]
+                    / ".github/workflows/interop-hardening.yml").read_text()
+        self.assertIn("fail-fast: false", workflow)
+        self.assertIn(
+            "shard: [protocol, production-native, production-native-funding, "
+            "production-native-claim, production-lib, production-integration]",
+            workflow)
+        self.assertIn(
+            "python3 scripts/test_interop_hardening.py --mode full --full-shard ${{ matrix.shard }}",
+            workflow)
+        self.assertIn("if: ${{ matrix.shard == 'protocol' }}", workflow)
+        self.assertIn("if: ${{ startsWith(matrix.shard, 'production-') }}", workflow)
+        self.assertIn("if: ${{ matrix.shard == 'production-integration' }}", workflow)
+        self.assertIn("name: interop-hardening-${{ matrix.shard }}-${{ github.sha }}", workflow)
+        self.assertNotIn("--mode components", workflow)
+        summary = workflow.split("- name: Fail after all interop checks have reported", 1)[1]
+        self.assertIn("*=success|*=skipped", summary)
+        self.assertIn("*) failed=1", summary)
 
     def test_public_refund_auth_and_ready_regressions_execute_on_cached_tools(self):
         action = (Path(__file__).resolve().parents[2]
@@ -258,6 +279,15 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn("github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native'", job)
         self.assertIn("./dom/.github/actions/xmr-test-tools", job)
         self.assertIn("real-daemon: 'true'", job)
+        self.assertIn("fail-fast: false", job)
+        self.assertIn("case: claims-reopen", job)
+        self.assertIn("case: dom-compensation", job)
+        self.assertIn("scenario: native_real_daemon_two_claims_survive_original_store_reopen_v23", job)
+        self.assertIn("scenario: native_real_daemon_dom_compensation_without_counterparty_v23", job)
+        self.assertIn("--scenario ${{ matrix.scenario }}", job)
+        self.assertNotIn("scenarios sequentially", job)
+        self.assertIn("matrix.owns_regressions", job)
+        self.assertIn("dom-xmr-real-daemon-${{ matrix.case }}-${{ github.sha }}", job)
         action = (Path(__file__).resolve().parents[2]
                   / ".github/actions/xmr-test-tools/action.yml").read_text()
         self.assertIn("cargo build --locked --release -p dom-interopd --no-default-features --features production --bin dom-interopd", action)
@@ -276,7 +306,8 @@ class HardeningDispatchTests(unittest.TestCase):
         self.assertIn("--scenario native_real_daemon_xmr_refund_after_public_u_without_counterparty_v23", refund)
         self.assertIn('[[ "${{ needs.dom-xmr-real-refund.result }}" == success ]]', jobs["heavy-gate"])
         self.assertEqual(len(native_runner.SCENARIOS), 3)
-        selected = re.findall(r"--scenario ([a-z0-9_]+)", job + refund)
+        selected = re.findall(r"scenario: (native_[a-z0-9_]+)", job)
+        selected += re.findall(r"--scenario (native_[a-z0-9_]+)", refund)
         self.assertCountEqual(selected, native_runner.SCENARIOS)
         scenario_source = (Path(__file__).resolve().parents[2]
                            / "crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs").read_text()

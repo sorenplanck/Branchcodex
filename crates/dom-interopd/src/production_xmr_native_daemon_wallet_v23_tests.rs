@@ -10,6 +10,20 @@ use std::os::unix::fs::PermissionsExt;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[path = "production_xmr_native_daemon_wallet_scan_v24_tests.rs"]
+mod scan_tests_v24;
+
+fn scan_baseline_wallet_inputs_v24(
+    adapter: &dom_scriptless_chain_adapter::DomHttpChainAdapterV1,
+) -> Result<dom_scriptless_chain_adapter::ScriptlessScanPageV1> {
+    // The genesis has no wallet output. Native baseline slots 0/1 fund
+    // the two route legs at heights 1/2; slot 2 is the independent solver
+    // collateral at height 3. A count of three from genesis omits that slot.
+    // The same authenticated scanner must cover all three origins BEFORE
+    // any move-only output is taken from the snapshot owner.
+    Ok(adapter.scan_page(ScriptlessScanCursorV1::genesis(), 4)?)
+}
+
 impl NativeXmrColdStartV23 {
     pub(crate) fn prepare_dom_wallet_v23(
         &self,
@@ -35,7 +49,7 @@ impl NativeXmrColdStartV23 {
         // This call verifies the real projection served by the local backend,
         // including the frozen genesis identity. The backend's private output
         // owner below moves each coinbase into at most one actor wallet.
-        let page = adapter.scan_page(ScriptlessScanCursorV1::genesis(), 3)?;
+        let page = scan_baseline_wallet_inputs_v24(adapter)?;
         let tip = page.identity.tip_height;
         if tip < dom_core::COINBASE_MATURITY + 3 {
             return Err("native wallet baseline coinbases are immature".into());

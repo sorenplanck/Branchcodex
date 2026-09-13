@@ -409,3 +409,66 @@ end-to-end evidence against the accepted bounds.
 
 The current refusal gates remain in force. This review does not establish DOM↔XMR completion, the sixteen route outcomes,
 independent verification, audits or reproducible operation.
+
+## 2026-09-12 F1/I6 guard inventory review
+
+This is a source/inventory review, not a Rust test result, a completed swap or
+permission to fund/deploy. The global guard reported the same 39 F1/I6 findings
+on `5206cbd` and the worktree; they were not introduced by choosing a dirty
+baseline. No Sponsor purpose, L1 rule, TTL or Relay policy is authorized here.
+
+I6's 36 findings were 30 changed exact signatures/counts and six obsolete
+compact signatures replaced by formatting. The revised inventory still pins
+each source line and multiplicity: `println!("{json}")` occurs 10 times,
+`eprintln!("{error}")` 12, and multiline `eprintln!(` twice. The remaining
+additions are 20 static usage signatures and seven fixed refusal signatures.
+No library-wide or file-wide output exception was added.
+
+The reviewed public producers are `production_prepare_planning_v23`,
+`production_prepare_f6_artifact_v23`, `production_prepare_xmr_leg_v23`,
+`production_prepare_xmr_enrollment_v23`, `production_route_services`,
+`production_xmr_inventory_v23` and `production_xmr_funding_command_v12`.
+Planning's JSON Value comes only from the seven typed public route pins;
+enrollment's Store filenames are constants. Reports contain scope IDs,
+digests, public keys/addresses, economic amounts, counts and fixed status
+fields, not private scalars, passphrases, authentication keys, raw signed
+transactions or RPC bodies. New error enums render fixed redacted messages;
+the funding error's nested wallet variant also renders only fixed messages.
+Existing bootstrap/self-check/simulation output remains in the exact inventory.
+
+F1 records a new review of the current Sponsor surface, with these source hashes:
+
+| Source | SHA-256 |
+| --- | --- |
+| `crates/dom-adaptor/src/context.rs` | `982c2d34ea636303bc6ca80d9c7e82b4070f158f37955b22d0f1215a7ae73561` |
+| `crates/dom-actuator/src/contracts.rs` | `f2f69b87bb09730239c601189667aedf02d4f048f55150fc8d04b323854d944c` |
+| `crates/dom-scriptless-store/src/runtime/linux/session_store.rs` | `122140f075bcbd2256b35b63ccdfe6745342c44431e3984a3f49d85621515371` |
+
+The old context hash `5b9c9486...` is present in `38dd705` and both supplied
+V21/V22 archives. Its nine-line diff extracts a private public-key audit while
+preserving `require_strict_phase1`, participant checks and explicit Sponsor
+refusal. Public reservation-audit wrappers return only a digest and require
+their exact Funding, ClaimAdaptor or Refund/RefundAdaptor purpose; Store funding
+and claim consumers use the respective wrappers, not the recovery-only entry.
+
+Provenance limitation: the old actuator `898be8d7...` and Store `13db3311...`
+frozen hashes were NOT found in available Git revisions or the two archives.
+The new values do not assert a comparison against those unavailable bytes.
+Review instead inspected current code and history from `38dd705`/`37d9da7`:
+actuator `action_for_purpose` retains Sponsor -> CapabilityMismatch and both
+consumers; its added native paths require authenticated Store custody and exact
+chain/transaction bindings. Store's operational/replay auditors retain strict
+purpose checks, and the shared equation helper explicitly excludes Sponsor.
+Native claim ancestry is checked under its exclusive profile; purpose-specific
+wallet keys reject unknown purposes. Claim publication's callback adds only a
+veto under the operation lock, preserving the original unguarded wrapper.
+The refund-kernel helper still admits only legacy HEIGHT_LOCKED, not a new
+consensus feature. Current Sponsor line allowances were not expanded.
+
+The inventory remains fail-closed on an extra/missing output line, multiplicity
+change, unreviewed Sponsor surface or any subsequent frozen-file byte change.
+Validation: all 51 `scripts.tests.test_guard_layer_policy` tests passed in
+29.258 seconds, including the complete workspace guard (F1/I6 and the other
+absorbed checks), mutation/refusal regressions and the new exact-output-count
+case. `git diff --check` passed. No Cargo, Rust compilation, chain operations,
+commit or publication was executed for this review.

@@ -35,6 +35,32 @@ def selection(identifier, package, prefix, source, names, *, test_filter=None,
 
 
 SELECTIONS = (
+    selection("native-preflight-policy", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::",
+              "crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", (
+                  "native_real_daemon_policy_uses_the_signed_xmr_m8_floor_v24",),
+              features=("production",),
+              test_filter="production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_policy_uses_the_signed_xmr_m8_floor_v24"),
+    selection("native-preflight-deadline", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::deadline_plan_v23::projection_v24::",
+              "crates/dom-interopd/src/production_xmr_native_deadline_projection_v24_tests.rs", (
+                  "native_deadline_admission_uses_snapshot_anchor_age_and_refuses_expired_v24",),
+              features=("production",),
+              test_filter="production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::deadline_plan_v23::projection_v24::native_deadline_admission_uses_snapshot_anchor_age_and_refuses_expired_v24"),
+    selection("native-preflight-wallet", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_wallet_v23::scan_tests_v24::",
+              "crates/dom-interopd/src/production_xmr_native_daemon_wallet_scan_v24_tests.rs", (
+                  "baseline_scan_requests_genesis_and_all_three_wallet_origins_v24",),
+              features=("production",),
+              test_filter="production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_wallet_v23::scan_tests_v24::baseline_scan_requests_genesis_and_all_three_wallet_origins_v24"),
+    selection("native-preflight-history", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::history_v24::tests::",
+              "crates/dom-interopd/src/production_xmr_native_dom_history_v24_tests.rs", (
+                  "campaign_pages_preserve_original_absolute_heights_and_request_bounds_v24",
+                  "campaign_reader_rejects_truncated_or_mutated_storage_v24",
+                  "campaign_append_refuses_skips_and_negotiated_limit_overflow_v24",
+                  "campaign_frozen_reader_does_not_block_native_history_publication_v24"),
+              features=("production",)),
     selection("dom-funding-dispatch-budget", "adapter-dom-real", "funding_deadline_v23_tests::",
               "crates/adapters/dom-real/src/funding_deadline_v23_tests.rs", (
                   "expired_funding_deadline_neither_scans_nor_posts_v23",
@@ -209,6 +235,193 @@ def command(identifier):
     return args + ["--", "--nocapture", "--test-threads=1", "--color", "never"]
 
 
+
+def start_test_command_v24(identifier, *, cwd, env, stdout):
+    """Closed literal argv dispatch, independently checked against the report.
+
+    These deliberate literals keep the automation guard's no-dynamic-process
+    boundary intact. A new selection or changed command must be reviewed here;
+    changing the report/allowlist alone cannot execute an unreviewed command.
+    No shell or caller-selected executable is accepted.
+    """
+    expected = command(identifier)
+    if identifier == "native-preflight-policy":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_policy_uses_the_signed_xmr_m8_floor_v24","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_policy_uses_the_signed_xmr_m8_floor_v24","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::deadline_plan_v23::projection_v24::native_deadline_admission_uses_snapshot_anchor_age_and_refuses_expired_v24","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::deadline_plan_v23::projection_v24::native_deadline_admission_uses_snapshot_anchor_age_and_refuses_expired_v24","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-wallet":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_wallet_v23::scan_tests_v24::baseline_scan_requests_genesis_and_all_three_wallet_origins_v24","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_wallet_v23::scan_tests_v24::baseline_scan_requests_genesis_and_all_three_wallet_origins_v24","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-history":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::history_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::history_v24::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-funding-dispatch-budget":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","funding_deadline_v23_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","funding_deadline_v23_tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-tip-original-budget":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","tests::bounded_tip_","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","tests::bounded_tip_","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-funding-scan-budget":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","terminal_finality::funding_bounded_v23::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","terminal_finality::funding_bounded_v23::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-recovery-budget-and-roles":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","xmr_recovery_execution_v12::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","xmr_recovery_execution_v12::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-refund-canonical-reorg":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","xmr_recovery_finality::refund_reorg_v23::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","xmr_recovery_finality::refund_reorg_v23::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-actuator-funding-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-actuator","--no-default-features","--features","production","--lib","contracts::funding_dispatch_v23::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-actuator","--no-default-features","--features","production","--lib","contracts::funding_dispatch_v23::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-actuator-refund-checkpoint":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-actuator","--no-default-features","--features","production","--lib","contracts::native_xmr_refund_v23::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-actuator","--no-default-features","--features","production","--lib","contracts::native_xmr_refund_v23::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-http-deadline-boundary":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-chain-adapter","--lib","tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-chain-adapter","--lib","tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-claim-observation-clock":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::f7_v12::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::f7_v12::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-refund-transport-grant":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::f7_v12::xmr_refund_transport_v23::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::f7_v12::xmr_refund_transport_v23::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-refund-exit-checkpoint":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::xmr_recovery::execution_v12::refund_checkpoint_tests_v23::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::xmr_recovery::execution_v12::refund_checkpoint_tests_v23::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "f7-original-observation-age":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","f7-anchor-authority","--lib","families_v11::authorization_v12::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","f7-anchor-authority","--lib","families_v11::authorization_v12::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "f7-native-scan-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","f7-anchor-authority","--lib","native_scan_deadline_v23_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","f7-anchor-authority","--lib","native_scan_deadline_v23_tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-local-public-proof-scope":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-key-image-proof","--lib","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-key-image-proof","--lib","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-sidecar-request-domains":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-sidecar-auth","--lib","tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-sidecar-auth","--lib","tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-private-uds-authentication":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-live-sidecar-uds-client","--lib","tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-live-sidecar-uds-client","--lib","tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-public-load-original-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-live-sidecar-uds-client","--lib","local_load_deadline_v24_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-live-sidecar-uds-client","--lib","local_load_deadline_v24_tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-rpc-original-submit-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-rpc-broadcast-blocking","--lib","broadcast_deadline_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-rpc-broadcast-blocking","--lib","broadcast_deadline_v24::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-rpc-original-observation-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-rpc-broadcast-blocking","--lib","observation_deadline_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-rpc-broadcast-blocking","--lib","observation_deadline_v24::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-quorum-original-observation-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_children::tests::public_observation_deadline_expiry_contacts_no_voter_v24","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_children::tests::public_observation_deadline_expiry_contacts_no_voter_v24","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-dom-public-refund-original-deadline":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_xmr_recovery_driver_v12::recovery_deadline_tests_v23::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_xmr_recovery_driver_v12::recovery_deadline_tests_v23::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-public-refund-publication-scope":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_xmr_remote_sweep_v23::remote_refund_v23::local_custody_tests_v24::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_xmr_remote_sweep_v23::remote_refund_v23::local_custody_tests_v24::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-terminal-refund-transport":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","relay_worker::terminal_refund_v24_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","relay_worker::terminal_refund_v24_tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-terminal-ack-handoff-reopen":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--test","relay_worker","store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--test","relay_worker","store_application_ack_loss_restarts_with_identical_bytes_and_no_new_sequence","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "relay-expiry-original-store-replay":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","route-transport","--test","expiry_recovery_characterization_v23","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","route-transport","--test","expiry_recovery_characterization_v23","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    raise ValueError("unreviewed native test dispatch")
+
+
 def evaluate_output(identifier, returncode, transcript):
     spec = spec_for(identifier)
     summaries = SUMMARY.findall(transcript)
@@ -248,9 +461,7 @@ def run_selection(identifier, evidence, timeout):
     try:
         print(f"boundary selection: {identifier}", flush=True)
         with log.open("xb", buffering=0) as output, log.open("rb") as live:
-            process = subprocess.Popen(command(identifier), cwd=ROOT, env=env,
-                                       stdin=subprocess.DEVNULL, stdout=output,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
+            process = start_test_command_v24(identifier, cwd=ROOT, env=env, stdout=output)
             tracker = OwnedProcesses(process.pid)
             result["status"] = "running"
             write_result(result_file, result)

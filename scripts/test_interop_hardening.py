@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -14,9 +15,17 @@ import time
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
-FULL_SHARDS = ("protocol", "production-native", "production-lib", "production-integration", "live")
+FULL_SHARDS = (
+    "protocol", "production-native", "production-native-funding", "production-native-claim",
+    "production-lib", "production-integration", "live",
+)
 NATIVE_TEST_PREFIX = ("production_contracts_bootstrap::producer_v13::native_ceremony_tests::"
                       "xmr_graph_wallet_tests")
+NATIVE_FUNDING_TEST = (NATIVE_TEST_PREFIX +
+                       "::v23_native_two_leg_templates_custody_ready_and_bounded_funding")
+NATIVE_CLAIM_TEST = (NATIVE_TEST_PREFIX +
+                     "::v23_native_claim_six_messages_and_presignature_with_real_output_scan")
+NATIVE_EXACT_SHARDS = frozenset(("production-native-funding", "production-native-claim"))
 PRODUCTION_INTEGRATION_TARGETS = (
     "admission", "admission_v2", "driver", "f6_artifact_cli", "planning_cli",
     "production_time_guard", "relay_worker", "route_services_cli", "supervisor",
@@ -26,6 +35,15 @@ PRODUCTION_INTEGRATION_TARGETS = (
 
 def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def exact_native_shard_error(name, log):
+    if name not in NATIVE_EXACT_SHARDS:
+        return None
+    summary = log.read_text(errors="replace")
+    if re.search(r"(?m)^test result: ok\. 1 passed; 0 failed;", summary):
+        return None
+    return "exact native shard did not report exactly one passed test"
 
 
 def source_digest():
@@ -103,7 +121,7 @@ def commands(mode, evidence_directory, full_shard="all"):
     # reused instead of compiling a second dev tree. This retains debug
     # assertions/overflow checks and executes every original target and oracle.
     # The separate Solana program workspace has no such profile and is unchanged.
-    monero = ("monero-rpc-and-actuator-v5", ["cargo", "test", "--locked", "--profile", "crypto-test", "-p",
+    monero = ("monero-rpc-and-actuator-v5", ["cargo", "test", "--locked", "--no-fail-fast", "--profile", "crypto-test", "-p",
         "xmr-rpc-broadcast-blocking", "-p", "xmr-actuator"], {})
     driver_fixture = evidence_directory / "rust-driver-claim-v6.json"
     driver_env = {"DOM_INTEROP_V6_DRIVER_CLAIM": str(driver_fixture)}
@@ -128,13 +146,13 @@ def commands(mode, evidence_directory, full_shard="all"):
         ]
     specs = offline + [
         ("workspace-lock", ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"], {}),
-        ("bitcoin", ["cargo", "test", "--locked", "--profile", "crypto-test", "-p", "btc-crypto", "-p", "adapter-btc", "-p", "btc-actuator"],
+        ("bitcoin", ["cargo", "test", "--locked", "--no-fail-fast", "--profile", "crypto-test", "-p", "btc-crypto", "-p", "adapter-btc", "-p", "btc-actuator"],
          {**driver_env, "DOM_INTEROP_V3_PUBLIC_FIXTURE": str(evidence_directory / "rust-participant-round-v3.json")}),
         driver_verification,
         ("rust-participant-independent-verification", [sys.executable, "scripts/bitcoin_participant_oracle.py",
          str(evidence_directory / "rust-participant-round-v3.json")], {}),
-        ("solana-adapters", ["cargo", "test", "--locked", "--profile", "crypto-test", "-p", "kaystra-core", "-p", "solana-kaystra-source", "-p", "solana-escrow-wire", "-p", "solana-program-client", "-p", "solana-observer", "-p", "solana-evidence", "-p", "solana-observation-store", "-p", "solana-observer-pump"], {}),
-        ("solana-program-host", ["cargo", "test", "--manifest-path", "programs/dom-solana-escrow/Cargo.toml", "--locked"], {}),
+        ("solana-adapters", ["cargo", "test", "--locked", "--no-fail-fast", "--profile", "crypto-test", "-p", "kaystra-core", "-p", "solana-kaystra-source", "-p", "solana-escrow-wire", "-p", "solana-program-client", "-p", "solana-observer", "-p", "solana-evidence", "-p", "solana-observation-store", "-p", "solana-observer-pump"], {}),
+        ("solana-program-host", ["cargo", "test", "--manifest-path", "programs/dom-solana-escrow/Cargo.toml", "--locked", "--no-fail-fast"], {}),
         monero,
         production,
         trace_verification,
@@ -161,9 +179,9 @@ def full_shard_commands(specs, shard, trace_env, production_env):
             "solana-adapters", "solana-program-host", "monero-rpc-and-actuator-v5",
         )]
     if shard == "production-native":
-        return [(shard, ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
-            "--features", "production", "--lib", "--locked", "--profile", "crypto-test",
-            "--no-fail-fast", NATIVE_TEST_PREFIX, "--", "--nocapture", "--test-threads=1"], {})]
+        return [(shard, native_shard_command(shard), {})]
+    if shard in ("production-native-funding", "production-native-claim"):
+        return [(shard, native_shard_command(shard), {})]
     if shard == "production-lib":
         return [(shard, ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
             "--features", "production", "--lib", "--locked", "--profile", "crypto-test",
@@ -185,6 +203,22 @@ def full_shard_commands(specs, shard, trace_env, production_env):
     if shard == "live":
         return [by_name[name] for name in ("bitcoin-regtest", "evm-deep", "evm-anvil")]
     raise ValueError("unknown full shard")
+
+
+def native_shard_command(shard):
+    command = ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
+               "--features", "production", "--lib", "--locked", "--profile", "crypto-test",
+               "--no-fail-fast"]
+    if shard == "production-native":
+        return command + [NATIVE_TEST_PREFIX, "--", "--nocapture", "--test-threads=1",
+                          "--skip", NATIVE_FUNDING_TEST, "--skip", NATIVE_CLAIM_TEST]
+    selected = {
+        "production-native-funding": NATIVE_FUNDING_TEST,
+        "production-native-claim": NATIVE_CLAIM_TEST,
+    }.get(shard)
+    if selected is None:
+        raise ValueError("unknown native shard")
+    return command + [selected, "--", "--exact", "--nocapture", "--test-threads=1"]
 
 
 def required_tools(mode, full_shard="all"):
@@ -222,13 +256,19 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['python3', '-m', 'scripts.route_trace_oracle', 'rust-route-trace-v4.json'], cwd=evidence_directory, env=env, executable=sys.executable,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'monero-rpc-and-actuator-v5':
-        return subprocess.Popen(['cargo', 'test', '--locked', '--profile', 'crypto-test', '-p', 'xmr-rpc-broadcast-blocking', '-p', 'xmr-actuator'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--locked', '--no-fail-fast', '--profile', 'crypto-test', '-p', 'xmr-rpc-broadcast-blocking', '-p', 'xmr-actuator'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production':
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--tests', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production-native':
-        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests', '--', '--nocapture', '--test-threads=1', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_two_leg_templates_custody_ready_and_bounded_funding', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan'], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-native-funding':
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_two_leg_templates_custody_ready_and_bounded_funding', '--', '--exact', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-native-claim':
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan', '--', '--exact', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production-lib':
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests'], cwd=ROOT, env=env,
@@ -253,7 +293,7 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['cargo', 'metadata', '--locked', '--format-version', '1', '--no-deps'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'bitcoin':
-        return subprocess.Popen(['cargo', 'test', '--locked', '--profile', 'crypto-test', '-p', 'btc-crypto', '-p', 'adapter-btc', '-p', 'btc-actuator'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--locked', '--no-fail-fast', '--profile', 'crypto-test', '-p', 'btc-crypto', '-p', 'adapter-btc', '-p', 'btc-actuator'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'rust-participant-independent-verification':
         # Fixed module import locations; an evidence file cannot choose code.
@@ -261,10 +301,10 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['python3', '-m', 'scripts.bitcoin_participant_oracle', 'rust-participant-round-v3.json'], cwd=evidence_directory, env=env, executable=sys.executable,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'solana-adapters':
-        return subprocess.Popen(['cargo', 'test', '--locked', '--profile', 'crypto-test', '-p', 'kaystra-core', '-p', 'solana-kaystra-source', '-p', 'solana-escrow-wire', '-p', 'solana-program-client', '-p', 'solana-observer', '-p', 'solana-evidence', '-p', 'solana-observation-store', '-p', 'solana-observer-pump'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--locked', '--no-fail-fast', '--profile', 'crypto-test', '-p', 'kaystra-core', '-p', 'solana-kaystra-source', '-p', 'solana-escrow-wire', '-p', 'solana-program-client', '-p', 'solana-observer', '-p', 'solana-evidence', '-p', 'solana-observation-store', '-p', 'solana-observer-pump'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'solana-program-host':
-        return subprocess.Popen(['cargo', 'test', '--manifest-path', 'programs/dom-solana-escrow/Cargo.toml', '--locked'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '--manifest-path', 'programs/dom-solana-escrow/Cargo.toml', '--locked', '--no-fail-fast'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'bitcoin-regtest':
         return subprocess.Popen(['bash', 'scripts/f5-regtest-e2e.sh'], cwd=ROOT, env=env,
@@ -319,7 +359,7 @@ def main():
     }
     if full_shard != "all":
         report["limits"].append(
-            "This report covers only the selected full-mode shard; the full campaign requires all five shard outcomes.")
+            "This report covers only the selected full-mode shard; the full campaign requires all seven shard outcomes.")
     report_path = out / "report.json"
 
     def save():
@@ -368,6 +408,13 @@ def main():
                     sys.stdout.buffer.write(line)
                     sys.stdout.buffer.flush()
                 code = process.wait()
+            if code == 0:
+                validation_error = exact_native_shard_error(name, log)
+                if validation_error:
+                    with log.open("a") as stream:
+                        stream.write(f"\nERROR: {validation_error}\n")
+                    code = 3
+                    entry["validation_error"] = validation_error
         except OSError as error:
             log.write_text(str(error) + "\n")
             code = 127

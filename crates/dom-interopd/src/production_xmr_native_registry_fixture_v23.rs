@@ -10,6 +10,14 @@ use kaystra_core::{
     types::{AssetId, ChainId, TimelockSpec},
 };
 
+pub(crate) const NATIVE_XMR_TIMING_V23: ChainTimingBoundsV1 = ChainTimingBoundsV1 {
+    min_block_seconds: 60,
+    max_block_seconds: 180,
+    max_reorg_seconds: 1080,
+    observation_seconds: 5,
+    broadcast_seconds: 5,
+};
+
 pub(crate) fn configure(
     manifest: &mut RegistryManifestV1,
     terms: [&mut SettlementTermsV1; 2],
@@ -110,13 +118,7 @@ fn chain_for_network_v24(
         profile: ChainProfileV1 {
             chain_id: chain,
             kind: ChainKindV1::Monero { network },
-            timing: ChainTimingBoundsV1 {
-                min_block_seconds: 60,
-                max_block_seconds: 180,
-                max_reorg_seconds: 1080,
-                observation_seconds: 5,
-                broadcast_seconds: 5,
-            },
+            timing: NATIVE_XMR_TIMING_V23,
             finality,
             native_asset: asset,
             allowed_assets: vec![],

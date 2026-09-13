@@ -9,7 +9,7 @@
 #   * interop-full — scripts/test_interop_hardening.py in `--mode full`:
 #     the components graph PLUS bitcoin-regtest (real Bitcoin Core),
 #     `FOUNDRY_PROFILE=deep forge test` and the Anvil cross-chain gate.
-#     interop-hardening.yml only ever runs `--mode components`.
+#     interop-hardening.yml runs the same six non-live shards independently.
 #   * live-composed-route — the `#[ignore]`d f5-e2e LIVE tests: one route
 #     scalar revealed on a real Anvil chain and claimed on a real Bitcoin
 #     Core regtest node (composed_route_live), and the F7 regtest anchor
@@ -18,8 +18,8 @@
 #     and the forge artifact they read.
 #   * bp-soak — the DSC-F4 collaborative Bulletproof soak at its full
 #     10 000-case requirement (seconds per case locally; hours of CPU).
-#   * dom-xmr-native also selects dom-xmr-real-daemon (serial claim and DOM
-#     compensation) and dom-xmr-real-refund (XMR refund after public U).
+#   * dom-xmr-native also selects three independent real-daemon runners:
+#     claim/reopen, DOM compensation and XMR refund after public U.
 #
 # Deliberately NOT here: `#[ignore]`d subprocess crash helpers (only their
 # parent tests may invoke them), golden-vector printers ("run only when
@@ -50,8 +50,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: heavy-tests-${{ github.ref }}
-  cancel-in-progress: true
+  # A correction must not cancel another commit before its failures are saved.
+  group: heavy-tests-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -125,7 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [protocol, production-native, production-lib, production-integration, live]
+        shard: [protocol, production-native, production-native-funding, production-native-claim, production-lib, production-integration, live]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -148,7 +149,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: interop-full-${{ matrix.shard }}
+          # Preserve the existing production-native cache while splitting its
+          # long tests across runners. All three restore the same immutable
+          # dependency/workspace snapshot; the first completed save wins.
+          key: interop-full-${{ startsWith(matrix.shard, 'production-native') && 'production-native' || matrix.shard }}
           cache-workspace-crates: 'true'
           cache-on-failure: 'true'
           workspaces: |
@@ -428,10 +432,22 @@ jobs:
           retention-days: 7
 
   dom-xmr-real-daemon:
-    name: "DOM↔XMR real daemon — claims, DOM compensation, original-store reopen"
+    name: "DOM↔XMR real daemon — ${{ matrix.label }}"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 210
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: claims-reopen
+            label: claims and original-store reopen
+            scenario: native_real_daemon_two_claims_survive_original_store_reopen_v23
+            owns_regressions: true
+          - case: dom-compensation
+            label: DOM compensation without counterparty
+            scenario: native_real_daemon_dom_compensation_without_counterparty_v23
+            owns_regressions: false
     env:
       CARGO_BUILD_JOBS: '2'
       RUST_TEST_THREADS: '1'
@@ -446,11 +462,11 @@ jobs:
       - name: Initialize explicit not-run evidence
         shell: bash
         run: |
-          mkdir -m 700 "$RUNNER_TEMP/dom-xmr-real-evidence"
+          mkdir -m 700 "$RUNNER_TEMP/dom-xmr-real-evidence-${{ matrix.case }}"
           python3 - <<'PY'
           import json, os
           from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-real-evidence'
+          root = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-real-evidence-${{ matrix.case }}'
           (root / 'campaign.json').write_text(json.dumps({
               'schema': 'DOM-XMR-REAL-DAEMON-CAMPAIGN-V23',
               'status': 'not-run',
@@ -480,7 +496,7 @@ jobs:
           real-daemon: 'true'
           # Own the shared regressions exactly once when heavy-tests is
           # dispatched manually for the complete DOM<->XMR campaign.
-          run-once-regressions: ${{ github.event_name == 'workflow_dispatch' && (inputs.suite == 'all' || inputs.suite == 'dom-xmr-native') }}
+          run-once-regressions: ${{ matrix.owns_regressions && github.event_name == 'workflow_dispatch' && (inputs.suite == 'all' || inputs.suite == 'dom-xmr-native') }}
 
       # A debug or feature-less executable cannot satisfy NativeDaemonBinaryV23.
       # GPL tooling lives in the sibling checkout, outside this build's git state.
@@ -491,39 +507,37 @@ jobs:
           python3 - <<'PY'
           import os
           from pathlib import Path
-          evidence = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-real-evidence'
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'dom-xmr-real-evidence-${{ matrix.case }}'
           (evidence / 'daemon-blake2b256.txt').write_text(os.environ['DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23'] + '\n')
           PY
 
-      # The runner invokes BOTH full names with --ignored --exact and insists
-      # on one passed test each. Never a blanket ignored suite or a silent skip.
-      # Each case has 150 minutes; second case starts only after verified cleanup.
-      - name: Run both mandatory real daemon scenarios sequentially
+      # Each matrix runner invokes one full name with --ignored --exact and
+      # insists on one passed test. Never a blanket ignored suite or a silent
+      # skip; claim and compensation start independently and report together.
+      - name: Run mandatory real daemon scenario
         working-directory: dom
         run: >-
           python3 scripts/run_native_daemon_scenario_v23.py
-          --evidence-dir "$RUNNER_TEMP/dom-xmr-real-evidence" --timeout-seconds 9000
-          --scenario native_real_daemon_two_claims_survive_original_store_reopen_v23
-          --scenario native_real_daemon_dom_compensation_without_counterparty_v23
+          --evidence-dir "$RUNNER_TEMP/dom-xmr-real-evidence-${{ matrix.case }}" --timeout-seconds 9000
+          --scenario ${{ matrix.scenario }}
 
       - name: Preserve real outcomes and original synthetic journals
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dom-xmr-real-daemon-${{ github.sha }}-${{ github.run_attempt }}
+          name: dom-xmr-real-daemon-${{ matrix.case }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/dom-xmr-real-evidence/campaign.json
-            ${{ runner.temp }}/dom-xmr-real-evidence/daemon-blake2b256.txt
-            ${{ runner.temp }}/dom-xmr-real-evidence/*/result.json
-            ${{ runner.temp }}/dom-xmr-real-evidence/*/test.log
-            ${{ runner.temp }}/dom-xmr-real-evidence/*/failed-fixture-path.txt
-            ${{ runner.temp }}/dom-xmr-real-evidence/*/synthetic-fixtures.tar.gz
+            ${{ runner.temp }}/dom-xmr-real-evidence-${{ matrix.case }}/campaign.json
+            ${{ runner.temp }}/dom-xmr-real-evidence-${{ matrix.case }}/daemon-blake2b256.txt
+            ${{ runner.temp }}/dom-xmr-real-evidence-${{ matrix.case }}/*/result.json
+            ${{ runner.temp }}/dom-xmr-real-evidence-${{ matrix.case }}/*/test.log
+            ${{ runner.temp }}/dom-xmr-real-evidence-${{ matrix.case }}/*/failed-fixture-path.txt
+            ${{ runner.temp }}/dom-xmr-real-evidence-${{ matrix.case }}/*/synthetic-fixtures.tar.gz
           if-no-files-found: error
           retention-days: 7
 
-  # A separate machine preserves the full 150-minute per-case bound without
-  # crowding three scenarios plus builds into one runner's six-hour job limit.
-  # No dependency on the claims job: its failure must not silently skip refund.
+  # A separate machine preserves the full 150-minute per-case bound. No
+  # dependency on the claims/compensation matrix: failure cannot skip refund.
   dom-xmr-real-refund:
     name: "DOM↔XMR real daemon — XMR refund after public U without counterparty"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}
@@ -619,13 +633,7 @@ jobs:
       # cancellation are not.
       - name: Require every selected suite to pass
         run: |
-          for r in "${{ needs.integration-heavy.result }}" \
-                   "${{ needs.interop-full.result }}" \
-                   "${{ needs.live-composed-route.result }}" \
-                   "${{ needs.bp-soak.result }}" \
-                   "${{ needs.dom-xmr-native.result }}" \
-                   "${{ needs.dom-xmr-real-daemon.result }}" \
-                   "${{ needs.dom-xmr-real-refund.result }}"; do
+          for r in "${{ needs.integration-heavy.result }}" "${{ needs.interop-full.result }}" "${{ needs.live-composed-route.result }}" "${{ needs.bp-soak.result }}" "${{ needs.dom-xmr-native.result }}" "${{ needs.dom-xmr-real-daemon.result }}" "${{ needs.dom-xmr-real-refund.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "a selected heavy suite did not pass: $r"; exit 1 ;;

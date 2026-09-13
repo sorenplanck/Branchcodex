@@ -157,6 +157,22 @@ string constant END = "*/"; }
 
 
 class FrozenAllowanceTests(unittest.TestCase):
+    def test_reviewed_cli_output_counts_remain_exact_not_a_file_exception(self) -> None:
+        path = "crates/dom-interopd/src/main.rs"
+        expected = collections.Counter({
+            key: count for key, count in guard.I6_ALLOWLIST.items() if key[0] == path
+        })
+        self.assertEqual(expected[(path, 'println!("{json}");')], 10)
+        self.assertEqual(expected[(path, 'eprintln!("{error}");')], 12)
+        self.assertEqual(expected[(path, "eprintln!(")], 2)
+        for added in ('println!("{json}");', 'eprintln!("{secret}");'):
+            actual = expected.copy()
+            actual[(path, added)] += 1
+            self.assertTrue(guard._exact_allowlist_findings("I6", actual, expected))
+        actual = expected.copy()
+        actual[(path, 'println!("{json}");')] -= 1
+        self.assertTrue(guard._exact_allowlist_findings("I6", actual, expected))
+
     def test_allowlist_fails_on_new_and_stale_exceptions(self) -> None:
         one = ("crates/example/src/lib.rs", "value.unwrap()")
         two = ("crates/example/src/lib.rs", "other.unwrap()")
@@ -952,6 +968,151 @@ fi
                 "pub const NETWORK: Network = Network::Signet;\n", encoding="utf-8"
             )
             self.assertTrue(guard.check_f5_signet_automation(root).passed)
+
+
+class ClosedNativeAutomationTests(unittest.TestCase):
+    def test_native_preflight_is_first_and_selects_only_three_cheap_tests(self):
+        import scoped_boundary_regressions_v24 as scoped
+
+        preflight = scoped.SELECTIONS[:3]
+        self.assertEqual([spec["id"] for spec in preflight], [
+            "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
+        ])
+        for spec in preflight:
+            with self.subTest(identifier=spec["id"]):
+                self.assertEqual(spec["package"], "dom-interopd")
+                self.assertEqual(spec["features"], ["production"])
+                self.assertEqual(spec["required_tests"], [spec["filter"]])
+                self.assertIsNone(spec["integration"])
+                source = (ROOT / spec["source"]).read_text()
+                self.assertIn("fn " + spec["filter"].rsplit("::", 1)[1] + "(", source)
+                argv = scoped.command(spec["id"])
+                self.assertNotIn("--ignored", argv)
+                self.assertNotIn("--include-ignored", argv)
+
+    def test_upload_path_is_data_but_run_and_unknown_actions_stay_guarded(self):
+        artifact = (
+            "jobs:\n  example:\n    steps:\n"
+            "      - name: Retain evidence\n"
+            "        if: always()\n"
+            "        uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: evidence\n"
+            "          path: |\n"
+            "            ${{ runner.temp }}/evidence.tar.gz\n"
+            "          if-no-files-found: error\n"
+        )
+        masked = guard._mask_upload_artifact_path_data(artifact)
+        self.assertEqual(len(masked), len(artifact))
+        self.assertEqual(masked.count("\n"), artifact.count("\n"))
+        self.assertNotIn("${{ runner.temp }}", masked)
+        self.assertIn("if-no-files-found: error", masked)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            path = workflows / "test.yml"
+            path.write_text(artifact)
+            self.assertTrue(guard.check_f5_signet_automation(root).passed)
+            for invalid in (
+                artifact.replace("actions/upload-artifact@v4", "example/execute-path@v4"),
+                artifact.replace("actions/upload-artifact@v4", "${{ inputs.action }}"),
+                artifact + "      - run: |\n          ${{ inputs.command }}\n",
+                artifact.replace("        with:", "        run: echo mixed\n        with:"),
+            ):
+                path.write_text(invalid)
+                self.assertFalse(guard.check_f5_signet_automation(root).passed)
+            # The narrow data correction does not exempt Signet paths from
+            # the independent token/reachability checks.
+            path.write_text(artifact.replace("evidence.tar.gz", "signet.tar.gz"))
+            self.assertFalse(guard.check_f5_signet_automation(root).passed)
+
+    def test_upload_data_does_not_mask_a_following_action_or_run(self):
+        source = (
+            "steps:\n  - uses: actions/upload-artifact@v4\n"
+            "    with:\n      path: |\n        ${{ runner.temp }}/report\n"
+            "  - uses: example/execute-path@v4\n"
+            "    with:\n      path: |\n        ${{ inputs.command }}\n"
+            "  - run: |\n      ${{ inputs.other }}\n"
+        )
+        masked = guard._mask_upload_artifact_path_data(source)
+        self.assertNotIn("${{ runner.temp }}", masked)
+        self.assertIn("${{ inputs.command }}", masked)
+        self.assertIn("${{ inputs.other }}", masked)
+
+    def test_action_looking_text_inside_any_block_scalar_remains_guarded(self):
+        for header in ("run: |", "run: >-", "run: |2+", "run: >+2", "data: |", 'run: "', "run: '"):
+            for prefix in ("", "          set +e\n"):
+                with self.subTest(header=header, prefix=prefix):
+                    source = (
+                        "jobs:\n  example:\n    steps:\n"
+                        "      - name: Not an upload action\n"
+                        "        " + header + "\n" + prefix +
+                        "          - uses: actions/upload-artifact@v4\n"
+                        "            with:\n"
+                        "              path: |\n"
+                        "                $COMMAND\n"
+                    )
+                    if header[-1] in ("'", '"'):
+                        source += "          " + header[-1] + "\n"
+                    self.assertEqual(guard._mask_upload_artifact_path_data(source), source)
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = pathlib.Path(directory)
+                        workflow = root / ".github/workflows/example.yml"
+                        workflow.parent.mkdir(parents=True)
+                        workflow.write_text(source)
+                        self.assertFalse(guard.check_f5_signet_automation(root).passed)
+
+    def test_native_process_dispatch_has_only_literal_argv(self):
+        for filename in ("run_native_daemon_scenario_v23.py", "scoped_boundary_regressions_v24.py"):
+            path = ROOT / "scripts" / filename
+            commands, errors = guard._python_process_commands(path, path.read_text())
+            self.assertEqual(errors, [], filename)
+            self.assertTrue(commands)
+            self.assertFalse(any("signet" in command.lower() for command in commands))
+
+    def test_every_native_and_live_selection_preserves_exact_command_and_process_ownership(self):
+        from unittest import mock
+        import run_native_daemon_scenario_v23 as native
+        import run_xmr_live_leg_v23 as live
+        import scoped_boundary_regressions_v24 as scoped
+
+        def check(module, selections):
+            for identifier in selections:
+                with self.subTest(identifier=identifier), mock.patch.object(
+                    module.subprocess, "Popen", return_value=mock.sentinel.process
+                ) as process:
+                    expected = module.command(identifier)
+                    result = module.start_test_command_v24(
+                        identifier, cwd=ROOT, env={"TEST_ONLY": "1"}, stdout=mock.sentinel.log
+                    )
+                    self.assertIs(result, mock.sentinel.process)
+                    process.assert_called_once_with(
+                        expected, cwd=ROOT, env={"TEST_ONLY": "1"},
+                        stdin=subprocess.DEVNULL, stdout=mock.sentinel.log,
+                        stderr=subprocess.STDOUT, start_new_session=True,
+                    )
+        check(native, native.SCENARIOS)
+        with mock.patch.object(native, "SCENARIOS", live.SCENARIOS), mock.patch.object(
+            native, "PREFIX",
+            "production_contracts_bootstrap::producer_v13::native_ceremony_tests::"
+            "xmr_coldstart_v23::live_route_v23::",
+        ):
+            check(native, live.SCENARIOS)
+        check(scoped, [spec["id"] for spec in scoped.SELECTIONS])
+
+    def test_changed_or_unknown_command_never_starts_a_process(self):
+        from unittest import mock
+        import run_native_daemon_scenario_v23 as native
+        import scoped_boundary_regressions_v24 as scoped
+
+        for module, known in ((native, native.SCENARIOS[0]), (scoped, scoped.SELECTIONS[0]["id"])):
+            with mock.patch.object(module.subprocess, "Popen") as process:
+                for identifier in (known, "unreviewed-new-selection"):
+                    with mock.patch.object(module, "command", return_value=["unreviewed-executable"]):
+                        with self.assertRaises(ValueError):
+                            module.start_test_command_v24(identifier, cwd=ROOT, env={}, stdout=None)
+                process.assert_not_called()
 
 
 class RepositoryContractTests(unittest.TestCase):

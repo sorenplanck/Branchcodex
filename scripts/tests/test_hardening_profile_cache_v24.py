@@ -33,6 +33,21 @@ COMPONENT_PACKAGES = {
 
 
 class HardeningProfileCache(unittest.TestCase):
+    def test_exact_native_shards_fail_closed_on_zero_or_multiple_tests(self):
+        with tempfile.TemporaryDirectory(prefix="exact-native-") as directory:
+            log = Path(directory) / "test.log"
+            for count in (0, 2):
+                log.write_text(
+                    f"test result: ok. {count} passed; 0 failed; 0 ignored; 0 measured;\n")
+                for shard in runner.NATIVE_EXACT_SHARDS:
+                    self.assertEqual(
+                        runner.exact_native_shard_error(shard, log),
+                        "exact native shard did not report exactly one passed test")
+            log.write_text("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;\n")
+            for shard in runner.NATIVE_EXACT_SHARDS:
+                self.assertIsNone(runner.exact_native_shard_error(shard, log))
+            self.assertIsNone(runner.exact_native_shard_error("production-native", log))
+
     def test_production_tmp_is_owned_private_canonical_and_does_not_mutate_parent(self):
         # Use a real owner-only ancestor instead of shared /tmp; no daemon or
         # native fixture is created by this lightweight filesystem check.
@@ -78,13 +93,13 @@ class HardeningProfileCache(unittest.TestCase):
                     with self.assertRaises(OSError):
                         runner.production_environment_v24(env)
 
-    def test_only_profile_changes_in_component_commands_and_literal_dispatch_matches(self):
+    def test_component_commands_keep_targets_continue_after_failures_and_match_literal_dispatch(self):
         evidence = Path("/synthetic-evidence")
         for mode in ("full", "components", "runtime"):
             for name, command, env in runner.commands(mode, evidence):
                 if name not in COMPONENT_PACKAGES:
                     continue
-                expected = ["cargo", "test", "--locked", "--profile", "crypto-test"]
+                expected = ["cargo", "test", "--locked", "--no-fail-fast", "--profile", "crypto-test"]
                 for package in COMPONENT_PACKAGES[name]:
                     expected.extend(("-p", package))
                 self.assertEqual(command, expected)
@@ -110,7 +125,7 @@ class HardeningProfileCache(unittest.TestCase):
             "DOM_INTEROP_V6_DRIVER_CLAIM", "DOM_INTEROP_V3_PUBLIC_FIXTURE",
         })
         self.assertEqual(by_name["solana-program-host"][0], [
-            "cargo", "test", "--manifest-path", "programs/dom-solana-escrow/Cargo.toml", "--locked",
+            "cargo", "test", "--manifest-path", "programs/dom-solana-escrow/Cargo.toml", "--locked", "--no-fail-fast",
         ])
         self.assertEqual(by_name["bitcoin-regtest"][0], ["bash", "scripts/f5-regtest-e2e.sh"])
         self.assertEqual(by_name["evm-deep"], (["forge", "test", "--root", "contracts"],
@@ -137,6 +152,8 @@ class HardeningProfileCache(unittest.TestCase):
         expected = {
             "protocol": FULL_ORDER[:8],
             "production-native": ("production-native",),
+            "production-native-funding": ("production-native-funding",),
+            "production-native-claim": ("production-native-claim",),
             "production-lib": ("production-lib", "rust-route-independent-verification"),
             "production-integration": ("production-integration", "rust-time-independent-verification"),
             "live": FULL_ORDER[-3:],
@@ -158,17 +175,26 @@ class HardeningProfileCache(unittest.TestCase):
         specs = {shard: runner.commands("full", Path("/synthetic-evidence"), shard)[0]
                  for shard in runner.FULL_SHARDS if shard.startswith("production-")}
         native = specs["production-native"][1]
+        native_funding = specs["production-native-funding"][1]
+        native_claim = specs["production-native-claim"][1]
         ordinary = specs["production-lib"][1]
         integration = specs["production-integration"][1]
         self.assertIn("--lib", native)
         self.assertEqual(native[native.index("--") - 1], runner.NATIVE_TEST_PREFIX)
+        self.assertEqual(native[-4:], ["--skip", runner.NATIVE_FUNDING_TEST,
+                                      "--skip", runner.NATIVE_CLAIM_TEST])
+        for command, selected in ((native_funding, runner.NATIVE_FUNDING_TEST),
+                                  (native_claim, runner.NATIVE_CLAIM_TEST)):
+            self.assertIn("--lib", command)
+            self.assertEqual(command[command.index("--") - 1], selected)
+            self.assertIn("--exact", command)
         self.assertIn("--lib", ordinary)
         self.assertEqual(ordinary[-2:], ["--skip", runner.NATIVE_TEST_PREFIX])
         self.assertEqual(tuple(integration[index + 1] for index, argument in enumerate(integration)
                                if argument == "--test"), runner.PRODUCTION_INTEGRATION_TARGETS)
         self.assertNotIn("*", integration)
         self.assertIn("--bins", integration)
-        for command in (native, ordinary, integration):
+        for command in (native, native_funding, native_claim, ordinary, integration):
             self.assertNotIn("--tests", command)  # This would include lib again.
             self.assertNotIn("--ignored", command)
             self.assertNotIn("--no-run", command)
@@ -189,13 +215,19 @@ class HardeningProfileCache(unittest.TestCase):
         targets = [
             ("lib", runner.NATIVE_TEST_PREFIX + "::native_case"),
             ("lib", runner.NATIVE_TEST_PREFIX + "::nested::another_case"),
+            ("lib", runner.NATIVE_FUNDING_TEST),
+            ("lib", runner.NATIVE_CLAIM_TEST),
             ("lib", "production_child_router::route_tests_v4::matrix"),
             ("lib", "future_module::regression"), ("bin", "dom-interopd::unit"),
         ] + [("test", name + "::case") for name in runner.PRODUCTION_INTEGRATION_TARGETS]
         self.assertGreater(len(targets), 6)
         for kind, name in targets:
             selected = [
-                kind == "lib" and runner.NATIVE_TEST_PREFIX in name,
+                kind == "lib" and runner.NATIVE_TEST_PREFIX in name
+                and not any(excluded in name for excluded in
+                            (runner.NATIVE_FUNDING_TEST, runner.NATIVE_CLAIM_TEST)),
+                kind == "lib" and name == runner.NATIVE_FUNDING_TEST,
+                kind == "lib" and name == runner.NATIVE_CLAIM_TEST,
                 kind == "lib" and runner.NATIVE_TEST_PREFIX not in name,
                 kind in ("bin", "test"),
             ]
@@ -268,7 +300,9 @@ class HardeningProfileCache(unittest.TestCase):
                       (source / "tests/production_time_guard.rs").read_text())
         self.assertIn("mod xmr_graph_wallet_tests;",
                       (source / "src/production_bootstrap_v13_tests.rs").read_text())
-        self.assertEqual(runner.commands("full", evidence, "production-native")[0][2], {})
+        for shard in ("production-native", "production-native-funding",
+                      "production-native-claim"):
+            self.assertEqual(runner.commands("full", evidence, shard)[0][2], {})
         self.assertEqual(runner.required_tools("full", "all"), [
             "git", "cargo", "rustc", "cc", "clang", "cmake", "pkg-config",
             "bitcoind", "bitcoin-cli", "forge", "anvil", "curl",
@@ -305,7 +339,10 @@ class HardeningProfileCache(unittest.TestCase):
                     self.assertEqual(env["TMPDIR"], "/synthetic/production" if is_production
                                      else "/original/tmp")
                     calls.append(name)
-                    return SimpleNamespace(args=[name], stdout=io.BytesIO(b"synthetic dispatch only\n"),
+                    output = (b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;\n"
+                              if name in runner.NATIVE_EXACT_SHARDS
+                              else b"synthetic dispatch only\n")
+                    return SimpleNamespace(args=[name], stdout=io.BytesIO(output),
                                            wait=lambda: 0)
 
                 with mock.patch.object(runner, "ROOT", root), \

@@ -402,6 +402,9 @@ impl FundingBarrierControlV23 for NativeBarrierV23 {
         let Some((dom, xmr)) = target else {
             return Ok(());
         };
+        if dom > running.maximum_dom_history_height_v24()? {
+            return Err("compensation exceeds original negotiated DOM history".into());
+        }
         // Repeat from fresh durable snapshots: a subsequently funded second
         // leg must not inherit the first leg's shorter horizon. Advancing local
         // synthetic history is not a policy rewrite or real mainnet mining.
@@ -624,7 +627,7 @@ fn compensation_recovery_target_v23(
         }
         if !policy.bounded_compensation
             || policy.cancel_height >= policy.compensation_height
-            || policy.compensation_height >= 4096
+            || policy.compensation_height > super::super::xmr_graph_wallet_tests::native_observation_v23::NativeDomSnapshotV23::MAX_CAMPAIGN_HEIGHT_V24
             || policy.xmr_deadline > 1_000_000
         {
             return Err("signed compensation policy unsupported by bounded local history".into());
@@ -783,7 +786,7 @@ fn decode_public_pin_v24(pin: &[u8]) -> Result<[u8; 704]> {
 fn public_refund_in_history_v24(
     identity: &dom_scriptless_chain_adapter::ExpectedDomIdentityV1,
     tip: &serde_json::Value,
-    blocks: &[serde_json::Value],
+    blocks: &super::super::xmr_graph_wallet_tests::native_observation_v23::PublicDomHistoryPagesV24,
     proposal: &[u8; 704],
     boundary: &FundingBoundaryV23,
     policy: RecoveryLegV23,
@@ -796,8 +799,8 @@ fn public_refund_in_history_v24(
     };
     identity.validate()?;
     let height = tip["tip_height"].as_u64().ok_or("public tip height")?;
-    if height >= 4096
-        || blocks.len() != usize::try_from(height + 1)?
+    if height > blocks.maximum_height()
+        || height != blocks.tip_height()
         || proposal[8..40] != identity.chain_id
         || hash(&tip["chain_id"])? != identity.chain_id
         || hash(&tip["genesis_hash"])? != identity.genesis_hash
@@ -813,67 +816,77 @@ fn public_refund_in_history_v24(
     let mut previous = [0; 32];
     let mut events = Vec::new();
     let mut seen = BTreeSet::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let h = index as u64;
-        let bytes = hex::decode(
-            block["canonical_header_bytes"]
-                .as_str()
-                .ok_or("public header absent")?,
-        )?;
-        let header = dom_consensus::BlockHeader::from_bytes(&bytes)?;
-        let id =
-            *dom_chain::canonical_header_identifier(identity.network_magic, &bytes)?.as_bytes();
-        if header.to_bytes()? != bytes
-            || header.height.0 != h
-            || header.prev_hash.as_bytes() != &previous
-            || hash(&block["previous_block_hash"])? != previous
-            || block["timestamp"].as_u64() != Some(header.timestamp.0)
-            || block["height"].as_u64() != Some(h)
-            || hash(&block["block_hash"])? != id
-            || hash(&block["canonical_marker"])? != id
-            || (h == 0 && id != identity.genesis_hash)
-        {
-            return Err("public history ancestry or canonical header mismatch".into());
+    let mut from = 0u64;
+    while from <= height {
+        let page = blocks.page(from, 64)?;
+        if page.is_empty() {
+            return Err("public history truncated before frozen tip".into());
         }
-        previous = id;
-        for (position, tx) in block["transactions"]
-            .as_array()
-            .ok_or("public transactions absent")?
-            .iter()
-            .enumerate()
-        {
+        for block in &page {
+            let h = from;
             let bytes = hex::decode(
-                tx["canonical_bytes"]
+                block["canonical_header_bytes"]
                     .as_str()
-                    .ok_or("public transaction absent")?,
+                    .ok_or("public header absent")?,
             )?;
-            let transaction = dom_consensus::Transaction::from_bytes(&bytes)?;
-            let txid = dom_scriptless_chain_adapter::canonical_transaction_hash_v1(&bytes)?;
-            if !seen.insert(txid)
-                || txid != hash(&tx["tx_hash"])?
-                || tx["block_height"].as_u64() != Some(h)
-                || hash(&tx["block_hash"])? != id
-                || tx["transaction_index"].as_u64() != Some(position as u64)
+            let header = dom_consensus::BlockHeader::from_bytes(&bytes)?;
+            let id =
+                *dom_chain::canonical_header_identifier(identity.network_magic, &bytes)?.as_bytes();
+            if header.to_bytes()? != bytes
+                || header.height.0 != h
+                || header.prev_hash.as_bytes() != &previous
+                || hash(&block["previous_block_hash"])? != previous
+                || block["timestamp"].as_u64() != Some(header.timestamp.0)
+                || block["height"].as_u64() != Some(h)
+                || hash(&block["block_hash"])? != id
+                || hash(&block["canonical_marker"])? != id
+                || (h == 0 && id != identity.genesis_hash)
             {
-                return Err("public transaction duplicate/location mismatch".into());
+                return Err("public history ancestry or canonical header mismatch".into());
             }
-            let template = dom_adaptor::canonical_template_v1(&transaction)?.1;
-            // Native proposal template order: funding, claim, cancel, refund, compensation.
-            let stage =
-                (0..5).find(|stage| proposal[266 + stage * 32..298 + stage * 32] == template);
-            if let Some(stage) = stage {
-                events.push((stage, h, txid));
-            }
-            // No unknown transaction may spend C or D, even if a pinned refund
-            // exists elsewhere. The native ledger already rejects double spends.
-            for input in &transaction.inputs {
-                if (input.commitment.as_bytes() == &proposal[426..459]
-                    || input.commitment.as_bytes() == &proposal[459..492])
-                    && !matches!(stage, Some(1..=4))
+            previous = id;
+            for (position, tx) in block["transactions"]
+                .as_array()
+                .ok_or("public transactions absent")?
+                .iter()
+                .enumerate()
+            {
+                let bytes = hex::decode(
+                    tx["canonical_bytes"]
+                        .as_str()
+                        .ok_or("public transaction absent")?,
+                )?;
+                let transaction = dom_consensus::Transaction::from_bytes(&bytes)?;
+                let txid = dom_scriptless_chain_adapter::canonical_transaction_hash_v1(&bytes)?;
+                if !seen.insert(txid)
+                    || txid != hash(&tx["tx_hash"])?
+                    || tx["block_height"].as_u64() != Some(h)
+                    || hash(&tx["block_hash"])? != id
+                    || tx["transaction_index"].as_u64() != Some(position as u64)
                 {
-                    return Err("unrecognized spend of original graph".into());
+                    return Err("public transaction duplicate/location mismatch".into());
+                }
+                let template = dom_adaptor::canonical_template_v1(&transaction)?.1;
+                // Native proposal template order: funding, claim, cancel, refund, compensation.
+                let stage =
+                    (0..5).find(|stage| proposal[266 + stage * 32..298 + stage * 32] == template);
+                if let Some(stage) = stage {
+                    events.push((stage, h, txid));
+                }
+                // No unknown transaction may spend C or D, even if a pinned refund
+                // exists elsewhere. The native ledger already rejects double spends.
+                for input in &transaction.inputs {
+                    if (input.commitment.as_bytes() == &proposal[426..459]
+                        || input.commitment.as_bytes() == &proposal[459..492])
+                        && !matches!(stage, Some(1..=4))
+                    {
+                        return Err("unrecognized spend of original graph".into());
+                    }
                 }
             }
+            from = from
+                .checked_add(1)
+                .ok_or("public history cursor overflow")?;
         }
     }
     if previous != hash(&tip["tip_hash"])? {

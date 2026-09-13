@@ -98,6 +98,97 @@ def command(name):
             "--exact", "--nocapture", "--test-threads=1", "--color", "never"]
 
 
+
+def start_test_command_v24(identifier, *, cwd, env, stdout):
+    """Closed literal argv dispatch, independently checked against the report.
+
+    These deliberate literals keep the automation guard's no-dynamic-process
+    boundary intact. A new selection or changed command must be reviewed here;
+    changing the report/allowlist alone cannot execute an unreviewed command.
+    No shell or caller-selected executable is accepted.
+    """
+    expected = command(identifier)
+    if identifier == "native_real_daemon_two_claims_survive_original_store_reopen_v23":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_two_claims_survive_original_store_reopen_v23","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_two_claims_survive_original_store_reopen_v23","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native_real_daemon_dom_compensation_without_counterparty_v23":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_dom_compensation_without_counterparty_v23","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_dom_compensation_without_counterparty_v23","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native_real_daemon_xmr_refund_after_public_u_without_counterparty_v23":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_xmr_refund_after_public_u_without_counterparty_v23","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::native_real_daemon_xmr_refund_after_public_u_without_counterparty_v23","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_startup_v23::v23_dom_and_xmr_only_pair_starts_and_holds_with_no_foreign_family_resource":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_startup_v23::v23_dom_and_xmr_only_pair_starts_and_holds_with_no_foreign_family_resource","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_startup_v23::v23_dom_and_xmr_only_pair_starts_and_holds_with_no_foreign_family_resource","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_startup_v23::v23_live_state_directory_refuses_a_second_owner_in_either_mode":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_startup_v23::v23_live_state_directory_refuses_a_second_owner_in_either_mode","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_startup_v23::v23_live_state_directory_refuses_a_second_owner_in_either_mode","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_startup_v23::v23_stopped_state_directory_reopens_but_refuses_a_second_creation":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_startup_v23::v23_stopped_state_directory_reopens_but_refuses_a_second_creation","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_startup_v23::v23_stopped_state_directory_reopens_but_refuses_a_second_creation","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_funding_v23::v23_route_evidence_persists_across_a_clean_shutdown_and_reopen":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_funding_v23::v23_route_evidence_persists_across_a_clean_shutdown_and_reopen","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_funding_v23::v23_route_evidence_persists_across_a_clean_shutdown_and_reopen","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_funding_v23::v23_route_evidence_survives_an_uncontrolled_crash_of_both_daemons":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_funding_v23::v23_route_evidence_survives_an_uncontrolled_crash_of_both_daemons","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_funding_v23::v23_route_evidence_survives_an_uncontrolled_crash_of_both_daemons","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_refund_v23::v23_second_actor_survives_and_restarts_with_the_first_unavailable":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_refund_v23::v23_second_actor_survives_and_restarts_with_the_first_unavailable","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_refund_v23::v23_second_actor_survives_and_restarts_with_the_first_unavailable","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_refund_v23::v23_first_actor_survives_and_restarts_with_the_second_unavailable":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_refund_v23::v23_first_actor_survives_and_restarts_with_the_second_unavailable","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_refund_v23::v23_first_actor_survives_and_restarts_with_the_second_unavailable","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_refund_v23::v23_survivor_reopens_repeatedly_with_a_permanently_absent_counterparty":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_refund_v23::v23_survivor_reopens_repeatedly_with_a_permanently_absent_counterparty","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_refund_v23::v23_survivor_reopens_repeatedly_with_a_permanently_absent_counterparty","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_custody_v23::v23_custody_stores_survive_repeated_uncontrolled_restarts_on_both_sides":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_custody_v23::v23_custody_stores_survive_repeated_uncontrolled_restarts_on_both_sides","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_custody_v23::v23_custody_stores_survive_repeated_uncontrolled_restarts_on_both_sides","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "live_custody_v23::v23_corrupted_manifest_or_leg_authority_is_refused_and_the_original_is_not":
+        if expected != ["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_custody_v23::v23_corrupted_manifest_or_leg_authority_is_refused_and_the_original_is_not","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","-p","dom-interopd","--no-default-features","--features","production","--lib","--profile","crypto-test","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::live_route_v23::live_custody_v23::v23_corrupted_manifest_or_leg_authority_is_refused_and_the_original_is_not","--","--ignored","--exact","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    raise ValueError("unreviewed native test dispatch")
+
+
 def write_result(path, value):
     temporary = path.with_suffix(".pending")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
@@ -304,9 +395,7 @@ def run_one(root, evidence, name, timeout):
         fingerprints = dependency_fingerprints(env)
         result["dependency_fingerprints"] = fingerprints
         with log.open("xb", buffering=0) as output, log.open("rb") as live:
-            process = subprocess.Popen(command(name), cwd=root, env=env,
-                                       stdin=subprocess.DEVNULL, stdout=output,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
+            process = start_test_command_v24(name, cwd=root, env=env, stdout=output)
             tracker = OwnedProcesses(process.pid)
             result["status"] = "running"
             write_result(result_path, result)

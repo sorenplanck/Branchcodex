@@ -160,84 +160,56 @@ I14_ALLOWLIST: collections.Counter[tuple[str, str]] = collections.Counter(
 
 I6_ALLOWLIST: collections.Counter[tuple[str, str]] = collections.Counter(
     {
-        # V13 CLI: fixed usage/refusals and the closed public BootstrapProgressV13
-        # report only. Private stdin and raw peer bytes never enter these values.
-        ("crates/dom-interopd/src/main.rs", 'println!("{USAGE}");'): 1,
-        ("crates/dom-interopd/src/main.rs", 'eprintln!("{USAGE}");'): 2,
-        ("crates/dom-interopd/src/main.rs", 'Err(_) => { eprintln!("bootstrap report encoding failed; preserve ceremony custody"); ExitCode::FAILURE }'): 1,
+        # Reviewed 2026-09-12: entry-point output only, exact lines/counts.
+        # New preparation reports contain public scope/economics, never raw
+        # transactions or credentials; all errors render redacted messages.
+        # Planning's JSON Value is created only from typed route pins; enrollment
+        # Store filenames are constants, not credentials or caller paths.
+        # Formatted V12/V13 lines replace their obsolete compact signatures.
+        # Audit/provenance: docs/interop/XMR_RECOVERY_WITHOUT_L1_REVIEW.md,
+        # section "2026-09-12 F1/I6 guard inventory review".
         (
             "crates/deployment-registry/examples/verify_evm_contract_release.rs",
             "println!(",
         ): 1,
-        ("crates/dom-interopd/src/main.rs", 'println!("{json}");'): 2,
-        # The reviewed inventory rose on 2026-08-30 when the `run` arm was written.  The
-        # reviewed question is the one this list exists to ask: is this the
-        # process entry point writing to stderr on a terminal branch that then
-        # returns a failing `ExitCode`, or is it output escaping from library
-        # code?  All three are the former, in `main.rs`, and two of them are
-        # error line is byte-identical to one already inventoried here, while
-        # the production usage banner is frozen by its exact constant-bearing
-        # line.  The remaining entry enumerates `MISSING_PRODUCTION_PARTS_V1`, which is
-        # the refusal behaviour itself: a composition root that will not start
-        # has to say which parts are absent, or the operator is left to guess.
-        # Reviewed 2026-09-02 (Stage 13 guard pass).  The stage-7 and stage-10
-        # composition roots changed two things in `main.rs`, and the inventory
-        # says which.  The fourth `eprintln!("{error}")` is `run` refusing a
-        # non-operational artifact (`require_operational_artifact_v1`) on a
-        # terminal branch that returns `ExitCode::FAILURE`.  The
-        # `MISSING_PRODUCTION_PARTS_V1` enumeration became the
-        # `PRODUCTION_KNOWN_LIMITS_V1` enumeration once the daemon could drive
-        # a route: same shape, the operator is told which paths refuse by
-        # policy before the route starts.  Both are the entry point writing to
-        # stderr, not output escaping from library code.
-        ("crates/dom-interopd/src/main.rs", 'eprintln!("{error}");'): 4,
-        ("crates/dom-interopd/src/main.rs", "eprintln!("): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'eprintln!("{PRODUCTION_USAGE_V1}");',
-        ): 1,
-        ("crates/dom-interopd/src/main.rs", 'eprintln!("  known limit: {limit}");'): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'eprintln!("usage: dom-interopd self-check [--json]");',
-        ): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'eprintln!("simulation report encoding failed");',
-        ): 1,
-        # V12 reviewed 2026-09-09: terminal CLI output only. The success value
-        # is PreparedXmrFundingReportV12 (public identity/economics, no raw
-        # transaction or view scalar). Both error enums render fixed redacted
-        # messages; neither carries an RPC body. Usage is a static constant.
-        # Keep each exact line and multiplicity pinned, not a file exemption.
-        (
-            "crates/dom-interopd/src/main.rs",
-            'Ok(json) => { println!("{json}"); ExitCode::SUCCESS }',
-        ): 2,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'Err(_) => { eprintln!("funding report output failed; inspect the durably published output directory"); ExitCode::FAILURE }',
-        ): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'Err(error) => { eprintln!("{error}"); ExitCode::FAILURE }',
-        ): 2,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'eprintln!("{PREPARE_XMR_FUNDING_USAGE_V12}"); return ExitCode::from(2);',
-        ): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'let [flag, path] = arguments else { eprintln!("{PREPARE_XMR_FUNDING_USAGE_V12}"); return ExitCode::from(2); };',
-        ): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'println!("{PREPARE_XMR_FUNDING_USAGE_V12}");',
-        ): 1,
-        (
-            "crates/dom-interopd/src/main.rs",
-            'eprintln!("{}", dom_interopd::PREPARE_XMR_FUNDING_USAGE_V12);',
-        ): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_PLANNING_USAGE_V23}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_PLANNING_USAGE_V23}\");"): 2,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{json}\");"): 10,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"planning report unavailable; preserve the output directory\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{error}\");"): 12,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_F6_ARTIFACT_USAGE_V23}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_F6_ARTIFACT_USAGE_V23}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"F6 artifact report unavailable; preserve the request directory\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_XMR_LEG_USAGE_V23}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_XMR_LEG_USAGE_V23}\");"): 3,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"XMR leg report unavailable; preserve the published bundle\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_XMR_ENROLLMENT_USAGE_V23}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_XMR_ENROLLMENT_USAGE_V23}\");"): 2,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"enrollment report unavailable; preserve custody\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_ROUTE_SERVICES_USAGE_V11}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_ROUTE_SERVICES_USAGE_V11}\");"): 2,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"route services report unavailable; preserve the published document\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{USAGE}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{USAGE}\");"): 2,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"bootstrap report encoding failed; preserve ceremony custody\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PRODUCTION_USAGE_V1}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PRODUCTION_USAGE_V4}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_XMR_FUNDING_USAGE_V12);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_XMR_INVENTORY_USAGE_V23);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_ROUTE_SERVICES_USAGE_V11);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_F6_ARTIFACT_USAGE_V23);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_PLANNING_USAGE_V23);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_XMR_ENROLLMENT_USAGE_V23);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{}\", dom_interopd::PREPARE_XMR_LEG_USAGE_V23);"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!("): 2,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"usage: dom-interopd self-check [--json]\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_XMR_FUNDING_USAGE_V12}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_XMR_FUNDING_USAGE_V12}\");"): 2,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"funding report output failed; inspect the durably published output directory\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "println!(\"{PREPARE_XMR_INVENTORY_USAGE_V23}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"{PREPARE_XMR_INVENTORY_USAGE_V23}\");"): 2,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"  known limit: {limit}\");"): 1,
+        ("crates/dom-interopd/src/main.rs", "eprintln!(\"simulation report encoding failed\");"): 1,
     }
 )
 
@@ -389,15 +361,27 @@ I2_CONTRACT_SHA256: dict[str, str] = {
 # compositor names Sponsor (three fail-closed arms, inventoried above); the
 # operational ladder migration will change that file and must re-freeze it.
 F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
+    # 2026-09-12: explicit review of the CURRENT Sponsor surface for the three
+    # entries updated below. The exact old context.rs bytes are available in
+    # 38dd705; its new internal public-key audit retains strict-purpose checks.
+    # Old actuator/Store frozen hashes were not found in the available Git
+    # revisions or V21/V22 archives: this is NOT an exact-old-hash comparison.
+    # Current actuator keeps Sponsor -> CapabilityMismatch and both callers;
+    # Store preserves purpose refusals, authenticates native funding/claim
+    # ancestry and adds only a veto to Claim response publication. Kernel
+    # admission still uses legacy HEIGHT_LOCKED, never an alternate L1 path.
+    # Detailed scope/limits: docs/interop/XMR_RECOVERY_WITHOUT_L1_REVIEW.md,
+    # section "2026-09-12 F1/I6 guard inventory review". Earlier notes below
+    # describe historical reviews, not a newly asserted provenance chain.
     # V12 reviewed 2026-09-09: additive opaque participant-wallet signer
     # bridge. Every existing function is byte-identical to delivered V11;
     # the new method rechecks chain/binding and requires the native share.
     # Evidence: v12-store-authority-review.json in the delivery archive.
     "crates/dom-actuator/src/contracts.rs": (
-        "898be8d7dac56d2b948f2cee233de680acc49fdd5085378da45cf2ca0a749fe0"
+        "f2f69b87bb09730239c601189667aedf02d4f048f55150fc8d04b323854d944c"
     ),
     "crates/dom-adaptor/src/context.rs": (
-        "5b9c9486caa18c0599a8995d8e805a7c641233bc978eaa72e9a40fb56324b22d"
+        "982c2d34ea636303bc6ca80d9c7e82b4070f158f37955b22d0f1215a7ae73561"
     ),
     "crates/dom-adaptor/src/messages.rs": (
         "2149fd13cf3ba2d8c1a8b31f92d9ee0f59ee44a0d4da54696db5dbb009d374c4"
@@ -458,7 +442,7 @@ F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     # No guard/test/build execution is implied. Scope and limits:
     # docs/interop/hardening/V18-CHAVES-E-REFUND-NO-RUNTIME.md.
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "13db3311e0059ec675015c890e715dac5ef60f6770e13c90c44ad5917f586512"
+        "122140f075bcbd2256b35b63ccdfe6745342c44431e3984a3f49d85621515371"
     ),
     "crates/dom-leg/src/f7_wallet.rs": (
         "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"
@@ -2097,6 +2081,109 @@ def _is_automation_file(path: pathlib.Path, root: pathlib.Path) -> bool:
     )
 
 
+def _mask_upload_artifact_path_data(source: str) -> str:
+    """Mask only v4 upload-artifact's literal-block `with.path` as data.
+
+    This action never executes its path input. Other actions, dynamic `uses`,
+    mixed run/uses steps and all executable run blocks remain fail-closed.
+    Keep line/character positions; this is not a general YAML exemption.
+    """
+    lines = source.splitlines(keepends=True)
+    masked = list(lines)
+    # A shell literal/folded block may itself contain text that looks like a
+    # workflow step. Never interpret that payload as another YAML mapping.
+    # Track all block scalars, not just `run`, so action-looking text cannot
+    # escape its enclosing data node. Ambiguous indentation only narrows this
+    # exemption; the independent execution scanner still sees original text.
+    scalar_payload: set[int] = set()
+    scalar_indent: int | None = None
+    quoted_scalar: str | None = None
+    scalar_start = re.compile(
+        r"^ *(?:- )?[^#\n]*?:[ \t]*[|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#.*)?$"
+    )
+    quoted_start = re.compile(r"^ *(?:- )?[^#\n]*?:[ \t]*(['\"])")
+
+    def quoted_continues(text: str, quote: str) -> bool:
+        cursor = 0
+        while cursor < len(text):
+            if quote == '"' and text[cursor] == "\\":
+                cursor += 2
+                continue
+            if text[cursor] == quote:
+                if quote == "'" and text[cursor:cursor + 2] == "''":
+                    cursor += 2
+                    continue
+                return False
+            cursor += 1
+        return True
+
+    for index, line in enumerate(lines):
+        if quoted_scalar is not None:
+            scalar_payload.add(index)
+            if not quoted_continues(line, quoted_scalar):
+                quoted_scalar = None
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if scalar_indent is not None:
+            if not line.strip() or line.lstrip().startswith("#") or indent > scalar_indent:
+                scalar_payload.add(index)
+                continue
+            scalar_indent = None
+        if scalar_start.fullmatch(line.rstrip("\r\n")):
+            scalar_indent = indent
+        elif (quoted := quoted_start.match(line)) is not None:
+            if quoted_continues(line[quoted.end():], quoted[1]):
+                quoted_scalar = quoted[1]
+    for index, line in enumerate(lines):
+        if index in scalar_payload:
+            continue
+        match = re.fullmatch(r"( *)(- )?uses: actions/upload-artifact@v4\s*", line)
+        if match is None:
+            continue
+        step_indent = len(match[1]) if match[2] else len(match[1]) - 2
+        if step_indent < 0:
+            continue
+        start = index
+        if not match[2]:
+            while start > 0:
+                start -= 1
+                candidate = lines[start]
+                if candidate.strip() and len(candidate) - len(candidate.lstrip(" ")) <= step_indent:
+                    break
+            if not lines[start].startswith(" " * step_indent + "- "):
+                continue
+        end = index + 1
+        while end < len(lines):
+            candidate = lines[end]
+            if candidate.strip() and len(candidate) - len(candidate.lstrip(" ")) <= step_indent:
+                break
+            end += 1
+        block = "".join(lines[start:end])
+        # Do not reinterpret malformed/mixed or duplicated execution keys.
+        if re.search(r"(?m)^ *(- )?run:", block):
+            continue
+        if len(re.findall(r"(?m)^ *(- )?uses:", block)) != 1:
+            continue
+        with_indent = step_indent + 2
+        field_indent = step_indent + 4
+        in_with = False
+        for cursor in range(start, end):
+            candidate = lines[cursor]
+            indent = len(candidate) - len(candidate.lstrip(" "))
+            if candidate.strip() and indent <= with_indent:
+                in_with = candidate.rstrip() == " " * with_indent + "with:"
+            if not in_with or candidate.rstrip() != " " * field_indent + "path: |":
+                continue
+            payload = cursor + 1
+            while payload < end:
+                text = lines[payload]
+                if text.strip() and len(text) - len(text.lstrip(" ")) <= field_indent:
+                    break
+                masked[payload] = "".join("\n" if char == "\n" else " " for char in text)
+                payload += 1
+    return "".join(masked)
+
+
 def check_f5_signet_automation(root: pathlib.Path) -> CheckResult:
     """Reject any literal or unresolved route from automation to live Signet."""
 
@@ -2141,7 +2228,14 @@ def check_f5_signet_automation(root: pathlib.Path) -> CheckResult:
         for command_source in command_sources:
             normalized = _normalize_automation_text(command_source)
             dequoted = normalized.replace('"', "").replace("'", "")
-            for scanned in (command_source, normalized, dequoted):
+            dynamic_source = (
+                _mask_upload_artifact_path_data(command_source)
+                if resolved.suffix in {".yml", ".yaml"}
+                else command_source
+            )
+            dynamic_normalized = _normalize_automation_text(dynamic_source)
+            for scanned in (dynamic_source, dynamic_normalized,
+                            dynamic_normalized.replace('"', "").replace("'", "")):
                 for pattern in _DYNAMIC_REPOSITORY_DISPATCH:
                     if match := pattern.search(scanned):
                         findings.append(
@@ -2151,6 +2245,10 @@ def check_f5_signet_automation(root: pathlib.Path) -> CheckResult:
                                 "dynamic repository automation dispatch is forbidden",
                             )
                         )
+            # The original source still participates in Signet-token/path
+            # reachability. Only the non-executable input's dynamic-dispatch
+            # interpretation was excluded above.
+            for scanned in (command_source, normalized, dequoted):
                 for match in _LIVE_SIGNET_COMMAND.finditer(scanned):
                     findings.append(
                         Finding(

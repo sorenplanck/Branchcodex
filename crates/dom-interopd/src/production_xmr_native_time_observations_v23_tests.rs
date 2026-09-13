@@ -337,7 +337,7 @@ fn anchor_height(tip: u64, binding: CheckpointBindingV2) -> Result<u64> {
     Ok(anchor)
 }
 
-fn observation(
+pub(in super::super) fn observation(
     height: u64,
     hash: [u8; 32],
     parent: [u8; 32],

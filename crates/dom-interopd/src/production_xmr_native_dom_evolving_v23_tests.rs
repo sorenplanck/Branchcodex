@@ -2,6 +2,40 @@
 //! headers model an authenticated RPC history, not mined mainnet blocks.
 use super::*;
 
+#[cfg(test)]
+mod publication_guard_tests_v24 {
+    use super::*;
+    #[test]
+    fn incomplete_history_refuses_identity_scan_and_public_reader_v24() -> Result<()> {
+        let identity = ExpectedDomIdentityV1 {
+            network: "mainnet".into(),
+            network_magic: dom_core::NETWORK_MAGIC_MAINNET,
+            chain_id: [1; 32],
+            genesis_hash: dom_core::GENESIS_HASH_MAINNET,
+            protocol_version: dom_core::PROTOCOL_VERSION,
+            range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+        };
+        let mut state = EvolvingDomV23::new(
+            ledger_v23::NativeDomLedgerV23::new([1; 32])?,
+            identity,
+            json!({"tip_height":0}),
+            Vec::new(),
+            2,
+        );
+        // Exercise refusal before any projection is parsed or any capability
+        // could be produced; there is no synthetic successful chain here.
+        state.history_healthy_v24 = false;
+        assert!(state.identity_json().is_err());
+        assert!(state
+            .scan_response("GET /chain/scan/scriptless/v1?from=0&to=0 HTTP/1.1")
+            .is_err());
+        assert!(state.public_history_pages_v24().is_err());
+        assert!(state.maximum_height_v24().is_err());
+        assert!(state.advance_to_height(1).is_err());
+        Ok(())
+    }
+}
+
 pub(super) struct EvolvingDomV23 {
     ledger: ledger_v23::NativeDomLedgerV23,
     identity: ExpectedDomIdentityV1,
@@ -9,6 +43,8 @@ pub(super) struct EvolvingDomV23 {
     blocks: Vec<Value>,
     baseline_v24: Option<Vec<Value>>,
     maximum_span_v24: u64,
+    campaign_v24: Option<history_v24::CampaignHistoryV24>,
+    history_healthy_v24: bool,
     confirmations: u32,
     hold_submissions: bool,
     pending: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
@@ -28,13 +64,16 @@ impl EvolvingDomV23 {
             blocks,
             baseline_v24: None,
             maximum_span_v24: 4095,
+            campaign_v24: None,
+            history_healthy_v24: true,
             confirmations,
             hold_submissions: false,
             pending: std::collections::BTreeMap::new(),
         }
     }
-    pub(super) fn identity_json(&self) -> &Value {
-        &self.public
+    pub(super) fn identity_json(&self) -> Result<&Value> {
+        self.require_history_v24()?;
+        Ok(&self.public)
     }
     pub(super) fn blocks(&self) -> &[Value] {
         &self.blocks
@@ -46,6 +85,7 @@ impl EvolvingDomV23 {
         maximum_span: u64,
     ) -> Result<()> {
         if self.baseline_v24.is_some()
+            || self.campaign_v24.is_some()
             || self.hold_submissions
             || !self.pending.is_empty()
             || baseline_tip == 0
@@ -84,6 +124,12 @@ impl EvolvingDomV23 {
     }
 
     pub(super) fn scan_response(&self, request: &str) -> Result<Vec<u8>> {
+        self.require_history_v24()?;
+        if let Some(history) = &self.campaign_v24 {
+            return window_v24::scan_response_with_reader_v24(request, &self.public, |height| {
+                history.block(height)
+            });
+        }
         match &self.baseline_v24 {
             None => super::scan_response(request, &self.public, &self.blocks),
             Some(baseline) => {
@@ -116,7 +162,11 @@ impl EvolvingDomV23 {
         Ok((height, self.maximum_span_v24))
     }
 
-    fn maximum_height_v24(&self) -> Result<u64> {
+    pub(super) fn maximum_height_v24(&self) -> Result<u64> {
+        self.require_history_v24()?;
+        if let Some(history) = &self.campaign_v24 {
+            return Ok(history.maximum());
+        }
         match &self.baseline_v24 {
             None => Ok(4095),
             Some(baseline) => baseline
@@ -133,7 +183,7 @@ impl EvolvingDomV23 {
             .as_u64()
             .and_then(|height| height.checked_add(1))
             .ok_or("local height overflow")?;
-        if self.blocks.len() >= 4096
+        if (self.campaign_v24.is_none() && self.blocks.len() >= 4096)
             || height > self.maximum_height_v24()?
             || self.public["tip_height"]
                 .as_u64()
@@ -143,6 +193,71 @@ impl EvolvingDomV23 {
             return Err("local finality history bound or discontinuity".into());
         }
         Ok(height)
+    }
+
+    fn require_history_v24(&self) -> Result<()> {
+        if !self.history_healthy_v24 {
+            return Err("campaign history publication incomplete; no further authority".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn enable_campaign_history_v24(
+        &mut self,
+        baseline: u64,
+        maximum: u64,
+        parent: &std::path::Path,
+    ) -> Result<()> {
+        self.require_history_v24()?;
+        if self.campaign_v24.is_some()
+            || self.baseline_v24.is_some()
+            || self.hold_submissions
+            || !self.pending.is_empty()
+            || baseline == 0
+            || baseline >= 4096
+            || maximum <= baseline
+            || maximum > Snapshot::MAX_CAMPAIGN_HEIGHT_V24
+            || self.public["tip_height"].as_u64() != Some(baseline)
+            || self.blocks.len() != usize::try_from(baseline + 1)?
+            || self.blocks.iter().any(|block| {
+                block["transactions"]
+                    .as_array()
+                    .is_none_or(|tx| !tx.is_empty())
+            })
+        {
+            return Err("campaign requires original transaction-empty bounded baseline and negotiated maximum".into());
+        }
+        let history = history_v24::CampaignHistoryV24::create(parent, &self.blocks, maximum)?;
+        let anchor = self
+            .blocks
+            .last()
+            .ok_or("campaign baseline anchor")?
+            .clone();
+        self.blocks.clear();
+        self.blocks.push(anchor);
+        self.campaign_v24 = Some(history);
+        Ok(())
+    }
+
+    pub(super) fn public_history_pages_v24(&self) -> Result<history_v24::PublicDomHistoryPagesV24> {
+        self.require_history_v24()?;
+        match &self.campaign_v24 {
+            Some(history) => history.reader(),
+            None => history_v24::PublicDomHistoryPagesV24::memory(
+                self.blocks.clone(),
+                self.public["tip_height"].as_u64().ok_or("public tip")?,
+                self.maximum_height_v24()?,
+            ),
+        }
+    }
+
+    fn record_block_v24(&mut self, block: Value) -> Result<()> {
+        if let Some(history) = &mut self.campaign_v24 {
+            history.append(&block)?;
+            self.blocks.clear();
+        }
+        self.blocks.push(block);
+        Ok(())
     }
 
     /// Scenario-owner control only, never reachable through the HTTP server.
@@ -187,13 +302,27 @@ impl EvolvingDomV23 {
                 "local recovery advance must be monotonic, bounded and after inclusion".into(),
             );
         }
-        while self.public["tip_height"].as_u64().ok_or("local tip")? < target {
-            self.append_empty()?;
+        if let Some(history) = &self.campaign_v24 {
+            history.begin_batch()?;
         }
-        Ok(())
+        let mut result = Ok(());
+        while self.public["tip_height"].as_u64().ok_or("local tip")? < target {
+            if let Err(error) = self.append_empty() {
+                result = Err(error);
+                break;
+            }
+        }
+        if let Some(history) = &self.campaign_v24 {
+            if let Err(error) = history.commit_batch() {
+                self.history_healthy_v24 = false;
+                return Err(error);
+            }
+        }
+        result
     }
 
     fn submit(&mut self, bytes: &[u8]) -> Result<Value> {
+        self.require_history_v24()?;
         let hash = dom_scriptless_chain_adapter::canonical_transaction_hash_v1(bytes)?;
         if !self.hold_submissions || self.ledger.contains_transaction(&hash) {
             return self.admit(bytes);
@@ -276,14 +405,17 @@ impl EvolvingDomV23 {
             "transactions":[],"coinbase":projection,"total_fees_noms":0,
             "protocol_version":self.identity.protocol_version,"range_proof_serialization_version":self.identity.range_proof_serialization_version});
         self.blocks.try_reserve(1)?;
+        self.history_healthy_v24 = false;
         self.ledger.seed_coinbase(height, &validated)?;
-        self.blocks.push(block);
+        self.record_block_v24(block)?;
         self.public["tip_height"] = json!(height);
         self.public["tip_hash"] = json!(hash);
+        self.history_healthy_v24 = true;
         Ok(())
     }
 
     fn admit(&mut self, bytes: &[u8]) -> Result<Value> {
+        self.require_history_v24()?;
         let hash = dom_scriptless_chain_adapter::canonical_transaction_hash_v1(bytes)?;
         if !self.ledger.contains_transaction(&hash) {
             let now = std::time::SystemTime::now()
@@ -351,25 +483,30 @@ impl EvolvingDomV23 {
                 "protocol_version":self.identity.protocol_version,"range_proof_serialization_version":self.identity.range_proof_serialization_version});
             // All fallible validation/projection precedes the atomic publication.
             self.blocks.try_reserve(1)?;
+            self.history_healthy_v24 = false;
             self.ledger.commit(prepared, &coinbase)?;
-            self.blocks.push(block);
+            self.record_block_v24(block)?;
             self.public["tip_height"] = json!(height);
             self.public["tip_hash"] = json!(block_hash);
+            self.history_healthy_v24 = true;
         }
-        let included = self
-            .blocks
-            .iter()
-            .find(|block| {
-                block["transactions"]
-                    .as_array()
-                    .is_some_and(|transactions| {
-                        transactions
-                            .iter()
-                            .any(|tx| tx["tx_hash"].as_str() == Some(hex::encode(hash).as_str()))
-                    })
-            })
-            .and_then(|block| block["height"].as_u64())
-            .ok_or("admitted transaction absent from RPC history")?;
+        let included = if let Some(history) = &self.campaign_v24 {
+            history.inclusion(&hash)?
+        } else {
+            self.blocks
+                .iter()
+                .find(|block| {
+                    block["transactions"]
+                        .as_array()
+                        .is_some_and(|transactions| {
+                            transactions.iter().any(|tx| {
+                                tx["tx_hash"].as_str() == Some(hex::encode(hash).as_str())
+                            })
+                        })
+                })
+                .and_then(|block| block["height"].as_u64())
+                .ok_or("admitted transaction absent from RPC history")?
+        };
         let target = included
             .checked_add(u64::from(
                 self.confirmations

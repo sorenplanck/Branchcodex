@@ -14,7 +14,11 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 25)
+        self.assertEqual(len(ids), 29)
+        self.assertEqual(ids[:4], [
+            "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
+            "native-preflight-history",
+        ])
         self.assertEqual(len(ids), len(set(ids)))
         for item in runner.SELECTIONS:
             with self.subTest(selection=item["id"]):
@@ -36,6 +40,16 @@ class ClosedBoundaryListTests(unittest.TestCase):
         # Explicit path attributes use module identifiers, NOT the filenames:
         # f7_xmr_refund_transport_v23.rs lives under f7_v12::xmr_refund_transport_v23.
         edges = (
+            ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_graph_wallet_tests"),
+            ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_observation_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_observation_v23_tests.rs", "dom_snapshot"),
+            ("crates/dom-interopd/src/production_xmr_native_dom_snapshot_v23_tests.rs", "history_v24"),
+            ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_coldstart_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_scenario_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "deadline_plan_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_wallet_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_deadline_plan_v23_tests.rs", "projection_v24"),
+            ("crates/dom-interopd/src/production_xmr_native_daemon_wallet_v23_tests.rs", "scan_tests_v24"),
             ("crates/adapters/dom-real/src/lib.rs", "funding_deadline_v23_tests"),
             ("crates/adapters/dom-real/src/lib.rs", "terminal_finality"),
             ("crates/adapters/dom-real/src/lib.rs", "xmr_recovery_execution_v12"),
@@ -68,6 +82,22 @@ class ClosedBoundaryListTests(unittest.TestCase):
                 self.assertRegex((runner.ROOT / source).read_text(), rf"\bmod {module};")
         self.assertEqual(runner.spec_for("store-refund-transport-grant")["module_prefix"],
                          "runtime::linux::session_store::f7_v12::xmr_refund_transport_v23::tests::")
+
+    def test_history_preflight_keeps_all_four_tests_and_literal_process_dispatch(self):
+        spec = runner.spec_for("native-preflight-history")
+        self.assertEqual(spec["module_prefix"],
+                         "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::history_v24::tests::")
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(spec["required_tests"], [
+            spec["module_prefix"] + "campaign_pages_preserve_original_absolute_heights_and_request_bounds_v24",
+            spec["module_prefix"] + "campaign_reader_rejects_truncated_or_mutated_storage_v24",
+            spec["module_prefix"] + "campaign_append_refuses_skips_and_negotiated_limit_overflow_v24",
+            spec["module_prefix"] + "campaign_frozen_reader_does_not_block_native_history_publication_v24",
+        ])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
 
     def test_every_command_is_locked_serial_and_reuses_crypto_test(self):
         for item in runner.SELECTIONS:

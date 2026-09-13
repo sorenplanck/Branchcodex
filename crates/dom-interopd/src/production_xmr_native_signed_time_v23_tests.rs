@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 #[path = "production_xmr_native_time_observations_v23_tests.rs"]
-mod observations;
+pub(super) mod observations;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub(crate) struct ColdStartSignedTimeV23 {

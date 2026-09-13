@@ -34,6 +34,20 @@ pub(super) fn scan_response(
     baseline: &[Value],
     window: &[Value],
 ) -> Result<Vec<u8>> {
+    let tip = identity["tip_height"].as_u64().ok_or("snapshot tip")?;
+    if window.last() != Some(block_at(baseline, window, tip)?) {
+        return Err("split DOM history tip mismatch".into());
+    }
+    scan_response_with_reader_v24(first, identity, |height| {
+        Ok(block_at(baseline, window, height)?.clone())
+    })
+}
+
+pub(super) fn scan_response_with_reader_v24(
+    first: &str,
+    identity: &Value,
+    mut block_at: impl FnMut(u64) -> Result<Value>,
+) -> Result<Vec<u8>> {
     let query = first
         .strip_prefix("GET /chain/scan/scriptless/v1?")
         .and_then(|value| value.strip_suffix(" HTTP/1.1"))
@@ -60,11 +74,11 @@ pub(super) fn scan_response(
     }
     let request_anchor = match (from, fields.remove("anchor_hash")) {
         (0, None) => {
-            block_at(baseline, window, 0)?;
+            block_at(0)?;
             Value::Null
         }
         (height, Some(hash)) if height > 0 => {
-            let previous = block_at(baseline, window, height - 1)?;
+            let previous = block_at(height - 1)?;
             if previous["block_hash"].as_str() != Some(hash) {
                 return Err("snapshot anchor mismatch".into());
             }
@@ -76,21 +90,18 @@ pub(super) fn scan_response(
         return Err("unknown snapshot query".into());
     }
     let tip = identity["tip_height"].as_u64().ok_or("snapshot tip")?;
-    let tip_block = block_at(baseline, window, tip)?;
-    if window.last() != Some(tip_block) || tip_block["block_hash"] != identity["tip_hash"] {
+    let tip_block = block_at(tip)?;
+    if tip_block["block_hash"] != identity["tip_hash"] {
         return Err("split DOM history tip mismatch".into());
     }
     let mut page = Vec::new();
     if from <= tip {
         for height in from..=to.min(tip) {
-            let block = block_at(baseline, window, height)?;
-            if height > 0
-                && block["previous_block_hash"]
-                    != block_at(baseline, window, height - 1)?["block_hash"]
-            {
+            let block = block_at(height)?;
+            if height > 0 && block["previous_block_hash"] != block_at(height - 1)?["block_hash"] {
                 return Err("split DOM history hash discontinuity".into());
             }
-            page.push(block.clone());
+            page.push(block);
         }
     }
     let last = page.last();

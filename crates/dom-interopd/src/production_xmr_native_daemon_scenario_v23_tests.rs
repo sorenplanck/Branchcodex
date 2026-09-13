@@ -32,6 +32,12 @@ const PHASE_TIMEOUT: Duration = Duration::from_secs(7200);
 
 fn fresh_local_policy() -> Result<route_time_anchor::RouteTimePolicyLimitsV2> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let xmr_timing = crate::production_xmr_native_registry_fixture_v23::NATIVE_XMR_TIMING_V23;
+    // The same signed native-XMR checkpoint appears on both counterparty
+    // legs. Derive the M.8 floor from that registry timing instead of carrying
+    // an independent fixture constant which could drift below policy.
+    let counterparty_margin_seconds =
+        adapter_btc::timelock::minimum_safety_margin_seconds(&xmr_timing, &xmr_timing)?;
     // An explicit NEW local negotiation, before registry/time signing. These
     // values never change an already-admitted route or its availability terms.
     Ok(route_time_anchor::RouteTimePolicyLimitsV2 {
@@ -44,8 +50,16 @@ fn fresh_local_policy() -> Result<route_time_anchor::RouteTimePolicyLimitsV2> {
         max_upstream_funding_anchor_delay_seconds: 14400,
         max_downstream_funding_anchor_delay_seconds: 14400,
         hub_margin_seconds: 300,
-        counterparty_margin_seconds: 300,
+        counterparty_margin_seconds,
     })
+}
+
+#[test]
+fn native_real_daemon_policy_uses_the_signed_xmr_m8_floor_v24() -> Result<()> {
+    let timing = crate::production_xmr_native_registry_fixture_v23::NATIVE_XMR_TIMING_V23;
+    let expected = adapter_btc::timelock::minimum_safety_margin_seconds(&timing, &timing)?;
+    assert_eq!(fresh_local_policy()?.counterparty_margin_seconds, expected);
+    Ok(())
 }
 
 fn launch(
