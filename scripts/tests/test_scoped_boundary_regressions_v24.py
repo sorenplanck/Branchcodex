@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 44)
+        self.assertEqual(len(ids), 45)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -90,6 +90,9 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-adaptor/src/lib.rs", "collaborative_range_proof"),
             ("crates/dom-adaptor/src/collaborative_range_proof.rs", "final_proof_cache_v25"),
             ("crates/dom-adaptor/src/collaborative_final_proof_cache_v25.rs", "tests"),
+            ("crates/dom-adaptor/src/lib.rs", "share_pop"),
+            ("crates/dom-adaptor/src/share_pop.rs", "verification_cache_v25"),
+            ("crates/dom-adaptor/src/share_pop_verification_cache_v25.rs", "tests"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store/f7_v12.rs", "xmr_refund_transport_v23"),
             ("crates/dom-scriptless-store/src/runtime/linux/xmr_recovery.rs", "execution_v12"),
             ("crates/f7-anchor-authority/src/families_v11/mod.rs", "authorization_v12"),
@@ -203,8 +206,9 @@ class ClosedBoundaryListTests(unittest.TestCase):
             "adaptor-public-range-proof-cache": (5, "public_range_proof_cache_transaction_preserves_error_index_order_and_atomic_admission_v24"),
             "store-public-envelope-signature-cache": (7, "public_envelope_real_64_replays_match_uncached_and_use_one_equation_v24"),
             "adaptor-collaborative-final-proof-cache": (5, "native_two_party_final_proof_cold_warm_repeat64_matches_original_v25"),
+            "adaptor-share-pop-equation-cache": (7, "identical_statement_bytes_with_another_authenticated_roster_cannot_hit_v25"),
         }
-        self.assertEqual([item["id"] for item in runner.SELECTIONS[13:19]], list(expected))
+        self.assertEqual([item["id"] for item in runner.SELECTIONS[13:20]], list(expected))
         for identifier, (count, mandatory) in expected.items():
             with self.subTest(selection=identifier):
                 spec = runner.spec_for(identifier)

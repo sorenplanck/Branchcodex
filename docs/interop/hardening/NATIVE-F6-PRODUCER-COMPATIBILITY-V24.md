@@ -64,3 +64,28 @@ The native funding component also passed on `d5ae969` in job `103667580819`
 (2,012.87 seconds), including deliberate reopen/replay coverage. Neither
 component timing proves a normal daemon swap latency, and neither removes the
 negotiated public-network confirmation or spendability requirements.
+
+### Additional SharePoK equation memo
+
+`dom-adaptor::verify_share_knowledge_v1` now retains only exact successful
+public proof equations in a fixed, process-local 64-entry ring. Its original
+mathematical body is retained unchanged as the private uncached verifier.
+The key contains a separate domain, all 202 statement bytes, the authenticated
+32-byte roster digest, the actual 33-byte share point, and the full 65-byte
+proof. The roster digest is **not** contained in the 202-byte encoding; omitting
+it would incorrectly reuse a result after changing another roster member.
+
+Parsing and authenticated roster construction remain outside this memo. All
+state/custody/nonce checks in its callers remain in place. Proof generation is
+unchanged, and no secret share or private nonce enters the cache. There is no
+heap allocation or lazy initialization in the memo; contention and poisoning
+use the original verifier without waiting, and eviction is not a validity
+limit. A false result or error is never remembered.
+
+Seven separately selected regressions compare real proofs against the original
+verifier, mutate every operand, test identical encodings under another roster,
+exercise the actual point separately, preserve backend errors, exceed capacity,
+and cover contention/poisoning. Their timing record includes one cold check plus
+63 exact reuses versus 64 original verifications. Writing these tests is not
+execution evidence; the new primitive and complete daemon scenarios must still
+pass in CI before claiming any additional measured speedup.

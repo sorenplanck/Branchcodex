@@ -184,6 +184,16 @@ SELECTIONS = (
                   "successful_cache_is_bounded_and_evicted_context_reexecutes_original_v25",
                   "oversized_valid_extra_commit_falls_back_and_framing_never_bypasses_v25",
                   "poisoned_or_busy_cache_reexecutes_original_without_reusing_finalizer_v25")),
+    selection("adaptor-share-pop-equation-cache", "dom-adaptor",
+              "share_pop::verification_cache_v25::tests::",
+              "crates/dom-adaptor/src/share_pop_verification_cache_v25_tests.rs", (
+                  "real_share_pop_cold_plus_warm64_matches_64_original_verifications_v25",
+                  "every_statement_operand_and_proof_mutation_matches_original_v25",
+                  "identical_statement_bytes_with_another_authenticated_roster_cannot_hit_v25",
+                  "actual_public_point_operand_is_not_replaced_by_encoded_statement_bytes_v25",
+                  "false_and_original_backend_errors_never_enter_success_cache_v25",
+                  "fixed_capacity_evicts_only_successes_and_rechecks_old_equations_v25",
+                  "contention_and_poison_fall_back_to_original_without_waiting_v25")),
     selection("dom-funding-dispatch-budget", "adapter-dom-real", "funding_deadline_v23_tests::",
               "crates/adapters/dom-real/src/funding_deadline_v23_tests.rs", (
                   "expired_funding_deadline_neither_scans_nor_posts_v23",
@@ -480,6 +490,12 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::final_proof_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::final_proof_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "adaptor-share-pop-equation-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "dom-funding-dispatch-budget":

@@ -11,6 +11,9 @@ use dom_scriptless_primitives::{
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 
+#[path = "share_pop_verification_cache_v25.rs"]
+mod verification_cache_v25;
+
 const CONTEXT_TAG_V1: &str = crate::DomainTag::SharePop.as_str();
 const CHALLENGE_TAG_V1: &str = crate::DomainTag::SharePopChallenge.as_str();
 const ROSTER_TAG_V1: &str = "DOM_ADAPTOR_SHARE_POP_ROSTER_V1";
@@ -312,6 +315,15 @@ pub fn prove_share_knowledge_v1(
 
 /// Verify the exact V1 share proof relation.
 pub fn verify_share_knowledge_v1(
+    statement: &SharePoPStatementV1,
+    proof: &ShareProofV1,
+) -> Result<bool> {
+    verification_cache_v25::verify(statement, proof)
+}
+
+// Original mathematical verifier. Parsing, canonical roster validation and
+// proof generation remain outside the exact public-equation memo.
+fn verify_share_knowledge_uncached_v25(
     statement: &SharePoPStatementV1,
     proof: &ShareProofV1,
 ) -> Result<bool> {
