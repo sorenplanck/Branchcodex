@@ -95,6 +95,29 @@ SELECTIONS = (
                   "terminal_spends_use_finality_and_multiple_fundings_use_latest_maturity_v24",
                   "planner_refuses_overflow_invalid_finality_and_inconsistent_history_v24"),
               features=("production",)),
+    selection("native-preflight-leg-parameters", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::leg_parameters_v24_tests::",
+              "crates/dom-interopd/src/production_xmr_native_daemon_scenario_v24_leg_parameters_tests.rs", (
+                  "nested_enrollment_parameters_roundtrip_through_real_codec_v24",
+                  "root_discriminator_other_families_and_open_parameters_are_refused_v24",
+                  "manifest_digest_and_json_framing_remain_required_v24"),
+              features=("production",)),
+    selection("native-preflight-exit-diagnostic", "dom-interopd",
+              "production_xmr_native_binary_v23_tests::process::exit_diagnostic_v24::tests::",
+              "crates/dom-interopd/src/production_xmr_native_binary_v23_tests/process/exit_diagnostic_v24.rs", (
+                  "exact_public_messages_map_only_to_fixed_codes_v24",
+                  "secret_bytes_and_unknown_diagnostics_are_never_returned_v24",
+                  "multiple_exact_errors_are_ambiguous_without_echoing_input_v24",
+                  "diagnostic_respects_capture_bound_and_never_truncates_into_match_v24",
+                  "allowlist_is_pinned_to_literal_production_errors_v24",
+                  "stderr_capture_timeout_and_repeat_preserve_the_single_owned_result_v24"),
+              features=("production",)),
+    selection("native-preflight-xmr-rpc-budget", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::",
+              "crates/dom-interopd/src/production_xmr_native_daemon_f6_v23_tests.rs", (
+                  "native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24",),
+              features=("production",),
+              test_filter="production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24"),
     selection("store-public-output-proof-cache", "dom-scriptless-store",
               "runtime::linux::session_store::xmr_graph_output_journal_v22::proof_cache_v24::tests::",
               "crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_output_proof_cache_v24.rs", (
@@ -357,6 +380,24 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::xmr_progress_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::xmr_progress_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-leg-parameters":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::leg_parameters_v24_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::leg_parameters_v24_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-exit-diagnostic":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_xmr_native_binary_v23_tests::process::exit_diagnostic_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_xmr_native_binary_v23_tests::process::exit_diagnostic_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-xmr-rpc-budget":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "store-public-output-proof-cache":

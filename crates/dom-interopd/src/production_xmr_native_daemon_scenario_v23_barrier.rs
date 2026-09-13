@@ -12,6 +12,10 @@ use std::{collections::BTreeSet, io::Read, path::Path};
 #[path = "production_xmr_native_daemon_scenario_v24_xmr_progress.rs"]
 mod xmr_progress_v24;
 
+#[cfg(test)]
+#[path = "production_xmr_native_daemon_scenario_v24_leg_parameters_tests.rs"]
+mod leg_parameters_v24_tests;
+
 pub(super) struct NativeBarrierV23 {
     terms: [SettlementTermsV1; 2],
     external_funding: [[u8; 32]; 2],
@@ -949,14 +953,26 @@ fn config(state: &Path) -> Result<ProductionBootstrapConfigV1> {
 fn leg_parameters(state: &Path, leg: &ProductionUniversalLegV11) -> Result<serde_json::Value> {
     let bytes = read_optional(&state.join(&leg.authority_bundle), 1024 * 1024)?
         .ok_or("scenario leg absent")?;
-    if ProductionUniversalLegV11::bundle_digest(&bytes)? != leg.authority_bundle_digest {
+    decode_leg_parameters_v24(&bytes, leg.authority_bundle_digest)
+}
+
+fn decode_leg_parameters_v24(bytes: &[u8], expected_digest: [u8; 32]) -> Result<serde_json::Value> {
+    if ProductionUniversalLegV11::bundle_digest(bytes)? != expected_digest {
         return Err("scenario leg digest differs from manifest".into());
     }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    if value["family"] != "XMR_ENROLLMENT_V23" {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    // WireV11 owns the outer format/scope; its tagged WireAuthorityV11 lives
+    // under `authority`. The discriminator was never a root-level field.
+    let authority = &value["authority"];
+    if authority["family"] != "XMR_ENROLLMENT_V23" {
         return Err("scenario leg family mismatch".into());
     }
-    Ok(value["parameters"].clone())
+    // Reuse the actual closed production parameter codec. This projection is
+    // not admission: scope and validated_compensation remain None; the caller
+    // independently checks the policy against the original negotiated terms.
+    let parameters: crate::production_universal_leg_authority::ProductionUniversalXmrEnrollmentAuthorityV23 =
+        serde_json::from_value(authority["parameters"].clone())?;
+    Ok(serde_json::to_value(parameters)?)
 }
 
 fn committed_funding<'a>(bytes: &'a [u8], terms: &SettlementTermsV1) -> Result<&'a [u8]> {

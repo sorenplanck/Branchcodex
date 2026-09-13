@@ -235,7 +235,13 @@ mod tests {
     }
 
     fn example_key() -> Vec<u8> {
-        key(b"statement", b"capsule", &[b"payload"; 11], &[7; 33]).unwrap()
+        key(
+            b"statement",
+            b"capsule",
+            &[b"payload".as_slice(); 11],
+            &[7; 33],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -281,8 +287,8 @@ mod tests {
             );
         }
         assert_ne!(
-            key(b"a", b"bc", &[b"x"; 11], &[7; 33]),
-            key(b"ab", b"c", &[b"x"; 11], &[7; 33])
+            key(b"a", b"bc", &[b"x".as_slice(); 11], &[7; 33]),
+            key(b"ab", b"c", &[b"x".as_slice(); 11], &[7; 33])
         );
     }
 
@@ -314,8 +320,14 @@ mod tests {
         }
         assert_eq!(cache.lock().unwrap().entries.len(), CAPACITY);
         assert_eq!(verified(&cache, Some(vec![0]), || Ok::<_, ()>(99)), Ok(99));
-        assert!(key(&vec![0; MAX_KEY_BYTES], b"", &[b"x"; 11], &[7; 33]).is_none());
-        assert!(key(b"s", b"c", &[b"x"; 10], &[7; 33]).is_none());
+        assert!(key(
+            &vec![0; MAX_KEY_BYTES],
+            b"",
+            &[b"x".as_slice(); 11],
+            &[7; 33]
+        )
+        .is_none());
+        assert!(key(b"s", b"c", &[b"x".as_slice(); 10], &[7; 33]).is_none());
         assert_eq!(
             verified(&cache, None, || Err::<usize, _>("verify")),
             Err("verify")

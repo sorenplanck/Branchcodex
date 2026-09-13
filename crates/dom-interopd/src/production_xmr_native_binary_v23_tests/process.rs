@@ -13,6 +13,20 @@ use zeroize::Zeroizing;
 const MAX_CAPTURE: usize = 256 * 1024;
 type Capture = Receiver<std::io::Result<Zeroizing<Vec<u8>>>>;
 
+mod exit_diagnostic_v24;
+
+fn retain_stderr_once_v24(
+    receiver: &Capture,
+    retained: &mut Option<std::io::Result<Zeroizing<Vec<u8>>>>,
+    timeout: Duration,
+) {
+    if retained.is_none() {
+        if let Ok(capture) = receiver.recv_timeout(timeout) {
+            *retained = Some(capture);
+        }
+    }
+}
+
 fn drain(mut stream: impl Read + Send + 'static) -> Capture {
     let (send, receive) = mpsc::sync_channel(1);
     thread::spawn(move || {
@@ -53,6 +67,8 @@ pub(crate) struct NativeDaemonProcessV23 {
     status: Option<ExitStatus>,
     stdout: Capture,
     stderr: Capture,
+    captured_stderr: Option<std::io::Result<Zeroizing<Vec<u8>>>>,
+    failure_reported: bool,
 }
 
 impl NativeDaemonProcessV23 {
@@ -74,6 +90,8 @@ impl NativeDaemonProcessV23 {
             status: None,
             stdout,
             stderr,
+            captured_stderr: None,
+            failure_reported: false,
         };
         let mut stdin = owned
             .child
@@ -109,6 +127,22 @@ impl NativeDaemonProcessV23 {
                 .child
                 .try_wait()
                 .map_err(|_| "daemon status unavailable")?;
+        }
+        if self.status.is_some_and(|status| !status.success()) && !self.failure_reported {
+            // A failed process can be noticed by either poll_actor or
+            // require_running. Preserve the one received Zeroizing buffer for
+            // finish: diagnostics never consume stdout/self-check evidence.
+            retain_stderr_once_v24(
+                &self.stderr,
+                &mut self.captured_stderr,
+                Duration::from_secs(2),
+            );
+            let code = match self.captured_stderr.as_ref() {
+                Some(Ok(bytes)) => exit_diagnostic_v24::classify(bytes),
+                _ => "unknown",
+            };
+            eprintln!("DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code={code}");
+            self.failure_reported = true;
         }
         Ok(self.status)
     }
@@ -151,11 +185,14 @@ impl NativeDaemonProcessV23 {
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "daemon stdout did not close")?
             .map_err(|_| "bounded daemon stdout capture failed")?;
-        let stderr = self
-            .stderr
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| "daemon stderr did not close")?
-            .map_err(|_| "bounded daemon stderr capture failed")?;
+        let stderr = match self.captured_stderr.take() {
+            Some(captured) => captured,
+            None => self
+                .stderr
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| "daemon stderr did not close")?,
+        }
+        .map_err(|_| "bounded daemon stderr capture failed")?;
         Ok(CapturedExit {
             status,
             stdout,

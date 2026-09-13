@@ -415,7 +415,7 @@ fn real_graph_offer_cache_is_bounded_and_eviction_reexecutes_original_v24() -> T
         assert!(successful.bytes <= RETAINED_BYTES);
         assert_eq!(
             successful.bytes,
-            successful.keys.iter().map(|key| key.len()).sum()
+            successful.keys.iter().map(|key| key.len()).sum::<usize>()
         );
     }
     assert_eq!(cache.successful.lock().unwrap().keys.len(), ENTRIES);

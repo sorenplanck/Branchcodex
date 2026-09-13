@@ -398,12 +398,39 @@ fn runtime_bounds() -> ProductionRuntimeBoundsV1 {
         dispatch_lease_ms: 30_000,
         coordinator_lease_ms: 120_000,
         actuator_lease_ms: 120_000,
-        external_call_timeout_ms: 5_000,
+        // Enclose the unchanged native XMR HTTP clients' 30-second bound.
+        // Five seconds is refused during service admission, before any swap.
+        external_call_timeout_ms: 30_000,
         waiting_backoff_ms: 100,
         recovery_backoff_ms: 100,
         relay_poll_backoff_ms: 100,
         per_queue_batch_limit: 1,
     }
+}
+
+#[test]
+fn native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24() {
+    use crate::production_route_services::require_xmr_rpc_deadline_v24;
+    let bounds = runtime_bounds();
+    assert!(require_xmr_rpc_deadline_v24(bounds.external_call_timeout_ms).is_ok());
+    for too_short in [0, 5_000, 29_999] {
+        assert!(require_xmr_rpc_deadline_v24(too_short).is_err());
+    }
+    assert_eq!(bounds.external_call_timeout_ms, 30_000);
+    assert!(bounds.external_call_timeout_ms <= bounds.dispatch_lease_ms);
+    assert!(bounds.dispatch_lease_ms <= bounds.renew_before_ms);
+    assert!(bounds.renew_before_ms < bounds.lease_duration_ms);
+    assert!(bounds.dispatch_lease_ms <= bounds.coordinator_lease_ms);
+    assert!(bounds.dispatch_lease_ms <= bounds.actuator_lease_ms);
+    assert_eq!(bounds.per_queue_batch_limit, 1);
+    // No expiry, backoff or owner lease is extended to mask slow computation.
+    assert_eq!(bounds.lease_duration_ms, 120_000);
+    assert_eq!(bounds.coordinator_lease_ms, 120_000);
+    assert_eq!(bounds.actuator_lease_ms, 120_000);
+    assert_eq!(bounds.dispatch_lease_ms, 30_000);
+    assert_eq!(bounds.waiting_backoff_ms, 100);
+    assert_eq!(bounds.recovery_backoff_ms, 100);
+    assert_eq!(bounds.relay_poll_backoff_ms, 100);
 }
 
 fn random_id() -> [u8; 32] {

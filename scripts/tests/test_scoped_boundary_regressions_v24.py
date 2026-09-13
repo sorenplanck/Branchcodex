@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 37)
+        self.assertEqual(len(ids), 40)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -55,8 +55,13 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "timing_v24"),
             ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "barrier"),
             ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_barrier.rs", "xmr_progress_v24"),
+            ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_barrier.rs", "leg_parameters_v24_tests"),
+            ("crates/dom-interopd/src/lib.rs", "production_xmr_native_binary_v23_tests"),
+            ("crates/dom-interopd/src/production_xmr_native_binary_v23_tests.rs", "process"),
+            ("crates/dom-interopd/src/production_xmr_native_binary_v23_tests/process.rs", "exit_diagnostic_v24"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "deadline_plan_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_wallet_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_f6_v23"),
             ("crates/dom-interopd/src/production_xmr_native_deadline_plan_v23_tests.rs", "projection_v24"),
             ("crates/dom-interopd/src/production_xmr_native_daemon_wallet_v23_tests.rs", "scan_tests_v24"),
             ("crates/adapters/dom-real/src/lib.rs", "funding_deadline_v23_tests"),
@@ -163,7 +168,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
             "xmr-graph-offer-proof-cache": (7, "real_graph_offer_warm_repeat64_reports_actual_verifier_counts_v24"),
             "adaptor-public-range-proof-cache": (5, "public_range_proof_cache_transaction_preserves_error_index_order_and_atomic_admission_v24"),
         }
-        self.assertEqual([item["id"] for item in runner.SELECTIONS[8:12]], list(expected))
+        self.assertEqual([item["id"] for item in runner.SELECTIONS[11:15]], list(expected))
         for identifier, (count, mandatory) in expected.items():
             with self.subTest(selection=identifier):
                 spec = runner.spec_for(identifier)
@@ -188,6 +193,29 @@ class ClosedBoundaryListTests(unittest.TestCase):
             "terminal_spends_use_finality_and_multiple_fundings_use_latest_maturity_v24",
             "planner_refuses_overflow_invalid_finality_and_inconsistent_history_v24",
         )])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_safe_exit_and_leg_codec_preflights_remain_closed_pure_tests(self):
+        for identifier, count in (("native-preflight-leg-parameters", 3),
+                                  ("native-preflight-exit-diagnostic", 6)):
+            with self.subTest(selection=identifier):
+                spec = runner.spec_for(identifier)
+                self.assertEqual(len(spec["required_tests"]), count)
+                self.assertEqual(spec["filter"], spec["module_prefix"])
+                self.assertEqual(spec["features"], ["production"])
+                with mock.patch.object(runner.subprocess, "Popen") as process:
+                    runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
+                    self.assertEqual(process.call_args.args[0], runner.command(identifier))
+                    process.assert_called_once()
+
+    def test_xmr_rpc_budget_preflight_runs_only_the_selected_bound_regression(self):
+        spec = runner.spec_for("native-preflight-xmr-rpc-budget")
+        exact = "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24"
+        self.assertEqual(spec["required_tests"], [exact])
+        self.assertEqual(spec["filter"], exact)
         with mock.patch.object(runner.subprocess, "Popen") as process:
             runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
             self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))

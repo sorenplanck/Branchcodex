@@ -397,9 +397,7 @@ impl RouteServicesV8 {
                     {
                         return Err(Error::InvalidXmrEndpoints);
                     }
-                    if timeout_ms < 30_000 {
-                        return Err(Error::InvalidRuntimeTimeout);
-                    }
+                    require_xmr_rpc_deadline_v24(timeout_ms)?;
                     DeploymentV8::Monero(
                         admission
                             .monero_deployment_capability(leg)
@@ -415,6 +413,15 @@ impl RouteServicesV8 {
             timeout_ms,
         })
     }
+}
+
+// The selected native HTTP clients have a fixed 30-second request bound.
+// This is an admission check, not a sleep or an override of either client.
+pub(crate) fn require_xmr_rpc_deadline_v24(timeout_ms: u64) -> Result<(), Error> {
+    if timeout_ms < 30_000 {
+        return Err(Error::InvalidRuntimeTimeout);
+    }
+    Ok(())
 }
 
 enum DeploymentV8 {
