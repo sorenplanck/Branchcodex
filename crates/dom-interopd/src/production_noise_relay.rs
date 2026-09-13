@@ -699,8 +699,8 @@ mod graph_offer_v22;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use graph_offer_v22::SignedNativeGraphFixtureV23;
 pub(crate) use graph_offer_v22::{
-    ProductionNoiseGraphOfferV22, ProductionReceivedXmrGraphCandidateV22,
-    ProductionXmrGraphPublicMaterialV22,
+    ProductionAuthenticatedXmrClaimPrincipalV25, ProductionNoiseGraphOfferV22,
+    ProductionReceivedXmrGraphCandidateV22, ProductionXmrGraphPublicMaterialV22,
 };
 
 /// Bounded counters plus an optional public candidate, redacted in Debug.

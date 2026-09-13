@@ -3,6 +3,9 @@ use super::*;
 #[path = "production_noise_graph_material_v22.rs"]
 mod material_v22;
 pub(crate) use material_v22::ProductionXmrGraphPublicMaterialV22;
+#[path = "production_noise_xmr_f6_principal_v25.rs"]
+mod f6_principal_v25;
+pub(crate) use f6_principal_v25::ProductionAuthenticatedXmrClaimPrincipalV25;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "production_noise_native_graph_v22_tests.rs"]
 mod native_graph_tests;

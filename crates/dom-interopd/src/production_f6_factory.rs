@@ -12,6 +12,11 @@ pub(crate) mod native_daemon_export_v23;
 pub(crate) mod artifact_writer_v23;
 #[path = "production_f6_native_observation_v23.rs"]
 pub(crate) mod native_observation_v23;
+#[path = "production_f6_native_principal_slot_v25.rs"]
+mod native_principal_slot_v25;
+pub(crate) use native_principal_slot_v25::{
+    ProductionF6DomTermsOwnerV25, ProductionNativePrincipalPublisherV25,
+};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -694,8 +699,8 @@ impl ProductionF6CounterpartyTermsOwnerV7 {
 
 /// Both DOM payout owners plus both exact counterparty deployments/owners.
 pub(crate) struct ProductionF6TermsOwnersV7 {
-    pub upstream_dom: AuthenticatedDomPayoutFaceV1,
-    pub downstream_dom: AuthenticatedDomPayoutFaceV1,
+    pub upstream_dom: ProductionF6DomTermsOwnerV25,
+    pub downstream_dom: ProductionF6DomTermsOwnerV25,
     pub upstream_counterparty: ProductionF6CounterpartyTermsOwnerV7,
     pub downstream_counterparty: ProductionF6CounterpartyTermsOwnerV7,
 }
@@ -1006,6 +1011,26 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             &downstream_rfq,
         )?;
 
+        // Both RFQs and BOTH principal owners must exist before the first
+        // inventory lease or lazy store effect. Native peer proof may arrive
+        // later over Noise; this is awaiting, not a poisoned factory.
+        let owners = self
+            .terms
+            .as_ref()
+            .ok_or(ProductionF6ActivationRefusalV2::Unavailable)?;
+        for (position, owner) in [
+            (SettlementPositionV2::Upstream, &owners.upstream_dom),
+            (SettlementPositionV2::Downstream, &owners.downstream_dom),
+        ] {
+            if !owner.ready()? {
+                return Err(ProductionF6ActivationRefusalV2::Awaiting(
+                    crate::production_f6_lifecycle::ProductionPendingAuthorityV1::AdapterTerms {
+                        position,
+                    },
+                ));
+            }
+        }
+
         let upstream_secp = fresh_secp()?;
         let downstream_secp = fresh_secp()?;
         let native_observations = self.preflight_native_observations_v23(&upstream_secp)?;
@@ -1244,7 +1269,8 @@ impl ProductionF6PairAuthoritiesFactoryV2 for ProductionF6PairAuthoritiesFactory
     ) -> Result<AuthenticatedProductionF6PairBindingV7, ProductionF6ActivationRefusalV2> {
         let result =
             self.bind_pair_inner(upstream_wire, upstream_rfq, downstream_wire, downstream_rfq);
-        if result.is_err() {
+        if matches!(&result, Err(error) if !matches!(error, ProductionF6ActivationRefusalV2::Awaiting(_)))
+        {
             self.poisoned = true;
         }
         result
@@ -1801,22 +1827,24 @@ fn build_terms_pair(
         .registry
         .resolve_dom()
         .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
-    let upstream_dom = AdapterAuthenticatedRefundFaceV2::from_dom(
-        owners.upstream_dom,
-        &upstream_binding,
-        composition.upstream(),
-        composition,
-        dom_deployment,
-    )
-    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
-    let downstream_dom = AdapterAuthenticatedRefundFaceV2::from_dom(
-        owners.downstream_dom,
-        &downstream_binding,
-        composition.downstream(),
-        composition,
-        dom_deployment,
-    )
-    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+    let upstream_dom = owners
+        .upstream_dom
+        .into_face(
+            &upstream_binding,
+            composition.upstream(),
+            composition,
+            dom_deployment,
+        )
+        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+    let downstream_dom = owners
+        .downstream_dom
+        .into_face(
+            &downstream_binding,
+            composition.downstream(),
+            composition,
+            dom_deployment,
+        )
+        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
     let upstream_counterparty = counterparty_face(
         owners.upstream_counterparty,
         &upstream_binding,

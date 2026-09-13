@@ -319,8 +319,8 @@ impl ProductionRelayStage12OwnerV1 {
         driver.xmr_noise_graph_offer_v22(material)
     }
 
-    /// Memory-only candidate: a crash causes retransmission, not a fabricated
-    /// durability acknowledgement. Economic acceptance remains separate.
+    /// Graph candidate with separate F6 principal retention. Retaining this
+    /// authenticated public proof is not an economic/funding acknowledgement.
     pub(crate) fn receive_xmr_graph_candidate_v22(
         &mut self,
         leg: LegIdV1,
@@ -346,6 +346,23 @@ impl ProductionRelayStage12OwnerV1 {
             .is_some_and(|old| old != &candidate)
         {
             return Err(Error::Binding);
+        }
+        let private = self._private_bootstrap_v13.as_mut().ok_or(Error::Binding)?;
+        let cancelled = private._cancelled_contracts[index]
+            .as_ref()
+            .ok_or(Error::Binding)?;
+        let material = &mut private._shares[index];
+        if material.capability.binding().participant_id() != &cancelled.policy.policy().xmr_funder {
+            // Only the received beneficiary packet may populate this slot.
+            // Persist and read it back before the factory can bind any RFQ.
+            let principal = material
+                .retain_peer_f6_principal_v25(&context, &candidate)
+                .map_err(|_| Error::Binding)?;
+            private._f6_native_principals_v25[index]
+                .as_ref()
+                .ok_or(Error::Binding)?
+                .publish(principal)
+                .map_err(|_| Error::Binding)?;
         }
         self.xmr_graph_public_v22[index] = Some(public);
         self.xmr_graph_candidates_v22[index] = Some(candidate);

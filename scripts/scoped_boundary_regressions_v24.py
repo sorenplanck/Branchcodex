@@ -338,6 +338,37 @@ SELECTIONS = (
                   "accepted_before_expiry_recovers_lost_acks_after_all_stores_reopen_v23",
                   "never_accepted_expired_head_is_quarantined_and_fresh_successor_cannot_skip_it_v23"),
               integration="expiry_recovery_characterization_v23"),
+    selection("native-f6-principal-face", "dom-interopd",
+              "production_f6::terms::native_xmr_dom_face_v25::tests::",
+              "crates/dom-interopd/src/production_f6/native_xmr_dom_face_v25_tests.rs", (
+                  "real_principal_proofs_and_common_public_record_are_stable_v25",
+                  "principal_recipient_roster_direction_chain_and_terms_transplants_fail_v25",
+                  "other_valid_policy_payouts_cannot_be_relabelled_as_principal_v25",
+                  "exact_public_principal_encoding_rejects_proof_and_capsule_mutations_v25",
+                  "changed_availability_requires_new_proof_not_reused_principal_authority_v25"),
+              features=("production",)),
+    selection("native-f6-principal-slot", "dom-interopd",
+              "production_f6_factory::native_principal_slot_v25::tests::",
+              "crates/dom-interopd/src/production_f6_native_principal_slot_v25.rs", (
+                  "awaiting_slot_preserves_absence_without_creating_an_owner",
+                  "duplicate_publication_does_not_replenish_consumed_owner",
+                  "different_principal_refused_before_and_after_consumption"),
+              features=("production",)),
+    selection("native-f6-principal-awaiting", "dom-interopd",
+              "production_f6_activation::native_pending_v25_tests::",
+              "crates/dom-interopd/src/production_f6_native_pending_v25_tests.rs", (
+                  "awaiting_principal_retains_exact_factory_and_both_rfq_inputs_v25",
+                  "principal_binding_refusal_still_poisoned_and_never_treated_as_wait_v25",
+                  "changed_rfq_while_waiting_is_refused_without_rebinding_factory_v25"),
+              features=("production",)),
+    selection("native-f6-principal-provenance", "dom-interopd",
+              "production_noise_relay::graph_offer_v22::f6_principal_v25::tests::",
+              "crates/dom-interopd/src/production_noise_xmr_f6_principal_v25_tests.rs", (
+                  "original_local_beneficiary_and_noise_peer_mint_identical_principal_owners_v25",
+                  "peer_principal_reopens_from_original_journal_without_recreating_local_material_v25",
+                  "valid_alternative_peer_proof_cannot_replace_original_retained_principal_v25",
+                  "other_payouts_terms_and_corrupt_packets_never_publish_peer_principal_v25"),
+              features=("production",)),
 )
 
 COMPILE_ONLY = (
@@ -496,6 +527,30 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-principal-face":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::terms::native_xmr_dom_face_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::terms::native_xmr_dom_face_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-principal-slot":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6_factory::native_principal_slot_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6_factory::native_principal_slot_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-principal-awaiting":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6_activation::native_pending_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6_activation::native_pending_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-principal-provenance":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_noise_relay::graph_offer_v22::f6_principal_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_noise_relay::graph_offer_v22::f6_principal_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "dom-funding-dispatch-budget":

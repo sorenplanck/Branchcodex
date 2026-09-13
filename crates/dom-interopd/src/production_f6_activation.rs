@@ -364,6 +364,7 @@ struct ProductionF6PairActivationStateV2 {
     upstream_rfq: Option<RfqV2>,
     downstream_rfq: Option<RfqV2>,
     authority_factory: Option<Box<dyn ProductionF6PairAuthoritiesFactoryV2>>,
+    pending_authority_v25: Option<crate::production_f6_lifecycle::ProductionPendingAuthorityV1>,
     upstream_ready: Option<ProductionF6AuthoritiesV2>,
     downstream_ready: Option<ProductionF6AuthoritiesV2>,
     upstream_active: bool,
@@ -442,6 +443,7 @@ impl ProductionF6PairActivationRequestV2 {
             upstream_rfq: None,
             downstream_rfq: None,
             authority_factory: Some(self.authority_factory),
+            pending_authority_v25: None,
             upstream_ready: None,
             downstream_ready: None,
             upstream_active: false,
@@ -535,11 +537,20 @@ impl ProductionF6PairActivationStateV2 {
         let authenticated_pair =
             match factory.bind_pair(upstream_wire, upstream_rfq, downstream_wire, downstream_rfq) {
                 Ok(bindings) => bindings,
+                Err(ProductionF6ActivationRefusalV2::Awaiting(pending)) => {
+                    // A native beneficiary's authenticated public proof can
+                    // arrive after both RFQs. Preserve the exact factory and
+                    // inputs; no runtime/terminal ownership is consumed.
+                    self.authority_factory = Some(factory);
+                    self.pending_authority_v25 = Some(pending);
+                    return Ok(());
+                }
                 Err(error) => {
                     self.poisoned = true;
                     return Err(error);
                 }
             };
+        self.pending_authority_v25 = None;
         let (upstream, downstream, inventory_fencing_epoch) = authenticated_pair.into_parts();
         if !upstream.authenticates_pending_rfq(
             upstream_wire,
@@ -626,6 +637,9 @@ impl ProductionF6PairActivationStateV2 {
             (None, None) => {}
         }
         if self.runtime.is_none() {
+            if let Some(pending) = self.pending_authority_v25 {
+                return Err(ProductionF6ActivationRefusalV2::Awaiting(pending));
+            }
             Err(ProductionF6ActivationRefusalV2::Awaiting(
                 crate::production_f6_lifecycle::ProductionPendingAuthorityV1::AuthenticatedRfq {
                     position: other,
@@ -750,6 +764,10 @@ impl ProductionF6ActivationAuthorityV2 for ProductionF6PairActivationAuthorityV2
         Ok(authority)
     }
 }
+
+#[cfg(test)]
+#[path = "production_f6_native_pending_v25_tests.rs"]
+mod native_pending_v25_tests;
 
 #[cfg(test)]
 mod tests {

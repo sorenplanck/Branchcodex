@@ -30,6 +30,10 @@ use route_executor::LegIdV1;
 use super::{ProductionF6ErrorV2, ProductionSolverF6BindingV2};
 use crate::production_refund_arming::production_bitcoin_refund_route_binding_v1;
 
+#[path = "native_xmr_dom_face_v25.rs"]
+mod native_xmr_dom_face_v25;
+pub(crate) use native_xmr_dom_face_v25::ProductionNativeXmrDomFaceOwnerV25;
+
 const ZERO_DIGEST: Digest32 = [0; 32];
 const DOM_RECORD_DOMAIN: &[u8] = b"DOM-INTEROP/F6/ADAPTER-REFUND-FACE/DOM/V2\0";
 const EVM_RECORD_DOMAIN: &[u8] = b"DOM-INTEROP/F6/ADAPTER-REFUND-FACE/EVM/V2\0";

@@ -53,13 +53,6 @@ pub(crate) enum ProductionPendingAuthorityV1 {
     )]
     BondAttestationSigners { position: SettlementPositionV2 },
     /// The adapter-owned refund/payout terms authority is unavailable.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     AdapterTerms { position: SettlementPositionV2 },
     /// The two explicit, authenticated final-claim role scopes are absent.
     #[cfg_attr(

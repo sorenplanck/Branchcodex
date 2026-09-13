@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 45)
+        self.assertEqual(len(ids), 49)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -44,6 +44,14 @@ class ClosedBoundaryListTests(unittest.TestCase):
         # f7_xmr_refund_transport_v23.rs lives under f7_v12::xmr_refund_transport_v23.
         edges = (
             ("crates/dom-interopd/src/lib.rs", "production_inputs"),
+            ("crates/dom-interopd/src/production_f6/terms.rs", "native_xmr_dom_face_v25"),
+            ("crates/dom-interopd/src/production_f6/native_xmr_dom_face_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_f6_factory.rs", "native_principal_slot_v25"),
+            ("crates/dom-interopd/src/production_f6_activation.rs", "native_pending_v25_tests"),
+            ("crates/dom-interopd/src/production_noise_relay.rs", "graph_offer_v22"),
+            ("crates/dom-interopd/src/production_noise_graph_offer_v22.rs", "f6_principal_v25"),
+            ("crates/dom-interopd/src/production_noise_xmr_f6_principal_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "f6_source_fixture_v25"),
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_graph_wallet_tests"),
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_observation_v23"),
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_funding_v23"),
@@ -214,6 +222,23 @@ class ClosedBoundaryListTests(unittest.TestCase):
                 spec = runner.spec_for(identifier)
                 self.assertEqual(len(spec["required_tests"]), count)
                 self.assertIn(spec["module_prefix"] + mandatory, spec["required_tests"])
+                self.assertEqual(spec["filter"], spec["module_prefix"])
+                self.assertNotIn("--ignored", runner.command(identifier))
+                with mock.patch.object(runner.subprocess, "Popen") as process:
+                    runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
+                    self.assertEqual(process.call_args.args[0], runner.command(identifier))
+                    process.assert_called_once()
+
+    def test_native_f6_principal_keeps_proof_slot_and_pending_regressions(self):
+        for identifier, count in (
+            ("native-f6-principal-face", 5),
+            ("native-f6-principal-slot", 3),
+            ("native-f6-principal-awaiting", 3),
+            ("native-f6-principal-provenance", 4),
+        ):
+            with self.subTest(selection=identifier):
+                spec = runner.spec_for(identifier)
+                self.assertEqual(len(spec["required_tests"]), count)
                 self.assertEqual(spec["filter"], spec["module_prefix"])
                 self.assertNotIn("--ignored", runner.command(identifier))
                 with mock.patch.object(runner.subprocess, "Popen") as process:

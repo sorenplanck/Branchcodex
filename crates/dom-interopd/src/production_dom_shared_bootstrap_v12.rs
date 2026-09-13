@@ -115,7 +115,7 @@ impl ProductionDomSharedBootstrapV12 {
             .require_production_binding(shared_bootstrap_journal_binding_v12(binding, &roster)?)
             .map_err(|_| Error::Journal)?;
         let limits =
-            store::ProductionAuditLimitsV1::new(19, 131072, 32768).map_err(|_| Error::Journal)?;
+            store::ProductionAuditLimitsV1::new(20, 131072, 32768).map_err(|_| Error::Journal)?;
         let snapshot = journal
             .production_audit_snapshot(limits)
             .map_err(|_| Error::Journal)?;
@@ -144,6 +144,7 @@ impl ProductionDomSharedBootstrapV12 {
                             | b"xmr-graph-proofs-v22"
                             | b"xmr-funding-offer-v22"
                             | b"xmr-graph-offer-v22"
+                            | b"xmr-peer-graph-offer-v25"
                     )
                     || !runtime_public_length_valid(row.key(), row.value().len())
             })
@@ -663,6 +664,7 @@ impl ProductionBoundDomSharedOutputV12 {
                 | b"xmr-graph-proofs-v22"
                 | b"xmr-funding-offer-v22"
                 | b"xmr-graph-offer-v22"
+                | b"xmr-peer-graph-offer-v25"
         ) {
             return Err(ProductionDomSharedBootstrapErrorV12::Binding);
         }
@@ -683,7 +685,9 @@ impl ProductionBoundDomSharedOutputV12 {
         key: &[u8],
         bytes: &[u8],
     ) -> Result<(), ProductionDomSharedBootstrapErrorV12> {
-        if !runtime_public_length_valid(key, bytes.len()) {
+        // Peer evidence has a dedicated authenticated ingress below. Generic
+        // public-record writes must not manufacture peer identity provenance.
+        if key == b"xmr-peer-graph-offer-v25" || !runtime_public_length_valid(key, bytes.len()) {
             return Err(ProductionDomSharedBootstrapErrorV12::Binding);
         }
         if let Some(old) = self.runtime_public_record_v16(key)? {
@@ -699,6 +703,43 @@ impl ProductionBoundDomSharedOutputV12 {
             return Err(ProductionDomSharedBootstrapErrorV12::Journal);
         }
         Ok(())
+    }
+
+    /// Authenticate the peer beneficiary's exact public graph, retain it in
+    /// this original journal, and only then release its principal proof token.
+    /// Missing state is not reconstructed by copying another actor's custody.
+    pub(crate) fn retain_peer_f6_principal_v25(
+        &mut self,
+        source: &crate::production_noise_relay::ProductionNoiseGraphOfferV22,
+        candidate: &crate::production_noise_relay::ProductionReceivedXmrGraphCandidateV22,
+    ) -> Result<
+        crate::production_noise_relay::ProductionAuthenticatedXmrClaimPrincipalV25,
+        ProductionDomSharedBootstrapErrorV12,
+    > {
+        use ProductionDomSharedBootstrapErrorV12 as Error;
+        source
+            .verify_f6_peer_principal_v25(self, candidate)
+            .map_err(|_| Error::Binding)?;
+        let key = b"xmr-peer-graph-offer-v25";
+        if !runtime_public_length_valid(key, candidate.bytes().len()) {
+            return Err(Error::Binding);
+        }
+        if let Some(old) = self.runtime_public_record_v16(key)? {
+            if old != candidate.bytes() {
+                return Err(Error::Journal);
+            }
+        } else {
+            self.journal
+                .put_opaque_if_absent(NS, key, candidate.bytes())
+                .map_err(|_| Error::Journal)?;
+        }
+        if self.runtime_public_record_v16(key)?.as_deref() != Some(candidate.bytes()) {
+            return Err(Error::Journal);
+        }
+        source
+            .reopen_f6_principal_v25(self)
+            .map_err(|_| Error::Binding)?
+            .ok_or(Error::Journal)
     }
 }
 
@@ -751,7 +792,7 @@ mod runtime_public_length_tests {
 }
 
 fn runtime_public_limit(key: &[u8]) -> usize {
-    if key == b"xmr-graph-offer-v22" {
+    if matches!(key, b"xmr-graph-offer-v22" | b"xmr-peer-graph-offer-v25") {
         return xmr_refund_policy::graph_offer_v22::XmrGraphOfferV22::MAX_BYTES;
     }
     if key == b"xmr-funding-offer-v22" {

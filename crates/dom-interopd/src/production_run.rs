@@ -22,9 +22,7 @@ use adapter_dom_real::RealDomRpcRuntimeV1;
 use btc_actuator::DurableBitcoinActuatorV1;
 use cap_std::fs::Dir;
 use deployment_registry::ResolvedEvmDeploymentV1;
-use dom_actuator::{
-    AuthenticatedDomPayoutFaceV1, DomActuatorStoreV1, DomLeaseV1, DomPayoutFaceSelectionRequestV1,
-};
+use dom_actuator::{DomActuatorStoreV1, DomLeaseV1, DomPayoutFaceSelectionRequestV1};
 use dom_scriptless_store::{
     BudgetPolicyProfileV1, BudgetPolicyV1, ContractsSessionStoreV1,
     PreparedContractsSessionStoreOpenV1, BUDGET_POLICY_LEN,
@@ -1668,12 +1666,16 @@ fn authenticate_dom_f6_payouts(
     lease_duration_ms: u64,
 ) -> Result<
     (
-        AuthenticatedDomPayoutFaceV1,
-        AuthenticatedDomPayoutFaceV1,
+        crate::production_f6_factory::ProductionF6DomTermsOwnerV25,
+        crate::production_f6_factory::ProductionF6DomTermsOwnerV25,
         DomLeaseV1,
     ),
     ProductionRunErrorV1,
 > {
+    use crate::production_f6_factory::{
+        ProductionF6DomTermsOwnerV25, ProductionNativePrincipalPublisherV25,
+    };
+    let mut native_owners: [Option<ProductionF6DomTermsOwnerV25>; 2] = [None, None];
     let participant = chain_signers.participant_id();
     let lease = store
         .acquire_lease(participant.0, owner_id, now_unix_ms, lease_duration_ms)
@@ -1818,6 +1820,38 @@ fn authenticate_dom_f6_payouts(
                 )
                 .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
                 material.xmr_graph_shares_v22 = Some(shares);
+                // The DOM beneficiary may be the peer. A derived principal
+                // must not be relabelled as a local parent-session C0 payout.
+                // Reopen only the original authenticated journal before F6
+                // history recovery; cold peer absence remains awaiting.
+                let local_packet = material
+                    .runtime_public_record_v16(b"xmr-graph-offer-v22")
+                    .map_err(|_| ProductionRunErrorV1::F6Authorities)?
+                    .ok_or(ProductionRunErrorV1::F6Authorities)?;
+                let route_id = chain_signers.dom_binding(leg).route_id();
+                let source = crate::production_noise_relay::ProductionNoiseGraphOfferV22::new(
+                    route_id,
+                    terms.clone(),
+                    cancelled.policy.clone(),
+                    material.capability.binding().clone(),
+                    local_packet,
+                )
+                .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+                let (publisher, owner) = ProductionNativePrincipalPublisherV25::new(
+                    route_id,
+                    terms.clone(),
+                    cancelled.policy.clone(),
+                );
+                if let Some(principal) = source
+                    .reopen_f6_principal_v25(material)
+                    .map_err(|_| ProductionRunErrorV1::F6Authorities)?
+                {
+                    publisher
+                        .publish(principal)
+                        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+                }
+                private._f6_native_principals_v25[index] = Some(publisher);
+                native_owners[index] = Some(owner);
                 continue;
             }
             if terms.policy_version != dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17 {
@@ -1840,41 +1874,49 @@ fn authenticate_dom_f6_payouts(
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
     let downstream_request = DomPayoutFaceSelectionRequestV1::new(downstream_value, now_unix_ms)
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
-    let upstream = {
+    let upstream = if let Some(owner) = native_owners[0].take() {
+        owner
+    } else {
         let mut authority = chain_signers
             .dom_authority(LegIdV1::Upstream)
             .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
-        if private_bootstrap.is_some()
-            && inputs.composition().upstream().policy_version
-                == dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17
-        {
-            authority
-                .wallet()
-                .prepare_unique_payout_face_v16(store, lease, upstream_request)
-        } else {
-            authority
-                .wallet()
-                .authenticate_unique_payout_face(store, lease, upstream_request)
-        }
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?
+        ProductionF6DomTermsOwnerV25::Wallet(
+            if private_bootstrap.is_some()
+                && inputs.composition().upstream().policy_version
+                    == dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17
+            {
+                authority
+                    .wallet()
+                    .prepare_unique_payout_face_v16(store, lease, upstream_request)
+            } else {
+                authority
+                    .wallet()
+                    .authenticate_unique_payout_face(store, lease, upstream_request)
+            }
+            .map_err(|_| ProductionRunErrorV1::F6Authorities)?,
+        )
     };
-    let downstream = {
+    let downstream = if let Some(owner) = native_owners[1].take() {
+        owner
+    } else {
         let mut authority = chain_signers
             .dom_authority(LegIdV1::Downstream)
             .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
-        if private_bootstrap.is_some()
-            && inputs.composition().downstream().policy_version
-                == dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17
-        {
-            authority
-                .wallet()
-                .prepare_unique_payout_face_v16(store, lease, downstream_request)
-        } else {
-            authority
-                .wallet()
-                .authenticate_unique_payout_face(store, lease, downstream_request)
-        }
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?
+        ProductionF6DomTermsOwnerV25::Wallet(
+            if private_bootstrap.is_some()
+                && inputs.composition().downstream().policy_version
+                    == dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17
+            {
+                authority
+                    .wallet()
+                    .prepare_unique_payout_face_v16(store, lease, downstream_request)
+            } else {
+                authority
+                    .wallet()
+                    .authenticate_unique_payout_face(store, lease, downstream_request)
+            }
+            .map_err(|_| ProductionRunErrorV1::F6Authorities)?,
+        )
     };
     // Persist before any outbound publication. A restart reconstructs the
     // private signing shares from the encrypted wallet and exact reservation,
@@ -1923,7 +1965,7 @@ fn authenticate_dom_f6_payouts(
                     lease,
                     terms,
                     &material.capability,
-                    payout,
+                    payout.wallet().ok_or(ProductionRunErrorV1::F6Authorities)?,
                     retained.as_ref(),
                     now_unix_ms,
                 )

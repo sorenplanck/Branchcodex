@@ -1007,6 +1007,8 @@ pub(crate) struct MountedBootstrapV13 {
     pub(crate) _shares: [ProductionBoundDomSharedOutputV12; 2],
     pub(crate) _cancelled_shares: [Option<ProductionBoundDomSharedOutputV12>; 2],
     pub(crate) _cancelled_contracts: [Option<MountedCancelledContractsV22>; 2],
+    pub(crate) _f6_native_principals_v25:
+        [Option<crate::production_f6_factory::ProductionNativePrincipalPublisherV25>; 2],
     _ceremony: Journal,
 }
 
@@ -1138,6 +1140,7 @@ pub(crate) fn resume_completed_bootstrap_v13(
         xmr_cancelled_v22::resume(&context, &plan, &cap, work, &unlock, &policy)?;
     Ok(Some(MountedBootstrapV13 {
         _shares: shares.try_into().map_err(|_| Custody)?,
+        _f6_native_principals_v25: [None, None],
         _cancelled_shares: cancelled_shares,
         _cancelled_contracts: xmr_cancelled_v22::resume_contracts(
             &context, &plan, &cap, &policy, &journal,

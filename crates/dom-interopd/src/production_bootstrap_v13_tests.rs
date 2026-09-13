@@ -8,6 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 #[path = "production_xmr_native_bootstrap_path_v24_tests.rs"]
 mod bootstrap_path_v24;
 
+#[cfg(target_os = "linux")]
+#[path = "production_xmr_native_f6_source_fixture_v25_tests.rs"]
+pub(crate) mod f6_source_fixture_v25;
+
 fn write(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
