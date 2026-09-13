@@ -30,6 +30,7 @@ pub use kaystra_core::types::{AssetId, ChainId, FeeLimitV1, ParticipantId, Timel
 pub use uspe::objects::PolicyId;
 
 pub mod fee_policy;
+pub mod native_reconfirmation_v25;
 pub mod selection;
 /// Versioned heterogeneous-clock F6 objects for production routes.
 pub mod v2;

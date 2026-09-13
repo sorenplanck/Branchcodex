@@ -8,8 +8,8 @@ use crate::production_dom_shared_bootstrap_v12::{
 use crate::relay_worker::{ContractsRelayIngressErrorV1, PreparedContractsIngressV1};
 use dom_actuator::DomSessionBindingV1;
 use dom_adaptor::{
-    BpStatementV1, CollaborativeBpNonceBindingV1, CollaborativeRangeProof, DirectionV1,
-    EarlyShareCommitmentV1, EarlyShareRevealV1, PendingSharedBlindingBindingV1,
+    BpStatementV1, CollaborativeBpNonceBindingV1, DirectionV1, EarlyShareCommitmentV1,
+    EarlyShareRevealV1, PendingSharedBlindingBindingV1, Round1ContinuationV25,
     SharedBlindingBindingV1, TrustedChainIdV1,
 };
 use dom_crypto::{blake2b_256, PublicKey};
@@ -74,6 +74,9 @@ pub(crate) struct ProductionBootstrapLegV16 {
         kaystra_core::SettlementTermsV1,
     )>,
     templates_v17: Option<templates_v17::TemplateDriverV17>,
+    // Process-local, move-only continuation of this exact BP session. It is
+    // never persisted or used instead of current Store/vault authentication.
+    round1_continuation_v25: Option<Round1ContinuationV25>,
 }
 impl ProductionBootstrapLegV16 {
     pub(crate) fn new(
@@ -146,6 +149,7 @@ impl ProductionBootstrapLegV16 {
             complete: false,
             xmr_collateral_policy: None,
             templates_v17: None,
+            round1_continuation_v25: None,
             xmr_value_v22: None,
             frozen_xmr_v22: None,
             verified_xmr_v22: None,
@@ -220,6 +224,7 @@ impl ProductionBootstrapLegV16 {
             complete: false,
             xmr_collateral_policy: None,
             templates_v17: None,
+            round1_continuation_v25: None,
             xmr_value_v22: Some(amount),
             frozen_xmr_v22: None,
             verified_xmr_v22: None,
@@ -385,6 +390,7 @@ impl ProductionBootstrapLegV16 {
             return Err(Error::Binding);
         }
         if self.complete {
+            self.round1_continuation_v25 = None;
             return Ok(Step::Complete);
         }
         let head = owner.store.load_session(owner.session_id)?;
@@ -392,6 +398,7 @@ impl ProductionBootstrapLegV16 {
             head.phase(),
             SessionPhaseV1::Aborted | SessionPhaseV1::FailedClosed
         ) {
+            self.round1_continuation_v25 = None;
             return Err(Error::Binding);
         }
         let early_phase = head.revision() < 6
@@ -417,6 +424,9 @@ impl ProductionBootstrapLegV16 {
             )?
         };
         let proof_complete = completed_proof.is_some();
+        if proof_complete {
+            self.round1_continuation_v25 = None;
+        }
         if proof_complete && self.frozen_xmr_v22.is_none() {
             if let Some(value) = self.xmr_value_v22 {
                 let frozen = owner
@@ -654,7 +664,11 @@ impl ProductionBootstrapLegV16 {
                     Stage::RoundCommit | Stage::Round1 => {
                         let secrets = continuation.finish_common_nonce(pending)?;
                         let round1 = driver
-                            .round1(&self.statement, &secrets)
+                            .round1_with_continuation_v25(
+                                &self.statement,
+                                secrets,
+                                &mut self.round1_continuation_v25,
+                            )
                             .map_err(|_| Error::Crypto)?;
                         if stage == Stage::RoundCommit {
                             round1.reveal_commitment().to_vec()
@@ -677,9 +691,21 @@ impl ProductionBootstrapLegV16 {
                             .map_err(|_| Error::Vault)?;
                         let secrets = continuation.finish_common_nonce(pending)?;
                         driver
-                            .round1(&self.statement, &secrets)
+                            .round1_with_continuation_v25(
+                                &self.statement,
+                                secrets,
+                                &mut self.round1_continuation_v25,
+                            )
                             .map_err(|_| Error::Crypto)?;
                         let aggregate = continuation.aggregate_round1()?;
+                        // The same private continuation is moved, never
+                        // cloned. The original vault-backed round2 still
+                        // persists/consumes custody before bytes can leave.
+                        let secrets = self
+                            .round1_continuation_v25
+                            .take()
+                            .ok_or(Error::Crypto)?
+                            .into_local_for_round2_v25();
                         driver
                             .round2_vault_backed_v1(
                                 &self.statement,
@@ -689,13 +715,16 @@ impl ProductionBootstrapLegV16 {
                             )
                             .map_err(|_| Error::Vault)?
                     }
-                    CollaborativeBpCustodyV16::Round2 | CollaborativeBpCustodyV16::Proof => driver
-                        .resume_persisted_round2_v1(
-                            &self.statement,
-                            local as u16,
-                            material.vault.as_mut().ok_or(Error::Vault)?,
-                        )
-                        .map_err(|_| Error::Vault)?,
+                    CollaborativeBpCustodyV16::Round2 | CollaborativeBpCustodyV16::Proof => {
+                        self.round1_continuation_v25 = None;
+                        driver
+                            .resume_persisted_round2_v1(
+                                &self.statement,
+                                local as u16,
+                                material.vault.as_mut().ok_or(Error::Vault)?,
+                            )
+                            .map_err(|_| Error::Vault)?
+                    }
                     _ => return Err(Error::Vault),
                 };
                 Zeroizing::new(

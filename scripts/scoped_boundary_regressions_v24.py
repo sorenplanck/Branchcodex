@@ -372,6 +372,46 @@ SELECTIONS = (
 )
 
 SELECTIONS += (
+    selection("adaptor-native-round1-continuation", "dom-adaptor",
+              "collaborative_range_proof::round1_continuation_v25::tests::",
+              "crates/dom-adaptor/src/round1_continuation_v25_tests.rs", (
+                  "real_two_party_round1_three_to_one_preserves_final_proof_and_durable_round2_v25",
+                  "changed_private_origin_or_participant_refuses_without_replacing_round1_v25",
+                  "complete_statement_and_raw_extra_are_compared_before_round1_reuse_v25",
+                  "fresh_guards_and_consumed_state_never_become_round1_reuse_authority_v25",
+                  "dropping_round1_holder_restarts_original_without_changing_public_share_v25",
+                  "oversized_extra_always_computes_original_and_never_becomes_round1_memo_v25",
+                  "failed_durable_round2_cannot_reuse_the_moved_round1_state_v25",
+                  "poisoned_fresh_or_retained_round1_state_refuses_without_replacement_v25")),
+    selection("native-f6-versioned-acceptance-codec", "rfq",
+              "native_reconfirmation_v25::tests::",
+              "crates/rfq/src/native_reconfirmation_v25_tests.rs", (
+                  "genuine_rfq_quote_terms_roundtrip_preserves_complete_original_terms",
+                  "legacy_and_new_acceptance_codecs_never_cross_decode",
+                  "every_header_domain_version_flag_and_total_length_byte_is_closed",
+                  "every_public_payload_bit_is_rejected_or_changes_expected_acceptance",
+                  "all_inner_lengths_truncations_suffixes_and_overbounds_are_refused",
+                  "inner_acceptance_must_match_full_terms_and_outer_initiator",
+                  "every_terms_field_is_part_of_expected_acceptance_not_just_its_inner_id",
+                  "missing_record_zero_identity_and_solver_as_initiator_are_refused",
+                  "public_replay_is_exact_and_cannot_cross_record_initiator_session_or_position")),
+    selection("native-f6-initiator-receiver-boundaries", "dom-interopd",
+              "production_f6::initiator_v25::tests::",
+              "crates/dom-interopd/src/production_f6/initiator_v25_tests.rs", (
+                  "initiator_accepts_designated_solver_quote_sender_but_not_impersonation_v25",
+                  "initiator_local_owner_and_selection_acceptance_sender_are_closed_v25",
+                  "initiator_physical_bindings_cannot_open_solver_or_other_position_logs_v25",
+                  "initiator_exact_records_survive_reopen_and_conflicts_never_overwrite_v25",
+                  "initiator_delivery_replay_requires_exact_disposition_record_v25",
+                  "initiator_reuses_exact_time_scope_not_embedded_clock_scope_v25",
+                  "initiator_selection_cannot_switch_winner_or_authority_snapshot_v25"),
+              features=("production",)),
+    selection("native-proof-restart-cost-accounting", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::native_proof_timing_v25::",
+              "crates/dom-interopd/src/production_xmr_native_proof_timing_v25_tests.rs", (
+                  "native_proof_restart_timing_counts_only_observed_calls_v25",
+                  "native_proof_restart_timing_phases_are_disjoint_and_cover_total_v25"),
+              features=("production",)),
     selection("adaptor-bound-partial-equation-cache", "dom-adaptor",
               "signing_round::partial_bound_verification_cache_v25::tests::",
               "crates/dom-adaptor/src/partial_bound_verification_cache_v25_tests.rs", (
@@ -382,6 +422,18 @@ SELECTIONS += (
                   "message_length_padding_and_oversize_preserve_original_acceptance_v25",
                   "fixed_capacity_rechecks_evicted_partial_equations_v25",
                   "partial_cache_contention_and_poison_use_original_without_waiting_v25")),
+    selection("native-f6-public-reconfirmation", "dom-interopd",
+              "production_f6::native_reconfirmation_v25::tests::",
+              "crates/dom-interopd/src/production_f6/native_reconfirmation_v25_tests.rs", (
+                  "public_checks_cover_both_positions_and_modes_without_rewriting_intent",
+                  "altered_original_economics_and_authority_scope_are_refused",
+                  "canonical_but_changed_quote_cannot_change_original_amounts_or_fee_cap",
+                  "deadlines_require_same_dom_clock_without_comparing_foreign_heights",
+                  "noncanonical_ids_and_missing_reservation_are_never_accepted_as_public_inputs",
+                  "bounded_encoding_is_length_delimited_and_digest_binds_every_public_byte",
+                  "real_signed_temporal_composition_constructs_and_retains_every_original_byte",
+                  "another_real_composition_cannot_reuse_original_rfq_even_with_identical_terms"),
+              features=("production",)),
 )
 
 COMPILE_ONLY = (
@@ -542,10 +594,40 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "adaptor-native-round1-continuation":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::round1_continuation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::round1_continuation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-versioned-acceptance-codec":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","rfq","--lib","native_reconfirmation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","rfq","--lib","native_reconfirmation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-initiator-receiver-boundaries":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::initiator_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::initiator_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-proof-restart-cost-accounting":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::native_proof_timing_v25::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::native_proof_timing_v25::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "adaptor-bound-partial-equation-cache":
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","signing_round::partial_bound_verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","signing_round::partial_bound_verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-f6-public-reconfirmation":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::native_reconfirmation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_f6::native_reconfirmation_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "native-f6-principal-face":

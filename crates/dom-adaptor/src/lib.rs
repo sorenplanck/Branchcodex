@@ -436,7 +436,7 @@ pub use collaborative_output::{
 };
 pub use collaborative_range_proof::{
     AggregateBpRound1, AggregateBpRound2, CollaborativeRangeProof, DomCollaborativeRangeProofV1,
-    LocalBpSecrets, PendingCommonNonce, RangeProof739,
+    LocalBpSecrets, PendingCommonNonce, RangeProof739, Round1ContinuationV25,
 };
 pub use context::{DirectionV1, SessionContextInputsV1, SessionContextV1, SigningPhaseV1};
 pub use contract_session::{

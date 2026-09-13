@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 50)
+        self.assertEqual(len(ids), 55)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -44,6 +44,12 @@ class ClosedBoundaryListTests(unittest.TestCase):
         # f7_xmr_refund_transport_v23.rs lives under f7_v12::xmr_refund_transport_v23.
         edges = (
             ("crates/dom-interopd/src/lib.rs", "production_inputs"),
+            ("crates/rfq/src/lib.rs", "native_reconfirmation_v25"),
+            ("crates/rfq/src/native_reconfirmation_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_f6.rs", "initiator_v25"),
+            ("crates/dom-interopd/src/production_f6/initiator_v25.rs", "tests"),
+            ("crates/dom-interopd/src/production_f6.rs", "native_reconfirmation_v25"),
+            ("crates/dom-interopd/src/production_f6/native_reconfirmation_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6/terms.rs", "native_xmr_dom_face_v25"),
             ("crates/dom-interopd/src/production_f6/native_xmr_dom_face_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6_factory.rs", "native_principal_slot_v25"),
@@ -52,6 +58,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-interopd/src/production_noise_graph_offer_v22.rs", "f6_principal_v25"),
             ("crates/dom-interopd/src/production_noise_xmr_f6_principal_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "f6_source_fixture_v25"),
+            ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "native_proof_timing_v25"),
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_graph_wallet_tests"),
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_observation_v23"),
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_funding_v23"),
@@ -96,6 +103,8 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/adapters/xmr-refund-policy/src/graph_offer_verification_cache_v24.rs", "tests"),
             ("crates/dom-adaptor/src/lib.rs", "public_range_proof_cache_v24"),
             ("crates/dom-adaptor/src/lib.rs", "collaborative_range_proof"),
+            ("crates/dom-adaptor/src/collaborative_range_proof.rs", "round1_continuation_v25"),
+            ("crates/dom-adaptor/src/round1_continuation_v25.rs", "tests"),
             ("crates/dom-adaptor/src/collaborative_range_proof.rs", "final_proof_cache_v25"),
             ("crates/dom-adaptor/src/collaborative_final_proof_cache_v25.rs", "tests"),
             ("crates/dom-adaptor/src/lib.rs", "signing_round"),
@@ -124,6 +133,58 @@ class ClosedBoundaryListTests(unittest.TestCase):
                 self.assertRegex((runner.ROOT / source).read_text(), rf"\bmod {module};")
         self.assertEqual(runner.spec_for("store-refund-transport-grant")["module_prefix"],
                          "runtime::linux::session_store::f7_v12::xmr_refund_transport_v23::tests::")
+
+    def test_round1_continuation_requires_real_proof_and_failure_regressions(self):
+        spec = runner.spec_for("adaptor-native-round1-continuation")
+        self.assertEqual(len(spec["required_tests"]), 8)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        for name in (
+            "real_two_party_round1_three_to_one_preserves_final_proof_and_durable_round2_v25",
+            "failed_durable_round2_cannot_reuse_the_moved_round1_state_v25",
+        ):
+            self.assertIn(spec["module_prefix"] + name, spec["required_tests"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_native_acceptance_and_initiator_keep_all_additive_regressions(self):
+        for identifier, count in (
+            ("native-f6-versioned-acceptance-codec", 9),
+            ("native-f6-initiator-receiver-boundaries", 7),
+        ):
+            spec = runner.spec_for(identifier)
+            self.assertEqual(len(spec["required_tests"]), count)
+            self.assertEqual(spec["filter"], spec["module_prefix"])
+            self.assertNotIn("--ignored", runner.command(identifier))
+            with mock.patch.object(runner.subprocess, "Popen") as process:
+                runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
+                self.assertEqual(process.call_args.args[0], runner.command(identifier))
+                process.assert_called_once()
+
+    def test_restart_cost_accounting_requires_both_disjoint_phase_regressions(self):
+        spec = runner.spec_for("native-proof-restart-cost-accounting")
+        self.assertEqual(len(spec["required_tests"]), 2)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_reconfirmation_requires_genuine_composition_regressions(self):
+        spec = runner.spec_for("native-f6-public-reconfirmation")
+        self.assertEqual(len(spec["required_tests"]), 8)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        for name in (
+            "real_signed_temporal_composition_constructs_and_retains_every_original_byte",
+            "another_real_composition_cannot_reuse_original_rfq_even_with_identical_terms",
+        ):
+            self.assertIn(spec["module_prefix"] + name, spec["required_tests"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
 
     def test_bound_partial_cache_keeps_seven_real_oracle_regressions(self):
         spec = runner.spec_for("adaptor-bound-partial-equation-cache")

@@ -532,6 +532,29 @@ pub(crate) struct BpCommonNonceShareV1 {
 /// ordering, or generic serialization.
 pub(crate) struct BpLocalBlindingV1(Zeroizing<[u8; 32]>);
 
+/// Exact process-local origin comparison for one existing round-one state.
+/// No scalar accessor, cloning, formatting or persistence surface is exposed.
+pub(crate) struct BpRound1PrivateOriginV25(Zeroizing<[u8; 96]>);
+
+impl BpRound1PrivateOriginV25 {
+    pub(crate) fn from_fresh(
+        blinding: &BpLocalBlindingV1,
+        common_nonce: &BpCommonNonceV1,
+        private_nonce: &BpPrivateNonceV1,
+    ) -> Self {
+        let mut bytes = Zeroizing::new([0; 96]);
+        bytes[..32].copy_from_slice(blinding.0.as_ref());
+        bytes[32..64].copy_from_slice(common_nonce.0.as_ref());
+        bytes[64..].copy_from_slice(private_nonce.0.as_ref());
+        Self(bytes)
+    }
+
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(self.0.as_ref().ct_eq(other.0.as_ref()))
+    }
+}
+
 impl BpCommonNonceShareV1 {
     pub(crate) fn generate(statement: &BpStatementV1, participant_index: u16) -> Result<Self> {
         if statement

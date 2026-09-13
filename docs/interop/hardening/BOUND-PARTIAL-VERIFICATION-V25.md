@@ -29,6 +29,10 @@ against 64 original calls, explicitly labelled `primitive_only`, not swap latenc
 
 The closed CI selector `adaptor-bound-partial-equation-cache` requires all seven
 named regressions, in addition to existing production, replay and recovery tests.
-At implementation handoff these new Rust regressions have not yet run. Local
-validation is restricted to formatting, dispatch-policy tests and frozen-source
-checks; cryptographic execution belongs to GitHub CI.
+All seven passed in GitHub job 103684678119 (run 34742580472, commit
+71817f1288151b27a011106d37dc33b9e2cef52a). The recorded primitive comparison was
+12,553 microseconds for 64 original calls versus 210 microseconds for one cold
+call plus 63 exact hits. This is not end-to-end swap latency and does not measure
+the separate frozen Store audit. Local validation remains restricted to
+formatting, dispatch-policy tests and frozen-source checks; cryptographic
+execution belongs to GitHub CI.

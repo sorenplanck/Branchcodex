@@ -6,6 +6,8 @@
 //! neither capability is cached across an operation.
 
 pub(crate) mod candidate_attestation;
+pub(crate) mod initiator_v25;
+pub(crate) mod native_reconfirmation_v25;
 pub(crate) mod terminal_release;
 pub(crate) mod terms;
 

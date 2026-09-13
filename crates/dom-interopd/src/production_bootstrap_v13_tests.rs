@@ -12,6 +12,9 @@ mod bootstrap_path_v24;
 #[path = "production_xmr_native_f6_source_fixture_v25_tests.rs"]
 pub(crate) mod f6_source_fixture_v25;
 
+#[path = "production_xmr_native_proof_timing_v25_tests.rs"]
+mod native_proof_timing_v25;
+
 fn write(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -535,6 +538,7 @@ fn complete_native_proof_in_fixture_for_leg(
     artifact: &[u8],
     leg_index: usize,
 ) -> [Option<NativeGraphOutput>; 2] {
+    let mut timing = native_proof_timing_v25::NativeProofTimingV25::new();
     assert!(leg_index < 2);
     let cancelled = matches!(case, BootstrapProofCase::Cancelled);
     let collateral = matches!(case, BootstrapProofCase::Collateral);
@@ -587,6 +591,7 @@ fn complete_native_proof_in_fixture_for_leg(
     let mut revisions = [0; 2];
     for _ in 0..80 {
         for actor in 0..2 {
+            timing.begin_actor_tick();
             let plan = &plans[actor];
             let positions = [0, 1].map(|l| {
                 context.rosters.legs()[l]
@@ -599,6 +604,7 @@ fn complete_native_proof_in_fixture_for_leg(
                 context.bindings[0][positions[0]],
                 context.bindings[1][positions[1]],
             ];
+            timing.begin_tick_mount();
             let mut mounted = resume_completed_bootstrap_v13(
                 &fixture.work[actor].join(ARTIFACT),
                 &verified,
@@ -608,6 +614,7 @@ fn complete_native_proof_in_fixture_for_leg(
             )
             .unwrap()
             .unwrap();
+            timing.resume_tick();
             let material = if cancelled {
                 mounted._cancelled_shares[leg_index].as_mut().unwrap()
             } else {
@@ -619,12 +626,14 @@ fn complete_native_proof_in_fixture_for_leg(
                 bindings[leg_index]
             };
             let bp_session = bp_binding.session_id();
+            timing.begin_identity_open();
             let identity = ContractsTransportIdentityStoreV1::open_production(
                 private_directory(plan.identity_store.parent().unwrap()).unwrap(),
                 "identity",
                 &ContractsIdentityPassphraseV1::new(b"test-passphrase-v13".to_vec()).unwrap(),
             )
             .unwrap();
+            timing.resume_tick();
             let parent = private_directory(&fixture.work[actor]).unwrap();
             let contracts_name = if cancelled {
                 format!(
@@ -1012,6 +1021,7 @@ fn complete_native_proof_in_fixture_for_leg(
             break;
         }
     }
+    timing.begin_terminal_audit();
     assert_eq!(completed, [true; 2]);
     assert_eq!(last_heads, [Some(SessionPhaseV1::OutputFinalized); 2]);
     assert_eq!(revisions, [17; 2]);
@@ -1028,6 +1038,7 @@ fn complete_native_proof_in_fixture_for_leg(
                 .unwrap();
             context.bindings[index][position]
         });
+        timing.begin_terminal_mount();
         let mut mounted = resume_completed_bootstrap_v13(
             &fixture.work[actor].join(ARTIFACT),
             &verified,
@@ -1037,6 +1048,7 @@ fn complete_native_proof_in_fixture_for_leg(
         )
         .unwrap()
         .unwrap();
+        timing.resume_terminal_audit();
         let material = if cancelled {
             mounted._cancelled_shares[leg_index].as_ref().unwrap()
         } else {
@@ -1156,5 +1168,18 @@ fn complete_native_proof_in_fixture_for_leg(
             .is_some());
     }
     assert_eq!(proof_digests[0], proof_digests[1]);
+    eprintln!(
+        "{}",
+        timing.finish().public_summary(
+            leg_index,
+            if cancelled {
+                "cancelled"
+            } else if collateral {
+                "collateral"
+            } else {
+                "ordinary"
+            },
+        )
+    );
     outputs
 }

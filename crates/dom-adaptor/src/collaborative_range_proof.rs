@@ -85,6 +85,10 @@ use zeroize::Zeroizing;
 #[path = "collaborative_final_proof_cache_v25.rs"]
 mod final_proof_cache_v25;
 
+#[path = "round1_continuation_v25.rs"]
+mod round1_continuation_v25;
+pub use round1_continuation_v25::Round1ContinuationV25;
+
 /// Exactly the §5.5 proof container: 739 bytes or nothing.
 pub struct RangeProof739([u8; RANGE_PROOF_SIZE]);
 
@@ -814,21 +818,21 @@ mod tests {
 
     #[derive(Debug, thiserror::Error)]
     #[error("test collaborative-BP nonce vault failure")]
-    struct TestNonceVaultError;
+    pub(super) struct TestNonceVaultError;
 
     #[derive(Default)]
-    struct TestNonceVault {
-        binding: Option<CollaborativeBpNonceBindingV1>,
-        plaintext: Option<[u8; 64]>,
+    pub(super) struct TestNonceVault {
+        pub(super) binding: Option<CollaborativeBpNonceBindingV1>,
+        pub(super) plaintext: Option<[u8; 64]>,
         finalize_binding: Option<CollaborativeBpFinalizeBindingV1>,
         finalize_plaintext: Option<Zeroizing<Vec<u8>>>,
         round2_plaintext: Option<[u8; BpRound2ShareV1::ENCODED_LEN]>,
-        round2_consumed: bool,
+        pub(super) round2_consumed: bool,
         finalize_consumed: bool,
         proof_plaintext: Option<[u8; dom_crypto::RANGE_PROOF_SIZE]>,
-        seal_count: usize,
-        open_count: usize,
-        round2_persist_count: usize,
+        pub(super) seal_count: usize,
+        pub(super) open_count: usize,
+        pub(super) round2_persist_count: usize,
         round2_open_count: usize,
         finalize_open_count: usize,
         proof_persist_count: usize,
