@@ -119,6 +119,7 @@ impl NativeXmrColdStartV23 {
                 candidates[position] = Some(funding.raw(position)?);
             }
         }
+        eprintln!("native preparation actor={actor}: preparing scoped resources");
         let resources = NativeXmrDaemonResourcesV23::prepare(
             self,
             actor,
@@ -130,6 +131,9 @@ impl NativeXmrColdStartV23 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
+        eprintln!(
+            "native preparation actor={actor}: resources ready; authenticating planning inputs"
+        );
         let planning = self.prepare_authenticated(
             actor,
             resources.state_dir(),
@@ -139,6 +143,7 @@ impl NativeXmrColdStartV23 {
             signed.evidence.clone(),
             now,
         )?;
+        eprintln!("native preparation actor={actor}: planning authenticated; preparing observed DOM wallet");
         self.prepare_dom_wallet_v23(
             actor,
             &resources,
@@ -148,6 +153,7 @@ impl NativeXmrColdStartV23 {
                 .get(actor)
                 .ok_or("wallet actor")?,
         )?;
+        eprintln!("native preparation actor={actor}: observed DOM wallet ready");
         Ok((resources, planning))
     }
 }

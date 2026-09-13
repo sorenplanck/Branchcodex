@@ -2371,12 +2371,8 @@ fn load_authenticated_production_inputs_inner_v1(
     }
     validate_roster_terms(&roster_bundle, &upstream, &downstream, &secp)?;
 
-    let participant_bytes = read_bounded(
-        layout.path(ProductionPathRoleV1::ParticipantBindings),
-        MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 as u64,
-    )?;
     let participant_bundle =
-        ProductionParticipantBindingBundleV1::decode_canonical(&participant_bytes)?;
+        read_participant_bundle_v24(layout.path(ProductionPathRoleV1::ParticipantBindings))?;
     if participant_bundle.bundle_digest()? != pins.participant_bindings_digest
         || participant_bundle.route_id != pins.route_id
     {
@@ -3566,6 +3562,20 @@ fn open_or_resume_started_time_store(
         }
         Err(error) => Err(error),
     }
+}
+
+fn read_participant_bundle_v24(
+    path: &std::path::Path,
+) -> Result<ProductionParticipantBindingBundleV1, ProductionInputErrorV1> {
+    // The writer and enrollment loader already support the extended XMR/Solana
+    // layout. Use that same frozen wire bound here; the canonical decoder still
+    // enforces the smaller legacy-layout bound and each individual proof bound.
+    // Route pins and cryptographic authority are checked by the caller below.
+    let bytes = read_bounded(
+        path,
+        MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 as u64,
+    )?;
+    ProductionParticipantBindingBundleV1::decode_canonical(&bytes)
 }
 
 fn read_bounded(path: &std::path::Path, maximum: u64) -> Result<Vec<u8>, ProductionInputErrorV1> {
@@ -5545,6 +5555,96 @@ mod tests {
             combined_spend_public_key: [0x47; 32],
         };
         ProductionXmrLegSetupV1::new(position, profile, binding).expect("monero leg")
+    }
+
+    mod participant_file_bounds_v24 {
+        use super::*;
+
+        // Structural wire/file fixtures only: these synthetic proof bytes do
+        // not authenticate XMR enrollment or authorize any economic operation.
+        fn extended_bundle() -> ProductionParticipantBindingBundleV1 {
+            let mut leg = synthetic_monero_leg(ProductionRoutePositionV1::Upstream);
+            assert!(MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 < xmr_dleq_sigma::MAX_PROOF_BYTES);
+            leg.binding.dleq.bundle.proof =
+                vec![0x45; MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 + 1];
+            ProductionParticipantBindingBundleV1::new_with_all_counterparty_bindings(
+                ROUTE_ID,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![leg],
+            )
+            .expect("structural XMR bundle")
+        }
+
+        #[test]
+        fn extended_xmr_file_uses_existing_codec_bound_v24() {
+            let root = tempfile::tempdir().expect("private fixture");
+            let path = root.path().join("participants.bin");
+            let bundle = extended_bundle();
+            let bytes = bundle.canonical_bytes().expect("canonical bytes");
+            assert!(bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1);
+            assert!(bytes.len() <= MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1);
+            fs::write(&path, &bytes).expect("public fixture bytes");
+            assert_eq!(
+                read_participant_bundle_v24(&path).expect("extended read"),
+                bundle
+            );
+        }
+
+        #[test]
+        fn extended_xmr_read_still_requires_authenticated_manifest_pin_v24() {
+            let prepared = prepare_inputs();
+            write_owner_file(
+                &prepared.path(ProductionPathRoleV1::ParticipantBindings),
+                &extended_bundle()
+                    .canonical_bytes()
+                    .expect("canonical bytes"),
+            );
+            let bootstrap = load_production_create_bootstrap_v1(&prepared.root)
+                .expect("physical create bootstrap");
+            assert_eq!(
+                input_error(load_authenticated_production_inputs_v1(
+                    &bootstrap,
+                    time_common::EVIDENCE_TIME,
+                )),
+                ProductionInputErrorV1::PinMismatch
+            );
+            assert!(!prepared
+                .path(ProductionPathRoleV1::TimeAnchorStore)
+                .exists());
+        }
+
+        #[test]
+        fn participant_file_refuses_oversize_legacy_relabel_and_trailing_v24() {
+            let root = tempfile::tempdir().expect("private fixture");
+            let path = root.path().join("participants.bin");
+            let file = File::create(&path).expect("public fixture file");
+            file.set_len(MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 as u64 + 1)
+                .expect("sparse oversized file");
+            drop(file);
+            assert_eq!(
+                read_participant_bundle_v24(&path).expect_err("outer file cap"),
+                ProductionInputErrorV1::InputBoundExceeded
+            );
+            let bytes = extended_bundle()
+                .canonical_bytes()
+                .expect("canonical bytes");
+            let mut legacy = bytes.clone();
+            legacy[10..12].copy_from_slice(&[0, 0]);
+            fs::write(&path, legacy).expect("legacy relabel");
+            assert_eq!(
+                read_participant_bundle_v24(&path).expect_err("legacy layout keeps its cap"),
+                ProductionInputErrorV1::InputBoundExceeded
+            );
+            let mut trailing = bytes;
+            trailing.push(0);
+            fs::write(&path, trailing).expect("trailing byte");
+            assert_eq!(
+                read_participant_bundle_v24(&path).expect_err("canonical framing"),
+                ProductionInputErrorV1::NonCanonicalEncoding
+            );
+        }
     }
 
     // Codec-only fixtures: these proof bytes are intentionally not admission

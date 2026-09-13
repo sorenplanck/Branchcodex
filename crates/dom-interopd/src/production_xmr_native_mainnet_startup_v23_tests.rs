@@ -210,6 +210,7 @@ impl NativeMainnetStartupV23 {
         fee_cap: u64,
         live: bool,
     ) -> ColdStartResult<Self> {
+        eprintln!("native startup: preparing original enrollment and funding owners");
         let (credentials, master_keys) = NativeXmrDaemonCredentialsV23::create()?;
         let profile = xmr_setup_profile::XmrAdapterProfileV1::new(
             xmr_setup_profile::XmrNetwork::Mainnet,
@@ -226,6 +227,7 @@ impl NativeMainnetStartupV23 {
             live,
         )?;
         let inventory = funding.take_inventory_source_v23()?;
+        eprintln!("native startup: enrollment and funding owners ready; preparing DOM baseline");
         let mut owner = Self {
             prepared: None,
             f6: None,
@@ -258,6 +260,7 @@ impl NativeMainnetStartupV23 {
             cold.mainnet_node_config_v23(baseline)?,
             cold.mainnet_node_config_v23(baseline)?,
         ];
+        eprintln!("native startup: bounded DOM baseline ready; observing signed time");
         let time = if live {
             cold.observe_mainnet_time_live_v24(
                 &nodes[0],
@@ -274,6 +277,7 @@ impl NativeMainnetStartupV23 {
                 limits,
             )?
         };
+        eprintln!("native startup: signed time ready; preparing actor resources and F6");
         let (prepared, f6) = cold.prepare_mainnet_f6_pair_v23(
             nodes,
             funding,
@@ -284,6 +288,7 @@ impl NativeMainnetStartupV23 {
         )?;
         owner.prepared = Some(prepared);
         owner.f6 = Some(f6);
+        eprintln!("native startup: both actors and F6 observations ready; daemon not launched");
         Ok(owner)
     }
 
@@ -327,6 +332,9 @@ impl NativeMainnetStartupV23 {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs();
+            eprintln!(
+                "native startup actor={actor}: exporting and authenticating production inputs"
+            );
             exports.push(resources.export(
                 plan,
                 provision.family.clone(),
@@ -337,6 +345,7 @@ impl NativeMainnetStartupV23 {
                 credentials.stdin_for(actor)?,
                 now,
             )?);
+            eprintln!("native startup actor={actor}: authenticated export ready");
         }
         let exports = exports.try_into().map_err(|_| "startup two exports")?;
         let dependencies = RunningDependenciesV23 {
@@ -349,6 +358,7 @@ impl NativeMainnetStartupV23 {
                 .take()
                 .ok_or("startup credentials absent")?,
         };
+        eprintln!("native startup: both exports authenticated; launching actual daemons");
         self.cold
             .take()
             .ok_or("startup cold owner absent")?

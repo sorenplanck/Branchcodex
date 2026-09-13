@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Run the closed, serial DOM/XMR boundary regression list, never a ceremony.
+"""Run closed, serial DOM/XMR boundary regressions, not the full swap daemon.
 
 The production daemon's test command does not execute dependency unit tests.
 These selections cover those boundaries using the existing crypto-test build.
 API/spend-port have no native tests: their compilation is reported separately,
 not counted as a successful test. No private fixture files are archived.
+Proof-cache selections include real cryptographic vectors and original-verifier
+comparisons; they are not substitutes for the complete lifecycle scenarios.
 """
 import argparse
 import ctypes
@@ -19,6 +21,7 @@ import sys
 import time
 
 from run_native_daemon_scenario_v23 import OwnedProcesses, RUN_COUNT, TEST_START, write_result
+from test_interop_hardening import production_environment_v24
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_LIMIT = 64 * 1024 * 1024
@@ -61,6 +64,60 @@ SELECTIONS = (
                   "campaign_append_refuses_skips_and_negotiated_limit_overflow_v24",
                   "campaign_frozen_reader_does_not_block_native_history_publication_v24"),
               features=("production",)),
+    selection("native-preflight-http", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::http_v24::tests::",
+              "crates/dom-interopd/src/production_xmr_native_dom_http_v24_tests.rs", (
+                  "native_dom_get_peer_timeout_keeps_next_connection_available_v24",
+                  "native_dom_post_lost_ack_preserves_exact_admission_for_readback_v24",
+                  "native_dom_socket_retry_never_swallows_storage_scope_or_unknown_errors_v24",
+                  "native_dom_incomplete_post_never_reaches_admission_v24",
+                  "native_dom_post_storage_timeout_is_rejection_not_peer_retry_or_acceptance_v24"),
+              features=("production",)),
+    selection("native-preflight-funding-schedule", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_funding_v23::",
+              "crates/dom-interopd/src/production_xmr_native_funding_fixture_v23.rs", (
+                  "native_funding_sender_schedule_preserves_six_authenticated_roster_turns_v24",),
+              features=("production",),
+              test_filter="production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_funding_v23::native_funding_sender_schedule_preserves_six_authenticated_roster_turns_v24"),
+    selection("native-preflight-participant-file", "dom-interopd",
+              "production_inputs::tests::participant_file_bounds_v24::",
+              "crates/dom-interopd/src/production_inputs.rs", (
+                  "extended_xmr_file_uses_existing_codec_bound_v24",
+                  "extended_xmr_read_still_requires_authenticated_manifest_pin_v24",
+                  "participant_file_refuses_oversize_legacy_relabel_and_trailing_v24"),
+              features=("production",)),
+    selection("store-public-output-proof-cache", "dom-scriptless-store",
+              "runtime::linux::session_store::xmr_graph_output_journal_v22::proof_cache_v24::tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_output_proof_cache_v24.rs", (
+                  "real_output_cold_warm_and_all_public_mutations_match_original_v24",
+                  "cold_executes_and_warm_reuses_only_exact_success_v24",
+                  "every_public_input_and_field_boundary_changes_key_v24",
+                  "failures_are_never_memoized_v24",
+                  "bounded_fifo_eviction_and_oversize_fall_back_v24",
+                  "contention_and_poison_use_original_verifier_v24")),
+    selection("native-public-phase-timing", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::timing_v24::",
+              "crates/dom-interopd/src/production_xmr_native_daemon_timing_v24_tests.rs", (
+                  "daemon_timing_observes_only_public_transitions_without_inventing_round_durations_v24",),
+              features=("production",)),
+    selection("xmr-graph-offer-proof-cache", "xmr-refund-policy",
+              "graph_offer_v22::verification_cache_v24::tests::",
+              "crates/adapters/xmr-refund-policy/src/graph_offer_verification_cache_v24_tests.rs", (
+                  "real_graph_offer_cold_warm_and_uncached_results_are_identical_v24",
+                  "real_graph_offer_cache_misses_every_trusted_scope_and_terms_family_v24",
+                  "real_graph_offer_cache_misses_payload_keys_offsets_proofs_funding_and_payouts_v24",
+                  "real_graph_offer_full_key_equality_and_strict_decode_survive_warm_cache_v24",
+                  "real_graph_offer_cache_is_bounded_and_eviction_reexecutes_original_v24",
+                  "real_graph_offer_poison_and_contention_fall_back_to_original_v24",
+                  "real_graph_offer_warm_repeat64_reports_actual_verifier_counts_v24")),
+    selection("adaptor-public-range-proof-cache", "dom-adaptor",
+              "public_range_proof_cache_v24::tests::",
+              "crates/dom-adaptor/src/public_range_proof_cache_v24.rs", (
+                  "public_range_proof_cache_real_plain_and_capsule_64_replays_use_one_original_v24",
+                  "public_range_proof_cache_mutations_never_reuse_success_or_cache_failure_v24",
+                  "public_range_proof_cache_transaction_preserves_error_index_order_and_atomic_admission_v24",
+                  "public_range_proof_cache_contention_and_poison_use_original_verifiers_v24",
+                  "public_range_proof_cache_budget_eviction_is_bounded_and_not_a_validation_limit_v24")),
     selection("dom-funding-dispatch-budget", "adapter-dom-real", "funding_deadline_v23_tests::",
               "crates/adapters/dom-real/src/funding_deadline_v23_tests.rs", (
                   "expired_funding_deadline_neither_scans_nor_posts_v23",
@@ -269,6 +326,48 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::history_v24::tests::","--","--nocapture","--test-threads=1","--color","never"],
                                 cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-http":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::http_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::http_v24::tests::","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-funding-schedule":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_funding_v23::native_funding_sender_schedule_preserves_six_authenticated_roster_turns_v24","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_funding_v23::native_funding_sender_schedule_preserves_six_authenticated_roster_turns_v24","--","--nocapture","--test-threads=1","--color","never"],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-participant-file":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_inputs::tests::participant_file_bounds_v24::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_inputs::tests::participant_file_bounds_v24::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-public-output-proof-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_output_journal_v22::proof_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_output_journal_v22::proof_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-public-phase-timing":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::timing_v24::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::timing_v24::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "xmr-graph-offer-proof-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","xmr-refund-policy","--lib","graph_offer_v22::verification_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","xmr-refund-policy","--lib","graph_offer_v22::verification_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "adaptor-public-range-proof-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","public_range_proof_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","public_range_proof_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "dom-funding-dispatch-budget":
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","adapter-dom-real","--lib","funding_deadline_v23_tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
@@ -454,11 +553,13 @@ def run_selection(identifier, evidence, timeout):
               "returncode": None, "cleanup_verified": False}
     result_file = case / "result.json"
     write_result(result_file, result)
-    env = dict(os.environ, CARGO_BUILD_JOBS="2", CARGO_TERM_COLOR="never", RUST_TEST_THREADS="1")
     process = tracker = None
     started = time.monotonic()
     log = case / "test.log"
     try:
+        env = production_environment_v24(dict(os.environ))
+        env.update(CARGO_BUILD_JOBS="2", CARGO_TERM_COLOR="never", RUST_TEST_THREADS="1")
+        result["private_fixture_root"] = env["TMPDIR"]
         print(f"boundary selection: {identifier}", flush=True)
         with log.open("xb", buffering=0) as output, log.open("rb") as live:
             process = start_test_command_v24(identifier, cwd=ROOT, env=env, stdout=output)

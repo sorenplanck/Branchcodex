@@ -9,6 +9,9 @@ use dom_scriptless_crypto::{
 const MAGIC: &[u8; 8] = b"DXOJ22\0\x01";
 const MAX_BYTES: usize = 65536;
 
+#[path = "xmr_graph_output_proof_cache_v24.rs"]
+mod proof_cache_v24;
+
 pub(super) struct XmrGraphOutputJournalV22 {
     early: EarlyTransportAuthorityRecordV1,
     bp: BpTransportAuthorityRecordV1,
@@ -298,25 +301,64 @@ impl XmrGraphOutputJournalV22 {
         if frozen.statement().to_bytes() != bp.statement.to_bytes() {
             return Err(SessionStoreError::Conflict);
         }
-        verify_bp_payloads(&bp.statement, &bp.recovery_capsule, &bp_payloads)?;
-        let output = dom_consensus::TransactionOutput::with_recovery_capsule(
-            dom_crypto::pedersen::Commitment::from_compressed_bytes(frozen.aggregate_commitment())
-                .map_err(|_| SessionStoreError::InvalidDomTransaction)?,
-            bp_payloads[10].to_vec(),
+        // All scope, identity, transcript and contribution checks above run
+        // on EVERY reconstruction. Only deterministic public proof checking
+        // can reuse an exact-byte success; this does not cache Store authority.
+        let output = verified_public_output_v24(
+            &bp.statement,
             &bp.recovery_capsule,
-        )
-        .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
-        let output = dom_adaptor::VerifiedSharedOutputV1::from_retained_output_v14(
-            &output,
+            &bp_payloads,
             frozen.aggregate_commitment(),
-        )
-        .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
+        )?;
         Ok(ReconstructedXmrGraphOutputV22 {
             formation: frozen,
             output,
             proof_digest: *blake2b_256(bp_payloads[10]).as_bytes(),
         })
     }
+}
+
+fn verified_public_output_v24(
+    statement: &BpStatementV1,
+    capsule: &RecoveryCapsule,
+    payloads: &[&[u8]],
+    commitment: &[u8; 33],
+) -> Result<dom_adaptor::VerifiedSharedOutputV1, SessionStoreError> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<
+        Mutex<proof_cache_v24::ExactProofCacheV24<dom_adaptor::VerifiedSharedOutputV1>>,
+    > = OnceLock::new();
+    let key = proof_cache_v24::key(
+        statement.to_bytes(),
+        capsule.as_bytes(),
+        payloads,
+        commitment,
+    );
+    proof_cache_v24::verified(
+        CACHE.get_or_init(|| Mutex::new(proof_cache_v24::ExactProofCacheV24::new())),
+        key,
+        || verify_public_output_uncached_v24(statement, capsule, payloads, commitment),
+    )
+}
+
+fn verify_public_output_uncached_v24(
+    statement: &BpStatementV1,
+    capsule: &RecoveryCapsule,
+    payloads: &[&[u8]],
+    commitment: &[u8; 33],
+) -> Result<dom_adaptor::VerifiedSharedOutputV1, SessionStoreError> {
+    // Miss, contention, poison or an uncacheable input uses BOTH original
+    // verifiers. No signing or nonce operation lives here.
+    verify_bp_payloads(statement, capsule, payloads)?;
+    let output = dom_consensus::TransactionOutput::with_recovery_capsule(
+        dom_crypto::pedersen::Commitment::from_compressed_bytes(commitment)
+            .map_err(|_| SessionStoreError::InvalidDomTransaction)?,
+        payloads[10].to_vec(),
+        capsule,
+    )
+    .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
+    dom_adaptor::VerifiedSharedOutputV1::from_retained_output_v14(&output, commitment)
+        .map_err(|_| SessionStoreError::InvalidDomTransaction)
 }
 
 fn verify_bp_payloads(

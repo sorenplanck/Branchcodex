@@ -531,6 +531,22 @@ pub(super) fn submit_http_v23(
     received: &[u8],
     ledger: &std::sync::Mutex<EvolvingDomV23>,
 ) -> Result<()> {
+    submit_http_with_v24(stream, received, |bytes| {
+        ledger
+            .lock()
+            .map_err(|_| "local ledger poisoned")?
+            .submit(bytes)
+    })
+}
+
+/// The admission closure is private to the harness. Production fixture callers
+/// above always use the same native ledger; tests can isolate transport failure
+/// without manufacturing consensus transactions or authority.
+pub(super) fn submit_http_with_v24(
+    stream: &mut (impl Read + Write),
+    received: &[u8],
+    admit: impl FnOnce(&[u8]) -> Result<Value>,
+) -> Result<()> {
     let result = (|| -> Result<Value> {
         let split = received
             .windows(4)
@@ -561,9 +577,12 @@ pub(super) fn submit_http_v23(
         while body.len() < length {
             let mut buffer = [0; 8192];
             let count = (length - body.len()).min(buffer.len());
-            let n = stream.read(&mut buffer[..count])?;
+            let n = http_v24::socket_io_v24(stream.read(&mut buffer[..count]))?;
             if n == 0 {
-                return Err("short submission".into());
+                return http_v24::socket_io_v24(Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer disconnected before submission body",
+                )));
             }
             body.extend_from_slice(&buffer[..n]);
         }
@@ -574,13 +593,11 @@ pub(super) fn submit_http_v23(
         }
         let request: Request = serde_json::from_slice(&body)?;
         let bytes = hex::decode(request.tx_hex)?;
-        ledger
-            .lock()
-            .map_err(|_| "local ledger poisoned")?
-            .submit(&bytes)
+        admit(&bytes)
     })();
     let (status, value) = match result {
         Ok(value) => ("200 OK", value),
+        Err(error) if http_v24::peer_io_v24(error.as_ref()) => return Err(error),
         Err(_) => (
             "400 Bad Request",
             json!({"accepted":false,
@@ -588,7 +605,5 @@ pub(super) fn submit_http_v23(
         ),
     };
     let response = serde_json::to_vec(&value)?;
-    write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len())?;
-    stream.write_all(&response)?;
-    Ok(())
+    http_v24::write_json_v24(stream, status, &response)
 }

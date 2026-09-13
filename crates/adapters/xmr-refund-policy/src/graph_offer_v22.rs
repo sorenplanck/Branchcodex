@@ -11,6 +11,9 @@ use dom_adaptor::{DirectionV1, TrustedChainIdV1};
 use dom_crypto::PublicKey;
 use kaystra_core::SettlementTermsV1;
 
+#[path = "graph_offer_verification_cache_v24.rs"]
+mod verification_cache_v24;
+
 /// Context authenticated outside the packet, including the Noise sender.
 pub struct XmrGraphOfferScopeV22<'a> {
     /// Locally trusted DOM chain identity.
@@ -67,6 +70,17 @@ impl XmrGraphOfferV22 {
     /// The complete graph must still verify balance, C/D ancestry and signing
     /// history before any funding authorization can be produced.
     pub fn verify(
+        &self,
+        terms: &SettlementTermsV1,
+        policy: &ValidatedXmrCompensationPolicyV11,
+        scope: &XmrGraphOfferScopeV22<'_>,
+    ) -> Result<(), Error> {
+        verification_cache_v24::verify(self, terms, policy, scope)
+    }
+
+    // The original, pure construction verifier. Cache misses and every cache
+    // failure execute this unchanged path; it grants no time/state authority.
+    fn verify_uncached_v24(
         &self,
         terms: &SettlementTermsV1,
         policy: &ValidatedXmrCompensationPolicyV11,

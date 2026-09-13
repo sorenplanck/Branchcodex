@@ -9,7 +9,7 @@
 #   * interop-full — scripts/test_interop_hardening.py in `--mode full`:
 #     the components graph PLUS bitcoin-regtest (real Bitcoin Core),
 #     `FOUNDRY_PROFILE=deep forge test` and the Anvil cross-chain gate.
-#     interop-hardening.yml runs the same six non-live shards independently.
+#     interop-hardening.yml runs the same eight non-live shards independently.
 #   * live-composed-route — the `#[ignore]`d f5-e2e LIVE tests: one route
 #     scalar revealed on a real Anvil chain and claimed on a real Bitcoin
 #     Core regtest node (composed_route_live), and the F7 regtest anchor
@@ -118,6 +118,51 @@ jobs:
       - name: dom-pow — fast/light dataset equivalence (2 GB dataset)
         run: cargo test --locked -p dom-pow --test miner_light_equivalence -- --ignored --nocapture
 
+  interop-preflight:
+    name: "interop preflight — independent boundary checks"
+    # Pushes have one owner in interop-hardening; a standalone full dispatch
+    # needs its own owner. The all/native dispatch retains its native owner.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify frozen consensus sources
+        id: consensus
+        continue-on-error: true
+        run: bash scripts/check-consensus-unchanged.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: interop-full
+          key: interop-full-production-native
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
+          workspaces: |
+            . -> target
+            programs/dom-solana-escrow -> target
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+      - uses: ./.github/actions/xmr-test-tools
+        id: boundaries
+        continue-on-error: true
+        with:
+          run-once-regressions: 'true'
+      - name: Require all preflight outcomes
+        if: always()
+        env:
+          CONSENSUS: ${{ steps.consensus.outcome }}
+          BOUNDARIES: ${{ steps.boundaries.outcome }}
+        run: |
+          failed=0
+          for outcome in "$CONSENSUS" "$BOUNDARIES"; do
+            case "$outcome" in success) ;; *) failed=1 ;; esac
+          done
+          exit "$failed"
+
   interop-full:
     name: "interop hardening — FULL / ${{ matrix.shard }}"
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'interop-full' }}
@@ -126,7 +171,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [protocol, production-native, production-native-funding, production-native-claim, production-lib, production-integration, live]
+        shard: [protocol, production-native, production-native-funding, production-native-claim, production-native-wallet-reopen, production-native-templates, production-lib, production-integration, live]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -150,7 +195,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Preserve the existing production-native cache while splitting its
-          # long tests across runners. All three restore the same immutable
+          # long tests across runners. All native shards restore the same immutable
           # dependency/workspace snapshot; the first completed save wins.
           key: interop-full-${{ startsWith(matrix.shard, 'production-native') && 'production-native' || matrix.shard }}
           cache-workspace-crates: 'true'
@@ -187,9 +232,8 @@ jobs:
         if: ${{ startsWith(matrix.shard, 'production-') }}
         continue-on-error: true
         with:
-          # Pushes have a single owner in interop-hardening. A manual
-          # interop-full-only campaign runs these once in production-native.
-          run-once-regressions: ${{ matrix.shard == 'production-native' && github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}
+          # Boundary checks have an independent owner, never a long graph queue.
+          run-once-regressions: 'false'
 
       - name: Verify prepared operational integration ingress
         id: interop_prepared_ingress
@@ -626,19 +670,22 @@ jobs:
   heavy-gate:
     name: heavy suites gate
     runs-on: ubuntu-latest
-    needs: [integration-heavy, interop-full, live-composed-route, bp-soak, dom-xmr-native, dom-xmr-real-daemon, dom-xmr-real-refund]
+    needs: [integration-heavy, interop-preflight, interop-full, live-composed-route, bp-soak, dom-xmr-native, dom-xmr-real-daemon, dom-xmr-real-refund]
     if: always()
     steps:
       # skipped is acceptable (a dispatch may select one suite); failure and
       # cancellation are not.
       - name: Require every selected suite to pass
         run: |
-          for r in "${{ needs.integration-heavy.result }}" "${{ needs.interop-full.result }}" "${{ needs.live-composed-route.result }}" "${{ needs.bp-soak.result }}" "${{ needs.dom-xmr-native.result }}" "${{ needs.dom-xmr-real-daemon.result }}" "${{ needs.dom-xmr-real-refund.result }}"; do
+          for r in "${{ needs.integration-heavy.result }}" "${{ needs.interop-preflight.result }}" "${{ needs.interop-full.result }}" "${{ needs.live-composed-route.result }}" "${{ needs.bp-soak.result }}" "${{ needs.dom-xmr-native.result }}" "${{ needs.dom-xmr-real-daemon.result }}" "${{ needs.dom-xmr-real-refund.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "a selected heavy suite did not pass: $r"; exit 1 ;;
             esac
           done
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}" == "true" ]]; then
+            [[ "${{ needs.interop-preflight.result }}" == success ]]
+          fi
           if [[ "${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'dom-xmr-native' }}" == "true" ]]; then
             [[ "${{ needs.dom-xmr-native.result }}" == success ]]
             [[ "${{ needs.dom-xmr-real-daemon.result }}" == success ]]

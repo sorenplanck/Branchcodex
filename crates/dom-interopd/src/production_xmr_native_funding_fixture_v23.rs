@@ -14,7 +14,7 @@ use dom_scriptless_store::{
     F7RecoveryPreparationV12, XmrGraphCustodyProvisioningStateV23,
     XmrOrdinaryRecoveryRoundSessionsV11, XmrRecoveryCustodyRoleV11, XmrRecoveryCustodyV11,
 };
-use std::{fs::File, path::Path, rc::Rc, sync::Arc};
+use std::{fs::File, path::Path, rc::Rc, sync::Arc, time::Instant};
 
 #[path = "production_xmr_native_claim_fixture_v23.rs"]
 pub(super) mod native_claim_v23;
@@ -27,6 +27,40 @@ fn custody_stage<T, E: std::fmt::Display>(
     result: core::result::Result<T, E>,
 ) -> Result<T> {
     result.map_err(|error| format!("native custody actor={actor} {stage}: {error}").into())
+}
+
+/// Schedule only: the selected Store must still authenticate its current
+/// prefix and both roster identities before the real driver can sign.
+fn native_sender_for_position_v24(indices: [u8; 2], position: usize) -> Result<usize> {
+    if position >= 6 || !matches!(indices, [0, 1] | [1, 0]) {
+        return Err("native signing requires six turns and two distinct protocol positions".into());
+    }
+    indices
+        .iter()
+        .position(|index| usize::from(*index) == position % 2)
+        .ok_or_else(|| "missing native sender".into())
+}
+
+#[test]
+fn native_funding_sender_schedule_preserves_six_authenticated_roster_turns_v24() -> Result<()> {
+    for indices in [[0, 1], [1, 0]] {
+        let mut turns = [0; 2];
+        for position in 0..6 {
+            let sender = native_sender_for_position_v24(indices, position)?;
+            let peer = sender ^ 1;
+            assert_ne!(sender, peer);
+            assert_eq!(usize::from(indices[sender]), position % 2);
+            assert_eq!(usize::from(indices[peer]), (position + 1) % 2);
+            turns[sender] += 1;
+        }
+        assert_eq!(turns, [3, 3]);
+        assert!(native_sender_for_position_v24(indices, 6).is_err());
+        assert!(native_sender_for_position_v24(indices, usize::MAX).is_err());
+    }
+    for indices in [[0, 0], [1, 1], [0, 2], [2, 1], [u8::MAX; 2]] {
+        assert!(native_sender_for_position_v24(indices, 0).is_err());
+    }
+    Ok(())
 }
 
 pub(crate) fn custody_and_funding(
@@ -301,6 +335,7 @@ pub(super) fn custody_and_funding_for_claim(
         .reopen(work)
         .map_err(|error| format!("native custody: reopen both private T/U owners: {error}"))?;
     eprintln!("native lifecycle: both encrypted archives Ready; private T/U reopened; funding still refused");
+    let funding_started = Instant::now();
     for position in 0..2 {
         let mut selected = None;
         for actor in 0..2 {
@@ -338,6 +373,10 @@ pub(super) fn custody_and_funding_for_claim(
             }
         }
     }
+    eprintln!(
+        "native funding: both readiness votes accepted after {:?}",
+        funding_started.elapsed(),
+    );
     let graph_binding = signed.produced[0].graph().binding();
     let closed_height = graph_binding
         .cancel_height
@@ -351,6 +390,7 @@ pub(super) fn custody_and_funding_for_claim(
     let mut signers = Vec::new();
     let mut funding_paths = Vec::new();
     for actor in 0..2 {
+        let actor_started = Instant::now();
         assert!(
             signed.stores[actor]
                 .authorize_f7_funding_v12(&gates[actor])
@@ -474,17 +514,24 @@ pub(super) fn custody_and_funding_for_claim(
                 share,
             ),
         )?);
-        eprintln!("native funding actor={actor}: retained vault Ready and signer bound");
+        eprintln!(
+            "native funding actor={actor}: retained vault Ready and signer bound after {:?}",
+            actor_started.elapsed(),
+        );
     }
+    assert_eq!(signed.stores.len(), 2);
+    assert_eq!(signed.wallets.len(), 2);
+    let protocol_indices = [
+        signed.wallets[0].0.participant().protocol_index(),
+        signed.wallets[1].0.participant().protocol_index(),
+    ];
     let mut messages = Vec::new();
     for position in 0..6 {
-        let accepted = signed.stores[0].resume_xmr_bounded_funding_signing_v23(chain, session)?;
-        let sender_id = accepted.roster().entries()[position % 2].participant_id();
-        let sender = signed
-            .wallets
-            .iter()
-            .position(|(binding, _)| &binding.participant().participant_id() == sender_id)
-            .ok_or("missing funding sender")?;
+        let turn_started = Instant::now();
+        // Selecting an actor does not consume an accepted signing handle. The
+        // fresh resume below still performs the full Store audit for this turn;
+        // no capability or verified prefix survives a Store mutation.
+        let sender = native_sender_for_position_v24(protocol_indices, position)?;
         let peer = sender ^ 1;
         let transport = signed.stores[sender].prepare_operational_signing_transport_authority(
             chain,
@@ -494,6 +541,15 @@ pub(super) fn custody_and_funding_for_claim(
         let accepted =
             signed.stores[sender].resume_xmr_bounded_funding_signing_v23(chain, session)?;
         assert_eq!(accepted.accepted_signing_messages().count(), position);
+        assert_eq!(accepted.roster().entries().len(), 2);
+        assert_eq!(
+            accepted.roster().entries()[position % 2].participant_id(),
+            &signed.wallets[sender].0.participant().participant_id(),
+        );
+        assert_eq!(
+            accepted.roster().entries()[(position + 1) % 2].participant_id(),
+            &signed.wallets[peer].0.participant().participant_id(),
+        );
         let request =
             match crate::production_dom_claim_driver_v12::prepare_next_dom_funding_edge_v20(
                 &signed.stores[sender],
@@ -520,9 +576,15 @@ pub(super) fn custody_and_funding_for_claim(
             committed.signed_bytes(),
         )?;
         messages.push(committed.signed_bytes().to_vec());
+        eprintln!(
+            "native funding: envelope {position} authenticated by both Stores after {:?}",
+            turn_started.elapsed(),
+        );
     }
+    assert_eq!(messages.len(), 6);
     let mut transactions = Vec::new();
     for actor in 0..2 {
+        let actor_started = Instant::now();
         let transaction =
             signed.stores[actor].complete_f7_funding_signing_v20(chain, session, context)?;
         transactions.push(transaction.canonical_bytes().to_vec());
@@ -575,6 +637,10 @@ pub(super) fn custody_and_funding_for_claim(
             signed.produced[actor].economic().policy(),
             &custody[actor],
         )?;
+        eprintln!(
+            "native funding actor={actor}: completion and refusal audits passed after {:?}",
+            actor_started.elapsed(),
+        );
     }
     assert_eq!(transactions[0], transactions[1]);
     drop(signers);
@@ -587,6 +653,7 @@ pub(super) fn custody_and_funding_for_claim(
     native = native.reopen(work)?;
     let mut reopened = Vec::with_capacity(2);
     for actor in 0..2 {
+        let actor_started = Instant::now();
         let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
             Arc::new(root(actor)?),
             "runtime-contracts",
@@ -686,10 +753,18 @@ pub(super) fn custody_and_funding_for_claim(
         assert_eq!(before.as_bytes(), store.load_session(session)?.as_bytes());
         assert!(!before.irreversible().adaptor_secret_exposed);
         reopened.push(Rc::new(store));
+        eprintln!(
+            "native funding actor={actor}: independent reopen, custody loss and six replays passed after {:?}",
+            actor_started.elapsed(),
+        );
     }
     signed.stores = reopened
         .try_into()
         .map_err(|_| "two reopened native Stores required")?;
     eprintln!("native lifecycle: six funding envelopes, identical durable bytes and reopen/replay verified; no broadcast");
+    eprintln!(
+        "native funding: complete after {:?}",
+        funding_started.elapsed()
+    );
     Ok((signed, native))
 }

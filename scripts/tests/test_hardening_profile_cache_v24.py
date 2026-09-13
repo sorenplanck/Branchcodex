@@ -33,6 +33,25 @@ COMPONENT_PACKAGES = {
 
 
 class HardeningProfileCache(unittest.TestCase):
+    def test_native_exact_splits_name_real_distinct_tests_and_never_skip_another_symbol(self):
+        expected = {
+            "production-native-funding": "v23_native_two_leg_templates_custody_ready_and_bounded_funding",
+            "production-native-claim": "v23_native_claim_six_messages_and_presignature_with_real_output_scan",
+            "production-native-wallet-reopen": "v22_both_wallets_reopen_payout_proofs_and_five_native_graph_excesses",
+            "production-native-templates": "v23_two_wallets_and_native_cd_proofs_form_identical_graph_templates",
+        }
+        self.assertEqual(runner.NATIVE_EXACT_TESTS, {
+            shard: runner.NATIVE_TEST_PREFIX + "::" + name for shard, name in expected.items()
+        })
+        self.assertEqual(runner.NATIVE_EXACT_SHARDS, frozenset(expected))
+        source = (runner.ROOT / "crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs").read_text()
+        tests = re.findall(r"#\[test\]\s*fn\s+(\w+)\s*\(", source)
+        for name in expected.values():
+            self.assertIn(name, tests)
+            # libtest --skip is substring-based, while each separated shard is
+            # exact. A future similarly named top-level test must not vanish.
+            self.assertEqual([other for other in tests if name in other], [name])
+
     def test_exact_native_shards_fail_closed_on_zero_or_multiple_tests(self):
         with tempfile.TemporaryDirectory(prefix="exact-native-") as directory:
             log = Path(directory) / "test.log"
@@ -154,6 +173,8 @@ class HardeningProfileCache(unittest.TestCase):
             "production-native": ("production-native",),
             "production-native-funding": ("production-native-funding",),
             "production-native-claim": ("production-native-claim",),
+            "production-native-wallet-reopen": ("production-native-wallet-reopen",),
+            "production-native-templates": ("production-native-templates",),
             "production-lib": ("production-lib", "rust-route-independent-verification"),
             "production-integration": ("production-integration", "rust-time-independent-verification"),
             "live": FULL_ORDER[-3:],
@@ -175,16 +196,15 @@ class HardeningProfileCache(unittest.TestCase):
         specs = {shard: runner.commands("full", Path("/synthetic-evidence"), shard)[0]
                  for shard in runner.FULL_SHARDS if shard.startswith("production-")}
         native = specs["production-native"][1]
-        native_funding = specs["production-native-funding"][1]
-        native_claim = specs["production-native-claim"][1]
+        exact_commands = {shard: specs[shard][1] for shard in runner.NATIVE_EXACT_TESTS}
         ordinary = specs["production-lib"][1]
         integration = specs["production-integration"][1]
         self.assertIn("--lib", native)
         self.assertEqual(native[native.index("--") - 1], runner.NATIVE_TEST_PREFIX)
-        self.assertEqual(native[-4:], ["--skip", runner.NATIVE_FUNDING_TEST,
-                                      "--skip", runner.NATIVE_CLAIM_TEST])
-        for command, selected in ((native_funding, runner.NATIVE_FUNDING_TEST),
-                                  (native_claim, runner.NATIVE_CLAIM_TEST)):
+        self.assertEqual(native[-8:],
+                         [arg for name in runner.NATIVE_EXACT_TESTS.values() for arg in ("--skip", name)])
+        for shard, command in exact_commands.items():
+            selected = runner.NATIVE_EXACT_TESTS[shard]
             self.assertIn("--lib", command)
             self.assertEqual(command[command.index("--") - 1], selected)
             self.assertIn("--exact", command)
@@ -194,7 +214,7 @@ class HardeningProfileCache(unittest.TestCase):
                                if argument == "--test"), runner.PRODUCTION_INTEGRATION_TARGETS)
         self.assertNotIn("*", integration)
         self.assertIn("--bins", integration)
-        for command in (native, native_funding, native_claim, ordinary, integration):
+        for command in (native, *exact_commands.values(), ordinary, integration):
             self.assertNotIn("--tests", command)  # This would include lib again.
             self.assertNotIn("--ignored", command)
             self.assertNotIn("--no-run", command)
@@ -217,6 +237,8 @@ class HardeningProfileCache(unittest.TestCase):
             ("lib", runner.NATIVE_TEST_PREFIX + "::nested::another_case"),
             ("lib", runner.NATIVE_FUNDING_TEST),
             ("lib", runner.NATIVE_CLAIM_TEST),
+            ("lib", runner.NATIVE_WALLET_REOPEN_TEST),
+            ("lib", runner.NATIVE_TEMPLATES_TEST),
             ("lib", "production_child_router::route_tests_v4::matrix"),
             ("lib", "future_module::regression"), ("bin", "dom-interopd::unit"),
         ] + [("test", name + "::case") for name in runner.PRODUCTION_INTEGRATION_TARGETS]
@@ -224,10 +246,8 @@ class HardeningProfileCache(unittest.TestCase):
         for kind, name in targets:
             selected = [
                 kind == "lib" and runner.NATIVE_TEST_PREFIX in name
-                and not any(excluded in name for excluded in
-                            (runner.NATIVE_FUNDING_TEST, runner.NATIVE_CLAIM_TEST)),
-                kind == "lib" and name == runner.NATIVE_FUNDING_TEST,
-                kind == "lib" and name == runner.NATIVE_CLAIM_TEST,
+                and not any(excluded in name for excluded in runner.NATIVE_EXACT_TESTS.values()),
+                *(kind == "lib" and name == exact for exact in runner.NATIVE_EXACT_TESTS.values()),
                 kind == "lib" and runner.NATIVE_TEST_PREFIX not in name,
                 kind in ("bin", "test"),
             ]
@@ -300,8 +320,7 @@ class HardeningProfileCache(unittest.TestCase):
                       (source / "tests/production_time_guard.rs").read_text())
         self.assertIn("mod xmr_graph_wallet_tests;",
                       (source / "src/production_bootstrap_v13_tests.rs").read_text())
-        for shard in ("production-native", "production-native-funding",
-                      "production-native-claim"):
+        for shard in ("production-native", *runner.NATIVE_EXACT_TESTS):
             self.assertEqual(runner.commands("full", evidence, shard)[0][2], {})
         self.assertEqual(runner.required_tools("full", "all"), [
             "git", "cargo", "rustc", "cc", "clang", "cmake", "pkg-config",

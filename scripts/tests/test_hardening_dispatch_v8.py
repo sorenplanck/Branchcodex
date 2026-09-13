@@ -67,14 +67,9 @@ class HardeningDispatchTests(unittest.TestCase):
             step = action.split(f"- name: {name}", 1)[1].split("- name:", 1)[0]
             self.assertIn("if: ${{ always() && inputs.run-once-regressions == 'true' }}", step)
         heavy = (root / ".github/workflows/heavy-tests.yml").read_text()
-        self.assertEqual(heavy.count("run-once-regressions: 'false'"), 2)
-        self.assertEqual(
-            heavy.count(
-                "run-once-regressions: ${{ matrix.shard == 'production-native' "
-                "&& github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full' }}"
-            ),
-            1,
-        )
+        self.assertEqual(heavy.count("run-once-regressions: 'false'"), 3)
+        self.assertEqual(heavy.count("run-once-regressions: 'true'"), 1)
+        self.assertIn("interop-preflight:", heavy)
         self.assertEqual(
             heavy.count(
                 "run-once-regressions: ${{ matrix.owns_regressions && github.event_name == 'workflow_dispatch' "
@@ -84,16 +79,18 @@ class HardeningDispatchTests(unittest.TestCase):
         )
         interop = (root / ".github/workflows/interop-hardening.yml").read_text()
         self.assertIn("uses: ./.github/actions/xmr-test-tools", interop)
-        self.assertNotIn("run-once-regressions: 'false'", interop)
-        self.assertIn("run-once-regressions: ${{ matrix.shard == 'production-native' }}", interop)
+        self.assertEqual(interop.count("run-once-regressions: 'false'"), 1)
+        self.assertEqual(interop.count("run-once-regressions: 'true'"), 1)
+        self.assertIn("production-preflight:", interop)
 
-    def test_interop_components_are_six_independent_non_live_shards(self):
+    def test_interop_components_are_eight_independent_non_live_shards(self):
         workflow = (Path(__file__).resolve().parents[2]
                     / ".github/workflows/interop-hardening.yml").read_text()
         self.assertIn("fail-fast: false", workflow)
         self.assertIn(
             "shard: [protocol, production-native, production-native-funding, "
-            "production-native-claim, production-lib, production-integration]",
+            "production-native-claim, production-native-wallet-reopen, "
+            "production-native-templates, production-lib, production-integration]",
             workflow)
         self.assertIn(
             "python3 scripts/test_interop_hardening.py --mode full --full-shard ${{ matrix.shard }}",
@@ -106,6 +103,23 @@ class HardeningDispatchTests(unittest.TestCase):
         summary = workflow.split("- name: Fail after all interop checks have reported", 1)[1]
         self.assertIn("*=success|*=skipped", summary)
         self.assertIn("*) failed=1", summary)
+
+    def test_interop_preflight_is_independent_and_protocol_cannot_capture_production_cache(self):
+        workflow = (Path(__file__).resolve().parents[2]
+                    / ".github/workflows/interop-hardening.yml").read_text()
+        jobs = dict(re.findall(r"^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+                               workflow, re.MULTILINE | re.DOTALL))
+        preflight = jobs["production-preflight"]
+        components = jobs["components"]
+        self.assertIn("run-once-regressions: 'true'", preflight)
+        self.assertIn("run-once-regressions: 'false'", components)
+        self.assertNotIn("    needs:", preflight)
+        self.assertNotIn("    needs:", components)
+        self.assertNotIn("real-daemon: 'true'", preflight)
+        self.assertIn("shared-key: components", preflight)
+        self.assertIn("key: production", preflight)
+        self.assertIn("key: ${{ matrix.shard == 'protocol' && 'protocol' || 'production' }}", components)
+        self.assertIn("case \"$outcome\" in success) ;; *) failed=1 ;; esac", preflight)
 
     def test_public_refund_auth_and_ready_regressions_execute_on_cached_tools(self):
         action = (Path(__file__).resolve().parents[2]

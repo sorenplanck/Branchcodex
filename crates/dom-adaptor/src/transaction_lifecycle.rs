@@ -20,9 +20,8 @@ use crate::{
     OperationalM8FundingAuthorizationV2, RangeProof739, Result, SharedCommitmentV1,
 };
 use dom_consensus::{
-    validate_balance_equation, validate_range_proofs, validate_transaction,
-    validate_transaction_structure, Transaction, TransactionInput, TransactionKernel,
-    TransactionOutput, ValidationContext,
+    validate_balance_equation, validate_transaction, validate_transaction_structure, Transaction,
+    TransactionInput, TransactionKernel, TransactionOutput, ValidationContext,
 };
 use dom_core::{BlockHeight, Timestamp, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN};
 use dom_crypto::{
@@ -59,15 +58,8 @@ impl VerifiedSharedOutputV1 {
         if output.commitment.as_bytes() != expected_commitment {
             return Err(AdaptorError::AuthorizationMismatch);
         }
-        let proof = output.range_proof_bytes()?;
-        let accepted = match output.recovery_capsule()? {
-            Some(capsule) => range_proof_verify_with_extra_commit(
-                expected_commitment,
-                proof,
-                capsule.as_bytes(),
-            )?,
-            None => range_proof_verify(expected_commitment, proof)?,
-        };
+        let accepted =
+            crate::public_range_proof_cache_v24::verify_public_output_range_proof_v24(output)?;
         if !accepted {
             return Err(AdaptorError::VerificationFailed(
                 "retained shared output proof",
@@ -325,7 +317,7 @@ impl ScriptlessTransactionTemplateV1 {
         // Signature-independent consensus checks freeze a real, balanced DOM
         // transaction before any nonce or adaptor pre-signature is produced.
         validate_transaction_structure(&transaction)?;
-        validate_range_proofs(&transaction)?;
+        crate::validate_public_range_proofs_v24(&transaction)?;
         validate_balance_equation(&transaction)?;
         let (canonical_template_bytes, template_hash) = canonical_template_v1(&transaction)?;
         Ok(Self {

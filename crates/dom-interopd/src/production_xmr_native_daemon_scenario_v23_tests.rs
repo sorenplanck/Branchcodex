@@ -26,6 +26,9 @@ use coordinator::{CoordinatorObserverV23, NativeActionV23};
 use route_executor::ActionKindV1;
 #[path = "production_xmr_native_refund_publication_v24_tests.rs"]
 mod refund_publication_v24;
+#[path = "production_xmr_native_daemon_timing_v24_tests.rs"]
+mod timing_v24;
+use timing_v24::{LaneV24, PhaseV24, SnapshotTimingV24};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const PHASE_TIMEOUT: Duration = Duration::from_secs(7200);
@@ -123,6 +126,7 @@ fn wait_claims(
     running: &mut NativeXmrRunningColdStartV23,
     observers: &mut [RouteObserverV23; 2],
     xmr: &mut XmrLedgerPumpV23,
+    timing: &mut SnapshotTimingV24,
 ) -> Result<()> {
     let start = Instant::now();
     let mut announced = Duration::ZERO;
@@ -144,6 +148,7 @@ fn wait_claims(
                     if exited.is_some() && !claimed(&snapshot) {
                         return Err("daemon exit 0 did not leave both economic claims final".into());
                     }
+                    timing.observe(actor, &snapshot);
                     complete &= claimed(&snapshot) && exited.is_some();
                     scoped_snapshots.push(snapshot);
                 }
@@ -174,16 +179,34 @@ fn wait_claims(
 #[test]
 #[ignore = "dedicated real release-production daemon and GPL helper campaign; mandatory CI uses --ignored --exact"]
 fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<()> {
+    let scenario = "claims_reopen";
+    let preparation = PhaseV24::start(
+        scenario,
+        LaneV24::ColdSwapPreparation,
+        "cold_swap_preparation",
+    );
     let binary = NativeDaemonBinaryV23::from_environment()?;
     let configuration = Configuration::require()?;
     let startup = NativeMainnetStartupV23::prepare(&configuration, fresh_local_policy()?, 10_000)?;
     let mut xmr = XmrLedgerPumpV23::new(&startup)?;
+    preparation.finish();
+    let normal = PhaseV24::start(
+        scenario,
+        LaneV24::NormalDaemon,
+        "launch_to_two_claims_and_natural_exit",
+    );
+    let launched = Instant::now();
+    let launch_phase = PhaseV24::start(scenario, LaneV24::NormalDaemon, "export_and_launch");
     let mut running = launch(startup, &binary)?;
+    launch_phase.finish();
+    let mut timing = SnapshotTimingV24::new(scenario, LaneV24::NormalDaemon, launched);
     let result = (|| -> Result<()> {
         let mut observers = observers(&running)?;
-        wait_claims(&mut running, &mut observers, &mut xmr)?;
+        wait_claims(&mut running, &mut observers, &mut xmr, &mut timing)?;
         running.reap_successful_actor_v23(0)?;
         running.reap_successful_actor_v23(1)?;
+        normal.finish();
+        let audit = PhaseV24::start(scenario, LaneV24::Validation, "stopped_final_claim_audits");
         let before = [
             observers[0].replay_stopped()?,
             observers[1].replay_stopped()?,
@@ -205,6 +228,13 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
             }
         }
         let heartbeats = [observers[0].heartbeat()?, observers[1].heartbeat()?];
+        audit.finish();
+        let reopen = PhaseV24::start(
+            scenario,
+            LaneV24::Validation,
+            "original_store_reopen_and_replay",
+        );
+        let mut timing = SnapshotTimingV24::new(scenario, LaneV24::Validation, Instant::now());
         running.restart_actor(0, &binary, NativeDaemonModeV23::Reopen)?;
         running.restart_actor(1, &binary, NativeDaemonModeV23::Reopen)?;
         let restarted = Instant::now();
@@ -232,7 +262,7 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
             }
             thread::sleep(Duration::from_millis(100));
         }
-        wait_claims(&mut running, &mut observers, &mut xmr)?;
+        wait_claims(&mut running, &mut observers, &mut xmr, &mut timing)?;
         running.reap_successful_actor_v23(0)?;
         running.reap_successful_actor_v23(1)?;
         for actor in 0..2 {
@@ -249,6 +279,7 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
                 return Err("reopening changed final economic state or secret evidence".into());
             }
         }
+        reopen.finish();
         Ok(())
     })();
     if result.is_err() {
@@ -275,20 +306,32 @@ pub(super) struct FundingBoundaryV23 {
 #[test]
 #[ignore = "dedicated real daemon noncooperative recovery campaign; mandatory CI uses --ignored --exact"]
 fn native_real_daemon_dom_compensation_without_counterparty_v23() -> Result<()> {
+    let preparation = PhaseV24::start(
+        "dom_compensation",
+        LaneV24::ColdSwapPreparation,
+        "cold_swap_preparation",
+    );
     let binary = NativeDaemonBinaryV23::from_environment()?;
     let configuration = Configuration::require()?;
     let startup = NativeMainnetStartupV23::prepare(&configuration, fresh_local_policy()?, 10_000)?;
     let mut control = NativeBarrierV23::arm(&startup)?;
+    preparation.finish();
     run_noncooperative_recovery_v23(startup, &binary, &mut control)
 }
 
 #[test]
 #[ignore = "dedicated real daemon XMR refund after final public U; mandatory CI uses --ignored --exact"]
 fn native_real_daemon_xmr_refund_after_public_u_without_counterparty_v23() -> Result<()> {
+    let preparation = PhaseV24::start(
+        "xmr_refund",
+        LaneV24::ColdSwapPreparation,
+        "cold_swap_preparation",
+    );
     let binary = NativeDaemonBinaryV23::from_environment()?;
     let configuration = Configuration::require()?;
     let startup = NativeMainnetStartupV23::prepare(&configuration, fresh_local_policy()?, 10_000)?;
     let mut control = NativeBarrierV23::arm(&startup)?;
+    preparation.finish();
     run_noncooperative_exit_v23(startup, &binary, &mut control, RecoveryExitV23::XmrRefund)
 }
 
@@ -423,7 +466,18 @@ fn run_noncooperative_exit_v23(
     control: &mut impl FundingBarrierControlV23,
     expected: RecoveryExitV23,
 ) -> Result<()> {
+    let scenario = match expected {
+        RecoveryExitV23::DomCompensation => "dom_compensation",
+        RecoveryExitV23::XmrRefund => "xmr_refund",
+    };
+    let normal_prefix = PhaseV24::start(
+        scenario,
+        LaneV24::NormalDaemon,
+        "launch_to_retained_funding_before_fault_injection",
+    );
+    let launch_phase = PhaseV24::start(scenario, LaneV24::NormalDaemon, "export_and_launch");
     let mut running = launch(startup, binary)?;
+    launch_phase.finish();
     let result = (|| -> Result<()> {
         let mut observers = observers(&running)?;
         let boundary = control.wait_retained_funding(&mut running, PHASE_TIMEOUT)?;
@@ -435,6 +489,12 @@ fn run_noncooperative_exit_v23(
         {
             return Err("invalid retained-funding actor or identity".into());
         }
+        normal_prefix.finish();
+        let injected = PhaseV24::start(
+            scenario,
+            LaneV24::InjectedRecovery,
+            "forced_crashes_recovery_and_audits",
+        );
         // Stop and reap both at the pending boundary. Compensation never
         // restarts the absent actor. Refund temporarily restarts the private U
         // owner only in its safe window, then removes it before XMR BUILD.
@@ -448,6 +508,11 @@ fn run_noncooperative_exit_v23(
         {
             return Err("noncooperative funding boundary already leaked secret or aborted".into());
         }
+        let funding_reconcile = PhaseV24::start(
+            scenario,
+            LaneV24::InjectedRecovery,
+            "restart_to_retained_funding_broadcast",
+        );
         control.release_retained_funding(&mut running, &boundary)?;
         running.restart_actor(boundary.survivor, binary, NativeDaemonModeV23::Reopen)?;
         // No XMR candidate is included while the route writer is running.
@@ -500,6 +565,12 @@ fn run_noncooperative_exit_v23(
             }
             thread::sleep(Duration::from_millis(100));
         };
+        funding_reconcile.finish();
+        let advance = PhaseV24::start(
+            scenario,
+            LaneV24::FixtureSetup,
+            "confirm_offline_funding_and_advance_simulated_recovery_window",
+        );
         // The controller verifies actual local native finality before moving
         // deadlines; funded_offline remains Committed, never forged Final.
         control.confirm_stopped_funding(&mut running, &boundary, &funded_offline)?;
@@ -511,7 +582,13 @@ fn run_noncooperative_exit_v23(
                 control.advance_refund_window(&mut running, &boundary, &funded_offline)?
             }
         }
+        advance.finish();
         if expected == RecoveryExitV23::XmrRefund {
+            let public_u = PhaseV24::start(
+                scenario,
+                LaneV24::InjectedRecovery,
+                "public_u_with_survivor_stopped",
+            );
             require_unbuilt_refund_v24(&funded_offline, &boundary)?;
             let frozen = barrier::stopped_inventory_v24(running.state_dir(boundary.survivor)?)?;
             running.restart_actor(1 - boundary.survivor, binary, NativeDaemonModeV23::Reopen)?;
@@ -532,7 +609,15 @@ fn run_noncooperative_exit_v23(
             }
             require_unbuilt_refund_v24(&funded_offline, &boundary)?;
             eprintln!("native real daemon: public DOM U final tx={}; peer reaped before survivor refund BUILD", hex::encode(public_refund));
+            public_u.finish();
         }
+        let recovery = PhaseV24::start(
+            scenario,
+            LaneV24::InjectedRecovery,
+            "survivor_restart_to_final_exit_without_peer",
+        );
+        let mut recovery_timing =
+            SnapshotTimingV24::new(scenario, LaneV24::InjectedRecovery, Instant::now());
         running.restart_actor(boundary.survivor, binary, NativeDaemonModeV23::Reopen)?;
         let start = Instant::now();
         let deadline_advanced = true;
@@ -551,6 +636,7 @@ fn run_noncooperative_exit_v23(
                             .into(),
                     );
                 }
+                recovery_timing.observe(boundary.survivor, &snapshot);
                 // The absent peer has already been reaped before this writer
                 // reopened. Retain the new exact candidate before inclusion.
                 if expected != RecoveryExitV23::XmrRefund || retained_refund_without_peer.is_some()
@@ -641,6 +727,12 @@ fn run_noncooperative_exit_v23(
             }
             thread::sleep(Duration::from_millis(100));
         }
+        recovery.finish();
+        let final_audit = PhaseV24::start(
+            scenario,
+            LaneV24::Validation,
+            "stopped_noncooperative_exit_audits",
+        );
         let after = observers[boundary.survivor].replay_stopped()?;
         // Native confirmation happened while the aggregate remained Committed.
         // Prove the restarted writer entered the exit-only lane through its
@@ -678,6 +770,11 @@ fn run_noncooperative_exit_v23(
             {
                 return Err("XMR refund native finality or retained identity mismatch".into());
             }
+            let publication = PhaseV24::start(
+                scenario,
+                LaneV24::Validation,
+                "public_refund_proof_publication_after_restart",
+            );
             refund_publication_v24::prove_after_restart(
                 &mut running,
                 &binary,
@@ -688,6 +785,7 @@ fn run_noncooperative_exit_v23(
                     .ok_or("original refund absent")?
                     .1,
             )?;
+            publication.finish();
         }
         if let Some(compensation) = &selected(&after, boundary.leg).dom_compensation_v12 {
             eprintln!(
@@ -695,6 +793,8 @@ fn run_noncooperative_exit_v23(
                 compensation.payout_noms
             );
         }
+        final_audit.finish();
+        injected.finish();
         Ok(())
     })();
     if result.is_err() {

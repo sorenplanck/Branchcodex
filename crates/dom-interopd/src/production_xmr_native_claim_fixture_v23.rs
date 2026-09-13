@@ -11,7 +11,7 @@ use dom_scriptless_identity_store::{
 };
 use dom_scriptless_store::{ContractsSessionStoreV1, F7AnchorRequestBindingV12};
 use f7_anchor_authority::families_v11::VerifiedF7AnchorAuthorizationV12;
-use std::{fs::File, path::Path, rc::Rc, sync::Arc};
+use std::{fs::File, path::Path, rc::Rc, sync::Arc, time::Instant};
 use xmr_refund_policy::graph_builder::ProducedXmrRecoveryGraphV12;
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
@@ -35,6 +35,8 @@ pub(in super::super) fn claim_after_observed_funding(
         &ProducedXmrRecoveryGraphV12,
     ) -> Result<VerifiedF7AnchorAuthorizationV12>,
 ) -> Result<()> {
+    let claim_started = Instant::now();
+    eprintln!("native Claim: entering fresh observed-funding authorization and retained signing");
     let SignedNativeGraphFixtureV23 {
         stores,
         chain,
@@ -49,6 +51,7 @@ pub(in super::super) fn claim_after_observed_funding(
     let mut authorities = Vec::new();
     let mut signers = Vec::new();
     for actor in 0..2 {
+        let actor_started = Instant::now();
         let store = &stores[actor];
         let gate = store.resume_f7_funding_gate_v12(chain, session)?;
         // Require actual durable funding before asking for external evidence.
@@ -85,9 +88,20 @@ pub(in super::super) fn claim_after_observed_funding(
             "identity",
             &ContractsIdentityPassphraseV1::new(b"test-passphrase-v13".to_vec())?,
         )?);
+        eprintln!(
+            "native Claim actor={actor}: fresh authority and retained signer ready after {:?}",
+            actor_started.elapsed(),
+        );
     }
+    assert_eq!(stores.len(), 2);
+    assert_eq!(wallets.len(), 2);
+    let protocol_indices = [
+        wallets[0].0.participant().protocol_index(),
+        wallets[1].0.participant().protocol_index(),
+    ];
     let mut messages = Vec::new();
     for position in 0..6 {
+        let turn_started = Instant::now();
         // Refresh both process-bound consumed authorities with independent real
         // observations. Do not renew an old snapshot's timestamp locally.
         for actor in 0..2 {
@@ -98,16 +112,22 @@ pub(in super::super) fn claim_after_observed_funding(
                 observe(actor, &request, &produced[actor])?,
             )?;
         }
-        let accepted = stores[0].resume_xmr_bounded_claim_signing_v23(chain, &authorities[0])?;
-        let participant = accepted.roster().entries()[position % 2].participant_id();
-        let sender = wallets
-            .iter()
-            .position(|(binding, _)| &binding.participant().participant_id() == participant)
-            .ok_or("Claim sender absent from native roster")?;
+        // Public scheduling is not a signing capability. The selected owner
+        // still performs its full audit below, following both fresh observers.
+        let sender = super::native_sender_for_position_v24(protocol_indices, position)?;
         let peer = sender ^ 1;
         let accepted =
             stores[sender].resume_xmr_bounded_claim_signing_v23(chain, &authorities[sender])?;
         assert_eq!(accepted.accepted_signing_messages().count(), position);
+        assert_eq!(accepted.roster().entries().len(), 2);
+        assert_eq!(
+            accepted.roster().entries()[position % 2].participant_id(),
+            &wallets[sender].0.participant().participant_id(),
+        );
+        assert_eq!(
+            accepted.roster().entries()[(position + 1) % 2].participant_id(),
+            &wallets[peer].0.participant().participant_id(),
+        );
         let transport = stores[sender].prepare_operational_signing_transport_authority(
             chain,
             session,
@@ -131,7 +151,13 @@ pub(in super::super) fn claim_after_observed_funding(
             committed.signed_bytes(),
         )?;
         messages.push(committed.signed_bytes().to_vec());
+        eprintln!(
+            "native Claim: envelope {position}, two fresh observations and both Stores verified after {:?}",
+            turn_started.elapsed(),
+        );
     }
+    assert_eq!(messages.len(), 6);
+    let pre_signature_started = Instant::now();
     let mut pre_bytes = Vec::new();
     let mut transports = Vec::new();
     for actor in 0..2 {
@@ -191,6 +217,10 @@ pub(in super::super) fn claim_after_observed_funding(
             request.role().final_claim_receiver_id().0
         );
     }
+    eprintln!(
+        "native Claim: identical pre-signatures and accepted 0x0f verified after {:?}",
+        pre_signature_started.elapsed(),
+    );
     drop(committed);
     drop(transports);
     drop(signers);
@@ -199,6 +229,7 @@ pub(in super::super) fn claim_after_observed_funding(
     drop(stores);
     let mut captured = None;
     for actor in 0..2 {
+        let actor_started = Instant::now();
         let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
             Arc::new(root(actor)?),
             "runtime-contracts",
@@ -369,10 +400,15 @@ pub(in super::super) fn claim_after_observed_funding(
                     .adaptor_secret_exposed
             );
         }
+        eprintln!(
+            "native Claim actor={actor}: independent reopen, replay and scoped exposure checks passed after {:?}",
+            actor_started.elapsed(),
+        );
     }
     let (sender, exact) = captured.ok_or("native exposed Claim was not captured")?;
     let receiver = sender ^ 1;
-    for _restart in 0..2 {
+    for restart in 0..2 {
+        let observation_started = Instant::now();
         let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
             Arc::new(root(receiver)?),
             "runtime-contracts",
@@ -391,6 +427,11 @@ pub(in super::super) fn claim_after_observed_funding(
                 .irreversible()
                 .adaptor_secret_exposed
         );
+        eprintln!(
+            "native Claim receiver: canonical observation and extraction restart={restart} passed after {:?}",
+            observation_started.elapsed(),
+        );
     }
+    eprintln!("native Claim: complete after {:?}", claim_started.elapsed());
     Ok(())
 }

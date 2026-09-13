@@ -24,6 +24,27 @@ runs:
         [[ "$(realpath -e -- "$native_tmp")" == "$native_tmp" ]]
         [[ "$(stat -c '%u:%a' -- "$native_tmp")" == "$(id -u):700" ]]
         printf 'DOM_XMR_PRIVATE_TMP_V23=%s\n' "$native_tmp" >> "$GITHUB_ENV"
+    - name: Verify private UDS ancestry and actual socket readiness before compilation
+      id: uds_preflight
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.dom-path }}
+      run: |
+        set -uo pipefail
+        failed=0
+        python3 -m unittest discover -s scripts/tests -p test_native_uds_preflight_v24.py || failed=1
+        python3 scripts/native_uds_preflight_v24.py --result "$RUNNER_TEMP/dom-xmr-uds-preflight.json" || failed=1
+        exit "$failed"
+    - name: Preserve private UDS readiness result
+      id: uds_evidence
+      continue-on-error: true
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: dom-xmr-uds-${{ github.job }}-${{ strategy.job-index }}-${{ github.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/dom-xmr-uds-preflight.json
+        if-no-files-found: warn
+        retention-days: 7
     - name: Reclaim hosted runner disk for both production build profiles
       if: ${{ inputs.real-daemon == 'true' }}
       shell: bash
@@ -67,6 +88,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
+        TMPDIR: ${{ env.DOM_XMR_PRIVATE_TMP_V23 }}
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: cargo test --locked -p dom-adaptor --lib --profile crypto-test reservation_binding::public_audit_v23::tests -- --nocapture --test-threads=1
@@ -130,6 +152,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
+        TMPDIR: ${{ env.DOM_XMR_PRIVATE_TMP_V23 }}
         XMR_TEST_WORKSPACE: ${{ github.workspace }}/.ci-eigenwallet
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
@@ -164,6 +187,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
+        TMPDIR: ${{ env.DOM_XMR_PRIVATE_TMP_V23 }}
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: >-
@@ -184,6 +208,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
+        TMPDIR: ${{ env.DOM_XMR_PRIVATE_TMP_V23 }}
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: |
@@ -207,6 +232,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
+        TMPDIR: ${{ env.DOM_XMR_PRIVATE_TMP_V23 }}
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: cargo test --locked -p dom-scriptless-store --lib --profile crypto-test xmr_round_audit_v11::tests -- --nocapture
@@ -217,6 +243,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.dom-path }}
       env:
+        TMPDIR: ${{ env.DOM_XMR_PRIVATE_TMP_V23 }}
         CARGO_BUILD_JOBS: '2'
         RUST_TEST_THREADS: '1'
       run: |
@@ -251,6 +278,8 @@ runs:
       if: always()
       shell: bash
       env:
+        UDS_PREFLIGHT: ${{ steps.uds_preflight.outcome }}
+        UDS_EVIDENCE: ${{ steps.uds_evidence.outcome }}
         OFFLINE_DISPATCH: ${{ steps.offline_dispatch.outcome }}
         COMPILE_PRODUCTION: ${{ steps.compile_production.outcome }}
         RESERVATION_AUDIT: ${{ steps.reservation_audit.outcome }}
@@ -261,6 +290,12 @@ runs:
         ARTIFACT_PRODUCERS: ${{ steps.artifact_producers.outcome }}
       run: |
         failed=0
+        # This check is mandatory in every caller, including tools-only jobs.
+        # An absent/skipped preflight never borrows another step's green result.
+        [[ "$UDS_PREFLIGHT" == success ]] || failed=1
+        [[ "$UDS_EVIDENCE" == success ]] || failed=1
+        printf 'private-uds-preflight=%s\n' "$UDS_PREFLIGHT"
+        printf 'private-uds-evidence=%s\n' "$UDS_EVIDENCE"
         for entry in \
           "offline-dispatch=$OFFLINE_DISPATCH" \
           "compile-production=$COMPILE_PRODUCTION" \

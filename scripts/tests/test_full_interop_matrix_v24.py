@@ -22,10 +22,10 @@ class FullInteropMatrixV24Tests(unittest.TestCase):
         self.assertEqual(len(matches), 1, unique_text)
         return matches[0]
 
-    def test_seven_exact_shards_run_independently_with_the_full_mode(self):
+    def test_nine_exact_shards_run_independently_with_the_full_mode(self):
         self.assertIn("fail-fast: false", self.job)
         self.assertIn(
-            "shard: [protocol, production-native, production-native-funding, production-native-claim, production-lib, production-integration, live]",
+            "shard: [protocol, production-native, production-native-funding, production-native-claim, production-native-wallet-reopen, production-native-templates, production-lib, production-integration, live]",
             self.job)
         self.assertIn("timeout-minutes: 240", self.job)
         self.assertIn(
@@ -46,7 +46,7 @@ class FullInteropMatrixV24Tests(unittest.TestCase):
             self.assertIn("if: ${{ matrix.shard == 'live' }}", self.step(selector))
         xmr = self.step("id: interop_xmr_tools")
         self.assertIn("if: ${{ startsWith(matrix.shard, 'production-') }}", xmr)
-        self.assertIn("run-once-regressions: ${{ matrix.shard == 'production-native'", xmr)
+        self.assertIn("run-once-regressions: 'false'", xmr)
         ingress = self.step("id: interop_prepared_ingress")
         self.assertIn("if: ${{ matrix.shard == 'production-integration' }}", ingress)
         self.assertIn("--test relay_worker --profile crypto-test prepared_operational", ingress)
@@ -75,6 +75,20 @@ class FullInteropMatrixV24Tests(unittest.TestCase):
         aggregate = self.jobs["heavy-gate"]
         self.assertRegex(aggregate, r"needs: \[[^\]]*\binterop-full\b")
         self.assertIn("${{ needs.interop-full.result }}", aggregate)
+
+    def test_manual_full_preflight_is_independent_and_required_by_final_gate(self):
+        preflight = self.jobs["interop-preflight"]
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.suite == 'interop-full'", preflight)
+        self.assertIn("run-once-regressions: 'true'", preflight)
+        self.assertIn("uses: ./.github/actions/xmr-test-tools", preflight)
+        self.assertNotRegex(self.job, r"^    needs:",)
+        self.assertNotIn("real-daemon: 'true'", preflight)
+        self.assertIn("shared-key: interop-full", preflight)
+        self.assertIn("key: interop-full-production-native", preflight)
+        self.assertIn("case \"$outcome\" in success) ;; *) failed=1 ;; esac", preflight)
+        aggregate = self.jobs["heavy-gate"]
+        self.assertRegex(aggregate, r"needs: \[[^\]]*\binterop-preflight\b")
+        self.assertIn('[[ "${{ needs.interop-preflight.result }}" == success ]]', aggregate)
 
 
 if __name__ == "__main__":

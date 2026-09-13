@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[1]
 FULL_SHARDS = (
     "protocol", "production-native", "production-native-funding", "production-native-claim",
+    "production-native-wallet-reopen", "production-native-templates",
     "production-lib", "production-integration", "live",
 )
 NATIVE_TEST_PREFIX = ("production_contracts_bootstrap::producer_v13::native_ceremony_tests::"
@@ -25,7 +26,17 @@ NATIVE_FUNDING_TEST = (NATIVE_TEST_PREFIX +
                        "::v23_native_two_leg_templates_custody_ready_and_bounded_funding")
 NATIVE_CLAIM_TEST = (NATIVE_TEST_PREFIX +
                      "::v23_native_claim_six_messages_and_presignature_with_real_output_scan")
-NATIVE_EXACT_SHARDS = frozenset(("production-native-funding", "production-native-claim"))
+NATIVE_WALLET_REOPEN_TEST = (NATIVE_TEST_PREFIX +
+    "::v22_both_wallets_reopen_payout_proofs_and_five_native_graph_excesses")
+NATIVE_TEMPLATES_TEST = (NATIVE_TEST_PREFIX +
+    "::v23_two_wallets_and_native_cd_proofs_form_identical_graph_templates")
+NATIVE_EXACT_TESTS = {
+    "production-native-funding": NATIVE_FUNDING_TEST,
+    "production-native-claim": NATIVE_CLAIM_TEST,
+    "production-native-wallet-reopen": NATIVE_WALLET_REOPEN_TEST,
+    "production-native-templates": NATIVE_TEMPLATES_TEST,
+}
+NATIVE_EXACT_SHARDS = frozenset(NATIVE_EXACT_TESTS)
 PRODUCTION_INTEGRATION_TARGETS = (
     "admission", "admission_v2", "driver", "f6_artifact_cli", "planning_cli",
     "production_time_guard", "relay_worker", "route_services_cli", "supervisor",
@@ -180,7 +191,7 @@ def full_shard_commands(specs, shard, trace_env, production_env):
         )]
     if shard == "production-native":
         return [(shard, native_shard_command(shard), {})]
-    if shard in ("production-native-funding", "production-native-claim"):
+    if shard in NATIVE_EXACT_SHARDS:
         return [(shard, native_shard_command(shard), {})]
     if shard == "production-lib":
         return [(shard, ["cargo", "test", "-p", "dom-interopd", "--no-default-features",
@@ -211,11 +222,8 @@ def native_shard_command(shard):
                "--no-fail-fast"]
     if shard == "production-native":
         return command + [NATIVE_TEST_PREFIX, "--", "--nocapture", "--test-threads=1",
-                          "--skip", NATIVE_FUNDING_TEST, "--skip", NATIVE_CLAIM_TEST]
-    selected = {
-        "production-native-funding": NATIVE_FUNDING_TEST,
-        "production-native-claim": NATIVE_CLAIM_TEST,
-    }.get(shard)
+                          *(arg for name in NATIVE_EXACT_TESTS.values() for arg in ("--skip", name))]
+    selected = NATIVE_EXACT_TESTS.get(shard)
     if selected is None:
         raise ValueError("unknown native shard")
     return command + [selected, "--", "--exact", "--nocapture", "--test-threads=1"]
@@ -262,13 +270,19 @@ def start_test_command(name, env, evidence_directory):
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--tests', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production-native':
-        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests', '--', '--nocapture', '--test-threads=1', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_two_leg_templates_custody_ready_and_bounded_funding', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan'], cwd=ROOT, env=env,
+        return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests', '--', '--nocapture', '--test-threads=1', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_two_leg_templates_custody_ready_and_bounded_funding', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v22_both_wallets_reopen_payout_proofs_and_five_native_graph_excesses', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_two_wallets_and_native_cd_proofs_form_identical_graph_templates'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production-native-funding':
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_two_leg_templates_custody_ready_and_bounded_funding', '--', '--exact', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production-native-claim':
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_native_claim_six_messages_and_presignature_with_real_output_scan', '--', '--exact', '--nocapture', '--test-threads=1'], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-native-wallet-reopen':
+        return subprocess.Popen(["cargo","test","-p","dom-interopd","--no-default-features","--features","production","--lib","--locked","--profile","crypto-test","--no-fail-fast","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v22_both_wallets_reopen_payout_proofs_and_five_native_graph_excesses","--","--exact","--nocapture","--test-threads=1"], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if name == 'production-native-templates':
+        return subprocess.Popen(["cargo","test","-p","dom-interopd","--no-default-features","--features","production","--lib","--locked","--profile","crypto-test","--no-fail-fast","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::v23_two_wallets_and_native_cd_proofs_form_identical_graph_templates","--","--exact","--nocapture","--test-threads=1"], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if name == 'production-lib':
         return subprocess.Popen(['cargo', 'test', '-p', 'dom-interopd', '--no-default-features', '--features', 'production', '--lib', '--locked', '--profile', 'crypto-test', '--no-fail-fast', '--', '--nocapture', '--test-threads=1', '--skip', 'production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests'], cwd=ROOT, env=env,
@@ -359,7 +373,7 @@ def main():
     }
     if full_shard != "all":
         report["limits"].append(
-            "This report covers only the selected full-mode shard; the full campaign requires all seven shard outcomes.")
+            "This report covers only the selected full-mode shard; the full campaign requires all nine shard outcomes.")
     report_path = out / "report.json"
 
     def save():

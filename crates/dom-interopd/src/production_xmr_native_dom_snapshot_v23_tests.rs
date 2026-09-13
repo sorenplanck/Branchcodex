@@ -26,6 +26,8 @@ use page_v23::scan_response;
 mod evolving_v23;
 #[path = "production_xmr_native_dom_history_v24_tests.rs"]
 mod history_v24;
+#[path = "production_xmr_native_dom_http_v24_tests.rs"]
+mod http_v24;
 #[path = "production_xmr_native_dom_ledger_v23_tests.rs"]
 mod ledger_v23;
 #[path = "production_xmr_native_dom_window_v24_tests.rs"]
@@ -353,75 +355,71 @@ impl Snapshot {
                         stream
                             .set_write_timeout(Some(Duration::from_secs(5)))
                             .map_err(|e| e.to_string())?;
-                        let mut header = Vec::new();
-                        while !header.windows(4).any(|w| w == b"\r\n\r\n") {
-                            let mut buffer = [0; 1024];
-                            let n = stream.read(&mut buffer).map_err(|e| e.to_string())?;
-                            if n == 0 || header.len() + n > 8192 {
-                                return Err("snapshot request bound".into());
+                        let connection = (|| -> Result<()> {
+                            let header = http_v24::read_header_v24(&mut stream)?;
+                            let header_end = header
+                                .windows(4)
+                                .position(|part| part == b"\r\n\r\n")
+                                .ok_or("HTTP header terminator")?;
+                            let head = std::str::from_utf8(&header[..header_end])
+                                .map_err(|_| "snapshot HTTP encoding")?;
+                            let auth: Vec<_> = head
+                                .lines()
+                                .filter_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("authorization")
+                                        .then_some(value.trim())
+                                })
+                                .collect();
+                            let authorized = auth.len() == 1
+                                && auth[0].strip_prefix("Bearer ").is_some_and(|candidate| {
+                                    bearer_tokens
+                                        .iter()
+                                        .any(|expected| candidate == expected.as_str())
+                                });
+                            if !authorized {
+                                http_v24::socket_io_v24(stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))?;
+                                return Ok(());
                             }
-                            header.extend_from_slice(&buffer[..n]);
-                        }
-                        let header_end = header
-                            .windows(4)
-                            .position(|part| part == b"\r\n\r\n")
-                            .ok_or("HTTP header terminator")?;
-                        let head = std::str::from_utf8(&header[..header_end])
-                            .map_err(|_| "snapshot HTTP encoding")?;
-                        let auth: Vec<_> = head
-                            .lines()
-                            .filter_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("authorization")
-                                    .then_some(value.trim())
-                            })
-                            .collect();
-                        let authorized = auth.len() == 1
-                            && auth[0].strip_prefix("Bearer ").is_some_and(|candidate| {
-                                bearer_tokens
-                                    .iter()
-                                    .any(|expected| candidate == expected.as_str())
-                            });
-                        if !authorized {
-                            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").map_err(|e|e.to_string())?;
-                            continue;
-                        }
-                        if header.starts_with(b"POST /tx/submit HTTP/1.1\r\n") {
-                            if let Some(live) = &live {
-                                evolving_v23::submit_http_v23(&mut stream, &header, live)
-                                    .map_err(|e| e.to_string())?;
-                                continue;
+                            if header.starts_with(b"POST /tx/submit HTTP/1.1\r\n") {
+                                if let Some(live) = &live {
+                                    return evolving_v23::submit_http_v23(
+                                        &mut stream,
+                                        &header,
+                                        live,
+                                    );
+                                }
+                                let bytes =
+                                    recovery_capture_v23::capture_submission(&mut stream, &header)
+                                        .map_err(|e| e.to_string())?;
+                                let mut captured = captured.lock().map_err(|_| "capture lock")?;
+                                if captured.len() >= 4 {
+                                    return Err("capture count bound".into());
+                                }
+                                captured.push(bytes);
+                                return Ok(());
                             }
-                            let bytes =
-                                recovery_capture_v23::capture_submission(&mut stream, &header)
-                                    .map_err(|e| e.to_string())?;
-                            let mut captured = captured.lock().map_err(|_| "capture lock")?;
-                            if captured.len() >= 4 {
-                                return Err("capture count bound".into());
+                            let header =
+                                String::from_utf8(header).map_err(|_| "snapshot HTTP encoding")?;
+                            let first = header.lines().next().ok_or("snapshot request missing")?;
+                            if !authorized || !first.starts_with("GET /chain/scan/scriptless/v1?") {
+                                http_v24::socket_io_v24(stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))?;
+                                return Ok(());
                             }
-                            captured.push(bytes);
-                            continue;
-                        }
-                        let header =
-                            String::from_utf8(header).map_err(|_| "snapshot HTTP encoding")?;
-                        let first = header.lines().next().ok_or("snapshot request missing")?;
-                        if !authorized || !first.starts_with("GET /chain/scan/scriptless/v1?") {
-                            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").map_err(|e|e.to_string())?;
-                            continue;
-                        }
-                        requests += 1;
-                        if requests > 65_536 {
-                            return Err("snapshot call bound".into());
-                        }
-                        let response = if let Some(live) = &live {
-                            let state = live.lock().map_err(|_| "evolving ledger lock")?;
-                            state.scan_response(first)
-                        } else {
-                            scan_response(first, &identity_json, &blocks)
-                        }
-                        .map_err(|e| e.to_string())?;
-                        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len()).map_err(|e|e.to_string())?;
-                        stream.write_all(&response).map_err(|e| e.to_string())?;
+                            requests += 1;
+                            if requests > 65_536 {
+                                return Err("snapshot call bound".into());
+                            }
+                            let response = if let Some(live) = &live {
+                                let state = live.lock().map_err(|_| "evolving ledger lock")?;
+                                state.scan_response(first)
+                            } else {
+                                scan_response(first, &identity_json, &blocks)
+                            }?;
+                            http_v24::write_json_v24(&mut stream, "200 OK", &response)
+                        })();
+                        http_v24::finish_connection_v24(connection)
+                            .map_err(|error| error.to_string())?;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5))

@@ -14,10 +14,12 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 29)
-        self.assertEqual(ids[:4], [
+        self.assertEqual(len(ids), 36)
+        self.assertEqual(ids[:7], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
-            "native-preflight-history",
+            "native-preflight-history", "native-preflight-http",
+            "native-preflight-funding-schedule",
+            "native-preflight-participant-file",
         ])
         self.assertEqual(len(ids), len(set(ids)))
         for item in runner.SELECTIONS:
@@ -40,12 +42,16 @@ class ClosedBoundaryListTests(unittest.TestCase):
         # Explicit path attributes use module identifiers, NOT the filenames:
         # f7_xmr_refund_transport_v23.rs lives under f7_v12::xmr_refund_transport_v23.
         edges = (
+            ("crates/dom-interopd/src/lib.rs", "production_inputs"),
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_graph_wallet_tests"),
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_observation_v23"),
+            ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_funding_v23"),
             ("crates/dom-interopd/src/production_xmr_native_observation_v23_tests.rs", "dom_snapshot"),
             ("crates/dom-interopd/src/production_xmr_native_dom_snapshot_v23_tests.rs", "history_v24"),
+            ("crates/dom-interopd/src/production_xmr_native_dom_snapshot_v23_tests.rs", "http_v24"),
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_coldstart_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_scenario_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "timing_v24"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "deadline_plan_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_wallet_v23"),
             ("crates/dom-interopd/src/production_xmr_native_deadline_plan_v23_tests.rs", "projection_v24"),
@@ -62,6 +68,12 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-scriptless-store/src/runtime/linux.rs", "session_store"),
             ("crates/dom-scriptless-store/src/runtime/linux.rs", "xmr_recovery"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store.rs", "f7_v12"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store.rs", "xmr_graph_output_journal_v22"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_output_journal_v22.rs", "proof_cache_v24"),
+            ("crates/adapters/xmr-refund-policy/src/lib.rs", "graph_offer_v22"),
+            ("crates/adapters/xmr-refund-policy/src/graph_offer_v22.rs", "verification_cache_v24"),
+            ("crates/adapters/xmr-refund-policy/src/graph_offer_verification_cache_v24.rs", "tests"),
+            ("crates/dom-adaptor/src/lib.rs", "public_range_proof_cache_v24"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store/f7_v12.rs", "xmr_refund_transport_v23"),
             ("crates/dom-scriptless-store/src/runtime/linux/xmr_recovery.rs", "execution_v12"),
             ("crates/f7-anchor-authority/src/families_v11/mod.rs", "authorization_v12"),
@@ -98,6 +110,68 @@ class ClosedBoundaryListTests(unittest.TestCase):
             runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
             self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
             process.assert_called_once()
+
+    def test_http_preflight_keeps_all_five_tests_and_literal_process_dispatch(self):
+        spec = runner.spec_for("native-preflight-http")
+        self.assertEqual(spec["module_prefix"],
+                         "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::dom_snapshot::http_v24::tests::")
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(spec["required_tests"], [
+            spec["module_prefix"] + "native_dom_get_peer_timeout_keeps_next_connection_available_v24",
+            spec["module_prefix"] + "native_dom_post_lost_ack_preserves_exact_admission_for_readback_v24",
+            spec["module_prefix"] + "native_dom_socket_retry_never_swallows_storage_scope_or_unknown_errors_v24",
+            spec["module_prefix"] + "native_dom_incomplete_post_never_reaches_admission_v24",
+            spec["module_prefix"] + "native_dom_post_storage_timeout_is_rejection_not_peer_retry_or_acceptance_v24",
+        ])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_funding_schedule_preflight_selects_only_the_cheap_roster_test(self):
+        spec = runner.spec_for("native-preflight-funding-schedule")
+        exact = "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_funding_v23::native_funding_sender_schedule_preserves_six_authenticated_roster_turns_v24"
+        self.assertEqual(spec["required_tests"], [exact])
+        self.assertEqual(spec["filter"], exact)
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_participant_file_preflight_keeps_all_three_bounds_and_pin_tests(self):
+        spec = runner.spec_for("native-preflight-participant-file")
+        source = (runner.ROOT / spec["source"]).read_text()
+        self.assertIn("mod participant_file_bounds_v24 {", source)
+        self.assertEqual(spec["filter"], "production_inputs::tests::participant_file_bounds_v24::")
+        self.assertEqual(spec["required_tests"], [
+            spec["filter"] + "extended_xmr_file_uses_existing_codec_bound_v24",
+            spec["filter"] + "extended_xmr_read_still_requires_authenticated_manifest_pin_v24",
+            spec["filter"] + "participant_file_refuses_oversize_legacy_relabel_and_trailing_v24",
+        ])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_proof_caches_and_timing_are_additive_and_keep_real_verifier_comparisons(self):
+        expected = {
+            "store-public-output-proof-cache": (6, "real_output_cold_warm_and_all_public_mutations_match_original_v24"),
+            "native-public-phase-timing": (1, "daemon_timing_observes_only_public_transitions_without_inventing_round_durations_v24"),
+            "xmr-graph-offer-proof-cache": (7, "real_graph_offer_warm_repeat64_reports_actual_verifier_counts_v24"),
+            "adaptor-public-range-proof-cache": (5, "public_range_proof_cache_transaction_preserves_error_index_order_and_atomic_admission_v24"),
+        }
+        self.assertEqual([item["id"] for item in runner.SELECTIONS[7:11]], list(expected))
+        for identifier, (count, mandatory) in expected.items():
+            with self.subTest(selection=identifier):
+                spec = runner.spec_for(identifier)
+                self.assertEqual(len(spec["required_tests"]), count)
+                self.assertIn(spec["module_prefix"] + mandatory, spec["required_tests"])
+                self.assertEqual(spec["filter"], spec["module_prefix"])
+                self.assertNotIn("--ignored", runner.command(identifier))
+                with mock.patch.object(runner.subprocess, "Popen") as process:
+                    runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
+                    self.assertEqual(process.call_args.args[0], runner.command(identifier))
+                    process.assert_called_once()
 
     def test_every_command_is_locked_serial_and_reuses_crypto_test(self):
         for item in runner.SELECTIONS:
@@ -186,6 +260,35 @@ class BoundaryEvidenceTests(unittest.TestCase):
                 self.assertEqual(report["status"], "failed")
                 if not cleaned:
                     self.assertEqual(report["results"][1]["status"], "not-run")
+
+
+class ProductionEnvironmentTests(unittest.TestCase):
+    def test_private_tmp_is_scoped_to_child_and_parent_is_unchanged(self):
+        import shutil
+        from run_native_daemon_scenario_v23 import private_synthetic_tmp
+        root = private_synthetic_tmp()
+        self.addCleanup(shutil.rmtree, root)
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(runner.os.environ, {"DOM_XMR_PRIVATE_TMP_V23": str(root), "TMPDIR": "/tmp"}), \
+                mock.patch.object(runner, "start_test_command_v24", side_effect=OSError("no process launched")) as start:
+            result = runner.run_selection("native-preflight-http", Path(directory), 1)
+            self.assertEqual(start.call_args.kwargs["env"]["TMPDIR"], str(root))
+            self.assertEqual(start.call_args.kwargs["env"]["CARGO_BUILD_JOBS"], "2")
+            self.assertEqual(start.call_args.kwargs["env"]["RUST_TEST_THREADS"], "1")
+            self.assertEqual(runner.os.environ["TMPDIR"], "/tmp")
+            self.assertEqual(result["private_fixture_root"], str(root))
+            self.assertEqual(result["status"], "failed")
+            self.assertTrue(result["cleanup_verified"])
+
+    def test_invalid_private_root_refuses_before_any_cargo_process(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(runner.os.environ, {"DOM_XMR_PRIVATE_TMP_V23": "/tmp"}), \
+                mock.patch.object(runner, "start_test_command_v24") as start:
+            result = runner.run_selection("native-preflight-http", Path(directory), 1)
+            start.assert_not_called()
+            self.assertEqual(result["status"], "failed")
+            self.assertTrue(result["cleanup_verified"])
+            self.assertIn("PermissionError", result["error"])
 
 
 if __name__ == "__main__":

@@ -19,10 +19,10 @@
 //! native transaction verification alone cannot prove that provenance.
 
 use crate::VerifiedRefundPreSignatureV1;
-use dom_adaptor::{canonical_template_v1, AdaptorSecret};
+use dom_adaptor::{canonical_template_v1, validate_public_range_proofs_v24, AdaptorSecret};
 use dom_consensus::{
-    validate_balance_equation, validate_range_proofs, validate_transaction,
-    validate_transaction_structure, Transaction, ValidationContext,
+    validate_balance_equation, validate_transaction, validate_transaction_structure, Transaction,
+    ValidationContext,
 };
 use dom_core::{BlockHeight, Timestamp, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN};
 use dom_crypto::{blake2b_256, PublicKey};
@@ -526,7 +526,7 @@ fn verify_unsigned(transaction: &Transaction) -> Result<()> {
         return Err(XmrRecoveryGraphErrorV11::NonCanonicalTransaction);
     }
     validate_transaction_structure(transaction)
-        .and_then(|()| validate_range_proofs(transaction))
+        .and_then(|()| validate_public_range_proofs_v24(transaction))
         .and_then(|()| validate_balance_equation(transaction))
         .map_err(|_| XmrRecoveryGraphErrorV11::ConsensusRejected)
 }

@@ -381,6 +381,7 @@ mod nonce_vault;
 mod operational_funding_authority;
 mod partial_commitment_pop;
 mod permit;
+mod public_range_proof_cache_v24;
 mod reservation_binding;
 mod secret_nonce;
 mod session;
@@ -524,6 +525,7 @@ pub use signing_round::{
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use nonce_vault::fuzz_nar006_runtime_bindings_v1;
+pub use public_range_proof_cache_v24::validate_public_range_proofs_v24;
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use reservation_binding::fuzz_closed_request_types_v1;

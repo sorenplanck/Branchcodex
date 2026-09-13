@@ -7,16 +7,11 @@ concurrency:
   group: interop-hardening-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 jobs:
-  components:
-    name: "components / ${{ matrix.shard }}"
+  production-preflight:
+    name: "preflight / environment, custody and input boundaries"
     runs-on: ubuntu-latest
-    # The native graphs run on separate machines, while every selected shard
-    # still reports and uploads its own complete outcome.
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [protocol, production-native, production-native-funding, production-native-claim, production-lib, production-integration]
+    timeout-minutes: 90
+    # No needs edge: a boundary failure must not suppress the other scenarios.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,8 +24,58 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.1
       - uses: Swatinem/rust-cache@v2
         with:
-          # Matrix jobs retain the existing `components` job cache key, so the
-          # split can restore compilation produced before this matrix existed.
+          shared-key: components
+          key: production
+          cache-workspace-crates: 'true'
+          cache-on-failure: 'true'
+          save-if: ${{ github.event_name != 'pull_request' }}
+          workspaces: |
+            . -> target
+            programs/dom-solana-escrow -> target
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config python3
+      - uses: ./.github/actions/xmr-test-tools
+        id: boundaries
+        continue-on-error: true
+        with:
+          run-once-regressions: 'true'
+      - name: Require all preflight outcomes
+        if: always()
+        env:
+          CONSENSUS: ${{ steps.consensus.outcome }}
+          BOUNDARIES: ${{ steps.boundaries.outcome }}
+        run: |
+          failed=0
+          for outcome in "$CONSENSUS" "$BOUNDARIES"; do
+            case "$outcome" in success) ;; *) failed=1 ;; esac
+          done
+          exit "$failed"
+
+  components:
+    name: "components / ${{ matrix.shard }}"
+    runs-on: ubuntu-latest
+    # The native graphs run on separate machines, while every selected shard
+    # still reports and uploads its own complete outcome.
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [protocol, production-native, production-native-funding, production-native-claim, production-native-wallet-reopen, production-native-templates, production-lib, production-integration]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify frozen consensus sources
+        id: consensus
+        continue-on-error: true
+        run: bash scripts/check-consensus-unchanged.sh
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Protocol must not win the immutable cache save with a target that
+          # lacks production. All production jobs build the same initial targets.
+          key: ${{ matrix.shard == 'protocol' && 'protocol' || 'production' }}
           cache-workspace-crates: 'true'
           cache-on-failure: 'true'
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -51,8 +96,8 @@ jobs:
         if: ${{ startsWith(matrix.shard, 'production-') }}
         continue-on-error: true
         with:
-          # interop-hardening owns these shared regressions once per campaign.
-          run-once-regressions: ${{ matrix.shard == 'production-native' }}
+          # The independent preflight job owns these once per campaign.
+          run-once-regressions: 'false'
       - name: Verify prepared operational integration ingress
         id: prepared_ingress
         if: ${{ matrix.shard == 'production-integration' }}
