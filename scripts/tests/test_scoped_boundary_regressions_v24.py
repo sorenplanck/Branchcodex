@@ -14,12 +14,13 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 36)
-        self.assertEqual(ids[:7], [
+        self.assertEqual(len(ids), 37)
+        self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
             "native-preflight-funding-schedule",
             "native-preflight-participant-file",
+            "native-preflight-xmr-maturity",
         ])
         self.assertEqual(len(ids), len(set(ids)))
         for item in runner.SELECTIONS:
@@ -52,6 +53,8 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_coldstart_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_scenario_v23"),
             ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "timing_v24"),
+            ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "barrier"),
+            ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_barrier.rs", "xmr_progress_v24"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "deadline_plan_v23"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_wallet_v23"),
             ("crates/dom-interopd/src/production_xmr_native_deadline_plan_v23_tests.rs", "projection_v24"),
@@ -160,7 +163,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
             "xmr-graph-offer-proof-cache": (7, "real_graph_offer_warm_repeat64_reports_actual_verifier_counts_v24"),
             "adaptor-public-range-proof-cache": (5, "public_range_proof_cache_transaction_preserves_error_index_order_and_atomic_admission_v24"),
         }
-        self.assertEqual([item["id"] for item in runner.SELECTIONS[7:11]], list(expected))
+        self.assertEqual([item["id"] for item in runner.SELECTIONS[8:12]], list(expected))
         for identifier, (count, mandatory) in expected.items():
             with self.subTest(selection=identifier):
                 spec = runner.spec_for(identifier)
@@ -172,6 +175,23 @@ class ClosedBoundaryListTests(unittest.TestCase):
                     runner.start_test_command_v24(identifier, cwd=runner.ROOT, env={}, stdout=None)
                     self.assertEqual(process.call_args.args[0], runner.command(identifier))
                     process.assert_called_once()
+
+    def test_xmr_maturity_preflight_keeps_five_pure_scope_and_height_tests(self):
+        spec = runner.spec_for("native-preflight-xmr-maturity")
+        self.assertEqual(spec["module_prefix"],
+                         "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::xmr_progress_v24::tests::")
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(spec["required_tests"], [spec["module_prefix"] + name for name in (
+            "scoped_funding_respects_negotiated_finality_and_native_unlock_v24",
+            "retained_funding_matures_with_empty_pool_at_exact_height_v24",
+            "unrelated_or_undispatched_pool_never_drives_inclusion_or_maturity_v24",
+            "terminal_spends_use_finality_and_multiple_fundings_use_latest_maturity_v24",
+            "planner_refuses_overflow_invalid_finality_and_inconsistent_history_v24",
+        )])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
 
     def test_every_command_is_locked_serial_and_reuses_crypto_test(self):
         for item in runner.SELECTIONS:

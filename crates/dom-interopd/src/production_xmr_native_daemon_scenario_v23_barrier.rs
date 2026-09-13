@@ -9,6 +9,9 @@ use dom_scriptless_store::{SessionPhaseV1, SessionRecordV1};
 use kaystra_core::{terms::SettlementTermsV1, types::TimelockSpec};
 use std::{collections::BTreeSet, io::Read, path::Path};
 
+#[path = "production_xmr_native_daemon_scenario_v24_xmr_progress.rs"]
+mod xmr_progress_v24;
+
 pub(super) struct NativeBarrierV23 {
     terms: [SettlementTermsV1; 2],
     external_funding: [[u8; 32]; 2],
@@ -93,7 +96,7 @@ impl XmrLedgerPumpV23 {
                     ] {
                         if let Some(action) = coordinator.poll(snapshot, leg, kind)? {
                             if action.xmr_dispatched {
-                                expected.push(action);
+                                expected.push((kind, action));
                             }
                         }
                     }
@@ -101,29 +104,26 @@ impl XmrLedgerPumpV23 {
             }
         }
         let history = running.xmr_history_status_v23()?;
-        let pool = history.pool_tx_hashes;
-        if pool.len() > 32
-            || pool.iter().any(|hash| *hash == [0; 32])
-            || pool.iter().copied().collect::<BTreeSet<_>>().len() != pool.len()
-        {
-            return Err("scenario XMR pool bound or duplicate identity".into());
-        }
-        // A valid pool transaction with no durable scoped intent is NOT
-        // confirmed. A later poll may find the committed intent; otherwise the
-        // scenario times out, rather than confirming arbitrary pool contents.
-        let include: Vec<_> = pool
-            .into_iter()
-            .filter(|hash| expected.iter().any(|action| action.matches_xmr(*hash)))
+        let retained: Vec<_> = history
+            .transactions
+            .iter()
+            .map(|transaction| (transaction.tx_hash, transaction.block_height))
             .collect();
-        if include.is_empty() {
+        // Inclusion/finality alone does not make a Monero output spendable.
+        // Only original dispatched coordinator actions can drive inclusion or
+        // subsequent empty-block maturation; unrelated pool contents stay put.
+        let Some(progress) = xmr_progress_v24::plan(
+            history.tip_height,
+            self.confirmations,
+            &history.pool_tx_hashes,
+            &retained,
+            &expected,
+        )?
+        else {
             return Ok(());
-        }
-        let target = history
-            .tip_height
-            .checked_add(self.confirmations)
-            .ok_or("scenario XMR height overflow")?;
+        };
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        running.advance_xmr_history_v23(target, now, &include)?;
+        running.advance_xmr_history_v23(progress.target, now, &progress.include)?;
         Ok(())
     }
 

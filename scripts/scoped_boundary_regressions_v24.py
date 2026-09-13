@@ -86,6 +86,15 @@ SELECTIONS = (
                   "extended_xmr_read_still_requires_authenticated_manifest_pin_v24",
                   "participant_file_refuses_oversize_legacy_relabel_and_trailing_v24"),
               features=("production",)),
+    selection("native-preflight-xmr-maturity", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::xmr_progress_v24::tests::",
+              "crates/dom-interopd/src/production_xmr_native_daemon_scenario_v24_xmr_progress.rs", (
+                  "scoped_funding_respects_negotiated_finality_and_native_unlock_v24",
+                  "retained_funding_matures_with_empty_pool_at_exact_height_v24",
+                  "unrelated_or_undispatched_pool_never_drives_inclusion_or_maturity_v24",
+                  "terminal_spends_use_finality_and_multiple_fundings_use_latest_maturity_v24",
+                  "planner_refuses_overflow_invalid_finality_and_inconsistent_history_v24"),
+              features=("production",)),
     selection("store-public-output-proof-cache", "dom-scriptless-store",
               "runtime::linux::session_store::xmr_graph_output_journal_v22::proof_cache_v24::tests::",
               "crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_output_proof_cache_v24.rs", (
@@ -342,6 +351,12 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_inputs::tests::participant_file_bounds_v24::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_inputs::tests::participant_file_bounds_v24::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-xmr-maturity":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::xmr_progress_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_scenario_v23::barrier::xmr_progress_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "store-public-output-proof-cache":
