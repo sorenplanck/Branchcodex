@@ -4113,6 +4113,16 @@ impl AcceptedOperationalSigningSessionV1 for AcceptedContractsSigningSessionV1 {
     }
 }
 
+/// Process-local shared reconstruction of one session's public XMR graph
+/// evidence. Instances exist only through the complete cryptographic
+/// reverification in `reconstruct_xmr_graph_evidence_verified_v24`; the cache
+/// key commits to every retained byte that verification reads, so a shared
+/// instance never outlives a single changed input byte.
+pub(crate) type XmrGraphReconstructionV24 = std::sync::Arc<(
+    xmr_refund_policy::graph_builder::XmrRecoveryGraphTemplatesV12,
+    xmr_refund_policy::graph_signing_keys_v22::XmrGraphSigningKeysV22,
+)>;
+
 /// Retained-capability operational store for authenticated session records.
 ///
 /// This is a sibling authority to the nonce vault. It never derives, stores,
@@ -4138,6 +4148,7 @@ pub struct ContractsSessionStoreV1 {
     process_claim_signing_authorities_v2: Mutex<BTreeMap<[u8; 32], Weak<()>>>,
     process_downstream_claim_gates_v23: Mutex<BTreeMap<[u8; 32], f7_v12::DownstreamClaimLeaseV23>>,
     process_evm_signed_action_imports: Mutex<BTreeSet<[u8; 32]>>,
+    xmr_graph_reconstruction_cache_v24: Mutex<Vec<([u8; 32], XmrGraphReconstructionV24)>>,
 }
 
 /// Move-only, locked production Store opening authenticated before recovery.
@@ -4683,6 +4694,7 @@ impl ContractsSessionStoreV1 {
             open_instance_id: random_nonzero()?,
             operation: Mutex::new(()),
             recovery_projection: Mutex::new(None),
+            xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4859,6 +4871,7 @@ impl ContractsSessionStoreV1 {
             open_instance_id: random_nonzero()?,
             operation: Mutex::new(()),
             recovery_projection: Mutex::new(None),
+            xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),

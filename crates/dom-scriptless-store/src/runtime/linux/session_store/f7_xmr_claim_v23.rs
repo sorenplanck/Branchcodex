@@ -72,13 +72,14 @@ impl ContractsSessionStoreV1 {
             Ok(_) => return Err(SessionStoreError::Conflict),
             Err(error) => return Err(error),
         }
-        let (templates, keys) = self.reconstruct_xmr_graph_evidence_core_v23(
+        let reconstructed = self.reconstruct_xmr_graph_evidence_core_v23(
             chain,
             gate.role.route_id(),
             session,
             false,
         )?;
-        keys.require_graph(&templates)
+        let (templates, keys) = (&reconstructed.0, &reconstructed.1);
+        keys.require_graph(templates)
             .map_err(|_| SessionStoreError::Quarantined)?;
         let hash = keys.template_hash(XmrGraphSigningStageV22::Claim);
         let template = templates.claim().clone();

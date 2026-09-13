@@ -81,7 +81,8 @@ impl ContractsSessionStoreV1 {
     ) -> Result<[u8; 32], SessionStoreError> {
         let _guard = self.operation_lock()?;
         self.audit_transport()?;
-        let (_, keys) = self.reconstruct_xmr_graph_under_lock_v23(chain, route, session)?;
+        let reconstructed = self.reconstruct_xmr_graph_under_lock_v23(chain, route, session)?;
+        let keys = &reconstructed.1;
         let current = self.load_session_locked(session)?;
         if current.revision() != 17 || current.phase() != SessionPhaseV1::OutputFinalized {
             return Err(SessionStoreError::InvalidTransition);

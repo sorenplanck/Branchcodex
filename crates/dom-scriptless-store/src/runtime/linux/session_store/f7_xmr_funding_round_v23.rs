@@ -201,13 +201,14 @@ impl ContractsSessionStoreV1 {
             Err(error) => return Err(error),
         }
         let chain = self.require_process_trusted_chain_v23(&gate.chain_id)?;
-        let (templates, keys) = self.reconstruct_xmr_graph_evidence_core_v23(
+        let reconstructed = self.reconstruct_xmr_graph_evidence_core_v23(
             chain,
             gate.role.route_id(),
             session,
             false,
         )?;
-        keys.require_graph(&templates)
+        let (templates, keys) = (&reconstructed.0, &reconstructed.1);
+        keys.require_graph(templates)
             .map_err(|_| SessionStoreError::Quarantined)?;
         let hash = keys.template_hash(XmrGraphSigningStageV22::Funding);
         if hash != gate.role.funding_template_hash() {

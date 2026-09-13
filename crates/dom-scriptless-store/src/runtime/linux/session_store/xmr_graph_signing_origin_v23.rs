@@ -235,8 +235,9 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::InvalidTransition);
         }
-        let (templates, keys) =
+        let reconstructed =
             self.reconstruct_xmr_graph_evidence_core_v23(chain, route, parent, false)?;
+        let (templates, keys) = (&reconstructed.0, &reconstructed.1);
         let proposal = keys
             .proposal()
             .map_err(|_| SessionStoreError::Conflict)?
@@ -249,8 +250,8 @@ impl ContractsSessionStoreV1 {
             route,
             parent,
             edge,
-            &templates,
-            &keys,
+            templates,
+            keys,
             &transport,
             [context.digest(), proposal, *agreement.digest()],
         )
