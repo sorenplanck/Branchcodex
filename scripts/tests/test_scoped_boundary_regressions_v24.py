@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 42)
+        self.assertEqual(len(ids), 44)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -48,9 +48,12 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_observation_v23"),
             ("crates/dom-interopd/src/production_xmr_graph_wallet_v22_tests.rs", "native_funding_v23"),
             ("crates/dom-interopd/src/production_xmr_native_observation_v23_tests.rs", "dom_snapshot"),
+            ("crates/dom-interopd/src/production_xmr_native_observation_v23_tests.rs", "route_funding_v23"),
+            ("crates/dom-interopd/src/production_xmr_native_route_funding_owner_v23_tests.rs", "inventory_fixture_compat_v24"),
             ("crates/dom-interopd/src/production_xmr_native_dom_snapshot_v23_tests.rs", "history_v24"),
             ("crates/dom-interopd/src/production_xmr_native_dom_snapshot_v23_tests.rs", "http_v24"),
             ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "xmr_coldstart_v23"),
+            ("crates/dom-interopd/src/production_bootstrap_v13_tests.rs", "bootstrap_path_v24"),
             ("crates/dom-interopd/src/production_xmr_native_coldstart_v23_tests.rs", "daemon_scenario_v23"),
             ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "timing_v24"),
             ("crates/dom-interopd/src/production_xmr_native_daemon_scenario_v23_tests.rs", "barrier"),
@@ -166,6 +169,32 @@ class ClosedBoundaryListTests(unittest.TestCase):
             self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
             process.assert_called_once()
 
+    def test_inventory_preflight_requires_all_five_real_reader_regressions(self):
+        spec = runner.spec_for("native-preflight-inventory-codec")
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(len(spec["required_tests"]), 5)
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        self.assertIn(spec["module_prefix"] +
+                      "production_reader_refuses_legacy_mutated_and_nonprivate_inventory_v24",
+                      spec["required_tests"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_bootstrap_preflight_requires_original_private_owner_reopen(self):
+        spec = runner.spec_for("native-preflight-original-bootstrap")
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(len(spec["required_tests"]), 3)
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        self.assertIn(spec["module_prefix"] +
+                      "selected_native_bootstrap_path_reopens_real_xmr_private_owners_v24",
+                      spec["required_tests"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
     def test_proof_caches_and_timing_are_additive_and_keep_real_verifier_comparisons(self):
         expected = {
             "store-public-output-proof-cache": (6, "real_output_cold_warm_and_all_public_mutations_match_original_v24"),
@@ -175,7 +204,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
             "store-public-envelope-signature-cache": (7, "public_envelope_real_64_replays_match_uncached_and_use_one_equation_v24"),
             "adaptor-collaborative-final-proof-cache": (5, "native_two_party_final_proof_cold_warm_repeat64_matches_original_v25"),
         }
-        self.assertEqual([item["id"] for item in runner.SELECTIONS[11:17]], list(expected))
+        self.assertEqual([item["id"] for item in runner.SELECTIONS[13:19]], list(expected))
         for identifier, (count, mandatory) in expected.items():
             with self.subTest(selection=identifier):
                 spec = runner.spec_for(identifier)

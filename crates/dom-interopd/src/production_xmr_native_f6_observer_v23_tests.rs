@@ -9,7 +9,7 @@ use solver_status::{
     SignedSolverStatusV1, SolverOperationalStateV1, SolverStatusObservationV1, SolverStatusScopeV1,
     SolverStatusSignatureV1, SolverStatusStatementV1,
 };
-use xmr_rpc_broadcast_blocking::{BlockingMoneroDaemonReaderV1, MoneroTransactionObservationV5};
+use xmr_rpc_broadcast_blocking::BlockingMoneroDaemonReaderV1;
 
 /// Closed result emitted only by the concrete native source-inventory observer.
 ///
@@ -92,6 +92,10 @@ impl NativeF6XmrInventorySourceV23
             || self.max_fee_piconero() == 0
             || self.max_fee_piconero()
                 > upstream.deployment().deployment().max_fee_piconero
+            || self.max_fee_piconero()
+                > downstream.deployment().deployment().max_fee_piconero
+            || self.max_fee_piconero() > u64::try_from(terms[0].fee_limit.counterparty_max)?
+            || self.max_fee_piconero() > u64::try_from(terms[1].fee_limit.counterparty_max)?
             || funding.hash(0)? == self.tx_hash()
             || funding.hash(1)? == self.tx_hash()
             || cold.enrolled[0].setup().funding_tx_hash() == self.tx_hash()
@@ -137,7 +141,6 @@ impl NativeF6XmrInventorySourceV23
             return Err("XMR inventory quorum profile mismatch".into());
         }
         let mut distinct_ports = std::collections::BTreeSet::new();
-        let mut port_order = Vec::with_capacity(funding.urls().len());
         let mut readers = Vec::with_capacity(funding.urls().len());
         for url in funding.urls() {
             let reader = BlockingMoneroDaemonReaderV1::new(url.clone())?;
@@ -145,7 +148,6 @@ impl NativeF6XmrInventorySourceV23
             if !distinct_ports.insert(port) {
                 return Err("XMR inventory duplicate quorum voter".into());
             }
-            port_order.push(port);
             readers.push(reader);
         }
 
@@ -212,52 +214,27 @@ impl NativeF6XmrInventorySourceV23
             return Err("XMR inventory output is spent or contested".into());
         }
 
-        let mut evidence = Vec::new();
-        evidence.extend_from_slice(b"DOM/NATIVE-F6/XMR-INVENTORY-EVIDENCE/V23\0");
-        for value in [network, route, sessions[0], sessions[1], terms_hashes[0], terms_hashes[1]] {
-            evidence.extend_from_slice(&value);
+        // Match the daemon's stable public evidence identity, not a second
+        // fixture-only domain or the transient RPC tip/voter ordering. All
+        // freshness, ownership, quorum/finality and absence checks above remain
+        // mandatory; the signed observation below retains its original expiry.
+        let evidence_digest = crate::production_xmr_inventory_v23::PublicInventoryEvidenceV24 {
+            network_id: network,
+            route_id: route,
+            sessions,
+            terms: terms_hashes,
+            genesis,
+            tx_hash: self.tx_hash(),
+            raw_fingerprint: owned.funding().transaction().raw_fingerprint,
+            output_index: owned.funding().output_index(),
+            output_key: owned.output_key(),
+            key_image: owned.key_image(),
+            amount_piconero: self.amount_piconero(),
+            fee_piconero: owned.funding().fee_piconero(),
+            height: inclusion.height,
+            block_hash: inclusion.block_hash,
         }
-        evidence.extend_from_slice(&genesis);
-        evidence.extend_from_slice(&self.tx_hash());
-        evidence.extend_from_slice(&owned.funding().transaction().raw_fingerprint);
-        evidence.extend_from_slice(&owned.funding().output_index().to_be_bytes());
-        evidence.extend_from_slice(&owned.output_key());
-        evidence.extend_from_slice(&owned.key_image());
-        evidence.extend_from_slice(&self.amount_piconero().to_be_bytes());
-        evidence.extend_from_slice(&owned.funding().fee_piconero().to_be_bytes());
-        evidence.extend_from_slice(&inclusion.height.to_be_bytes());
-        evidence.extend_from_slice(&inclusion.block_hash);
-        evidence.extend_from_slice(&inclusion.confirmations.to_be_bytes());
-        evidence.extend_from_slice(&minimum_confirmations.to_be_bytes());
-        evidence.extend_from_slice(&nonce);
-        evidence.extend_from_slice(&sidecar_observation.event_index.to_be_bytes());
-        evidence.extend_from_slice(&decoded_policy.policy_digest()?);
-        evidence.extend_from_slice(&decoded_evidence.evidence_digest()?);
-        for (port, vote) in port_order.iter().zip(&inclusion_votes) {
-            evidence.extend_from_slice(&port.to_be_bytes());
-            match vote {
-                Some(MoneroTransactionObservationV5::Included {
-                    height,
-                    block_hash,
-                    chain_length,
-                }) => {
-                    evidence.push(1);
-                    evidence.extend_from_slice(&height.to_be_bytes());
-                    evidence.extend_from_slice(block_hash);
-                    evidence.extend_from_slice(&chain_length.to_be_bytes());
-                }
-                Some(MoneroTransactionObservationV5::Absent) => evidence.push(2),
-                Some(MoneroTransactionObservationV5::InPool) => evidence.push(3),
-                None => evidence.push(4),
-            }
-        }
-        for vote in &spent_votes {
-            evidence.push(match vote {
-                Some(false) => 1,
-                Some(true) => 2,
-                None => 3,
-            });
-        }
+        .digest()?;
         let observed_at = now.checked_mul(1000).ok_or("XMR inventory clock overflow")?;
         let valid_until_seconds = now
             .checked_add(limits.max_evidence_age_seconds)
@@ -276,10 +253,7 @@ impl NativeF6XmrInventorySourceV23
             spendable_amount: u128::from(self.amount_piconero()),
             canonical_height: inclusion.height,
             canonical_anchor_digest: inclusion.block_hash,
-            evidence_digest: digest(
-                b"DOM/NATIVE-F6/XMR-INVENTORY-COMMITMENT/V23\0",
-                &[&evidence],
-            )?,
+            evidence_digest,
             registry_manifest_digest: planning.resolved_registry().manifest_digest(),
             profile_bundle_digest: planning.admission().frozen_bindings().profile_bundle_digest,
             asset_binding_digest: planning.resolved_registry().asset_binding_digest(

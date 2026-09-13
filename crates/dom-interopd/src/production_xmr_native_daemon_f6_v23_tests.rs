@@ -290,11 +290,8 @@ impl NativeF6ProvisionV23 {
             let budget = std::fs::read(&cold.plans[actor].budget_policy_file)?;
             dom_scriptless_store::BudgetPolicyV1::from_bytes(&budget)?;
             publish(root, "native-contracts-budget.bin", &budget)?;
-            publish(
-                root,
-                "native-contracts-bootstrap.bin",
-                &cold.contracts_bootstrap,
-            )?;
+            let bootstrap_name =
+                retained_native_bootstrap_name_v24(root, &cold.contracts_bootstrap)?;
             let identity = cold
                 .identity_store(actor)?
                 .strip_prefix(root)?
@@ -315,7 +312,7 @@ impl NativeF6ProvisionV23 {
                     identity,
                     "native-contracts-budget.bin".into(),
                     f6,
-                    "native-contracts-bootstrap.bin".into(),
+                    bootstrap_name.into(),
                     ProductionContractsBootstrapPinsV5::new(
                         *contracts.commit_stage_digest(),
                         *contracts.reveal_stage_digest(),
@@ -476,6 +473,29 @@ fn digest(domain: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {
         return Err("native F6 zero digest".into());
     }
     Ok(value)
+}
+
+/// Select the original completed ceremony owner, not a public-only copy. The
+/// production mount's reserved basename is intentional: another basename is
+/// the externally prepared path and does not reopen the private V13 custody.
+/// Never create, rename or replace an artifact to make that guard pass.
+pub(crate) fn retained_native_bootstrap_name_v24(
+    root: &Path,
+    expected: &[u8],
+) -> Result<&'static str> {
+    let name = crate::production_contracts_bootstrap::producer_v13::ARTIFACT;
+    if expected.is_empty() {
+        return Err("native completed bootstrap is absent".into());
+    }
+    let retained = read_owner_file_bounded(
+        &root.join(name),
+        u64::try_from(expected.len())?,
+        ProductionConfigErrorV1::InvalidPublicBinding,
+    )?;
+    if retained != expected {
+        return Err("native original bootstrap differs from authenticated artifact".into());
+    }
+    Ok(name)
 }
 
 fn publish(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {

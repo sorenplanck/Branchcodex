@@ -9,222 +9,15 @@ use super::*;
 mod control_v23;
 pub(crate) use control_v23::NativeXmrHistoryStatusV23;
 
-fn inventory_custody_digest_v23(domain: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {
-    use blake2::digest::{Update, VariableOutput};
-    let mut hash = blake2::Blake2bVar::new(32)?;
-    hash.update(domain);
-    for part in parts {
-        hash.update(&u64::try_from(part.len())?.to_be_bytes());
-        hash.update(part);
-    }
-    let mut value = [0; 32];
-    hash.finalize_variable(&mut value)?;
-    if value == [0; 32] {
-        return Err("solver inventory zero custody digest".into());
-    }
-    Ok(value)
-}
+// The real daemon and this fixture must share one descriptor codec, custody
+// associated-data derivation and bounded reader. This data is not authority.
+pub(crate) use crate::production_xmr_inventory_v23::NATIVE_XMR_INVENTORY_DESCRIPTOR_V23;
+use crate::production_xmr_inventory_v23::{
+    custody_ids as inventory_custody_ids_v23, DescriptorV23 as NativeInventoryDescriptorV23,
+};
 
-pub(crate) const NATIVE_XMR_INVENTORY_DESCRIPTOR_V23: &str =
-    "native-xmr-inventory-authority-v23.bin";
-const INVENTORY_DESCRIPTOR_MAGIC_V23: &[u8; 8] = b"XMRINV23";
-const INVENTORY_DESCRIPTOR_PREFIX_V23: usize = 320;
-const INVENTORY_DESCRIPTOR_MAX_V23: usize =
-    INVENTORY_DESCRIPTOR_PREFIX_V23 + 256 + xmr_raw_tx_verify::MAX_VERIFIED_RAW_TX_BYTES + 32;
-
-struct NativeInventoryDescriptorV23 {
-    network: [u8; 32],
-    route: [u8; 32],
-    sessions: [[u8; 32]; 2],
-    terms: [[u8; 32]; 2],
-    authority_id: [u8; 32],
-    tx_hash: [u8; 32],
-    spend_public: [u8; 32],
-    amount_piconero: u64,
-    max_fee_piconero: u64,
-    destination: String,
-    raw: Zeroizing<Vec<u8>>,
-}
-
-impl NativeInventoryDescriptorV23 {
-    fn encode(&self) -> Result<Vec<u8>> {
-        if [
-            self.network,
-            self.route,
-            self.sessions[0],
-            self.sessions[1],
-            self.terms[0],
-            self.terms[1],
-            self.authority_id,
-            self.tx_hash,
-            self.spend_public,
-        ]
-        .contains(&[0; 32])
-            || self.sessions[0] == self.sessions[1]
-            || self.terms[0] == self.terms[1]
-            || self.amount_piconero == 0
-            || self.max_fee_piconero == 0
-            || self.destination.is_empty()
-            || self.destination.len() > 256
-            || !self.destination.is_ascii()
-            || self.raw.is_empty()
-            || self.raw.len() > xmr_raw_tx_verify::MAX_VERIFIED_RAW_TX_BYTES
-        {
-            return Err("solver inventory descriptor bounds".into());
-        }
-        let mut bytes = Vec::with_capacity(
-            INVENTORY_DESCRIPTOR_PREFIX_V23 + self.destination.len() + self.raw.len() + 32,
-        );
-        bytes.extend_from_slice(INVENTORY_DESCRIPTOR_MAGIC_V23);
-        bytes.extend_from_slice(&23_u16.to_le_bytes());
-        for field in [
-            self.network,
-            self.route,
-            self.sessions[0],
-            self.sessions[1],
-            self.terms[0],
-            self.terms[1],
-            self.authority_id,
-            self.tx_hash,
-            self.spend_public,
-        ] {
-            bytes.extend_from_slice(&field);
-        }
-        bytes.extend_from_slice(&self.amount_piconero.to_le_bytes());
-        bytes.extend_from_slice(&self.max_fee_piconero.to_le_bytes());
-        bytes.extend_from_slice(&u16::try_from(self.destination.len())?.to_le_bytes());
-        bytes.extend_from_slice(&u32::try_from(self.raw.len())?.to_le_bytes());
-        bytes.extend_from_slice(self.destination.as_bytes());
-        bytes.extend_from_slice(&self.raw);
-        let checksum = inventory_custody_digest_v23(
-            b"DOM/NATIVE-F6/XMR-INVENTORY-DESCRIPTOR/V23\0",
-            &[&bytes],
-        )?;
-        bytes.extend_from_slice(&checksum);
-        Ok(bytes)
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < INVENTORY_DESCRIPTOR_PREFIX_V23 + 32
-            || bytes.len() > INVENTORY_DESCRIPTOR_MAX_V23
-            || bytes.get(..8) != Some(INVENTORY_DESCRIPTOR_MAGIC_V23.as_slice())
-            || bytes.get(8..10) != Some(23_u16.to_le_bytes().as_slice())
-        {
-            return Err("solver inventory descriptor framing".into());
-        }
-        let mut at = 10usize;
-        let mut field = || -> Result<[u8; 32]> {
-            let end = at
-                .checked_add(32)
-                .ok_or("solver inventory descriptor overflow")?;
-            let value = bytes
-                .get(at..end)
-                .ok_or("solver inventory descriptor field")?
-                .try_into()?;
-            at = end;
-            Ok(value)
-        };
-        let network = field()?;
-        let route = field()?;
-        let sessions = [field()?, field()?];
-        let terms = [field()?, field()?];
-        let authority_id = field()?;
-        let tx_hash = field()?;
-        let spend_public = field()?;
-        let amount_piconero = u64::from_le_bytes(
-            bytes
-                .get(at..at + 8)
-                .ok_or("solver inventory amount")?
-                .try_into()?,
-        );
-        let max_fee_piconero = u64::from_le_bytes(
-            bytes
-                .get(at + 8..at + 16)
-                .ok_or("solver inventory fee")?
-                .try_into()?,
-        );
-        let destination_len = usize::from(u16::from_le_bytes(
-            bytes
-                .get(at + 16..at + 18)
-                .ok_or("solver inventory destination length")?
-                .try_into()?,
-        ));
-        let raw_len = usize::try_from(u32::from_le_bytes(
-            bytes
-                .get(at + 18..at + 22)
-                .ok_or("solver inventory raw length")?
-                .try_into()?,
-        ))?;
-        at = at
-            .checked_add(22)
-            .ok_or("solver inventory descriptor overflow")?;
-        let payload_end = at
-            .checked_add(destination_len)
-            .and_then(|value| value.checked_add(raw_len))
-            .ok_or("solver inventory descriptor overflow")?;
-        if payload_end.checked_add(32) != Some(bytes.len()) {
-            return Err("solver inventory descriptor trailing bytes".into());
-        }
-        let expected = inventory_custody_digest_v23(
-            b"DOM/NATIVE-F6/XMR-INVENTORY-DESCRIPTOR/V23\0",
-            &[&bytes[..payload_end]],
-        )?;
-        if bytes[payload_end..] != expected {
-            return Err("solver inventory descriptor checksum".into());
-        }
-        let destination_end = at + destination_len;
-        let value = Self {
-            network,
-            route,
-            sessions,
-            terms,
-            authority_id,
-            tx_hash,
-            spend_public,
-            amount_piconero,
-            max_fee_piconero,
-            destination: std::str::from_utf8(&bytes[at..destination_end])?.to_owned(),
-            raw: Zeroizing::new(bytes[destination_end..payload_end].to_vec()),
-        };
-        if value.encode()? != bytes {
-            return Err("solver inventory descriptor noncanonical".into());
-        }
-        Ok(value)
-    }
-}
-
-fn inventory_custody_ids_v23(
-    descriptor: &NativeInventoryDescriptorV23,
-) -> Result<([u8; 32], [u8; 32])> {
-    let record_id = inventory_custody_digest_v23(
-        b"DOM/NATIVE-F6/XMR-INVENTORY-CUSTODY-RECORD/V23\0",
-        &[
-            &descriptor.network,
-            &descriptor.route,
-            &descriptor.sessions[0],
-            &descriptor.sessions[1],
-            &descriptor.tx_hash,
-        ],
-    )?;
-    let binding = inventory_custody_digest_v23(
-        b"DOM/NATIVE-F6/XMR-INVENTORY-CUSTODY-BINDING/V23\0",
-        &[
-            &descriptor.network,
-            &descriptor.route,
-            &descriptor.sessions[0],
-            &descriptor.sessions[1],
-            &descriptor.terms[0],
-            &descriptor.terms[1],
-            &descriptor.authority_id,
-            &descriptor.tx_hash,
-            &descriptor.spend_public,
-            &descriptor.amount_piconero.to_be_bytes(),
-            &descriptor.max_fee_piconero.to_be_bytes(),
-            descriptor.destination.as_bytes(),
-        ],
-    )?;
-    Ok((record_id, binding))
-}
+#[path = "production_xmr_native_inventory_fixture_compat_v24_tests.rs"]
+mod inventory_fixture_compat_v24;
 
 fn publish_inventory_descriptor_v23(
     path: &Path,
@@ -265,20 +58,24 @@ fn read_inventory_descriptor_v23(path: &Path) -> Result<NativeInventoryDescripto
         || metadata.file_type().is_symlink()
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.permissions().mode() & 0o077 != 0
-        || usize::try_from(metadata.len())? > INVENTORY_DESCRIPTOR_MAX_V23
         || path.file_name().and_then(std::ffi::OsStr::to_str)
             != Some(NATIVE_XMR_INVENTORY_DESCRIPTOR_V23)
     {
         return Err("solver inventory descriptor file refused".into());
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
-    std::fs::File::open(path)?
-        .take(u64::try_from(INVENTORY_DESCRIPTOR_MAX_V23 + 1)?)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() != usize::try_from(metadata.len())? {
-        return Err("solver inventory descriptor changed during read".into());
+    Ok(
+        crate::production_xmr_inventory_v23::read_inventory_descriptor_v24(
+            path.parent().ok_or("solver inventory descriptor parent")?,
+        )?,
+    )
+}
+
+fn inventory_fee_cap_v24(fees: [u64; 2]) -> Result<u64> {
+    if fees.contains(&0) {
+        return Err("solver inventory fee cap absent".into());
     }
-    NativeInventoryDescriptorV23::decode(&bytes)
+    // The same inventory funds both legs; neither negotiated cap may grow.
+    Ok(fees[0].min(fees[1]))
 }
 
 #[derive(Deserialize)]
@@ -508,8 +305,11 @@ impl NativeMainnetXmrInventorySourceV23 {
                 descriptor.max_fee_piconero,
             )?;
             if owned.funding().transaction().tx_hash != descriptor.tx_hash
+                || owned.funding().output_index() != descriptor.output_index
                 || owned.funding().amount_piconero() != descriptor.amount_piconero
                 || owned.funding().fee_piconero() > descriptor.max_fee_piconero
+                || descriptor.genesis
+                    != crate::production_xmr_remote_sweep_v23::MONERO_MAINNET_GENESIS_V23
             {
                 return Err("solver inventory restored outpoint/economics mismatch".into());
             }
@@ -531,8 +331,8 @@ impl NativeMainnetXmrInventorySourceV23 {
                 binding,
             }),
             custody_scope: Some((
-                descriptor.network,
-                descriptor.route,
+                descriptor.network_id,
+                descriptor.route_id,
                 descriptor.sessions,
                 descriptor.terms,
             )),
@@ -630,24 +430,40 @@ impl NativeMainnetXmrInventorySourceV23 {
         {
             return Err("solver inventory custody scope or state mismatch".into());
         }
-        let descriptor = NativeInventoryDescriptorV23 {
-            network,
-            route,
-            sessions,
-            terms,
-            authority_id: self.authority_id,
-            tx_hash: self.tx_hash,
-            spend_public: self.spend_public,
-            amount_piconero: self.amount_piconero,
-            max_fee_piconero: self.max_fee_piconero,
-            destination: self.destination.clone(),
-            raw: Zeroizing::new(self.raw.to_vec()),
-        };
-        let (record_id, binding) = inventory_custody_ids_v23(&descriptor)?;
         let pending = self
             .pending_material
             .as_ref()
             .ok_or("solver inventory pending custody absent")?;
+        // The index comes from the exact independently owned raw output, not
+        // from a fixture default or a route funding candidate.
+        let output_index = pending.expose(|spend, view| -> Result<u32> {
+            Ok(xmr_raw_tx_verify::derive_owned_funding_key_image_v23(
+                &self.raw,
+                self.tx_hash,
+                spend,
+                view,
+                self.amount_piconero,
+                self.max_fee_piconero,
+            )?
+            .funding()
+            .output_index())
+        })?;
+        let descriptor = NativeInventoryDescriptorV23 {
+            network_id: network,
+            route_id: route,
+            sessions,
+            terms,
+            authority_id: self.authority_id,
+            genesis: crate::production_xmr_remote_sweep_v23::MONERO_MAINNET_GENESIS_V23,
+            tx_hash: self.tx_hash,
+            spend_public: self.spend_public,
+            amount_piconero: self.amount_piconero,
+            max_fee_piconero: self.max_fee_piconero,
+            output_index,
+            destination: self.destination.clone(),
+            raw: Zeroizing::new(self.raw.to_vec()),
+        };
+        let (record_id, binding) = inventory_custody_ids_v23(&descriptor)?;
         let store = persist(record_id, binding, pending)?;
         use xmr_secret_store::SecretMaterialStore;
         let restored = store.load(&record_id, &binding)?;
@@ -742,7 +558,7 @@ impl Configuration {
         let inventory_amount = amounts[0]
             .checked_add(amounts[1])
             .ok_or("solver inventory amount overflow")?;
-        let inventory_fee = fees.into_iter().max().ok_or("solver inventory fee")?;
+        let inventory_fee = inventory_fee_cap_v24(fees)?;
         let child = Command::new(&self.helper)
             .env_clear()
             .stdin(Stdio::piped())

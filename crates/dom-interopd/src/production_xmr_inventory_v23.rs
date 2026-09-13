@@ -434,20 +434,22 @@ pub(crate) struct NativeF6XmrInventoryExpectedV23 {
     pub(crate) max_age_seconds: u64,
 }
 
-struct DescriptorV23 {
-    network_id: [u8; 32],
-    route_id: [u8; 32],
-    sessions: [[u8; 32]; 2],
-    terms: [[u8; 32]; 2],
-    authority_id: [u8; 32],
-    genesis: [u8; 32],
-    tx_hash: [u8; 32],
-    spend_public: [u8; 32],
-    amount_piconero: u64,
-    max_fee_piconero: u64,
-    output_index: u32,
-    destination: String,
-    raw: Zeroizing<Vec<u8>>,
+/// Public descriptor data, never a verified inventory or funding capability.
+/// Producers share this codec; consumers still authenticate scope and custody.
+pub(crate) struct DescriptorV23 {
+    pub(crate) network_id: [u8; 32],
+    pub(crate) route_id: [u8; 32],
+    pub(crate) sessions: [[u8; 32]; 2],
+    pub(crate) terms: [[u8; 32]; 2],
+    pub(crate) authority_id: [u8; 32],
+    pub(crate) genesis: [u8; 32],
+    pub(crate) tx_hash: [u8; 32],
+    pub(crate) spend_public: [u8; 32],
+    pub(crate) amount_piconero: u64,
+    pub(crate) max_fee_piconero: u64,
+    pub(crate) output_index: u32,
+    pub(crate) destination: String,
+    pub(crate) raw: Zeroizing<Vec<u8>>,
 }
 
 impl DescriptorV23 {
@@ -522,7 +524,7 @@ impl DescriptorV23 {
         Ok(value)
     }
 
-    fn encode(&self) -> Result<Vec<u8>> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
         if [
             self.network_id,
             self.route_id,
@@ -586,7 +588,10 @@ impl DescriptorV23 {
         Ok(bytes)
     }
 
-    fn require_expected(&self, expected: &NativeF6XmrInventoryExpectedV23) -> Result<()> {
+    pub(crate) fn require_expected(
+        &self,
+        expected: &NativeF6XmrInventoryExpectedV23,
+    ) -> Result<()> {
         if self.network_id != expected.network_id
             || self.route_id != expected.route_id
             || self.sessions != expected.sessions
@@ -613,6 +618,18 @@ impl DescriptorV23 {
         }
         Ok(())
     }
+}
+
+/// The exact bounded production reader, before any secret Store or RPC access.
+pub(crate) fn read_inventory_descriptor_v24(state_dir: &Path) -> Result<DescriptorV23> {
+    let descriptor_path = state_dir.join(NATIVE_XMR_INVENTORY_DESCRIPTOR_V23);
+    let bytes = crate::production_config::read_owner_file_bounded(
+        &descriptor_path,
+        u64::try_from(MAX_BYTES).map_err(|_| ProductionXmrInventoryErrorV23::Binding)?,
+        crate::production_config::ProductionConfigErrorV1::InvalidPublicBinding,
+    )
+    .map_err(|_| ProductionXmrInventoryErrorV23::Unavailable)?;
+    DescriptorV23::decode(&bytes)
 }
 
 /// Reopened production source. It retains no V4 bytes and has no method that
@@ -652,14 +669,7 @@ impl NativeF6XmrInventorySourceV23 {
         {
             return Err(ProductionXmrInventoryErrorV23::Binding);
         }
-        let descriptor_path = request.state_dir.join(NATIVE_XMR_INVENTORY_DESCRIPTOR_V23);
-        let bytes = crate::production_config::read_owner_file_bounded(
-            &descriptor_path,
-            u64::try_from(MAX_BYTES).map_err(|_| ProductionXmrInventoryErrorV23::Binding)?,
-            crate::production_config::ProductionConfigErrorV1::InvalidPublicBinding,
-        )
-        .map_err(|_| ProductionXmrInventoryErrorV23::Unavailable)?;
-        let descriptor = DescriptorV23::decode(&bytes)?;
+        let descriptor = read_inventory_descriptor_v24(&request.state_dir)?;
         descriptor.require_expected(&request.expected)?;
         let (record_id, binding) = custody_ids(&descriptor)?;
         let store = EncryptedSqliteSecretStore::open_existing(
@@ -757,27 +767,23 @@ impl NativeF6XmrInventorySourceV23 {
         {
             return Err(ProductionXmrInventoryErrorV23::Quorum);
         }
-        let evidence_digest = digest(
-            b"DOM/PRODUCTION/XMR-INVENTORY-EVIDENCE/V23\0",
-            &[
-                &self.expected.network_id,
-                &self.expected.route_id,
-                &self.expected.sessions[0],
-                &self.expected.sessions[1],
-                &self.expected.terms[0],
-                &self.expected.terms[1],
-                &self.expected.genesis,
-                &self.descriptor.tx_hash,
-                &owned.funding().transaction().raw_fingerprint,
-                &self.descriptor.output_index.to_be_bytes(),
-                &owned.output_key(),
-                &owned.key_image(),
-                &self.descriptor.amount_piconero.to_be_bytes(),
-                &owned.funding().fee_piconero().to_be_bytes(),
-                &inclusion.height.to_be_bytes(),
-                &inclusion.block_hash,
-            ],
-        )?;
+        let evidence_digest = PublicInventoryEvidenceV24 {
+            network_id: self.expected.network_id,
+            route_id: self.expected.route_id,
+            sessions: self.expected.sessions,
+            terms: self.expected.terms,
+            genesis: self.expected.genesis,
+            tx_hash: self.descriptor.tx_hash,
+            raw_fingerprint: owned.funding().transaction().raw_fingerprint,
+            output_index: self.descriptor.output_index,
+            output_key: owned.output_key(),
+            key_image: owned.key_image(),
+            amount_piconero: self.descriptor.amount_piconero,
+            fee_piconero: owned.funding().fee_piconero(),
+            height: inclusion.height,
+            block_hash: inclusion.block_hash,
+        }
+        .digest()?;
         Ok(ProductionXmrInventoryVerifiedV23 {
             chain_id: self.expected.chain_id,
             asset_id: self.expected.asset_id,
@@ -852,7 +858,7 @@ fn authenticate_material(
     })
 }
 
-fn custody_ids(descriptor: &DescriptorV23) -> Result<([u8; 32], [u8; 32])> {
+pub(crate) fn custody_ids(descriptor: &DescriptorV23) -> Result<([u8; 32], [u8; 32])> {
     let record = digest(
         b"DOM/PRODUCTION/XMR-INVENTORY-CUSTODY-RECORD/V23\0",
         &[
@@ -884,6 +890,52 @@ fn custody_ids(descriptor: &DescriptorV23) -> Result<([u8; 32], [u8; 32])> {
         ],
     )?;
     Ok((record, binding))
+}
+
+/// Stable public identity shared by independent inventory observers. Freshness,
+/// quorum, sidecar ownership and key-image absence remain separate checks on
+/// every observation. Computing this digest never creates an inventory token.
+pub(crate) struct PublicInventoryEvidenceV24 {
+    pub(crate) network_id: [u8; 32],
+    pub(crate) route_id: [u8; 32],
+    pub(crate) sessions: [[u8; 32]; 2],
+    pub(crate) terms: [[u8; 32]; 2],
+    pub(crate) genesis: [u8; 32],
+    pub(crate) tx_hash: [u8; 32],
+    pub(crate) raw_fingerprint: [u8; 32],
+    pub(crate) output_index: u32,
+    pub(crate) output_key: [u8; 32],
+    pub(crate) key_image: [u8; 32],
+    pub(crate) amount_piconero: u64,
+    pub(crate) fee_piconero: u64,
+    pub(crate) height: u64,
+    pub(crate) block_hash: [u8; 32],
+}
+
+impl PublicInventoryEvidenceV24 {
+    pub(crate) fn digest(&self) -> Result<[u8; 32]> {
+        digest(
+            b"DOM/PRODUCTION/XMR-INVENTORY-EVIDENCE/V23\0",
+            &[
+                &self.network_id,
+                &self.route_id,
+                &self.sessions[0],
+                &self.sessions[1],
+                &self.terms[0],
+                &self.terms[1],
+                &self.genesis,
+                &self.tx_hash,
+                &self.raw_fingerprint,
+                &self.output_index.to_be_bytes(),
+                &self.output_key,
+                &self.key_image,
+                &self.amount_piconero.to_be_bytes(),
+                &self.fee_piconero.to_be_bytes(),
+                &self.height.to_be_bytes(),
+                &self.block_hash,
+            ],
+        )
+    }
 }
 
 fn digest(domain: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {

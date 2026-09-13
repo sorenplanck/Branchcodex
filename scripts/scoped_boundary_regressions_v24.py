@@ -118,6 +118,22 @@ SELECTIONS = (
                   "native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24",),
               features=("production",),
               test_filter="production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24"),
+    selection("native-preflight-inventory-codec", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::route_funding_v23::inventory_fixture_compat_v24::",
+              "crates/dom-interopd/src/production_xmr_native_inventory_fixture_compat_v24_tests.rs", (
+                  "fixture_descriptor_roundtrips_through_production_reader_v24",
+                  "production_reader_refuses_legacy_mutated_and_nonprivate_inventory_v24",
+                  "inventory_fixture_scope_refuses_relabelled_source_v24",
+                  "inventory_custody_derivation_binds_genesis_and_output_index_v24",
+                  "inventory_public_evidence_keeps_production_domain_and_all_operands_v24"),
+              features=("production",)),
+    selection("native-preflight-original-bootstrap", "dom-interopd",
+              "production_contracts_bootstrap::producer_v13::native_ceremony_tests::bootstrap_path_v24::",
+              "crates/dom-interopd/src/production_xmr_native_bootstrap_path_v24_tests.rs", (
+                  "original_native_bootstrap_path_is_selected_without_rewriting_v24",
+                  "missing_copied_mutated_or_nonprivate_bootstrap_never_recreates_owner_v24",
+                  "selected_native_bootstrap_path_reopens_real_xmr_private_owners_v24"),
+              features=("production",)),
     selection("store-public-output-proof-cache", "dom-scriptless-store",
               "runtime::linux::session_store::xmr_graph_output_journal_v22::proof_cache_v24::tests::",
               "crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_output_proof_cache_v24.rs", (
@@ -416,6 +432,18 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_coldstart_v23::daemon_f6_v23::native_runtime_bounds_cover_selected_xmr_rpc_deadline_v24","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-inventory-codec":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::route_funding_v23::inventory_fixture_compat_v24::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::xmr_graph_wallet_tests::native_observation_v23::route_funding_v23::inventory_fixture_compat_v24::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "native-preflight-original-bootstrap":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::bootstrap_path_v24::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_contracts_bootstrap::producer_v13::native_ceremony_tests::bootstrap_path_v24::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "store-public-output-proof-cache":

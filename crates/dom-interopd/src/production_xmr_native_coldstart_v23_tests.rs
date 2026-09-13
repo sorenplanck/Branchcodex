@@ -12,7 +12,8 @@ pub(crate) use mainnet_startup_v23::{NativeMainnetStartupV23, MAINNET_BASELINE_T
 #[path = "production_xmr_native_daemon_f6_v23_tests.rs"]
 mod daemon_f6_v23;
 pub(crate) use daemon_f6_v23::{
-    NativeF6ProvisionV23, NativeF6XmrInventoryObservationV23, NativeF6XmrInventorySourceV23,
+    retained_native_bootstrap_name_v24, NativeF6ProvisionV23, NativeF6XmrInventoryObservationV23,
+    NativeF6XmrInventorySourceV23,
 };
 #[path = "production_xmr_native_daemon_resources_v23_tests.rs"]
 mod daemon_resources_v23;
