@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 49)
+        self.assertEqual(len(ids), 50)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -98,6 +98,9 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-adaptor/src/lib.rs", "collaborative_range_proof"),
             ("crates/dom-adaptor/src/collaborative_range_proof.rs", "final_proof_cache_v25"),
             ("crates/dom-adaptor/src/collaborative_final_proof_cache_v25.rs", "tests"),
+            ("crates/dom-adaptor/src/lib.rs", "signing_round"),
+            ("crates/dom-adaptor/src/signing_round.rs", "partial_bound_verification_cache_v25"),
+            ("crates/dom-adaptor/src/partial_bound_verification_cache_v25.rs", "tests"),
             ("crates/dom-adaptor/src/lib.rs", "share_pop"),
             ("crates/dom-adaptor/src/share_pop.rs", "verification_cache_v25"),
             ("crates/dom-adaptor/src/share_pop_verification_cache_v25.rs", "tests"),
@@ -121,6 +124,19 @@ class ClosedBoundaryListTests(unittest.TestCase):
                 self.assertRegex((runner.ROOT / source).read_text(), rf"\bmod {module};")
         self.assertEqual(runner.spec_for("store-refund-transport-grant")["module_prefix"],
                          "runtime::linux::session_store::f7_v12::xmr_refund_transport_v23::tests::")
+
+    def test_bound_partial_cache_keeps_seven_real_oracle_regressions(self):
+        spec = runner.spec_for("adaptor-bound-partial-equation-cache")
+        self.assertEqual(len(spec["required_tests"]), 7)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        self.assertIn(spec["module_prefix"] +
+                      "every_public_partial_equation_operand_matches_original_on_mutation_v25",
+                      spec["required_tests"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
 
     def test_history_preflight_keeps_all_four_tests_and_literal_process_dispatch(self):
         spec = runner.spec_for("native-preflight-history")

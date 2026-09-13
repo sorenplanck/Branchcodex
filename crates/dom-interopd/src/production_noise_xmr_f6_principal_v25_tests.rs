@@ -22,7 +22,7 @@ fn same_principal(
     assert_eq!(left.route_id(), right.route_id());
     assert_eq!(left.terms(), right.terms());
     assert_eq!(left.policy(), right.policy());
-    assert_eq!(left.chain(), right.chain());
+    assert_eq!(left.chain().as_bytes(), right.chain().as_bytes());
     assert_eq!(left.beneficiary(), right.beneficiary());
     assert_eq!(left.participant_index(), right.participant_index());
     assert_eq!(left.direction(), right.direction());

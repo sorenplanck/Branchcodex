@@ -371,6 +371,19 @@ SELECTIONS = (
               features=("production",)),
 )
 
+SELECTIONS += (
+    selection("adaptor-bound-partial-equation-cache", "dom-adaptor",
+              "signing_round::partial_bound_verification_cache_v25::tests::",
+              "crates/dom-adaptor/src/partial_bound_verification_cache_v25_tests.rs", (
+                  "real_bound_partial_cold_plus_warm64_matches_64_original_verifications_v25",
+                  "every_public_partial_equation_operand_matches_original_on_mutation_v25",
+                  "warm_partial_cache_cannot_bypass_purpose_or_template_guards_v25",
+                  "false_results_and_explicit_backend_error_policy_never_insert_success_v25",
+                  "message_length_padding_and_oversize_preserve_original_acceptance_v25",
+                  "fixed_capacity_rechecks_evicted_partial_equations_v25",
+                  "partial_cache_contention_and_poison_use_original_without_waiting_v25")),
+)
+
 COMPILE_ONLY = (
     {"package": "xmr-live-sidecar-api", "native_test_count": 0,
      "compiled_by": "xmr-private-uds-authentication",
@@ -527,6 +540,12 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","share_pop::verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "adaptor-bound-partial-equation-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","signing_round::partial_bound_verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","signing_round::partial_bound_verification_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "native-f6-principal-face":

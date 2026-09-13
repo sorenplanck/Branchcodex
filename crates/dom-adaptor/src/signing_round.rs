@@ -13,6 +13,9 @@ use crate::{
 };
 use dom_crypto::{schnorr_verify, PublicKey, SchnorrSignature};
 
+#[path = "partial_bound_verification_cache_v25.rs"]
+mod partial_bound_verification_cache_v25;
+
 const ENVELOPE_PREFIX_LEN: usize = 148;
 const SIGNATURE_LEN: usize = 65;
 const FIXED_ENVELOPE_LEN: usize = ENVELOPE_PREFIX_LEN + SIGNATURE_LEN;
@@ -994,7 +997,8 @@ impl ValidatedSigningRoundStateV1 {
                 .roster
                 .signing_index(self.roster.entries()[protocol_index].participant_id())?
                 != participant_index
-            || !partial.verify_bound(
+            || !partial_bound_verification_cache_v25::verify(
+                partial,
                 inputs.context.purpose(),
                 inputs.context.template_hash(),
                 &inputs.effective_nonces[usize::from(participant_index)],
