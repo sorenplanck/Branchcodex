@@ -19586,24 +19586,25 @@ impl ContractsSessionStoreV1 {
     ) -> Result<u64, SessionStoreError> {
         let prefix = format!("{}-{}-", hex_lower(&session_id), hex_lower(&sender_id));
         let mut sequences = Vec::new();
-        self.messages.scan_lexicographic(|name, node| {
-            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
-                return Err(LinuxCapabilityError::InvalidObject);
-            }
-            if !name.starts_with(&prefix) || !name.ends_with(".message") {
-                return Ok(());
-            }
-            let bytes = self.messages.read_bounded_file(
-                &ValidatedComponent::registered(name)?,
-                TRANSPORT_MESSAGE_MAX_LEN,
-            )?;
-            let record = TransportMessageRecordV1::from_bytes(&bytes)
-                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
-            if record.successor.revision() <= inclusive_revision {
-                sequences.push(record.sequence);
-            }
-            Ok(())
-        })?;
+        self.messages
+            .scan_unordered_readonly_with_exclusions_v25(|name, node| {
+                if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
+                    return Err(LinuxCapabilityError::InvalidObject);
+                }
+                if !name.starts_with(&prefix) || !name.ends_with(".message") {
+                    return Ok(());
+                }
+                let bytes = self.messages.read_bounded_file(
+                    &ValidatedComponent::registered(name)?,
+                    TRANSPORT_MESSAGE_MAX_LEN,
+                )?;
+                let record = TransportMessageRecordV1::from_bytes(&bytes)
+                    .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+                if record.successor.revision() <= inclusive_revision {
+                    sequences.push(record.sequence);
+                }
+                Ok(())
+            })?;
         sequences.sort_unstable();
         for (index, sequence) in sequences.iter().enumerate() {
             if *sequence != u64::try_from(index).map_err(|_| SessionStoreError::Quarantined)? {
@@ -42995,6 +42996,7 @@ pub(crate) mod evidence_only_staging {
 #[cfg(test)]
 mod tests {
     include!("session_store/session_head_scan_v25_tests.rs");
+    include!("session_store/transport_sequence_scan_v25_tests.rs");
 
     use super::evidence_only_staging::*;
     use super::*;

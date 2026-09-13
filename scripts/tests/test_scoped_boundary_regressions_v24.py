@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 63)
+        self.assertEqual(len(ids), 66)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -50,6 +50,8 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-scriptless-store/src/runtime/linux/session_store.rs", "xmr_graph_proposal_v22"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_proposal_v22.rs", "public_signing_semantics_cache_v25"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store/public_signing_semantics_cache_v25.rs", "tests"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_proposal_v22.rs", "message_collect_v25"),
+            ("crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_message_collect_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6.rs", "native_acceptance_v25"),
             ("crates/dom-interopd/src/production_f6/native_acceptance_v25.rs", "tests"),
             ("crates/dom-interopd/src/production_f6.rs", "native_commitment_v25"),
@@ -169,6 +171,53 @@ class ClosedBoundaryListTests(unittest.TestCase):
         leaf = (runner.ROOT / spec["source"]).read_text()
         self.assertIn("mod session_head_scan_v25_tests {", leaf)
         self.assertIn("store.records.scan_lexicographic", leaf)
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_graph_collection_requires_original_lexical_baseline_without_authentication_claim(self):
+        spec = runner.spec_for("store-graph-message-exact-scan")
+        self.assertEqual(len(spec["required_tests"]), 7)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        leaf = (runner.ROOT / spec["source"]).read_text()
+        self.assertIn("messages.scan_lexicographic", leaf)
+        self.assertIn(spec["module_prefix"] +
+                      "graph_message_collect_never_deduplicates_or_authenticates_records_v25",
+                      spec["required_tests"])
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_unsigned_candidate_refusal_keeps_exact_existing_test_and_real_transport_gate(self):
+        spec = runner.spec_for("store-unsigned-graph-candidate-refusal")
+        self.assertEqual(len(spec["required_tests"]), 1)
+        self.assertEqual(spec["filter"], spec["required_tests"][0])
+        parent = (runner.ROOT / "crates/dom-scriptless-store/src/runtime/linux/session_store.rs").read_text()
+        self.assertIn('include!("session_store/xmr_graph_candidate_v22_tests.rs");', parent)
+        leaf = (runner.ROOT / spec["source"]).read_text()
+        self.assertIn("accept_transport_message_derived(&signed_commit)", leaf)
+        self.assertIn("prepare_xmr_graph_commit_dsc1_signing_request_v23(", leaf)
+        self.assertIn("require_no_grant(&reopened)", leaf)
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_transport_sequence_requires_signed_ingress_reopen_and_corruption_regressions(self):
+        spec = runner.spec_for("store-transport-sequence-exact-scan")
+        self.assertEqual(len(spec["required_tests"]), 6)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        parent = (runner.ROOT / "crates/dom-scriptless-store/src/runtime/linux/session_store.rs").read_text()
+        self.assertIn('include!("session_store/transport_sequence_scan_v25_tests.rs");', parent)
+        leaf = (runner.ROOT / spec["source"]).read_text()
+        self.assertIn("mod transport_sequence_scan_v25_tests {", leaf)
+        self.assertIn("store.messages.scan_lexicographic", leaf)
+        self.assertIn("accept_early_transport_position(", leaf)
+        self.assertIn("ContractsSessionStoreV1::open_evidence_only(", leaf)
         self.assertNotIn("--ignored", runner.command(spec["id"]))
         with mock.patch.object(runner.subprocess, "Popen") as process:
             runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)

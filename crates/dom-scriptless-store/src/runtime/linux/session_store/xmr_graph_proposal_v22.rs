@@ -1,6 +1,8 @@
 //! Native output provenance checks retained independently of retired graph admission.
 //! This is not a DSC1 signing request or a durable funding authorization.
 use super::*;
+#[path = "xmr_graph_message_collect_v25.rs"]
+mod message_collect_v25;
 #[path = "public_signing_semantics_cache_v25.rs"]
 pub(super) mod public_signing_semantics_cache_v25;
 

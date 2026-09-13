@@ -455,8 +455,13 @@ F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     # function spans; the only other change includes additive test evidence.
     # No wildcard, inventory expansion, signing permission or L1 edit. Review:
     # "2026-09-13 bounded session-head scan and F1 source review" in that doc.
+    # 2026-09-13: exact source review against 1ae798d. Only the read-only
+    # transport_sequence_at_revision scanner changes; callback (normalized)
+    # and sorted sequence-contiguity suffix remain identical. All 15 strict
+    # bodies remain among 1,484 unchanged function spans; additive test include.
+    # Review: "2026-09-13 bounded transport-sequence scan and F1 source review".
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "bda8fe04b472459ae87a9fadf857c3a04f7ef61189e202c1a82fa83a9d4a3ef9"
+        "71b64b2d83fc82b7d15e59404bfd2c60c5c521937157f0be7a58e3def735dc8e"
     ),
     "crates/dom-leg/src/f7_wallet.rs": (
         "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"

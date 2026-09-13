@@ -529,6 +529,33 @@ SELECTIONS += (
               integration="dom_deployment_profile_v25"),
 )
 
+SELECTIONS += (
+    selection("store-graph-message-exact-scan", "dom-scriptless-store",
+              "runtime::linux::session_store::xmr_graph_proposal_v22::message_collect_v25::tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_message_collect_v25_tests.rs", (
+                  "graph_message_collect_shuffled_physical_records_preserve_lexical_bytes_v25",
+                  "graph_message_collect_preserves_foreign_and_equivocation_suffix_filters_v25",
+                  "graph_message_collect_checks_invalid_and_foreign_physical_entries_before_filter_v25",
+                  "graph_message_collect_corruption_keeps_original_error_flattening_v25",
+                  "graph_message_collect_fresh_reload_observes_append_remove_and_tamper_v25",
+                  "graph_message_collect_exclusions_require_original_physical_identity_v25",
+                  "graph_message_collect_never_deduplicates_or_authenticates_records_v25")),
+    selection("store-unsigned-graph-candidate-refusal", "dom-scriptless-store",
+              "runtime::linux::session_store::tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/xmr_graph_candidate_v22_tests.rs", (
+                  "unsigned_xmr_candidate_cache_is_immutable_scoped_and_not_a_transport_grant",),
+              test_filter="runtime::linux::session_store::tests::unsigned_xmr_candidate_cache_is_immutable_scoped_and_not_a_transport_grant"),
+    selection("store-transport-sequence-exact-scan", "dom-scriptless-store",
+              "runtime::linux::session_store::tests::transport_sequence_scan_v25_tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/transport_sequence_scan_v25_tests.rs", (
+                  "transport_sequence_scan_real_ingress_zero_inclusive_and_live_append_v25",
+                  "transport_sequence_scan_shuffled_publication_and_real_reopen_match_lexical_v25",
+                  "transport_sequence_scan_sender_session_and_equivocation_scope_v25",
+                  "transport_sequence_scan_missing_zero_and_interior_gap_quarantine_v25",
+                  "transport_sequence_scan_duplicate_embedded_sequence_quarantines_v25",
+                  "transport_sequence_scan_tamper_is_fresh_and_decoded_before_revision_filter_v25")),
+)
+
 COMPILE_ONLY = (
     {"package": "xmr-live-sidecar-api", "native_test_count": 0,
      "compiled_by": "xmr-private-uds-authentication",
@@ -697,6 +724,24 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::session_head_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::session_head_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-graph-message-exact-scan":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_proposal_v22::message_collect_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_proposal_v22::message_collect_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-unsigned-graph-candidate-refusal":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::unsigned_xmr_candidate_cache_is_immutable_scoped_and_not_a_transport_grant","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::unsigned_xmr_candidate_cache_is_immutable_scoped_and_not_a_transport_grant","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-transport-sequence-exact-scan":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::transport_sequence_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::transport_sequence_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "store-readonly-physical-inventory":

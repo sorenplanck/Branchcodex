@@ -40,24 +40,8 @@ impl ContractsSessionStoreV1 {
             .revision
             .checked_add(2)
             .ok_or(SessionStoreError::CapacityExceeded)?;
-        let prefix = format!("{}-", hex_lower(&session));
-        let mut retained = Vec::new();
-        self.messages.scan_lexicographic(|name, node| {
-            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
-                return Err(LinuxCapabilityError::InvalidObject);
-            }
-            if !name.starts_with(&prefix) || !name.ends_with(".message") {
-                return Ok(());
-            }
-            let bytes = self.messages.read_bounded_file(
-                &ValidatedComponent::registered(name)?,
-                TRANSPORT_MESSAGE_MAX_LEN,
-            )?;
-            let record = TransportMessageRecordV1::from_bytes(&bytes)
-                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
-            retained.push((name.to_owned(), record));
-            Ok(())
-        })?;
+        let retained =
+            super::message_collect_v25::collect_untrusted_messages_v25(&self.messages, session)?;
         let mut records = Vec::new();
         for (name, record) in retained {
             let (envelope, direction) = self.authenticate_transport_record(&name, &record)?;

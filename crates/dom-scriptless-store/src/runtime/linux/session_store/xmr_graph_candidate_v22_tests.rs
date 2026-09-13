@@ -37,7 +37,49 @@ fn unsigned_xmr_candidate_cache_is_immutable_scoped_and_not_a_transport_grant(
         store.load_session(initial.session_id())?.as_bytes(),
         initial.as_bytes()
     );
-    assert_eq!(transport_payload_cap(0x18), None);
+    // Native graph commits now have a registered 32-byte payload. Registration
+    // and a scope-valid unsigned cache still cannot authorize a new envelope.
+    assert_eq!(transport_payload_cap(0x18), Some(32));
+    let signed_commit = transport_signed_bytes(
+        &fixture.identity_keys[0],
+        *fixture.trusted_chain_id.as_bytes(),
+        initial.session_id(),
+        fixture.participant_ids[0],
+        0,
+        initial.transcript_hash(),
+        0x18,
+        &[0x55; 32],
+    )?;
+    ParsedTransportEnvelopeV1::parse(&signed_commit)?
+        .verify(&fixture.identity_keys[0].public_key())?;
+    let require_no_grant =
+        |candidate_store: &ContractsSessionStoreV1| -> Result<(), Box<dyn Error>> {
+            let before = snapshot_store_tree(&temporary.0.join("sessions"))?;
+            assert!(matches!(
+                candidate_store.accept_transport_message_derived(&signed_commit),
+                Err(SessionStoreError::InvalidTransition)
+            ));
+            // The fixture's unsigned proposal uses this route, but never supplies
+            // the native graph-commit context required by the real request owner.
+            assert!(matches!(
+                candidate_store.prepare_xmr_graph_commit_dsc1_signing_request_v23(
+                    fixture.trusted_chain_id,
+                    [5; 32],
+                    initial.session_id(),
+                ),
+                Err(SessionStoreError::SessionNotFound)
+            ));
+            assert_eq!(
+                candidate_store
+                    .load_session(initial.session_id())?
+                    .as_bytes(),
+                initial.as_bytes()
+            );
+            // Do not print the synthetic Store contents on failure.
+            assert!(snapshot_store_tree(&temporary.0.join("sessions"))? == before);
+            Ok(())
+        };
+    require_no_grant(&store)?;
     drop(store);
     let reopened = ContractsSessionStoreV1::open_evidence_only(
         temporary.capability()?,
@@ -54,6 +96,7 @@ fn unsigned_xmr_candidate_cache_is_immutable_scoped_and_not_a_transport_grant(
         reopened.load_session(initial.session_id())?.as_bytes(),
         initial.as_bytes()
     );
+    require_no_grant(&reopened)?;
     // No parent ceremony exists in this fixture: framing alone cannot produce
     // the native C provenance required by candidate reconstruction.
     assert!(

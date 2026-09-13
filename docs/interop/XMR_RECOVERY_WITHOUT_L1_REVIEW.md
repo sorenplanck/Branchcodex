@@ -558,3 +558,37 @@ Details, concurrency limits, capacity fallback and execution-evidence limits:
 evidence, not an external security audit, a completed real-daemon lifecycle, or
 proof of a swap completing in minutes. The new Rust regressions run in GitHub;
 no local cryptographic build/test is asserted.
+
+## 2026-09-13 bounded transport-sequence scan and F1 source review
+
+This next review compares the complete parent Store source to published commit
+`1ae798dd4efbe0bac92353ed90a48f3d726ce3fe`. The old whole-file SHA-256 is
+`bda8fe04b472459ae87a9fadf857c3a04f7ef61189e202c1a82fa83a9d4a3ef9`; the reviewed
+source including its additive test leaf has SHA-256
+`71b64b2d83fc82b7d15e59404bfd2c60c5c521937157f0be7a58e3def735dc8e`.
+
+Two source reviews find 1,485 ordered function spans with 1,484 literally
+unchanged. The sole changed function is `transport_sequence_at_revision`.
+Replacing its old scanner name and normalizing whitespace yields exactly the
+new function. The suffix beginning `sequences.sort_unstable` is byte-identical
+(SHA-256 `ae1ff21ea5685aac55ab2d6f4a6cd97aff0bfe594bafeba9b291cdd52325f077`).
+All 15 Sponsor/strict-purpose-containing bodies remain byte-identical, with
+homonymous functions compared by their separate ordered spans. The second
+parent edit only includes additive test evidence inside the existing test module.
+
+This shared reader still parses the original transport record, filters by the
+same session/sender and inclusive revision, sorts without deduplication and
+rejects a missing zero origin, gap or duplicate. It grants no transport or
+funding authority. The bounded scanner and original fallback are unchanged;
+`next_transport_sequence` and the remaining generic scanners stay unchanged.
+No strict-purpose inventory expansion, hash wildcard, nonce or signing gate
+change is authorized by this re-freeze. L1 and the frozen baseline stay unchanged.
+
+Separately, two native graph leaf readers use a shared physical message collector.
+Their complete code after collection is literally identical to the prior source,
+including all authentication and signing-semantic validation. Lexical filename
+order is restored before authentication; revision order is still checked by the
+original readers. The physical collector itself is not authenticated authority.
+See [scan scope and limits](hardening/SESSION-HEAD-SCAN-V25.md) for the three-pass
+cost model, mandatory negative regressions and remaining timing-evidence gap.
+These are source reviews, not Rust execution or an external security audit.
