@@ -107,8 +107,8 @@ impl Drop for PhaseV24 {
 }
 
 /// Consume snapshots that the scenario already read; never poll another owner.
-/// Initial route visibility includes activation and graph rounds as ONE opaque
-/// interval. We cannot infer individual round durations from this boundary.
+/// Initial route visibility may precede activation and graph signing entirely.
+/// A visible NotPrepared snapshot is not evidence of a completed authority graph.
 pub(super) struct SnapshotTimingV24 {
     scenario: &'static str,
     lane: LaneV24,
@@ -155,7 +155,8 @@ impl SnapshotTimingV24 {
                 elapsed,
             );
             first["actor"] = actor.into();
-            first["includes_opaque_activation_and_graph_rounds"] = true.into();
+            first["does_not_establish_graph_readiness"] = true.into();
+            first["may_precede_activation_and_graph_rounds"] = true.into();
             events.push(first);
         }
         let phases = [
@@ -211,6 +212,14 @@ fn daemon_timing_observes_only_public_transitions_without_inventing_round_durati
     assert_eq!(first.len(), 5);
     assert_eq!(first[0]["phase"], "first_route_snapshot");
     assert_eq!(first[0]["elapsed_ms"], 40_000);
+    assert_eq!(first[0]["does_not_establish_graph_readiness"], true);
+    assert_eq!(first[0]["may_precede_activation_and_graph_rounds"], true);
+    assert!(first[0]
+        .get("includes_opaque_activation_and_graph_rounds")
+        .is_none());
+    assert!(first[1..]
+        .iter()
+        .all(|item| item["progress"] == "not_prepared"));
     assert!(timing
         .observe_at(0, &snapshot, Duration::from_secs(50))
         .is_empty());

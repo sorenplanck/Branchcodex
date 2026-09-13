@@ -82,6 +82,9 @@ use dom_crypto::{blake2b_256, range_proof_verify_with_extra_commit, PublicKey, R
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 
+#[path = "collaborative_final_proof_cache_v25.rs"]
+mod final_proof_cache_v25;
+
 /// Exactly the §5.5 proof container: 739 bytes or nothing.
 pub struct RangeProof739([u8; RANGE_PROOF_SIZE]);
 
@@ -476,6 +479,27 @@ impl DomCollaborativeRangeProofV1 {
         Ok(())
     }
 
+    // Original mathematical verifier, also the fallback for every uncacheable
+    // input. Keep exact error ordering and raw extra_commit compatibility.
+    fn verify_final_uncached_v25(
+        &self,
+        statement: &BpStatementV1,
+        proof: &RangeProof739,
+    ) -> Result<()> {
+        self.require_statement(statement)?;
+        let accepted = range_proof_verify_with_extra_commit(
+            &statement.aggregate_commitment().to_compressed_bytes(),
+            proof.as_bytes(),
+            &self.extra_commit,
+        )?;
+        if !accepted {
+            return Err(AdaptorError::VerificationFailed(
+                "collaborative proof does not verify under the DOM verifier",
+            ));
+        }
+        Ok(())
+    }
+
     fn produce_round2_parts(
         &self,
         statement: &BpStatementV1,
@@ -744,21 +768,7 @@ impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
     }
 
     fn verify_final(&self, statement: &BpStatementV1, proof: &RangeProof739) -> Result<()> {
-        self.require_statement(statement)?;
-        // The exact call consensus makes for this output class, with the
-        // exact bytes the proof was bound to (§5.2/§1.3), against the
-        // statement's agreed aggregate commitment.
-        let accepted = range_proof_verify_with_extra_commit(
-            &statement.aggregate_commitment().to_compressed_bytes(),
-            proof.as_bytes(),
-            &self.extra_commit,
-        )?;
-        if !accepted {
-            return Err(AdaptorError::VerificationFailed(
-                "collaborative proof does not verify under the DOM verifier",
-            ));
-        }
-        Ok(())
+        final_proof_cache_v25::verify(self, statement, proof)
     }
 }
 

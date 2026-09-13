@@ -472,3 +472,47 @@ Validation: all 51 `scripts.tests.test_guard_layer_policy` tests passed in
 absorbed checks), mutation/refusal regressions and the new exact-output-count
 case. `git diff --check` passed. No Cargo, Rust compilation, chain operations,
 commit or publication was executed for this review.
+
+## 2026-09-13 public signature memo and F1 source review
+
+The off-chain verification optimization first failed the F1 whole-file pin;
+that refusal was retained until an exact source review. Unlike the historical
+provenance limitation above, the immediately preceding approved bytes are
+available in commit `b8c1420367ab777a6e0403fbb115d32684fa7745`:
+
+| Store source | SHA-256 |
+| --- | --- |
+| Prior `session_store.rs`, from that commit | `122140f075bcbd2256b35b63ccdfe6745342c44431e3984a3f49d85621515371` |
+| Reviewed `session_store.rs`, after the hook | `3ac4f8d43120647edc73865d57ba1ff808548b1bc94655900f026c87dded4b7d` |
+
+The complete diff has eight inserted and two removed lines: private module
+declaration, import adjustment and the call in `ParsedTransportEnvelopeV1::verify`.
+The existing signature parser and its `Canonical` error mapping remain before
+and after that call. The helper remembers only successful, exact Schnorr
+equations: signature (65 bytes), public key (33), chain (32), message digest
+(32). The digest is still freshly derived by the existing DSC1 parser, not
+manufactured by the cache. Capacity is 1,024 entries. Failed verification,
+contention and poisoned locks use the original mathematical verifier; no
+record, roster, transcript, nonce, current state or F7 decision is cached.
+
+Comparison using the guard's production/test source mask found all 1,161
+existing function signatures unchanged. All 15 enclosing functions containing
+`Sponsor`, `require_strict_phase1` or `is_strict_v1_authorized` are byte-identical:
+14 operational functions and one evidence-only `PreparedSigningPayloads::new`.
+Occurrence counts remain five Sponsor arms, four strict-phase checks and six
+strict-authorization checks. The existing Sponsor refusals and exact inventory
+were not expanded; the sole changed existing function body is the envelope's
+pure verification wrapper. The new module has no public re-export.
+
+The reviewed file remains pinned in full, with no hash wildcard or excluded
+region. Added negative tests copy its real bytes into an isolated temporary
+directory and require a one-byte change to fail the approved pin; a separate
+test rejects an additional Sponsor occurrence and an accepting Sponsor arm
+independently of the file digest. No node/consensus source, signing purpose,
+confirmation count, availability bound or custody transition changes here.
+
+This is source-review evidence, not a completed mainnet swap or a measured
+end-to-end speedup. Seven real envelope-cache regressions and five additional
+collaborative-proof-cache regressions are mandatory in the remote boundary
+suite, including cold-plus-warm measurements and adversarial failures. No
+local Rust build or cryptographic test is implied by this review.

@@ -26,6 +26,7 @@ pub use xmr_graph_proposal_v22::{
 mod bootstrap_keys_v18;
 mod bootstrap_v16;
 mod post_m8_v22;
+mod public_envelope_signature_cache_v24;
 mod xmr_condition_v22;
 mod xmr_graph_candidate_v22;
 mod xmr_graph_output_journal_v22;
@@ -83,7 +84,7 @@ use dom_core::{BlockHeight, Timestamp, KERNEL_FEAT_HEIGHT_LOCKED};
 use dom_crypto::{
     blake2b_256,
     recovery::{RecoveryCapsule, RECOVERY_CAPSULE_SIZE},
-    schnorr_verify, PublicKey, SchnorrSignature,
+    PublicKey, SchnorrSignature,
 };
 use dom_final_claim_binding::{
     ComposedSettlementLegV1, FinalClaimRevealModeV1, FinalClaimRoleBindingV1,
@@ -33457,7 +33458,12 @@ impl ParsedTransportEnvelopeV1 {
     fn verify(&self, key: &PublicKey) -> Result<(), SessionStoreError> {
         let signature = SchnorrSignature::from_bytes(&self.signature)
             .map_err(|_| SessionStoreError::Canonical)?;
-        match schnorr_verify(&signature, key, &self.chain_id, &self.message_digest) {
+        match public_envelope_signature_cache_v24::verify(
+            &signature,
+            key,
+            &self.chain_id,
+            &self.message_digest,
+        ) {
             Ok(true) => Ok(()),
             _ => Err(SessionStoreError::Canonical),
         }

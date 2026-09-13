@@ -441,8 +441,15 @@ F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     # Existing Sponsor refusals and strict-purpose/phase checks remain present.
     # No guard/test/build execution is implied. Scope and limits:
     # docs/interop/hardening/V18-CHAVES-E-REFUND-NO-RUNTIME.md.
+    # 2026-09-13: exact-byte review against b8c1420 (the prior 122140f0...
+    # digest is available). Only ParsedTransportEnvelopeV1::verify now uses a
+    # private success-only cache of the same Schnorr operands, after parsing.
+    # All 15 Sponsor/strict-purpose-containing function bodies are identical
+    # (14 operational, one evidence-only); no Sponsor allowance/API changes.
+    # Full scope and old/new digests: XMR_RECOVERY_WITHOUT_L1_REVIEW.md,
+    # section "2026-09-13 public signature memo and F1 source review".
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "122140f075bcbd2256b35b63ccdfe6745342c44431e3984a3f49d85621515371"
+        "3ac4f8d43120647edc73865d57ba1ff808548b1bc94655900f026c87dded4b7d"
     ),
     "crates/dom-leg/src/f7_wallet.rs": (
         "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"

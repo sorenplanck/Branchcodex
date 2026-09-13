@@ -150,6 +150,24 @@ SELECTIONS = (
                   "public_range_proof_cache_transaction_preserves_error_index_order_and_atomic_admission_v24",
                   "public_range_proof_cache_contention_and_poison_use_original_verifiers_v24",
                   "public_range_proof_cache_budget_eviction_is_bounded_and_not_a_validation_limit_v24")),
+    selection("store-public-envelope-signature-cache", "dom-scriptless-store",
+              "runtime::linux::session_store::public_envelope_signature_cache_v24::tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/public_envelope_signature_cache_v24_tests.rs", (
+                  "public_envelope_real_64_replays_match_uncached_and_use_one_equation_v24",
+                  "public_envelope_every_primitive_operand_mutation_misses_and_matches_original_v24",
+                  "public_envelope_contention_falls_back_to_real_verifier_without_waiting_v24",
+                  "public_envelope_poison_falls_back_to_real_verifier_and_never_admits_failure_v24",
+                  "public_envelope_real_success_eviction_is_bounded_and_not_a_validation_limit_v24",
+                  "public_envelope_warm_hit_never_accepts_changed_dsc1_context_or_framing_v24",
+                  "public_envelope_malformed_signature_is_rejected_before_warm_lookup_v24")),
+    selection("adaptor-collaborative-final-proof-cache", "dom-adaptor",
+              "collaborative_range_proof::final_proof_cache_v25::tests::",
+              "crates/dom-adaptor/src/collaborative_final_proof_cache_v25_tests.rs", (
+                  "native_two_party_final_proof_cold_warm_repeat64_matches_original_v25",
+                  "full_statement_scope_proof_and_raw_extra_mutations_match_original_v25",
+                  "successful_cache_is_bounded_and_evicted_context_reexecutes_original_v25",
+                  "oversized_valid_extra_commit_falls_back_and_framing_never_bypasses_v25",
+                  "poisoned_or_busy_cache_reexecutes_original_without_reusing_finalizer_v25")),
     selection("dom-funding-dispatch-budget", "adapter-dom-real", "funding_deadline_v23_tests::",
               "crates/adapters/dom-real/src/funding_deadline_v23_tests.rs", (
                   "expired_funding_deadline_neither_scans_nor_posts_v23",
@@ -422,6 +440,18 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","public_range_proof_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","public_range_proof_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-public-envelope-signature-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::public_envelope_signature_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::public_envelope_signature_cache_v24::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "adaptor-collaborative-final-proof-cache":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::final_proof_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-adaptor","--lib","collaborative_range_proof::final_proof_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "dom-funding-dispatch-budget":

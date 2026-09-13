@@ -284,6 +284,49 @@ class FrozenAllowanceTests(unittest.TestCase):
             self.assertEqual(len(findings), 1)
             self.assertIn("SHA-256 changed", findings[0].message)
 
+    def test_reviewed_real_store_pin_still_refuses_a_single_byte_change(self) -> None:
+        relative = "crates/dom-scriptless-store/src/runtime/linux/session_store.rs"
+        original = (ROOT / relative).read_bytes()
+        # Use the explicitly reviewed inventory, NEVER derive/refresh a pin
+        # from current source. This baseline also refuses an unreviewed edit.
+        expected = {relative: guard.F1_SPONSOR_FILE_SHA256[relative]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            copied = root / relative
+            copied.parent.mkdir(parents=True)
+            copied.write_bytes(original)
+            self.assertEqual(
+                guard._frozen_sha256_findings(root, "Sponsor", expected, (relative,)), []
+            )
+            # One extra newline changes no Sponsor arm or lexical signature.
+            # A re-freeze still pins EVERY byte, not just selected functions.
+            copied.write_bytes(original + b"\n")
+            findings = guard._frozen_sha256_findings(root, "Sponsor", expected, (relative,))
+            self.assertEqual(len(findings), 1)
+            self.assertIn("SHA-256 changed", findings[0].message)
+
+    def test_store_sponsor_inventory_refuses_extra_use_independently_of_file_pin(self) -> None:
+        relative = "crates/dom-scriptless-store/src/runtime/linux/session_store.rs"
+        expected = collections.Counter({
+            key: count for key, count in guard.F1_SPONSOR_ALLOWLIST.items() if key[0] == relative
+        })
+        self.assertTrue(expected)
+        self.assertEqual(guard._exact_allowlist_findings("F1 Sponsor", expected, expected), [])
+        # Even repeating an already reviewed refusal arm is a new occurrence,
+        # not a file-wide Sponsor exception granted by the source hash.
+        extra = expected.copy()
+        extra[next(iter(expected))] += 1
+        findings = guard._exact_allowlist_findings("F1 Sponsor", extra, expected)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("unreviewed production use", findings[0].message)
+        admitted = "match purpose { PurposeV1::Sponsor => Ok(()), _ => Err(Error::Denied) }"
+        self.assertFalse(guard._sponsor_context_is_rejection_or_registry(
+            relative, admitted, admitted.index("PurposeV1::Sponsor")
+        ))
+        extra = expected.copy()
+        extra[(relative, admitted)] += 1
+        self.assertTrue(guard._exact_allowlist_findings("F1 Sponsor", extra, expected))
+
     def test_unresolved_frozen_digest_is_a_failure_not_a_wildcard(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
