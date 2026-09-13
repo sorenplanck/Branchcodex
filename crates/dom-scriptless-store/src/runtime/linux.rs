@@ -125,6 +125,13 @@ const REQUIRED_COMPONENT_LIMIT: i64 = 229;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const DIRECTORY_SCAN_BUFFER_LEN: usize = 8_192;
+// An optimization budget, never a Store admission or protocol limit. A larger
+// inventory takes the unchanged lexical scanner before any caller is visited.
+const READONLY_SCAN_ENTRIES_V25: usize = 16_384;
+
+#[cfg(test)]
+#[path = "linux/unordered_readonly_scan_v25_tests.rs"]
+mod unordered_readonly_scan_v25_tests;
 
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
@@ -984,6 +991,161 @@ impl RetainedDirectory {
         }
     }
 
+    /// Collect a read-only inventory without imposing callback order.
+    ///
+    /// Only pure collectors that validate their complete result after returning
+    /// may use this method. It is NOT an atomic filesystem snapshot or a
+    /// replacement for the generic lexical scanner's mutation-sensitive callback
+    /// contract. The current caller sorts and validates its full session history.
+    ///
+    /// Exact names and physical identities are checked in three fresh passes.
+    /// Any observed membership/identity disagreement refuses; file contents pass
+    /// through each caller's original bounded, named-identity-checked reads. No
+    /// observation, file bytes, authority or inventory survives this call.
+    fn scan_unordered_readonly_with_exclusions_v25<F>(
+        &self,
+        inspect: F,
+    ) -> Result<(), LinuxCapabilityError>
+    where
+        F: FnMut(&str, NodeIdentity) -> Result<(), LinuxCapabilityError>,
+    {
+        self.scan_unordered_readonly_bounded_v25(READONLY_SCAN_ENTRIES_V25, inspect)
+    }
+
+    // Private budget parameter supports small-cap adversarial tests. Production
+    // has one closed-budget entry point above. At most 16,384 entries contain a
+    // name of <= REQUIRED_COMPONENT_LIMIT (229) bytes and fixed-size metadata:
+    // <= 16,384 * (229 + size_of::<Entry>()) logical bytes, plus allocator overhead.
+    // Sorting and lookup are O(N log N); physical passes each inspect N entries.
+    fn scan_unordered_readonly_bounded_v25<F>(
+        &self,
+        entry_limit: usize,
+        mut inspect: F,
+    ) -> Result<(), LinuxCapabilityError>
+    where
+        F: FnMut(&str, NodeIdentity) -> Result<(), LinuxCapabilityError>,
+    {
+        struct Entry {
+            name: String,
+            identity: NodeIdentity,
+            excluded: bool,
+            phase: u8,
+        }
+
+        let mut inventory: Vec<Entry> = Vec::new();
+        let mut fallback = false;
+        // Hold this only during preflight: no user callback, nested scan or
+        // filesystem mutation executes here. Every captured exclusion bit has
+        // already passed the same exact-identity guard as the original scanner.
+        let exclusions = self
+            .scan_exclusions
+            .lock()
+            .map_err(|_| LinuxCapabilityError::StoreBusy)?;
+        #[cfg(test)]
+        unordered_readonly_scan_v25_tests::observe_pass_v25(0);
+        self.scan_independent(|name, identity| {
+            #[cfg(test)]
+            unordered_readonly_scan_v25_tests::observe_entry_v25(0);
+            let excluded = if let Some(expected) = exclusions.get(name) {
+                expected.require_same(&identity)?;
+                true
+            } else {
+                false
+            };
+            if fallback {
+                return Ok(());
+            }
+            if inventory.len() >= entry_limit {
+                fallback = true;
+                return Ok(());
+            }
+            if inventory.len() == inventory.capacity() {
+                let next = inventory
+                    .capacity()
+                    .saturating_mul(2)
+                    .max(32)
+                    .min(entry_limit);
+                if inventory.try_reserve_exact(next - inventory.len()).is_err() {
+                    fallback = true;
+                    return Ok(());
+                }
+            }
+            let mut exact_name = String::new();
+            if exact_name.try_reserve_exact(name.len()).is_err() {
+                fallback = true;
+                return Ok(());
+            }
+            exact_name.push_str(name);
+            inventory.push(Entry {
+                name: exact_name,
+                identity,
+                excluded,
+                phase: 0,
+            });
+            Ok(())
+        })?;
+        drop(exclusions);
+        if fallback {
+            // Finish physical preflight even on overflow/allocation failure.
+            // Real errors above are never converted into fallback. No callback
+            // has run; release memory/lock before the original scanner starts.
+            drop(inventory);
+            #[cfg(test)]
+            unordered_readonly_scan_v25_tests::observe_fallback_v25();
+            return self.scan_lexicographic(inspect);
+        }
+        inventory.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        if inventory
+            .windows(2)
+            .any(|pair| pair[0].name == pair[1].name)
+        {
+            return Err(LinuxCapabilityError::InvalidDirectoryEntry);
+        }
+
+        #[cfg(test)]
+        unordered_readonly_scan_v25_tests::observe_pass_v25(1);
+        self.scan_independent(|name, identity| {
+            #[cfg(test)]
+            unordered_readonly_scan_v25_tests::observe_entry_v25(1);
+            let index = inventory
+                .binary_search_by(|entry| entry.name.as_str().cmp(name))
+                .map_err(|_| LinuxCapabilityError::IdentityMismatch)?;
+            let entry = &mut inventory[index];
+            if entry.identity != identity || entry.phase != 0 {
+                return Err(LinuxCapabilityError::IdentityMismatch);
+            }
+            entry.phase = 1;
+            if entry.excluded {
+                Ok(())
+            } else {
+                inspect(name, identity)
+            }
+        })?;
+        if inventory.iter().any(|entry| entry.phase != 1) {
+            return Err(LinuxCapabilityError::IdentityMismatch);
+        }
+
+        #[cfg(test)]
+        unordered_readonly_scan_v25_tests::observe_pass_v25(2);
+        self.scan_independent(|name, identity| {
+            #[cfg(test)]
+            unordered_readonly_scan_v25_tests::observe_entry_v25(2);
+            let index = inventory
+                .binary_search_by(|entry| entry.name.as_str().cmp(name))
+                .map_err(|_| LinuxCapabilityError::IdentityMismatch)?;
+            let entry = &mut inventory[index];
+            if entry.identity != identity || entry.phase != 1 {
+                return Err(LinuxCapabilityError::IdentityMismatch);
+            }
+            entry.phase = 2;
+            Ok(())
+        })?;
+        if inventory.iter().any(|entry| entry.phase != 2) {
+            return Err(LinuxCapabilityError::IdentityMismatch);
+        }
+        self.revalidate()
+    }
+
     fn read_bounded_file(
         &self,
         component: &ValidatedComponent,
@@ -1740,6 +1902,15 @@ mod tests {
             ValidatedComponent::operator_selected_root("contracts-store")?,
         )?;
         Ok((temporary, root))
+    }
+
+    // Reuse the existing real retained-directory fixture without exposing its
+    // temporary owner or adding any production constructor.
+    pub(super) fn with_root_v25<T>(
+        inspect: impl FnOnce(&Path, &RetainedDirectory) -> Result<T, Box<dyn Error>>,
+    ) -> Result<T, Box<dyn Error>> {
+        let (temporary, root) = create_root()?;
+        inspect(temporary.path(), &root)
     }
 
     #[test]

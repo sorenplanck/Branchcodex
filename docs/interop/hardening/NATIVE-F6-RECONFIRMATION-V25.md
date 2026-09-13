@@ -70,9 +70,33 @@ previous 24 regressions passed on `f418d20` in
 New proposal/receiver/certificate regressions include genuine signed temporal
 composition and wallet payout construction, real signed Relay/inbox delivery,
 physical store reopen/refusal, malformed messages and immutable receipt recovery.
-The new tests have not yet executed at this handoff. In particular, the positive
-proposal receipt-reopen test keeps its original owner alive; it is not evidence
-of reacquiring that same wallet/adapter owner after process exit.
+GitHub executed these on `77a4e0b`: all eleven certificate regressions passed,
+but the two real-proposal and six acceptance-boundary tests failed with
+`InvalidTerms` in preflight `103693319292` and production-lib `103693319426`.
+These failures must not be reported as passing integration. In particular, the
+positive proposal receipt-reopen test keeps its original owner alive; even when
+passing, it is not evidence of reacquiring that same wallet/adapter owner after
+process exit.
+
+The shared failure exposed a real domain mismatch in DOM face construction.
+Signed route-time composition binds the complete DOM adapter-profile digest,
+covering twelve deployment fields. The face reader instead compared that field
+to the wallet's consensus-rules digest. Those are different authenticated facts,
+not interchangeable hashes. The correction derives the former through the same
+canonical route-time implementation from a registry-resolved DOM deployment,
+while retaining the wallet's separate consensus-rules comparison and unchanged
+face-record encoding. Both wallet-backed and native-XMR DOM readers must use
+this distinction. No fixture terms, signed policy, L1 rule or authorization
+threshold is changed to satisfy the comparison. Remote regression results for
+the correction are still required.
+
+The same domain distinction is applied to Contracts refund-scope authentication
+and refund-arming admission: the latter retains two separate private pins, both
+derived from the authenticated deployment. The original wallet checks and
+refund evidence encodings remain intact. Six typed-profile regressions, one F6
+domain-substitution regression and two refund-pin regressions are additive.
+They cover authenticated registry inputs and consistency boundaries; they do
+not manufacture a completed native negotiation or a refund spending authority.
 
 Still required before native F6 is operational:
 

@@ -126,6 +126,9 @@ impl AdapterAuthenticatedRefundFaceV2 {
 
         let owner = payout.binding();
         let dom = deployment.deployment();
+        let settlement_profile =
+            route_time_anchor::resolved_dom_deployment_profile_digest_v25(deployment)
+                .map_err(|_| ProductionF6ErrorV2::InvalidTerms)?;
         let asset = deployment.native_asset_binding();
         let owner_participant = owner.participant();
         let roster_index = settlement
@@ -145,7 +148,7 @@ impl AdapterAuthenticatedRefundFaceV2 {
             || deployment.registry_epoch() == 0
             || dom.chain_id != settlement.dom_leg.chain_id
             || dom.native_asset != settlement.dom_leg.asset_id
-            || dom.consensus_rules_digest != settlement.dom_leg.adapter_profile_hash
+            || settlement_profile != settlement.dom_leg.adapter_profile_hash
             || dom.finality != settlement.dom_leg.finality
             || asset.chain_id != settlement.dom_leg.chain_id
             || asset.asset_id != settlement.dom_leg.asset_id
@@ -188,6 +191,9 @@ impl AdapterAuthenticatedRefundFaceV2 {
             session_id: settlement.session_id.0,
             terms_hash,
             chain_id: settlement.dom_leg.chain_id.0,
+            // Historical V2 record field pins the wallet's consensus profile,
+            // not the complete registry-derived settlement/time profile above.
+            // Preserve its bytes and the encoder's equality to consensus rules.
             profile_digest: dom.consensus_rules_digest,
             deadline,
             registry_digest: deployment.registry_digest(),

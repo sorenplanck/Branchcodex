@@ -5,7 +5,8 @@ use blake2::{
 };
 use chain_profile::ChainKindV1;
 use deployment_registry::{
-    ChainDeploymentV1, DomNetworkV1, RegistryManifestV1, ResolvedRegistryV1,
+    ChainDeploymentV1, DomDeploymentV1, DomNetworkV1, RegistryManifestV1, ResolvedDomDeploymentV1,
+    ResolvedRegistryV1,
 };
 use kaystra_core::terms::SettlementTermsV1;
 use kaystra_core::types::{ChainId, Digest32, FinalityPolicyV1, LockMechanism, TimelockSpec};
@@ -1541,7 +1542,10 @@ fn counterparty_binding(
 }
 
 fn dom_profile_digest(manifest: &RegistryManifestV1) -> Result<Digest32> {
-    let deployment = manifest.dom;
+    dom_deployment_profile_digest_v1(manifest.dom)
+}
+
+fn dom_deployment_profile_digest_v1(deployment: DomDeploymentV1) -> Result<Digest32> {
     let fields: [&[u8]; 12] = [
         &deployment.chain_id.0,
         &deployment.genesis_hash,
@@ -1575,6 +1579,20 @@ fn dom_profile_digest(manifest: &RegistryManifestV1) -> Result<Digest32> {
 /// verified. This is the same V1 domain used by productive route admission.
 pub fn resolved_dom_profile_digest_v1(registry: &ResolvedRegistryV1) -> Result<Digest32> {
     dom_profile_digest(registry.manifest())
+}
+
+/// Recomputes the same frozen V1 DOM adapter-profile digest from the resolved
+/// DOM capability retained by a participant, without requiring its full registry.
+///
+/// The capability is minted only by authenticated registry resolution. This
+/// function does not accept a caller-provided digest or raw deployment as an
+/// identity authority. Its twelve fields, field framing and V1 domain are exactly
+/// those of [`resolved_dom_profile_digest_v1`]; the result is not the bare
+/// `consensus_rules_digest`. Registry provenance remains a separate binding.
+pub fn resolved_dom_deployment_profile_digest_v25(
+    deployment: ResolvedDomDeploymentV1,
+) -> Result<Digest32> {
+    dom_deployment_profile_digest_v1(deployment.deployment())
 }
 
 /// Derives the exact length-delimited route scope used by policy and evidence.

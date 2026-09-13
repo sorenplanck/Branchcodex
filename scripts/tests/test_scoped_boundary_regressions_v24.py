@@ -14,7 +14,7 @@ import scoped_boundary_regressions_v24 as runner
 class ClosedBoundaryListTests(unittest.TestCase):
     def test_every_required_name_is_an_actual_test_in_the_declared_package(self):
         ids = [item["id"] for item in runner.SELECTIONS]
-        self.assertEqual(len(ids), 59)
+        self.assertEqual(len(ids), 63)
         self.assertEqual(ids[:8], [
             "native-preflight-policy", "native-preflight-deadline", "native-preflight-wallet",
             "native-preflight-history", "native-preflight-http",
@@ -101,6 +101,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
             ("crates/dom-actuator/src/contracts.rs", "funding_dispatch_v23"),
             ("crates/dom-actuator/src/contracts.rs", "native_xmr_refund_v23"),
             ("crates/dom-scriptless-store/src/runtime/linux.rs", "session_store"),
+            ("crates/dom-scriptless-store/src/runtime/linux.rs", "unordered_readonly_scan_v25_tests"),
             ("crates/dom-scriptless-store/src/runtime/linux.rs", "xmr_recovery"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store.rs", "f7_v12"),
             ("crates/dom-scriptless-store/src/runtime/linux/session_store.rs", "xmr_graph_output_journal_v22"),
@@ -157,6 +158,68 @@ class ClosedBoundaryListTests(unittest.TestCase):
             self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
             process.assert_called_once()
 
+    def test_session_head_collection_requires_original_path_and_corrupt_history_regressions(self):
+        spec = runner.spec_for("store-session-head-exact-scan")
+        self.assertEqual(len(spec["required_tests"]), 8)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertEqual(spec["module_prefix"],
+                         "runtime::linux::session_store::tests::session_head_scan_v25_tests::")
+        parent = (runner.ROOT / "crates/dom-scriptless-store/src/runtime/linux/session_store.rs").read_text()
+        self.assertIn('include!("session_store/session_head_scan_v25_tests.rs");', parent)
+        leaf = (runner.ROOT / spec["source"]).read_text()
+        self.assertIn("mod session_head_scan_v25_tests {", leaf)
+        self.assertIn("store.records.scan_lexicographic", leaf)
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_physical_inventory_requires_all_mutation_refusals_and_original_fallback(self):
+        spec = runner.spec_for("store-readonly-physical-inventory")
+        self.assertEqual(len(spec["required_tests"]), 9)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        self.assertNotIn("--ignored", runner.command(spec["id"]))
+        for suffix in (
+            "persistent_namespace_mutations_refuse_without_replaying_callbacks_v25",
+            "moved_directory_refuses_after_last_callback_v25",
+            "small_budget_falls_back_before_any_callback_v25",
+            "measures_three_physical_passes_and_one_callback_per_entry_v25",
+        ):
+            self.assertIn(spec["module_prefix"] + "unordered_readonly_" + suffix,
+                          spec["required_tests"])
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_dom_refund_profile_keeps_both_authenticated_domains_and_test_include(self):
+        spec = runner.spec_for("dom-refund-profile-domains")
+        self.assertEqual(len(spec["required_tests"]), 2)
+        self.assertEqual(spec["filter"], spec["module_prefix"])
+        parent = (runner.ROOT / "crates/dom-interopd/src/production_refund_arming.rs").read_text()
+        self.assertIn('include!("production_refund_arming_dom_profile_v25_tests.rs");', parent)
+        leaf = (runner.ROOT / spec["source"]).read_text()
+        self.assertIn("mod dom_profile_domains_v25_tests {", leaf)
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], runner.command(spec["id"]))
+            process.assert_called_once()
+
+    def test_resolved_dom_profile_runs_all_six_tests_in_its_exact_integration_target(self):
+        spec = runner.spec_for("resolved-dom-deployment-profile")
+        self.assertEqual(len(spec["required_tests"]), 6)
+        self.assertEqual(spec["module_prefix"], "")
+        self.assertEqual(spec["integration"], "dom_deployment_profile_v25")
+        expected = ["cargo", "test", "--locked", "--profile", "crypto-test", "-p",
+                    "route-time-anchor", "--test", "dom_deployment_profile_v25",
+                    "--", "--nocapture", "--test-threads=1", "--color", "never"]
+        self.assertEqual(runner.command(spec["id"]), expected)
+        with mock.patch.object(runner.subprocess, "Popen") as process:
+            runner.start_test_command_v24(spec["id"], cwd=runner.ROOT, env={}, stdout=None)
+            self.assertEqual(process.call_args.args[0], expected)
+            process.assert_called_once()
+
     def test_native_acceptance_and_initiator_keep_all_additive_regressions(self):
         for identifier, count in (
             ("native-f6-versioned-acceptance-codec", 9),
@@ -207,7 +270,7 @@ class ClosedBoundaryListTests(unittest.TestCase):
 
     def test_native_consent_proposal_and_commitment_boundaries_are_explicit(self):
         for identifier, count in (
-            ("native-f6-real-terms-proposal", 2),
+            ("native-f6-real-terms-proposal", 3),
             ("native-f6-original-acceptance-boundary", 6),
             ("native-f6-solver-postcommit-confirmation", 11),
         ):

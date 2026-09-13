@@ -448,8 +448,15 @@ F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     # (14 operational, one evidence-only); no Sponsor allowance/API changes.
     # Full scope and old/new digests: XMR_RECOVERY_WITHOUT_L1_REVIEW.md,
     # section "2026-09-13 public signature memo and F1 source review".
+    # 2026-09-13: independently reviewed exact diff against 77a4e0b. Only
+    # load_session_locked uses a bounded, three-pass exact physical inventory;
+    # its read-only collector and complete successor checks are unchanged.
+    # All 15 Sponsor/strict-purpose bodies are among 1,484 byte-identical
+    # function spans; the only other change includes additive test evidence.
+    # No wildcard, inventory expansion, signing permission or L1 edit. Review:
+    # "2026-09-13 bounded session-head scan and F1 source review" in that doc.
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "3ac4f8d43120647edc73865d57ba1ff808548b1bc94655900f026c87dded4b7d"
+        "bda8fe04b472459ae87a9fadf857c3a04f7ef61189e202c1a82fa83a9d4a3ef9"
     ),
     "crates/dom-leg/src/f7_wallet.rs": (
         "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"

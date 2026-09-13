@@ -516,3 +516,45 @@ end-to-end speedup. Seven real envelope-cache regressions and five additional
 collaborative-proof-cache regressions are mandatory in the remote boundary
 suite, including cold-plus-warm measurements and adversarial failures. No
 local Rust build or cryptographic test is implied by this review.
+
+## 2026-09-13 bounded session-head scan and F1 source review
+
+This separate, narrowly scoped re-freeze follows exact source comparison against
+published commit `77a4e0bd3b7cf8d2b589f160db3b8dd32af51e40`. It does not refresh
+the pin merely because the guard refuses a changed source file.
+
+| Store source | SHA-256 |
+| --- | --- |
+| Prior `session_store.rs`, from that commit | `3ac4f8d43120647edc73865d57ba1ff808548b1bc94655900f026c87dded4b7d` |
+| Reviewed `session_store.rs`, after the scan hook and test include | `bda8fe04b472459ae87a9fadf857c3a04f7ef61189e202c1a82fa83a9d4a3ef9` |
+
+Two source reviews using the guard's offset-preserving Rust sanitizer found
+1,485 existing function spans: 1,484 byte-identical and only
+`load_session_locked` changed. After whitespace normalization, that function's
+sole change is the scanner name. Its complete suffix starting at recovery
+projection, including sort, revision zero, gaps and exact successors, is
+byte-identical. The additional parent source change is a test-only leaf include.
+All 15 enclosing Sponsor/strict-purpose bodies, including the evidence-only
+constructor, remain byte-identical; homonymous functions were compared as
+separate spans rather than overwritten in a name-keyed map.
+
+The new helper is private and used only by this read-only collector. It captures
+a bounded exact name/physical-identity inventory, verifies exact coverage in
+collection and postflight, and revalidates the retained directory before
+returning. Excluded entries remain identity-checked. Capacity/allocation fallback
+runs the original scanner **before** callbacks; real errors and detected changes
+remain refusals. The generic lexicographic scanner is byte-identical. The design
+review rejected a simpler three-pass implementation that checked physical types
+but could miss a newly appended revision without comparing inventory membership.
+
+No nonce state, transcript, signing purpose, F7 decision, ownership authority,
+confirmation or availability condition is changed or cached. The complete source
+hash remains pinned, the exact Sponsor inventory remains unchanged, and the
+existing one-byte pin-mutation and extra-Sponsor-occurrence regressions remain.
+The separate frozen L1 baseline and its path inventory are untouched.
+
+Details, concurrency limits, capacity fallback and execution-evidence limits:
+[Session-head scan V25](hardening/SESSION-HEAD-SCAN-V25.md). This is source-review
+evidence, not an external security audit, a completed real-daemon lifecycle, or
+proof of a swap completing in minutes. The new Rust regressions run in GitHub;
+no local cryptographic build/test is asserted.

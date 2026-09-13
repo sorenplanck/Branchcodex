@@ -1651,6 +1651,9 @@ where
             .dom_deployment_capability()
             .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
         let dom = deployment.deployment();
+        let dom_adapter_profile_digest =
+            route_time_anchor::resolved_dom_deployment_profile_digest_v25(deployment)
+                .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
         let trusted_chain_id = TrustedChainIdV1::from_authenticated_genesis(
             binding.runtime_identity().network_magic,
             &Hash256::from_bytes(binding.genesis_hash()),
@@ -1663,7 +1666,7 @@ where
             || binding.session_id() != settlement.session_id.0
             || binding.terms_digest() != terms_digest
             || binding.chain_id() != settlement.dom_leg.chain_id.0
-            || binding.profile_digest() != settlement.dom_leg.adapter_profile_hash
+            || dom_adapter_profile_digest != settlement.dom_leg.adapter_profile_hash
             || binding.chain_id() != dom.chain_id.0
             || binding.genesis_hash() != dom.genesis_hash
             || binding.runtime_identity() != dom.runtime_identity

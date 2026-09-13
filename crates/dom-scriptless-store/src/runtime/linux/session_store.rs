@@ -12394,28 +12394,30 @@ impl ContractsSessionStoreV1 {
     ) -> Result<SessionRecordV1, SessionStoreError> {
         let session_hex = hex_lower(&session_id);
         let mut records = Vec::new();
-        self.records.scan_lexicographic(|name, node| {
-            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
-                return Err(LinuxCapabilityError::InvalidObject);
-            }
-            let Some((name_session, revision)) = parse_session_record_name(name) else {
-                return Err(LinuxCapabilityError::InvalidDirectoryEntry);
-            };
-            if name_session != session_hex {
-                return Ok(());
-            }
-            let bytes = self.records.read_bounded_file(
-                &ValidatedComponent::registered(name)?,
-                SESSION_RECORD_MAX_LEN,
-            )?;
-            let record = SessionRecordV1::from_bytes(&bytes)
-                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
-            if hex_lower(&record.session_id()) != name_session || record.revision() != revision {
-                return Err(LinuxCapabilityError::ExactBytesMismatch);
-            }
-            records.push(record);
-            Ok(())
-        })?;
+        self.records
+            .scan_unordered_readonly_with_exclusions_v25(|name, node| {
+                if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
+                    return Err(LinuxCapabilityError::InvalidObject);
+                }
+                let Some((name_session, revision)) = parse_session_record_name(name) else {
+                    return Err(LinuxCapabilityError::InvalidDirectoryEntry);
+                };
+                if name_session != session_hex {
+                    return Ok(());
+                }
+                let bytes = self.records.read_bounded_file(
+                    &ValidatedComponent::registered(name)?,
+                    SESSION_RECORD_MAX_LEN,
+                )?;
+                let record = SessionRecordV1::from_bytes(&bytes)
+                    .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+                if hex_lower(&record.session_id()) != name_session || record.revision() != revision
+                {
+                    return Err(LinuxCapabilityError::ExactBytesMismatch);
+                }
+                records.push(record);
+                Ok(())
+            })?;
         if let Some(projected) = self
             .recovery_projection
             .lock()
@@ -42992,6 +42994,8 @@ pub(crate) mod evidence_only_staging {
 
 #[cfg(test)]
 mod tests {
+    include!("session_store/session_head_scan_v25_tests.rs");
+
     use super::evidence_only_staging::*;
     use super::*;
     use crate::{

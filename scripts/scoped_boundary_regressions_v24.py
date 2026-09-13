@@ -441,7 +441,8 @@ SELECTIONS += (
               "production_f6::terms::native_reconfirmation_terms_v25::tests::",
               "crates/dom-interopd/src/production_f6/terms/native_reconfirmation_terms_v25_tests.rs", (
                   "real_faces_and_signed_time_prepare_only_native_proposal_legacy_still_refuses",
-                  "public_economic_and_scope_failures_preserve_real_faces_for_exact_retry"),
+                  "public_economic_and_scope_failures_preserve_real_faces_for_exact_retry",
+                  "dom_registry_profile_is_not_wallet_consensus_and_wrong_domain_is_refused"),
               features=("production",)),
     selection("native-f6-original-acceptance-boundary", "dom-interopd",
               "production_f6::native_acceptance_v25::tests::",
@@ -482,6 +483,50 @@ SELECTIONS += (
                   "public_signing_memo_capacity_evicts_without_replacing_original_semantics_v25",
                   "busy_or_poisoned_public_signing_memo_always_calls_original_v25",
                   "oversized_public_operands_fall_back_without_new_protocol_limits_v25")),
+)
+
+SELECTIONS += (
+    selection("store-session-head-exact-scan", "dom-scriptless-store",
+              "runtime::linux::session_store::tests::session_head_scan_v25_tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/session_store/session_head_scan_v25_tests.rs", (
+                  "session_head_scan_shuffled_revisions_match_original_lexical_head_v25",
+                  "session_head_scan_missing_origin_and_interior_gap_stay_quarantined_v25",
+                  "session_head_scan_changed_terms_and_irreversible_regression_refuse_v25",
+                  "session_head_scan_projection_is_exact_scoped_and_never_a_cached_head_v25",
+                  "session_head_scan_disk_projection_duplicate_revision_is_not_deduplicated_v25",
+                  "session_head_scan_invalid_foreign_registered_entry_cannot_be_filtered_out_v25",
+                  "session_head_scan_filename_cannot_substitute_record_session_or_revision_v25",
+                  "session_head_scan_same_open_observes_append_then_removed_origin_v25")),
+    selection("store-readonly-physical-inventory", "dom-scriptless-store",
+              "runtime::linux::unordered_readonly_scan_v25_tests::",
+              "crates/dom-scriptless-store/src/runtime/linux/unordered_readonly_scan_v25_tests.rs", (
+                  "unordered_readonly_static_corpus_matches_original_inventory_v25",
+                  "unordered_readonly_physical_refusals_match_original_before_callbacks_v25",
+                  "unordered_readonly_exclusions_pin_identity_and_snapshot_without_callback_lock_v25",
+                  "unordered_readonly_excluded_replacement_refuses_before_and_after_collection_v25",
+                  "unordered_readonly_persistent_namespace_mutations_refuse_without_replaying_callbacks_v25",
+                  "unordered_readonly_moved_directory_refuses_after_last_callback_v25",
+                  "unordered_readonly_callback_error_is_exact_and_never_retried_v25",
+                  "unordered_readonly_small_budget_falls_back_before_any_callback_v25",
+                  "unordered_readonly_measures_three_physical_passes_and_one_callback_per_entry_v25")),
+)
+
+SELECTIONS += (
+    selection("dom-refund-profile-domains", "dom-interopd",
+              "production_refund_arming::tests::dom_profile_domains_v25_tests::",
+              "crates/dom-interopd/src/production_refund_arming_dom_profile_v25_tests.rs", (
+                  "refund_dom_profile_domains_match_real_registry_and_wallet_independently_v25",
+                  "refund_dom_profile_domain_substitution_and_foreign_pins_refuse_v25"),
+              features=("production",)),
+    selection("resolved-dom-deployment-profile", "route-time-anchor", "",
+              "crates/route-time-anchor/tests/dom_deployment_profile_v25.rs", (
+                  "resolved_dom_deployment_matches_original_profile_on_all_authenticated_networks_v25",
+                  "every_independently_mutable_dom_profile_field_changes_both_authenticated_digests_v25",
+                  "isolated_chain_genesis_and_runtime_changes_cannot_mint_resolved_dom_capability_v25",
+                  "dom_adapter_profile_remains_distinct_from_consensus_and_registry_domains_v25",
+                  "registry_provenance_remains_separate_from_the_unchanged_twelve_field_dom_profile_v25",
+                  "changed_dom_profile_with_old_registry_signatures_cannot_issue_typed_capability_v25"),
+              integration="dom_deployment_profile_v25"),
 )
 
 COMPILE_ONLY = (
@@ -646,6 +691,30 @@ def start_test_command_v24(identifier, *, cwd, env, stdout):
         if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_proposal_v22::public_signing_semantics_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"]:
             raise ValueError("native test dispatch differs from its closed argv")
         return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::xmr_graph_proposal_v22::public_signing_semantics_cache_v25::tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-session-head-exact-scan":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::session_head_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::session_store::tests::session_head_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "store-readonly-physical-inventory":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::unordered_readonly_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-scriptless-store","--lib","runtime::linux::unordered_readonly_scan_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "dom-refund-profile-domains":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_refund_arming::tests::dom_profile_domains_v25_tests::","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","dom-interopd","--no-default-features","--features","production","--lib","production_refund_arming::tests::dom_profile_domains_v25_tests::","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
+                                stdin=subprocess.DEVNULL, stdout=stdout,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    if identifier == "resolved-dom-deployment-profile":
+        if expected != ["cargo","test","--locked","--profile","crypto-test","-p","route-time-anchor","--test","dom_deployment_profile_v25","--","--nocapture","--test-threads=1","--color","never"]:
+            raise ValueError("native test dispatch differs from its closed argv")
+        return subprocess.Popen(["cargo","test","--locked","--profile","crypto-test","-p","route-time-anchor","--test","dom_deployment_profile_v25","--","--nocapture","--test-threads=1","--color","never"], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=stdout,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     if identifier == "adaptor-native-round1-continuation":

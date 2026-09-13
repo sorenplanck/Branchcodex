@@ -592,7 +592,10 @@ struct BoundRefundLegV1 {
 struct AdmissionFacePinsV1 {
     registry_digest: Digest32,
     registry_epoch: u64,
+    // Wallet identity pins consensus rules; settlement terms pin the complete
+    // registry-derived adapter profile. Neither domain substitutes for the other.
     dom_profile_digest: Digest32,
+    dom_adapter_profile_digest: Digest32,
     dom_asset_binding_digest: Digest32,
     counterparty_profile_digest: Digest32,
     counterparty_asset_binding_digest: Digest32,
@@ -884,8 +887,7 @@ fn bind_dom_face(
         || binding.session_id() != settlement.session_id.0
         || binding.terms_digest() != terms_digest
         || binding.chain_id() != settlement.dom_leg.chain_id.0
-        || binding.profile_digest() != settlement.dom_leg.adapter_profile_hash
-        || validate_dom_admission_pins(binding, pins).is_err()
+        || validate_dom_settlement_pins_v25(binding, settlement, pins).is_err()
     {
         return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
     }
@@ -1385,6 +1387,19 @@ fn validate_dom_admission_pins(
         return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
     }
     Ok(())
+}
+
+fn validate_dom_settlement_pins_v25(
+    binding: DomSessionBindingV1,
+    settlement: &SettlementTermsV1,
+    pins: AdmissionFacePinsV1,
+) -> Result<(), ProductionRefundArmingOpenErrorV1> {
+    if pins.dom_adapter_profile_digest == ZERO_DIGEST
+        || settlement.dom_leg.adapter_profile_hash != pins.dom_adapter_profile_digest
+    {
+        return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+    }
+    validate_dom_admission_pins(binding, pins)
 }
 
 fn validate_bitcoin_admission_pins(
@@ -1967,11 +1982,15 @@ fn bind_configuration(
     let dom_deployment = admission
         .dom_deployment_capability()
         .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+    let dom_adapter_profile_digest =
+        route_time_anchor::resolved_dom_deployment_profile_digest_v25(dom_deployment)
+            .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
     let common_pins =
         |counterparty_profile_digest, counterparty_asset_binding_digest| AdmissionFacePinsV1 {
             registry_digest: admission.registry_digest(),
             registry_epoch: admission.registry_epoch(),
             dom_profile_digest: dom_deployment.deployment().consensus_rules_digest,
+            dom_adapter_profile_digest,
             dom_asset_binding_digest: dom_deployment.native_asset_binding_digest(),
             counterparty_profile_digest,
             counterparty_asset_binding_digest,
@@ -3109,6 +3128,8 @@ enum RefundArmingFaultV1 {
 
 #[cfg(test)]
 mod tests {
+    include!("production_refund_arming_dom_profile_v25_tests.rs");
+
     use std::cell::Cell;
 
     use adapter_btc::timelock::ChainTimingBoundsV1;
@@ -3341,6 +3362,9 @@ mod tests {
             registry_digest: fixture.registry.manifest_digest(),
             registry_epoch: fixture.registry.epoch(),
             dom_profile_digest: dom.deployment().consensus_rules_digest,
+            dom_adapter_profile_digest:
+                route_time_anchor::resolved_dom_deployment_profile_digest_v25(dom)
+                    .expect("authenticated DOM adapter profile"),
             dom_asset_binding_digest: dom.native_asset_binding_digest(),
             counterparty_profile_digest: counterparty
                 .profile()

@@ -56,6 +56,9 @@ impl ProductionNativeXmrDomFaceOwnerV25 {
         };
         let terms_hash = settlement.terms_hash().map_err(|_| Error::InvalidTerms)?;
         let dom = deployment.deployment();
+        let settlement_profile =
+            route_time_anchor::resolved_dom_deployment_profile_digest_v25(deployment)
+                .map_err(|_| Error::InvalidTerms)?;
         let asset = deployment.native_asset_binding();
         if selected != settlement
             || principal.terms != settlement
@@ -80,7 +83,7 @@ impl ProductionNativeXmrDomFaceOwnerV25 {
             || deployment.registry_epoch() == 0
             || dom.chain_id != settlement.dom_leg.chain_id
             || dom.native_asset != settlement.dom_leg.asset_id
-            || dom.consensus_rules_digest != settlement.dom_leg.adapter_profile_hash
+            || settlement_profile != settlement.dom_leg.adapter_profile_hash
             || dom.finality != settlement.dom_leg.finality
             || asset.chain_id != settlement.dom_leg.chain_id
             || asset.asset_id != settlement.dom_leg.asset_id

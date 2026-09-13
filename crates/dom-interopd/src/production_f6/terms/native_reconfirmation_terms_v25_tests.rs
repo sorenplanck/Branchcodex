@@ -159,6 +159,21 @@ pub(crate) fn native_terms_proposal_fixture_v25() -> TestResult<NativeTermsPropo
         pins,
     )?;
     let dom_deployment = fixture.registry.resolve_dom()?;
+    // The signed time policy freezes the complete registry-derived DOM
+    // profile. The wallet separately pins consensus rules; these domains must
+    // never be substituted merely to make the adapter face pass admission.
+    assert_eq!(
+        original.dom_leg.adapter_profile_hash,
+        route_time_anchor::resolved_dom_profile_digest_v1(&fixture.registry)?,
+    );
+    assert_eq!(
+        original.dom_leg.adapter_profile_hash,
+        route_time_anchor::resolved_dom_deployment_profile_digest_v25(dom_deployment)?,
+    );
+    assert_ne!(
+        original.dom_leg.adapter_profile_hash,
+        dom_deployment.deployment().consensus_rules_digest,
+    );
     let participant = DomParticipantV1::new(original.dom_leg.beneficiary.0, 1)?;
     let upstream = DomSessionBindingV1::from_resolved_deployment(
         wire.route_id,
@@ -202,7 +217,8 @@ pub(crate) fn native_terms_proposal_fixture_v25() -> TestResult<NativeTermsPropo
         original,
         &composition,
         dom_deployment,
-    )?;
+    )
+    .map_err(|error| format!("native proposal fixture DOM payout face: {error}"))?;
     let evm = fixture
         .registry
         .resolve_chain(original.counterparty_leg.chain_id)
@@ -218,13 +234,15 @@ pub(crate) fn native_terms_proposal_fixture_v25() -> TestResult<NativeTermsPropo
                 funder: [0x8e; 20],
             },
         )?;
-    let counterparty = AdapterAuthenticatedRefundFaceV2::from_evm(&binding, original, evm)?;
+    let counterparty = AdapterAuthenticatedRefundFaceV2::from_evm(&binding, original, evm)
+        .map_err(|error| format!("native proposal fixture EVM refund face: {error}"))?;
     let owner = ProductionNativeF6TermsProposalOwnerV25::new(
         binding,
         Rc::clone(&composition),
         dom,
         counterparty,
-    )?;
+    )
+    .map_err(|error| format!("native proposal fixture composed face owner: {error}"))?;
     Ok(NativeTermsProposalFixtureV25 {
         _root: root,
         composition,
@@ -233,6 +251,46 @@ pub(crate) fn native_terms_proposal_fixture_v25() -> TestResult<NativeTermsPropo
         quote,
         owner,
     })
+}
+
+#[test]
+fn dom_registry_profile_is_not_wallet_consensus_and_wrong_domain_is_refused() -> TestResult {
+    let fixture = common::fixture();
+    let deployment = fixture.registry.resolve_dom()?;
+    let profile = route_time_anchor::resolved_dom_deployment_profile_digest_v25(deployment)?;
+    assert_eq!(
+        profile,
+        route_time_anchor::resolved_dom_profile_digest_v1(&fixture.registry)?,
+    );
+    assert_eq!(profile, fixture.upstream.dom_leg.adapter_profile_hash);
+    assert_ne!(profile, deployment.deployment().consensus_rules_digest);
+    RouteTimePolicyV2::from_registry(
+        &fixture.registry,
+        &fixture.upstream,
+        &fixture.downstream,
+        common::limits(),
+    )?;
+    // Neither a plausible nonzero consensus digest nor the registry manifest
+    // digest can replace the exact profile authenticated by signed time policy.
+    for wrong_domain in [
+        deployment.deployment().consensus_rules_digest,
+        deployment.registry_digest(),
+    ] {
+        let mut upstream = fixture.upstream.clone();
+        let mut downstream = fixture.downstream.clone();
+        upstream.dom_leg.adapter_profile_hash = wrong_domain;
+        downstream.dom_leg.adapter_profile_hash = wrong_domain;
+        assert!(matches!(
+            RouteTimePolicyV2::from_registry(
+                &fixture.registry,
+                &upstream,
+                &downstream,
+                common::limits(),
+            ),
+            Err(route_time_anchor::RouteTimeAnchorErrorV2::RegistryMismatch)
+        ));
+    }
+    Ok(())
 }
 
 fn changed_quote(quote: QuoteV2, total_fee: u128, net_output: u128) -> TestResult<QuoteV2> {

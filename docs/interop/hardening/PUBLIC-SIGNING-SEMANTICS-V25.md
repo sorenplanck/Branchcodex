@@ -39,8 +39,17 @@ complete encoding, candidate/signature separation, errors, eviction, contention,
 poison and over-bound fallback. The minimal public transaction is deliberately
 only a semantic input, not a spendable transaction or manufactured Store/F7 grant.
 The original full funding, claim, recovery, transport and restart tests remain.
-These eight new Rust tests have not executed at this handoff; CI runs them through
-the closed `store-public-signing-semantics-cache` selection.
+All eight Rust regressions passed on published `77a4e0b` in GitHub preflight job
+`103693319292`, through the closed `store-public-signing-semantics-cache`
+selection: eight passed, none failed or ignored. That preflight job was **not
+green overall**: two F6 selections reported eight `InvalidTerms` failures.
+Their failures are separate from the successful semantic-verification evidence.
+
+On that runner, 64 original verifications took 37,651–39,117 microseconds across
+the four tested purposes; one cold verification plus 63 exact warm replays took
+692–872 microseconds. These are public-semantic-only measurements, excluding
+Store filesystem audits, ancestry reconstruction, network and blockchain waits.
+They establish neither a complete lifecycle result nor a minutes-long swap.
 
 The previous Round1 optimization has measured GitHub evidence: 5,797 to 1,937
 microseconds for two actors' repeated first phase on `f418d20`. That approximately
@@ -48,6 +57,12 @@ microseconds for two actors' repeated first phase on `f418d20`. That approximate
 This memo's timing label likewise explicitly excludes Store audits and swaps.
 
 ## Structural work still needed
+
+The separately reviewed [session-head scan change](SESSION-HEAD-SCAN-V25.md)
+addresses the quadratic records-directory item below, for bounded inventories,
+without changing the generic scanner or the successor validator. The inventory
+is fresh per load, not a retained authorization cache. Repeated ancestry work
+and complete daemon timing still require separate evidence.
 
 Static inspection identifies repeated work beyond the public equations:
 
