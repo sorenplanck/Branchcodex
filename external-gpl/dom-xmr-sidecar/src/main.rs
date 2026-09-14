@@ -385,7 +385,15 @@ async fn build_sweep(
         Zeroizing::new(view),
     )
     .await
-    .map_err(|_| SidecarOperationError::Retryable)?;
+    .map_err(|_| {
+        // Fixed compile-time tag only; never a scalar, address or RPC payload.
+        // Attributes which retryable sweep-build step failed from stderr.
+        tracing::warn!(
+            reason = "largest_received_utxo",
+            "sweep build step temporarily unavailable"
+        );
+        SidecarOperationError::Retryable
+    })?;
     if amount != Some(request.expected_amount_piconero) {
         return Err(SidecarOperationError::Rejected(
             "funding output changed or is not spendable".to_owned(),
@@ -447,16 +455,21 @@ fn parse_point(bytes: [u8; 32]) -> Result<Point, SidecarOperationError> {
 
 fn classify_sweep_error(error: &monero_wallet_ng::sweep::SweepError) -> SidecarOperationError {
     use monero_wallet_ng::sweep::SweepError;
-    match error {
-        SweepError::TransactionNotFound { .. }
-        | SweepError::TransactionInMempool { .. }
-        | SweepError::BlockNotFound { .. }
-        | SweepError::StatusLookup(_)
-        | SweepError::Fee(_)
-        | SweepError::Decoys(_)
-        | SweepError::Interface(_) => SidecarOperationError::Retryable,
-        _ => SidecarOperationError::Rejected(error.to_string()),
-    }
+    // Fixed compile-time tag only; never a scalar, address or RPC payload.
+    // Names which retryable sweep-build step failed so stderr attributes the
+    // exact transient cause instead of a bare "transient XMR port failure".
+    let reason = match error {
+        SweepError::TransactionNotFound { .. } => "transaction_not_found",
+        SweepError::TransactionInMempool { .. } => "transaction_in_mempool",
+        SweepError::BlockNotFound { .. } => "block_not_found",
+        SweepError::StatusLookup(_) => "status_lookup",
+        SweepError::Fee(_) => "fee_estimate",
+        SweepError::Decoys(_) => "decoy_selection",
+        SweepError::Interface(_) => "rpc_interface",
+        _ => return SidecarOperationError::Rejected(error.to_string()),
+    };
+    tracing::warn!(reason, "sweep build step temporarily unavailable");
+    SidecarOperationError::Retryable
 }
 
 /// World-writable roots a secret-carrying socket must never live in; the
