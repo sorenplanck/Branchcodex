@@ -368,6 +368,13 @@ impl ProductionBootstrapLegV16 {
         self.last_bp_step_v25
     }
 
+    /// This participant's protocol index within the frozen roster, so the two
+    /// daemons' interleaved progress lines can be told apart. Diagnostics only:
+    /// a 0 or 1 already fixed by the authenticated roster, never an identity.
+    pub(crate) const fn local_protocol_index_v25(&self) -> u8 {
+        self.binding.participant().protocol_index()
+    }
+
     /// Native evidence retained only after the exact C/D range proof is durable.
     /// This is input to graph formation, never a funding or signing grant.
     pub(crate) fn frozen_xmr_formation_v22(

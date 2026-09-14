@@ -764,7 +764,7 @@ impl ProductionRelayStage12OwnerV1 {
     /// completed — so `c_output`/`d_output` separate "the peer never finished
     /// its proof" from "the templates were refused". `refund_binding` is the
     /// readiness gate that still applies after the graph does leave Awaiting.
-    pub(crate) fn bootstrap_progress_v25(&self, leg: LegIdV1) -> [&'static str; 10] {
+    pub(crate) fn bootstrap_progress_v25(&self, leg: LegIdV1) -> [&'static str; 11] {
         let index = match leg {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
@@ -801,6 +801,17 @@ impl ProductionRelayStage12OwnerV1 {
             match self.cancelled_v22[index].as_ref() {
                 None => "-",
                 Some(owner) => owner.driver.last_bp_step_v25(),
+            },
+            // Which of the two daemons wrote this line. Both stream to one
+            // captured log, so without it the interleaved lines cannot be
+            // attributed and an asymmetric stall reads as a symmetric one.
+            match self.bootstrap_v16[index].as_ref() {
+                None => "-",
+                Some(driver) => match driver.local_protocol_index_v25() {
+                    0 => "0",
+                    1 => "1",
+                    _ => "?",
+                },
             },
         ]
     }
