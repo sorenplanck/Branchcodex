@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+futures = { workspace = true }
 kaystra-core = { path = "../../kaystra-core" }
 sha2 = { workspace = true }
 thiserror = { workspace = true }

@@ -19,6 +19,14 @@ use xmr_spend_port::{FundingVerifyPort, SpendPortError};
 /// Maximum headers replaced in one invocation.
 pub const MAX_HEADER_REFRESH: u64 = 4096;
 
+/// Quorum header fetches issued concurrently during a canonical refresh.
+///
+/// Each height still performs the identical quorum-verified `block_hash`
+/// RPC; only the waiting overlaps. Bounded so a cold refresh of the full
+/// `MAX_HEADER_REFRESH` window cannot open thousands of simultaneous
+/// requests against the configured nodes.
+const HEADER_FETCH_CONCURRENCY: usize = 32;
+
 /// Immutable observation plan derived from validated setup and frozen policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XmrObservationPlan {
@@ -206,11 +214,23 @@ where
         }
         let mut blocks =
             Vec::with_capacity(usize::try_from(count).map_err(|_| PumpError::BoundsExceeded)?);
-        for height in replacement_from..=remote_tip.height {
-            blocks.push(XmrBlockAnchor {
-                height,
-                hash: self.pool.block_hash(height).await?,
-            });
+        // The same quorum-verified per-height RPC as a serial walk, issued in
+        // bounded concurrent batches: `join_all` preserves input order, so the
+        // suffix stays ascending and every hash still comes from its own
+        // quorum agreement. One failed height fails the refresh exactly as
+        // before.
+        let heights: Vec<u64> = (replacement_from..=remote_tip.height).collect();
+        for batch in heights.chunks(HEADER_FETCH_CONCURRENCY) {
+            let fetched = futures::future::join_all(batch.iter().map(|&height| async move {
+                Ok::<XmrBlockAnchor, PumpError>(XmrBlockAnchor {
+                    height,
+                    hash: self.pool.block_hash(height).await?,
+                })
+            }))
+            .await;
+            for anchor in fetched {
+                blocks.push(anchor?);
+            }
         }
         self.feed
             .replace_canonical_suffix(replacement_from, &blocks)?;

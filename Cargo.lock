@@ -8567,6 +8567,7 @@ dependencies = [
 name = "xmr-observer-pump"
 version = "0.2.0"
 dependencies = [
+ "futures",
  "kaystra-core",
  "sha2",
  "thiserror 1.0.69",
