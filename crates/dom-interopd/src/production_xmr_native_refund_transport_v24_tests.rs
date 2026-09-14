@@ -172,6 +172,13 @@ impl NativeXmrCustodyFixtureV23 {
         assert_eq!(before, stores[receiver].load_session(session)?.as_bytes());
 
         let directory = tempfile::tempdir()?;
+        // The durable inbox refuses any parent that is not owner-only, and
+        // tempfile honors the ambient umask (0o022 on CI turns the fresh
+        // directory into 0o755). Pin the exact owner-only mode explicitly.
+        std::fs::set_permissions(
+            directory.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
         let secret = [0x71; 32];
         let secp = SecpContext::new(&[0x55; 32]);
         let xonly = secp.sign_bip340(&secret, &[0; 32], &[0x56; 32])?.1;

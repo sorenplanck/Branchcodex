@@ -3938,6 +3938,7 @@ mod database_authority_tests {
             64,
         )?;
         let temp = tempfile::tempdir()?;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))?;
         let root = temp.path().join("reopened-framed-sender");
         let expiry = TimelockSpec::BlockHeight { value: 10_000 };
         let raw = vec![0x5a; MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES + 1];
@@ -4042,6 +4043,7 @@ mod database_authority_tests {
         for size in [32, MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES * 2] {
             for fail_at in [1, 2] {
                 let temp = tempfile::tempdir()?;
+                fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))?;
                 let root = temp.path().join("sender");
                 let mut sender = DurableRelaySenderV1::create(&root, config, secret, [0x19; 32])?;
                 let checkpoint = sender.checkpoint()?;
@@ -4097,6 +4099,7 @@ mod database_authority_tests {
     #[test]
     fn sqlite_fd_proof_preserves_named_wal_authority() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let database = temporary.path().join(DATABASE_FILE_NAME);
         sqlite_file(&database, 7)?;
         let authority = open_database_authority(&database)?;
@@ -4124,6 +4127,7 @@ mod database_authority_tests {
     #[test]
     fn sqlite_fd_proof_refuses_swap_open_swap_back() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let database = temporary.path().join(DATABASE_FILE_NAME);
         let retained_name = temporary.path().join("retained.sqlite3");
         let alternate = temporary.path().join("alternate.sqlite3");
