@@ -308,7 +308,11 @@ enum SidecarOperationError {
     Rejected(String),
 }
 
-fn build_unavailable(reason: &'static str, prefix: &str, message: &str) -> SidecarResponseV2 {
+fn build_unavailable(
+    reason: &'static str,
+    prefix: &'static str,
+    message: &'static str,
+) -> SidecarResponseV2 {
     SidecarResponseV2::Error(SidecarErrorBody {
         code: format!("{prefix}_{reason}"),
         message: message.to_owned(),

@@ -314,7 +314,9 @@ async fn build_scoped(
     let prepared = match guard.load_plan(&encryption_key).map_err(cache_error)? {
         Some(encoded) => Prepared::decode(&encoded)?,
         None => {
-            let rpc = monerod(config).await?;
+            let rpc = monerod(config)
+                .await
+                .map_err(|_| retryable("monerod_transport_init"))?;
             if ProvidesBlockchain::block_hash(&rpc, 0)
                 .await
                 .map_err(|_| retryable("genesis_block_hash_rpc"))?

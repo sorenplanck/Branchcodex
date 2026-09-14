@@ -39,6 +39,8 @@ use zeroize::Zeroizing;
 const WORLD_WRITABLE_ROOTS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 /// The hello proof is one small JSON object; anything larger is an impostor.
 const MAX_HELLO_PROOF_BYTES: usize = 1024;
+/// Error codes are diagnostic labels, never free-form log content.
+const MAX_SIDECAR_ERROR_CODE_BYTES: usize = 128;
 
 /// Preferred Linux sidecar transport.
 pub struct BlockingUdsSidecarPort {
@@ -183,11 +185,17 @@ impl BlockingUdsSidecarPort {
         // SpendPortError intentionally remains the coarse retry/reject contract
         // consumed by the state machine, but operators must not lose the stage
         // that produced that classification.
-        tracing::warn!(
-            sidecar_code = %error.code,
-            retryable = error.retryable,
-            "XMR sidecar request failed"
-        );
+        let valid_code = !error.code.is_empty()
+            && error.code.len() <= MAX_SIDECAR_ERROR_CODE_BYTES
+            && error
+                .code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        if !valid_code {
+            tracing::warn!("XMR sidecar returned an invalid error code");
+            return SpendPortError::Rejected;
+        }
+        tracing::warn!(sidecar_code = %error.code, retryable = error.retryable, "XMR sidecar request failed");
         if error.retryable {
             SpendPortError::Retryable
         } else {
@@ -594,7 +602,7 @@ mod tests {
                 UnixListener::bind(&path)?,
                 KEY,
                 SidecarResponseV2::Error(xmr_live_sidecar_api::SidecarErrorBody {
-                    code: "funding-unavailable".into(),
+                    code: "funding_unavailable".into(),
                     message: "funding unavailable".into(),
                     retryable,
                 }),
@@ -605,6 +613,30 @@ mod tests {
                 Err(SpendPortError::Rejected) => assert!(!retryable),
                 Ok(_) => panic!("error response cannot authorize funding"),
             }
+            assert!(worker.join().expect("sidecar thread").0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_sidecar_error_codes_are_rejected_instead_of_logged_or_retried() -> TestResult {
+        for code in ["", "funding\nunavailable", "funding-unavailable"] {
+            let directory = socket_scratch_dir();
+            let path = directory.path().join("sidecar.sock");
+            let worker = one_shot_sidecar_response(
+                UnixListener::bind(&path)?,
+                KEY,
+                SidecarResponseV2::Error(xmr_live_sidecar_api::SidecarErrorBody {
+                    code: code.into(),
+                    message: "untrusted diagnostic".into(),
+                    retryable: true,
+                }),
+            );
+            let mut client = BlockingUdsSidecarPort::new(&path, SidecarAuthKey::new(KEY)?)?;
+            assert!(matches!(
+                client.verify_funding(funding_request()),
+                Err(SpendPortError::Rejected)
+            ));
             assert!(worker.join().expect("sidecar thread").0);
         }
         Ok(())
