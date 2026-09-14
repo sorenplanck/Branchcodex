@@ -324,6 +324,11 @@ impl ProductionNoiseRelaySessionV1 {
                 report.inbound_backlog_remains |= extra.inbound_backlog_remains;
             }
         }
+        // Total envelopes the shared relay holds, across every scope. Compared
+        // against what this exchange actually paged out, it separates "nothing
+        // was staged" from "something was staged under a scope no configured
+        // link drains". Diagnostics only: a count, never an envelope.
+        report.relay_total_v25 = relay.len().unwrap_or(0);
         Ok(report)
     }
 
@@ -361,6 +366,7 @@ impl ProductionNoiseRelaySessionV1 {
             pages_received: received.pages,
             envelopes_received: received.envelopes,
             inbound_backlog_remains: received.backlog_remains,
+            relay_total_v25: 0,
         })
     }
 
@@ -714,6 +720,8 @@ pub(crate) struct ProductionNoiseRelayExchangeReportV1 {
     pub(crate) pages_received: u16,
     pub(crate) envelopes_received: u32,
     pub(crate) inbound_backlog_remains: bool,
+    /// Envelopes the shared relay holds across every scope. Diagnostics only.
+    pub(crate) relay_total_v25: usize,
 }
 
 #[derive(Clone, Copy)]

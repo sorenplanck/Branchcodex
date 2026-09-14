@@ -252,9 +252,8 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     exchange_timeout: Duration,
     backoff: Duration,
     last_relay_time_seconds: u64,
-    last_bootstrap_progress_v25: [Option<[&'static str; 23]>; 2],
+    last_bootstrap_progress_v25: [Option<[&'static str; 24]>; 2],
     exchanged_envelopes_v25: [(u64, u64); 2],
-    last_reported_exchange_v25: [Option<(u64, u64)>; 2],
     last_tolerated_v25: [Option<Option<&'static str>>; 2],
     last_activation_ready_v25: std::cell::Cell<Option<bool>>,
 }
@@ -334,7 +333,6 @@ impl ProductionCompositeRelayLoopV1 {
             last_relay_time_seconds,
             last_bootstrap_progress_v25: [None, None],
             exchanged_envelopes_v25: [(0, 0); 2],
-            last_reported_exchange_v25: [None, None],
             last_tolerated_v25: [None, None],
             last_activation_ready_v25: std::cell::Cell::new(None),
         })
@@ -391,10 +389,10 @@ impl ProductionCompositeRelayLoopV1 {
                 .saturating_add(u64::from(report.exchange.envelopes_received)),
         );
         // Whether this leg's own contracts had anything to hand the sender
-        // before this tick's exchange. Bootstrap progress below is sampled
-        // after the exchange and inbound poll, so it may describe an envelope
-        // staged for the next tick. Do not infer that the two observations
-        // refer to the same envelope.
+        // *before* this tick's exchange. Every other tag below is sampled after
+        // the exchange and the inbound poll, so this one may describe an
+        // envelope staged for the next tick: do not read it and a bootstrap tag
+        // on the same line as two observations of the same envelope.
         let outbound = match report.outbound {
             RelayOutboundStepV1::Idle => "idle",
             RelayOutboundStepV1::Acked { .. } => "acked",
@@ -429,25 +427,22 @@ impl ProductionCompositeRelayLoopV1 {
             yes_no(report.inbound.dispatch.inbox.pending_f6 != 0),
         ];
         let owned = self.owner.bootstrap_progress_v25(leg);
-        let progress: [&'static str; 23] = core::array::from_fn(|position| {
+        let progress: [&'static str; 24] = core::array::from_fn(|position| {
             owned
                 .get(position)
                 .copied()
                 .unwrap_or_else(|| tail[position - owned.len()])
         });
-        let exchange_progress = self.exchanged_envelopes_v25[index];
-        if self.last_bootstrap_progress_v25[index] == Some(progress)
-            && self.last_reported_exchange_v25[index] == Some(exchange_progress)
-        {
+        if self.last_bootstrap_progress_v25[index] == Some(progress) {
             return;
         }
         self.last_bootstrap_progress_v25[index] = Some(progress);
-        self.last_reported_exchange_v25[index] = Some(exchange_progress);
-        let (sent, received) = exchange_progress;
-        let [graph, candidate, public, cancelled, bootstrap, c_output, d_output, refund, c_bp, d_bp, sender, out_backlog, in_backlog, blocked_f6, failed_closed, applied, duplicate, ingested, ingest_dup, refused, quarantined, pending_route, pending_f6] =
+        let (sent, received) = self.exchanged_envelopes_v25[index];
+        let relay_total = report.exchange.relay_total_v25;
+        let [graph, candidate, public, cancelled, bootstrap, c_output, d_output, refund, c_bp, d_bp, actor, sender, out_backlog, in_backlog, blocked_f6, failed_closed, applied, duplicate, ingested, ingest_dup, refused, quarantined, pending_route, pending_f6] =
             progress;
         eprintln!(
-            "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 leg={index} graph={graph} \
+            "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 actor={actor} leg={index} graph={graph} \
              candidate={candidate} public={public} cancelled_complete={cancelled} \
              bootstrap_complete={bootstrap} c_output={c_output} d_output={d_output} \
              needs_refund_binding={refund} c_bp={c_bp} d_bp={d_bp} sender_pre_exchange={sender} \
@@ -455,6 +450,7 @@ impl ProductionCompositeRelayLoopV1 {
              failed_closed={failed_closed} applied={applied} duplicate={duplicate} \
              ingested={ingested} ingest_dup={ingest_dup} refused={refused} \
              quarantined={quarantined} pending_route={pending_route} pending_f6={pending_f6} \
+             relay_total={relay_total} \
              envelopes_sent={sent} envelopes_received={received}"
         );
     }
