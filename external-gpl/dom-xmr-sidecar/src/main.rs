@@ -474,7 +474,10 @@ fn classify_sweep_error(error: &monero_wallet_ng::sweep::SweepError) -> SidecarO
         SweepError::Interface(_) => "rpc_interface",
         _ => return SidecarOperationError::Rejected(error.to_string()),
     };
-    tracing::warn!(reason, "sweep build step temporarily unavailable");
+    // The fixed tag classifies the step; the Display chain names the exact
+    // transient cause (e.g. which RPC route the interface rejected) without
+    // exposing any scalar, address or request payload.
+    tracing::warn!(reason, detail = %error, "sweep build step temporarily unavailable");
     SidecarOperationError::Retryable
 }
 

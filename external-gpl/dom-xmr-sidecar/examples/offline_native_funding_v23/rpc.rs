@@ -353,10 +353,15 @@ fn serve(stream: &mut TcpStream, ledger: &Arc<Mutex<Snapshot>>) -> Result<()> {
         }
     }
     let response = match (method, path) {
-        ("GET", "/get_height") => {
+        // monero-oxide's daemon client issues every non-JSON-RPC route as a
+        // POST (its HttpTransport has no GET); real monerod answers these
+        // read-only queries on both verbs. The refund sweep is the first path
+        // to call latest_block_number -> POST /get_height, so a GET-only match
+        // here 404s and surfaces as a retryable rpc_interface sweep failure.
+        ("GET" | "POST", "/get_height") => {
             json!({"status":"OK","untrusted":false,"height":snapshot.tip() + 1})
         }
-        ("GET", "/get_info") => json!({"status":"OK","untrusted":false,"synchronized":true,
+        ("GET" | "POST", "/get_info") => json!({"status":"OK","untrusted":false,"synchronized":true,
             "height":snapshot.tip() + 1,"target_height":snapshot.tip() + 1,
             "mainnet":snapshot.is_mainnet(),"testnet":false,"stagenet":!snapshot.is_mainnet(),"top_block_hash":snapshot.block_hash(snapshot.tip())?}),
         ("POST", "/json_rpc") => json_rpc(&serde_json::from_slice(body)?, &snapshot)?,
