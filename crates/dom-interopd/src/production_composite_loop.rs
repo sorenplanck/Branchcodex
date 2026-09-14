@@ -254,6 +254,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     last_relay_time_seconds: u64,
     last_bootstrap_progress_v25: [Option<[&'static str; 5]>; 2],
     exchanged_envelopes_v25: [(u64, u64); 2],
+    last_tolerated_v25: [Option<Option<&'static str>>; 2],
 }
 
 impl core::fmt::Debug for ProductionCompositeRelayLoopV1 {
@@ -331,6 +332,7 @@ impl ProductionCompositeRelayLoopV1 {
             last_relay_time_seconds,
             last_bootstrap_progress_v25: [None, None],
             exchanged_envelopes_v25: [(0, 0); 2],
+            last_tolerated_v25: [None, None],
         })
     }
 
@@ -344,6 +346,24 @@ impl ProductionCompositeRelayLoopV1 {
         let report = self.step_exchange_and_poll_v23(leg)?;
         self.report_bootstrap_progress_v25(leg, &report);
         Ok(report)
+    }
+
+    /// Emits one line when the class of tolerated refusal a leg keeps hitting
+    /// changes. These classes are deliberately swallowed so one leg cannot
+    /// stall the other, which also makes a leg that hits the same one every
+    /// round completely silent; naming the class is what separates "waiting
+    /// for the peer" from "refusing what already arrived". Diagnostics only:
+    /// the tolerance itself is unchanged.
+    fn report_tolerated_v25(&mut self, leg: LegIdV1, tolerated: Option<&'static str>) {
+        let index = relay_index(leg);
+        if self.last_tolerated_v25[index] == Some(tolerated) {
+            return;
+        }
+        self.last_tolerated_v25[index] = Some(tolerated);
+        eprintln!(
+            "DOM_NATIVE_TOLERATED_REFUSAL_V25 leg={index} class={}",
+            tolerated.unwrap_or("none")
+        );
     }
 
     /// Emits one line whenever a leg's bootstrap progress tags change, with
@@ -1021,16 +1041,28 @@ impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
 
     fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
         match self.step_leg(leg) {
-            Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
+            Ok(report) => {
+                self.report_tolerated_v25(leg, None);
+                Ok(relay_step_moved_traffic_v1(&report))
+            }
             // The exact 0x12 remains in the durable inbox. Return to the root
             // so its scanner can acquire finality, and continue the other leg
             // and recovery clock. Never ACK or classify bad evidence as absent.
-            Err(error) if is_claim_finality_awaiting_v16(&error) => Ok(false),
-            Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
+            Err(error) if is_claim_finality_awaiting_v16(&error) => {
+                self.report_tolerated_v25(leg, Some("claim_finality"));
+                Ok(false)
+            }
+            Err(error) if is_template_construction_awaiting_v17(&error) => {
+                self.report_tolerated_v25(leg, Some("template_construction"));
+                Ok(false)
+            }
             // Socket absence cannot suppress an already authorized local
             // recovery tick. step_leg still polls the authenticated durable
             // inbox, and any local refusal takes precedence over network loss.
-            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => {
+                self.report_tolerated_v25(leg, Some("peer_unavailable"));
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
