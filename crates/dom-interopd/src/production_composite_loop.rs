@@ -252,7 +252,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     exchange_timeout: Duration,
     backoff: Duration,
     last_relay_time_seconds: u64,
-    last_bootstrap_progress_v25: [Option<[&'static str; 5]>; 2],
+    last_bootstrap_progress_v25: [Option<[&'static str; 16]>; 2],
     exchanged_envelopes_v25: [(u64, u64); 2],
     last_tolerated_v25: [Option<Option<&'static str>>; 2],
     last_activation_ready_v25: std::cell::Cell<Option<bool>>,
@@ -388,17 +388,50 @@ impl ProductionCompositeRelayLoopV1 {
                 .1
                 .saturating_add(u64::from(report.exchange.envelopes_received)),
         );
-        let progress = self.owner.bootstrap_progress_v25(leg);
+        // Whether this leg's own contracts had anything to hand the sender.
+        // A driver that keeps re-staging while this stays Idle is staging into
+        // a sender that never sees the envelope, which no number of further
+        // rounds can resolve.
+        let outbound = match report.outbound {
+            RelayOutboundStepV1::Idle => "idle",
+            RelayOutboundStepV1::Acked { .. } => "acked",
+        };
+        // What the exchange and the inbound dispatch did with this tick's
+        // traffic. A backlog that never drains, and a route row held behind a
+        // pending F6 row, are both silent: the envelope counters alone cannot
+        // tell either apart from "the peer sent nothing".
+        let yes_no = |flag: bool| if flag { "y" } else { "n" };
+        let contracts = &report.inbound.dispatch.contracts;
+        let tail = [
+            outbound,
+            yes_no(report.exchange.outbound_backlog_remains),
+            yes_no(report.exchange.inbound_backlog_remains),
+            yes_no(contracts.blocked_by_f6 != 0),
+            yes_no(contracts.failed_closed != 0),
+            yes_no(contracts.applied != 0),
+        ];
+        let owned = self.owner.bootstrap_progress_v25(leg);
+        let progress: [&'static str; 16] = core::array::from_fn(|position| {
+            owned
+                .get(position)
+                .copied()
+                .unwrap_or_else(|| tail[position - owned.len()])
+        });
         if self.last_bootstrap_progress_v25[index] == Some(progress) {
             return;
         }
         self.last_bootstrap_progress_v25[index] = Some(progress);
         let (sent, received) = self.exchanged_envelopes_v25[index];
-        let [graph, candidate, public, cancelled, bootstrap] = progress;
+        let [graph, candidate, public, cancelled, bootstrap, c_output, d_output, refund, c_bp, d_bp, sender, out_backlog, in_backlog, blocked_f6, failed_closed, applied] =
+            progress;
         eprintln!(
             "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 leg={index} graph={graph} \
              candidate={candidate} public={public} cancelled_complete={cancelled} \
-             bootstrap_complete={bootstrap} envelopes_sent={sent} envelopes_received={received}"
+             bootstrap_complete={bootstrap} c_output={c_output} d_output={d_output} \
+             needs_refund_binding={refund} c_bp={c_bp} d_bp={d_bp} sender={sender} \
+             out_backlog={out_backlog} in_backlog={in_backlog} blocked_by_f6={blocked_f6} \
+             failed_closed={failed_closed} applied={applied} \
+             envelopes_sent={sent} envelopes_received={received}"
         );
     }
 

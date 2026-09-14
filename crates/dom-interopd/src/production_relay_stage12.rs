@@ -756,7 +756,15 @@ impl ProductionRelayStage12OwnerV1 {
     /// One leg's bootstrap progress as fixed tags, for stall diagnostics.
     /// Pure read of already-owned state: it takes no lock, touches no store
     /// and is never a decision input.
-    pub(crate) fn bootstrap_progress_v25(&self, leg: LegIdV1) -> [&'static str; 5] {
+    ///
+    /// The last three tags are the exact gate that keeps a stalled graph in
+    /// Awaiting. `prepare_xmr_graph_templates_v23` returns without forming
+    /// anything when the C or D native output is absent, and each of those is
+    /// absent only while its driver's operational Bulletproof has not
+    /// completed — so `c_output`/`d_output` separate "the peer never finished
+    /// its proof" from "the templates were refused". `refund_binding` is the
+    /// readiness gate that still applies after the graph does leave Awaiting.
+    pub(crate) fn bootstrap_progress_v25(&self, leg: LegIdV1) -> [&'static str; 10] {
         let index = match leg {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
@@ -773,6 +781,26 @@ impl ProductionRelayStage12OwnerV1 {
             match self.bootstrap_v16[index].as_ref() {
                 None => "-",
                 Some(driver) => yes_no(driver.complete()),
+            },
+            match self.bootstrap_v16[index].as_ref() {
+                None => "-",
+                Some(driver) => yes_no(driver.verified_xmr_output_v22().is_some()),
+            },
+            match self.cancelled_v22[index].as_ref() {
+                None => "-",
+                Some(owner) => yes_no(owner.driver.verified_xmr_output_v22().is_some()),
+            },
+            match self.xmr_graph_setup_v22[index].as_ref() {
+                None => "-",
+                Some(setup) => yes_no(setup.needs_refund_binding_v23()),
+            },
+            match self.bootstrap_v16[index].as_ref() {
+                None => "-",
+                Some(driver) => driver.last_bp_step_v25(),
+            },
+            match self.cancelled_v22[index].as_ref() {
+                None => "-",
+                Some(owner) => owner.driver.last_bp_step_v25(),
             },
         ]
     }

@@ -27,10 +27,14 @@ fn retain_stderr_once_v24(
     }
 }
 
-/// The one daemon line shape this harness echoes while a run is still in
-/// flight. It carries fixed progress tags only, never a payload, path or
-/// credential, so echoing it cannot leak what the capture bound protects.
-const ECHOED_PROGRESS_PREFIX_V25: &[u8] = b"DOM_NATIVE_BOOTSTRAP_PROGRESS_V25";
+/// The daemon line shapes this harness echoes while a run is still in flight.
+/// Every one of them carries fixed progress tags only, never a payload, path
+/// or credential, so echoing them cannot leak what the capture bound protects.
+const ECHOED_PROGRESS_PREFIXES_V25: &[&[u8]] = &[
+    b"DOM_NATIVE_BOOTSTRAP_PROGRESS_V25",
+    b"DOM_NATIVE_TOLERATED_REFUSAL_V25",
+    b"DOM_NATIVE_ACTIVATION_READY_V25",
+];
 
 /// Echoes complete progress lines from the freshly read bytes.
 ///
@@ -42,7 +46,10 @@ fn echo_progress_lines_v25(bytes: &[u8], scanned: &mut usize) {
     while let Some(offset) = bytes[*scanned..].iter().position(|byte| *byte == b'\n') {
         let line = &bytes[*scanned..*scanned + offset];
         *scanned += offset + 1;
-        if line.starts_with(ECHOED_PROGRESS_PREFIX_V25) {
+        if ECHOED_PROGRESS_PREFIXES_V25
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        {
             if let Ok(text) = std::str::from_utf8(line) {
                 eprintln!("{text}");
             }

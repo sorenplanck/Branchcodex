@@ -88,6 +88,11 @@ pub(crate) struct ProductionBootstrapLegV16 {
     shared: [SharedBlindingBindingV1; 2],
     statement: BpStatementV1,
     complete: bool,
+    /// Where this driver's last `step` stopped, as a fixed tag. Written only
+    /// by `step`, read only by stall diagnostics, and never a decision input:
+    /// a driver whose native output stays absent reports which collaborative
+    /// Bulletproof stage it keeps returning to instead of going silent.
+    last_bp_step_v25: &'static str,
     xmr_value_v22: Option<u64>,
     frozen_xmr_v22: Option<dom_scriptless_crypto::FrozenSharedOutputV1>,
     verified_xmr_v22: Option<dom_adaptor::VerifiedSharedOutputV1>,
@@ -169,6 +174,7 @@ impl ProductionBootstrapLegV16 {
             shared,
             statement,
             complete: false,
+            last_bp_step_v25: "unstarted",
             xmr_collateral_policy: None,
             templates_v17: None,
             round1_continuation_v25: None,
@@ -244,6 +250,7 @@ impl ProductionBootstrapLegV16 {
             shared,
             statement,
             complete: false,
+            last_bp_step_v25: "unstarted",
             xmr_collateral_policy: None,
             templates_v17: None,
             round1_continuation_v25: None,
@@ -334,6 +341,33 @@ impl ProductionBootstrapLegV16 {
         self.complete
     }
 
+    /// Fixed tag for one collaborative Bulletproof stage. `acting` separates a
+    /// round this driver drove from one where it deferred to the other
+    /// participant, which is what distinguishes a ceremony still advancing
+    /// from two participants each waiting for the other.
+    const fn stage_tag_v25(stage: Stage, acting: bool) -> &'static str {
+        match (stage, acting) {
+            (Stage::CommonCommit, true) => "common_commit",
+            (Stage::CommonCommit, false) => "common_commit_wait",
+            (Stage::CommonReveal, true) => "common_reveal",
+            (Stage::CommonReveal, false) => "common_reveal_wait",
+            (Stage::RoundCommit, true) => "round_commit",
+            (Stage::RoundCommit, false) => "round_commit_wait",
+            (Stage::Round1, true) => "round1",
+            (Stage::Round1, false) => "round1_wait",
+            (Stage::Round2, true) => "round2",
+            (Stage::Round2, false) => "round2_wait",
+            (Stage::Finalize, true) => "finalize",
+            (Stage::Finalize, false) => "finalize_wait",
+            (Stage::Complete, _) => "bp_complete",
+        }
+    }
+
+    /// Where this driver's last `step` stopped. Diagnostics only.
+    pub(crate) const fn last_bp_step_v25(&self) -> &'static str {
+        self.last_bp_step_v25
+    }
+
     /// Native evidence retained only after the exact C/D range proof is durable.
     /// This is input to graph formation, never a funding or signing grant.
     pub(crate) fn frozen_xmr_formation_v22(
@@ -411,8 +445,13 @@ impl ProductionBootstrapLegV16 {
         if material.capability.binding() != &self.shared[local] {
             return Err(Error::Binding);
         }
+        // Every later tag overwrites this one, so a driver still reporting
+        // "unstarted" was never stepped at all — a different fault from one
+        // stepping and refusing, and the two are otherwise indistinguishable.
+        self.last_bp_step_v25 = "entered";
         if self.complete {
             self.round1_continuation_v25 = None;
+            self.last_bp_step_v25 = "complete";
             return Ok(Step::Complete);
         }
         let head = owner.store.load_session(owner.session_id)?;
@@ -486,6 +525,7 @@ impl ProductionBootstrapLegV16 {
             if let Some(driver) = self.templates_v17.as_mut() {
                 let step = driver.step(owner, material, self.chain, &self.statement, now)?;
                 self.complete = step == Step::Complete;
+                self.last_bp_step_v25 = "templates_v17";
                 return Ok(step);
             }
         }
@@ -515,6 +555,7 @@ impl ProductionBootstrapLegV16 {
         // owner's canonical request; never generate replacement payloads.
         match owner.store.resume_outbound_dsc1(owner.session_id)? {
             OutboundDsc1RecoveryV1::SigningRequest(request) => {
+                self.last_bp_step_v25 = "outbound_resume";
                 if completion_v22::resumed_outbound_may_complete_v22(
                     request.message_type(),
                     proof_complete,
@@ -533,6 +574,7 @@ impl ProductionBootstrapLegV16 {
                 return Ok(Step::Staged);
             }
             OutboundDsc1RecoveryV1::Committed(committed) => {
+                self.last_bp_step_v25 = "outbound_commit";
                 let message = SignedMessageV1::decode_exact(committed.signed_bytes())
                     .map_err(|_| Error::Binding)?;
                 let kind = message.unsigned().kind() as u8;
@@ -562,6 +604,7 @@ impl ProductionBootstrapLegV16 {
             // C must retain the independently signed recovery graph before
             // becoming fundable. Ordinary wallet templates cannot replace it.
             if self.xmr_collateral_policy.is_some() {
+                self.last_bp_step_v25 = "handoff_to_graph";
                 return Err(Error::XmrRecoveryGraphRequired);
             }
             self.complete = true;
@@ -569,6 +612,7 @@ impl ProductionBootstrapLegV16 {
         }
         let expiry = Self::expiry(material, now)?;
         if early_phase {
+            self.last_bp_step_v25 = "early_share";
             let authority = owner.store.prepare_early_transport_authority(
                 self.chain,
                 [&self.shared[0], &self.shared[1]],
@@ -625,11 +669,13 @@ impl ProductionBootstrapLegV16 {
         if (stage == Stage::Finalize && local != 1)
             || (stage != Stage::Finalize && (mask[local] || (local == 1 && !mask[0])))
         {
+            self.last_bp_step_v25 = Self::stage_tag_v25(stage, false);
             owner.refresh_reissued_contracts_ingress_v16(
                 PreparedContractsIngressV1::operational_bp(authority),
             )?;
             return Ok(Step::AwaitingPeer);
         }
+        self.last_bp_step_v25 = Self::stage_tag_v25(stage, true);
         let nonce = CollaborativeBpNonceBindingV1::from_statement(&self.statement, local as u16)
             .map_err(|_| Error::Crypto)?;
         if stage != Stage::CommonCommit
