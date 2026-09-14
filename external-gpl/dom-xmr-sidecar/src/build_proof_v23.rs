@@ -28,9 +28,18 @@ const MAINNET_GENESIS: [u8; 32] = [
 ];
 fn cache_error(error: CacheError) -> SidecarOperationError {
     match error {
-        CacheError::Unavailable => SidecarOperationError::Retryable,
+        CacheError::Unavailable => retryable("durable_build_cache"),
         CacheError::Conflict | CacheError::Corrupt => rejected(),
     }
+}
+
+/// Names the step that could not complete, so one retryable sweep-build
+/// refusal is attributable from the sidecar's own stderr. The reason is a
+/// fixed compile-time tag: no request field, scalar, address or RPC payload
+/// is ever recorded, and the returned classification is unchanged.
+fn retryable(reason: &'static str) -> SidecarOperationError {
+    tracing::warn!(reason, "sweep build step temporarily unavailable");
+    SidecarOperationError::Retryable
 }
 fn rejected() -> SidecarOperationError {
     SidecarOperationError::Rejected("native V23 build scope or durable state mismatch".to_owned())
@@ -212,7 +221,7 @@ pub(super) async fn load_local_refund(
     let response = guard
         .load_public_local_ready_v24(&scope, &config.auth)
         .map_err(cache_error)?
-        .ok_or(SidecarOperationError::Retryable)?;
+        .ok_or_else(|| retryable("local_refund_result_absent"))?;
     if response.cache_request_hash != guard.request_hash_v24() {
         return Err(rejected());
     }
@@ -308,7 +317,7 @@ async fn build_scoped(
             let rpc = monerod(config).await?;
             if ProvidesBlockchain::block_hash(&rpc, 0)
                 .await
-                .map_err(|_| SidecarOperationError::Retryable)?
+                .map_err(|_| retryable("genesis_block_hash_rpc"))?
                 != request.network_genesis
             {
                 return Err(rejected());
@@ -316,17 +325,17 @@ async fn build_scoped(
             let tip = rpc
                 .latest_block_number()
                 .await
-                .map_err(|_| SidecarOperationError::Retryable)?;
+                .map_err(|_| retryable("latest_block_number_rpc"))?;
             let height = usize::try_from(request.funding_height).map_err(|_| rejected())?;
             if height.checked_add(9).ok_or_else(rejected)? > tip {
-                return Err(SidecarOperationError::Retryable);
+                return Err(retryable("funding_output_not_yet_unlocked"));
             }
             let view = Zeroizing::new(request.build.view_scalar.expose(|s| parse_scalar(*s))?);
             let pair = ViewPair::new(parse_point(request.build.expected_spend_public_key)?, view)
                 .map_err(|_| rejected())?;
             let block = ProvidesScannableBlocks::scannable_block_by_number(&rpc, height)
                 .await
-                .map_err(|_| SidecarOperationError::Retryable)?;
+                .map_err(|_| retryable("scannable_block_rpc"))?;
             let mut outputs = Scanner::new(pair)
                 .scan(block)
                 .map_err(|_| rejected())?
@@ -345,11 +354,11 @@ async fn build_scoped(
             let funding_raw =
                 ProvidesTransactions::transaction(&rpc, request.build.funding_tx_hash)
                     .await
-                    .map_err(|_| SidecarOperationError::Retryable)?
+                    .map_err(|_| retryable("funding_transaction_rpc"))?
                     .serialize();
             let decoys = OutputWithDecoys::new(&mut OsRng, &rpc, 16, tip, output.clone())
                 .await
-                .map_err(|_| SidecarOperationError::Retryable)?;
+                .map_err(|_| retryable("decoy_selection_rpc"))?;
             // Public fee-rate limiter also prevents overflow in native weight multiplication.
             let rate = rpc
                 .fee_rate(
@@ -357,7 +366,7 @@ async fn build_scoped(
                     request.max_fee.min(u64::MAX / 1_000_000),
                 )
                 .await
-                .map_err(|_| SidecarOperationError::Retryable)?;
+                .map_err(|_| retryable("fee_rate_rpc"))?;
             let rate_bytes = rate.serialize();
             let mask = u64::from_le_bytes(rate_bytes[8..16].try_into().map_err(|_| rejected())?);
             if mask > request.max_fee.min(u64::MAX / 2) {
