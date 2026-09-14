@@ -326,21 +326,24 @@ impl ProductionRelayStage12OwnerV1 {
         leg: LegIdV1,
         candidate: crate::production_noise_relay::ProductionReceivedXmrGraphCandidateV22,
     ) -> Result<(), crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
+        use crate::production_contracts::GraphCandidateSurfaceV25 as Surface;
         use crate::production_contracts::ProductionBootstrapRuntimeErrorV16 as Error;
-        // A surface that simply has not been retained yet is "awaiting", not
-        // a refusal: the candidate is dropped memory-only and re-received on
-        // a later round (same rule the terminal-refund path applies). Every
-        // check against the candidate's own content stays a Binding refusal.
+        // Each of these surfaces is established when this owner is
+        // constructed, so an absence is a composition fault, not a race a
+        // later round repairs. Name the surface instead of collapsing all
+        // five into one opaque Binding refusal; every check against the
+        // candidate's own content stays Binding as before.
+        let missing = Error::GraphCandidateSurfaceMissingV25;
         let context = self
             .xmr_noise_graph_offer_v22(leg)?
-            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
+            .ok_or(missing(Surface::NoiseOffer))?;
         let index = match leg {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
         };
         let setup = self.xmr_graph_setup_v22[index]
             .as_ref()
-            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
+            .ok_or(missing(Surface::GraphSetup))?;
         context
             .require_graph_setup_v22(setup)
             .map_err(|_| Error::Binding)?;
@@ -356,17 +359,17 @@ impl ProductionRelayStage12OwnerV1 {
         let private = self
             ._private_bootstrap_v13
             .as_mut()
-            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
+            .ok_or(missing(Surface::PrivateBootstrap))?;
         let cancelled = private._cancelled_contracts[index]
             .as_ref()
-            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
+            .ok_or(missing(Surface::CancelledContracts))?;
         let material = &mut private._shares[index];
         if material.capability.binding().participant_id() != &cancelled.policy.policy().xmr_funder {
             // The publish target must exist before anything is retained, so
             // an awaiting round leaves no partial state behind.
             let publisher = private._f6_native_principals_v25[index]
                 .as_ref()
-                .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
+                .ok_or(missing(Surface::F6PrincipalSlot))?;
             // Only the received beneficiary packet may populate this slot.
             // Persist and read it back before the factory can bind any RFQ.
             let principal = material

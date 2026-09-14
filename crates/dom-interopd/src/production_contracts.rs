@@ -23,7 +23,7 @@ mod graph_pin_v23;
 #[path = "production_xmr_graph_role_v23.rs"]
 mod graph_role_v23;
 pub(crate) use bootstrap_runtime_v16::{
-    ProductionBootstrapLegV16, ProductionBootstrapRuntimeErrorV16,
+    GraphCandidateSurfaceV25, ProductionBootstrapLegV16, ProductionBootstrapRuntimeErrorV16,
 };
 pub(crate) use graph_custody_v23::{
     ProductionXmrGraphCustodyResourcesV23, ProductionXmrGraphCustodyV23,

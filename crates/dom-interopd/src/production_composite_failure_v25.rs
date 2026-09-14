@@ -2,8 +2,8 @@
 //! its source chain, changes retry classification, or authorizes a transition.
 use super::*;
 use crate::production_contracts::{
-    ProductionBootstrapRuntimeErrorV16, ProductionContractsOutboundErrorV1,
-    ProductionF7ReadinessErrorV19,
+    GraphCandidateSurfaceV25, ProductionBootstrapRuntimeErrorV16,
+    ProductionContractsOutboundErrorV1, ProductionF7ReadinessErrorV19,
 };
 use crate::production_dom_shared_bootstrap_v12::ProductionDomSharedBootstrapErrorV12;
 use crate::production_f6::ProductionF6ErrorV2;
@@ -58,6 +58,11 @@ closed_tags!(Cause {
     Unprepared => "unprepared_message", ClaimObservation => "awaiting_claim_observation",
     Templates => "awaiting_template_construction", RefundHandoff => "awaiting_refund_handoff",
     NativeRefund => "awaiting_native_refund_transport", WrongAuthority => "wrong_authority",
+    GraphCandidateNoiseOffer => "graph_candidate_noise_offer_absent",
+    GraphCandidateSetup => "graph_candidate_setup_absent",
+    GraphCandidatePrivateBootstrap => "graph_candidate_private_bootstrap_absent",
+    GraphCandidateCancelled => "graph_candidate_cancelled_contracts_absent",
+    GraphCandidateF6Principal => "graph_candidate_f6_principal_absent",
     AlreadyInstalled => "authority_already_installed", Receipt => "invalid_receipt",
     SenderMismatch => "sender_mismatch", Inbox => "inbox_refused", Framing => "framing_refused",
     Connect => "connect_unavailable", Listen => "listen_unavailable",
@@ -286,13 +291,23 @@ impl ProductionCompositeLoopErrorV1 {
                     ProductionBootstrapRuntimeErrorV16::Ingress(error) => ingress(error),
                     ProductionBootstrapRuntimeErrorV16::Mailbox => Cause::Mailbox,
                     ProductionBootstrapRuntimeErrorV16::XmrRecoveryGraphRequired => Cause::XmrGraph,
-                    // Tolerated by the composite loop (the candidate is
-                    // re-received once the local surfaces exist); if it ever
-                    // reaches a failure report it reads as the binding stage
-                    // it guards.
-                    ProductionBootstrapRuntimeErrorV16::AwaitingGraphCandidateSurfacesV25 => {
-                        Cause::Binding
-                    }
+                    // One tag per construction-time surface, so a single
+                    // daemon exit line names which one was absent.
+                    ProductionBootstrapRuntimeErrorV16::GraphCandidateSurfaceMissingV25(
+                        surface,
+                    ) => match surface {
+                        GraphCandidateSurfaceV25::NoiseOffer => Cause::GraphCandidateNoiseOffer,
+                        GraphCandidateSurfaceV25::GraphSetup => Cause::GraphCandidateSetup,
+                        GraphCandidateSurfaceV25::PrivateBootstrap => {
+                            Cause::GraphCandidatePrivateBootstrap
+                        }
+                        GraphCandidateSurfaceV25::CancelledContracts => {
+                            Cause::GraphCandidateCancelled
+                        }
+                        GraphCandidateSurfaceV25::F6PrincipalSlot => {
+                            Cause::GraphCandidateF6Principal
+                        }
+                    },
                 },
             ),
             E::F7Readiness(error) => (
@@ -467,6 +482,11 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                         | C::JournalVault
                         | C::Journal
                         | C::PeerCommitment
+                        | C::GraphCandidateNoiseOffer
+                        | C::GraphCandidateSetup
+                        | C::GraphCandidatePrivateBootstrap
+                        | C::GraphCandidateCancelled
+                        | C::GraphCandidateF6Principal
                 )
         }
         Stage::F7 => ingress || outbound || matches!(cause, C::Identity | C::Clock),

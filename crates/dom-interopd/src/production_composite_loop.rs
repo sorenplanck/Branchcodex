@@ -527,25 +527,12 @@ impl ProductionCompositeRelayLoopV1 {
 
         let (exchange, inbound) = complete_exchange_poll_v23(exchange, |exchange| {
             if let Some(candidate) = exchange.and_then(|report| report.graph_candidate_v22.take()) {
-                match self.owner.receive_xmr_graph_candidate_v22(leg, candidate) {
-                    Ok(()) => {}
-                    // First-contact race: the peer's candidate arrived before
-                    // this side retained the surfaces it binds to. It stays
-                    // memory-only and unacknowledged; the peer's next
-                    // exchange re-sends it and a later round consumes it
-                    // through the full validation (the terminal-refund path
-                    // already applies this rule). Every refusal of the
-                    // candidate's own content still fails the leg below.
-                    Err(
-                        crate::production_contracts::ProductionBootstrapRuntimeErrorV16::AwaitingGraphCandidateSurfacesV25,
-                    ) => {}
-                    Err(error) => {
-                        return Err(ProductionCompositeLoopErrorV1::BootstrapAtV25 {
-                            context: ProductionCompositeBootstrapContextV25::GraphCandidate,
-                            error,
-                        });
-                    }
-                }
+                self.owner
+                    .receive_xmr_graph_candidate_v22(leg, candidate)
+                    .map_err(|error| ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+                        context: ProductionCompositeBootstrapContextV25::GraphCandidate,
+                        error,
+                    })?;
             }
             self.poll_retained_inbound_v23(leg)
         })?;
