@@ -158,6 +158,19 @@ pub(in super::super) fn claim_after_observed_funding(
     }
     assert_eq!(messages.len(), 6);
     let pre_signature_started = Instant::now();
+    // Refresh both consumed authorities with a fresh observation before the
+    // pre-signature phase. The six signing rounds above can together span more
+    // than MAX_V11_EXTERNAL_ANCHOR_AGE (60s) under the crypto-test profile, and
+    // reconstruct/transport re-check observation recency exactly as every
+    // signing round does, so a live caller re-observes here too.
+    for actor in 0..2 {
+        let gate = stores[actor].resume_f7_funding_gate_v12(chain, session)?;
+        let request = stores[actor].f7_anchor_request_binding_v12(&gate, chain)?;
+        stores[actor].revalidate_consumed_f7_claim_authorization_v12(
+            &authorities[actor],
+            observe(actor, &request, &produced[actor])?,
+        )?;
+    }
     let mut pre_bytes = Vec::new();
     let mut transports = Vec::new();
     for actor in 0..2 {
