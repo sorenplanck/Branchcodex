@@ -425,7 +425,9 @@ pub(super) fn run_claim(
         &deployment,
         &funding_bytes,
         funding_height,
-    )?;
+    )
+    .map_err(|error| format!("recover_on_private_fork: {error}"))?;
+    eprintln!("native claim: private-fork refund recovery complete");
     let claim_bindings = [signed.wallets[0].0, signed.wallets[1].0];
     let funding_owner = std::cell::RefCell::new(funding);
     let mut built_sweep = None;
@@ -508,7 +510,8 @@ pub(super) fn run_claim(
                 &mut funding.port,
             )
         },
-    )?;
+    )
+    .map_err(|error| format!("claim_after_observed_funding: {error}"))?;
     let claim_sweep = built_sweep.ok_or("real sidecar Claim sweep must be built")?;
     // Alternate histories spend the same exact funding output, not two
     // unrelated balances. Identical key images also make their mutual

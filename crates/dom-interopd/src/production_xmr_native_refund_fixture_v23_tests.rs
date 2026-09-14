@@ -201,22 +201,26 @@ pub(super) fn recover_on_private_fork(
     drop(store);
     // Reuse this fully signed graph and canonical U snapshot: transport races
     // must not be tested with a manually constructed native F7 capability.
+    eprintln!("private-fork refund: canonical U observed; exercising refund transport");
     let transport_message = {
         let (store0, custody0) = open(0)?;
         let (store1, custody1) = open(1)?;
-        native.assert_native_refund_transport_v24(
-            [std::rc::Rc::new(store0), std::rc::Rc::new(store1)],
-            [&custody0, &custody1],
-            signed.chain,
-            [signed.wallets[0].0, signed.wallets[1].0],
-            &runtime,
-            xmr_deployment,
-            &funding.envelope.daemon_urls,
-            &mut funding.port,
-            [&roots[0], &roots[1]],
-            [&roots[0], &roots[1]],
-        )?
+        native
+            .assert_native_refund_transport_v24(
+                [std::rc::Rc::new(store0), std::rc::Rc::new(store1)],
+                [&custody0, &custody1],
+                signed.chain,
+                [signed.wallets[0].0, signed.wallets[1].0],
+                &runtime,
+                xmr_deployment,
+                &funding.envelope.daemon_urls,
+                &mut funding.port,
+                [&roots[0], &roots[1]],
+                [&roots[0], &roots[1]],
+            )
+            .map_err(|error| format!("assert_native_refund_transport_v24: {error}"))?
     };
+    eprintln!("private-fork refund: refund transport asserted");
     let (store, custody) = open(public_actor)?;
     let retained = store
         .resume_pending_xmr_remote_sweep_request_for_local_signer(session)?
@@ -229,17 +233,20 @@ pub(super) fn recover_on_private_fork(
     let gate = store.resume_f7_funding_gate_v12(signed.chain, session)?;
     let authority = store.authorize_xmr_recovery_execution_v12(&gate, &custody)?;
     funding.require_alive()?;
-    let sweep = native.build_observed_refund_sweep_v23(
-        public_actor,
-        &store,
-        signed.wallets[public_actor].0,
-        signed.chain,
-        &runtime,
-        &authority,
-        &custody,
-        &mut funding.port,
-        *dom_crypto::blake2b_256_tagged("DOM/Fixture/NativeRefundSweep/V23\0", &session).as_bytes(),
-    )?;
+    let sweep = native
+        .build_observed_refund_sweep_v23(
+            public_actor,
+            &store,
+            signed.wallets[public_actor].0,
+            signed.chain,
+            &runtime,
+            &authority,
+            &custody,
+            &mut funding.port,
+            *dom_crypto::blake2b_256_tagged("DOM/Fixture/NativeRefundSweep/V23\0", &session)
+                .as_bytes(),
+        )
+        .map_err(|error| format!("build_observed_refund_sweep_v23: {error}"))?;
     assert!(!sweep.raw_transaction.is_empty());
     assert_ne!(sweep.key_image, [0; 32]);
     assert_ne!(sweep.tx_hash, [0; 32]);
