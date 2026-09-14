@@ -255,6 +255,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     last_bootstrap_progress_v25: [Option<[&'static str; 5]>; 2],
     exchanged_envelopes_v25: [(u64, u64); 2],
     last_tolerated_v25: [Option<Option<&'static str>>; 2],
+    last_activation_ready_v25: std::cell::Cell<Option<bool>>,
 }
 
 impl core::fmt::Debug for ProductionCompositeRelayLoopV1 {
@@ -333,6 +334,7 @@ impl ProductionCompositeRelayLoopV1 {
             last_bootstrap_progress_v25: [None, None],
             exchanged_envelopes_v25: [(0, 0); 2],
             last_tolerated_v25: [None, None],
+            last_activation_ready_v25: std::cell::Cell::new(None),
         })
     }
 
@@ -787,10 +789,22 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
 
     fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
         match self.step_leg(leg) {
-            Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
-            Err(error) if is_f6_activation_awaiting(&error) => Ok(false),
-            Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
-            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
+            Ok(report) => {
+                self.report_tolerated_v25(leg, None);
+                Ok(relay_step_moved_traffic_v1(&report))
+            }
+            Err(error) if is_f6_activation_awaiting(&error) => {
+                self.report_tolerated_v25(leg, Some("f6_activation"));
+                Ok(false)
+            }
+            Err(error) if is_template_construction_awaiting_v17(&error) => {
+                self.report_tolerated_v25(leg, Some("template_construction"));
+                Ok(false)
+            }
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => {
+                self.report_tolerated_v25(leg, Some("peer_unavailable"));
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
@@ -799,7 +813,12 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
         self.backoff
     }
     fn bootstrap_ready_v16(&self) -> bool {
-        self.owner.bootstrap_ready_v16()
+        let ready = self.owner.bootstrap_ready_v16();
+        if self.last_activation_ready_v25.get() != Some(ready) {
+            self.last_activation_ready_v25.set(Some(ready));
+            eprintln!("DOM_NATIVE_ACTIVATION_READY_V25 bootstrap_ready={ready}");
+        }
+        ready
     }
 }
 
