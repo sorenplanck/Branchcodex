@@ -252,7 +252,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     exchange_timeout: Duration,
     backoff: Duration,
     last_relay_time_seconds: u64,
-    last_bootstrap_progress_v25: [Option<[&'static str; 16]>; 2],
+    last_bootstrap_progress_v25: [Option<[&'static str; 23]>; 2],
     exchanged_envelopes_v25: [(u64, u64); 2],
     last_tolerated_v25: [Option<Option<&'static str>>; 2],
     last_activation_ready_v25: std::cell::Cell<Option<bool>>,
@@ -409,9 +409,24 @@ impl ProductionCompositeRelayLoopV1 {
             yes_no(contracts.blocked_by_f6 != 0),
             yes_no(contracts.failed_closed != 0),
             yes_no(contracts.applied != 0),
+            // An envelope Contracts recognizes as an exact prior commit is
+            // applied to nothing and answered with nothing, and is the only
+            // remaining way a delivered round can leave every other counter
+            // at zero.
+            yes_no(contracts.duplicate_commits != 0),
+            // The outer layer, before Contracts sees anything. An envelope
+            // refused or quarantined here, or one retained as pending_route,
+            // never reaches the dispatch counters above, which is why they can
+            // all read zero while the peer's round plainly arrived.
+            yes_no(report.inbound.ingest.accepted != 0),
+            yes_no(report.inbound.ingest.duplicates != 0),
+            yes_no(!report.inbound.ingest.refused.is_empty()),
+            yes_no(report.inbound.ingest.quarantined != 0),
+            yes_no(report.inbound.dispatch.inbox.pending_route != 0),
+            yes_no(report.inbound.dispatch.inbox.pending_f6 != 0),
         ];
         let owned = self.owner.bootstrap_progress_v25(leg);
-        let progress: [&'static str; 16] = core::array::from_fn(|position| {
+        let progress: [&'static str; 23] = core::array::from_fn(|position| {
             owned
                 .get(position)
                 .copied()
@@ -422,7 +437,7 @@ impl ProductionCompositeRelayLoopV1 {
         }
         self.last_bootstrap_progress_v25[index] = Some(progress);
         let (sent, received) = self.exchanged_envelopes_v25[index];
-        let [graph, candidate, public, cancelled, bootstrap, c_output, d_output, refund, c_bp, d_bp, sender, out_backlog, in_backlog, blocked_f6, failed_closed, applied] =
+        let [graph, candidate, public, cancelled, bootstrap, c_output, d_output, refund, c_bp, d_bp, sender, out_backlog, in_backlog, blocked_f6, failed_closed, applied, duplicate, ingested, ingest_dup, refused, quarantined, pending_route, pending_f6] =
             progress;
         eprintln!(
             "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 leg={index} graph={graph} \
@@ -430,7 +445,9 @@ impl ProductionCompositeRelayLoopV1 {
              bootstrap_complete={bootstrap} c_output={c_output} d_output={d_output} \
              needs_refund_binding={refund} c_bp={c_bp} d_bp={d_bp} sender={sender} \
              out_backlog={out_backlog} in_backlog={in_backlog} blocked_by_f6={blocked_f6} \
-             failed_closed={failed_closed} applied={applied} \
+             failed_closed={failed_closed} applied={applied} duplicate={duplicate} \
+             ingested={ingested} ingest_dup={ingest_dup} refused={refused} \
+             quarantined={quarantined} pending_route={pending_route} pending_f6={pending_f6} \
              envelopes_sent={sent} envelopes_received={received}"
         );
     }
