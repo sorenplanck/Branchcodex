@@ -1371,6 +1371,7 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         ".f7-v12-claim-exposure-v14",
         ".f7-v12-claim-admission-v14",
         ".f7-v12-claim-observation-v15",
+        ".f7-v12-refund-transport-v23",
     ] {
         if exact_wrapped_hex(value, "", 64, suffix)
             || exact_wrapped_hex(value, ".", 64, &format!("{suffix}.staging"))
@@ -1932,6 +1933,7 @@ mod tests {
             ".f7-v12-claim-exposure-v14",
             ".f7-v12-claim-admission-v14",
             ".f7-v12-claim-observation-v15",
+            ".f7-v12-refund-transport-v23",
         ] {
             let final_name = format!("{session}{suffix}");
             let staging_name = format!(".{session}{suffix}.staging");
