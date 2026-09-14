@@ -155,6 +155,17 @@ pub fn ingest_event<S: SettlementStore>(
             if let SettlementEvent::ReorgInvalidated { from_height, .. } = &env.event {
                 store.invalidate_evidence_from(env.settlement_id, *from_height)?;
             }
+            // Spec §11.8 parity for the funding-absent regression: an accepted
+            // FundingAbsent regresses Confirming -> ReadyToFund and drops the
+            // observation, so the observation's evidence row must be
+            // invalidated as well. Without this a byte-identical re-observation
+            // is indistinguishable from a plain duplicate, never re-applies the
+            // refresh, and a later legal event (e.g. RefundConfirmed) strands
+            // below what the redelivered evidence proves — exactly the
+            // divergence the durable/pure §14 agreement property catches.
+            if let SettlementEvent::FundingAbsent { revalidation_from } = &env.event {
+                store.invalidate_evidence_from(env.settlement_id, *revalidation_from)?;
+            }
             let outbox = effects_to_outbox(env, &t.effects);
             match store.commit_transition(
                 snapshot.context.revision,
