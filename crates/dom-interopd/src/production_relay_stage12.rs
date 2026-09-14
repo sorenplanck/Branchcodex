@@ -327,14 +327,20 @@ impl ProductionRelayStage12OwnerV1 {
         candidate: crate::production_noise_relay::ProductionReceivedXmrGraphCandidateV22,
     ) -> Result<(), crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
         use crate::production_contracts::ProductionBootstrapRuntimeErrorV16 as Error;
-        let context = self.xmr_noise_graph_offer_v22(leg)?.ok_or(Error::Binding)?;
+        // A surface that simply has not been retained yet is "awaiting", not
+        // a refusal: the candidate is dropped memory-only and re-received on
+        // a later round (same rule the terminal-refund path applies). Every
+        // check against the candidate's own content stays a Binding refusal.
+        let context = self
+            .xmr_noise_graph_offer_v22(leg)?
+            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
         let index = match leg {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
         };
         let setup = self.xmr_graph_setup_v22[index]
             .as_ref()
-            .ok_or(Error::Binding)?;
+            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
         context
             .require_graph_setup_v22(setup)
             .map_err(|_| Error::Binding)?;
@@ -347,22 +353,26 @@ impl ProductionRelayStage12OwnerV1 {
         {
             return Err(Error::Binding);
         }
-        let private = self._private_bootstrap_v13.as_mut().ok_or(Error::Binding)?;
+        let private = self
+            ._private_bootstrap_v13
+            .as_mut()
+            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
         let cancelled = private._cancelled_contracts[index]
             .as_ref()
-            .ok_or(Error::Binding)?;
+            .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
         let material = &mut private._shares[index];
         if material.capability.binding().participant_id() != &cancelled.policy.policy().xmr_funder {
+            // The publish target must exist before anything is retained, so
+            // an awaiting round leaves no partial state behind.
+            let publisher = private._f6_native_principals_v25[index]
+                .as_ref()
+                .ok_or(Error::AwaitingGraphCandidateSurfacesV25)?;
             // Only the received beneficiary packet may populate this slot.
             // Persist and read it back before the factory can bind any RFQ.
             let principal = material
                 .retain_peer_f6_principal_v25(&context, &candidate)
                 .map_err(|_| Error::Binding)?;
-            private._f6_native_principals_v25[index]
-                .as_ref()
-                .ok_or(Error::Binding)?
-                .publish(principal)
-                .map_err(|_| Error::Binding)?;
+            publisher.publish(principal).map_err(|_| Error::Binding)?;
         }
         self.xmr_graph_public_v22[index] = Some(public);
         self.xmr_graph_candidates_v22[index] = Some(candidate);

@@ -286,6 +286,13 @@ impl ProductionCompositeLoopErrorV1 {
                     ProductionBootstrapRuntimeErrorV16::Ingress(error) => ingress(error),
                     ProductionBootstrapRuntimeErrorV16::Mailbox => Cause::Mailbox,
                     ProductionBootstrapRuntimeErrorV16::XmrRecoveryGraphRequired => Cause::XmrGraph,
+                    // Tolerated by the composite loop (the candidate is
+                    // re-received once the local surfaces exist); if it ever
+                    // reaches a failure report it reads as the binding stage
+                    // it guards.
+                    ProductionBootstrapRuntimeErrorV16::AwaitingGraphCandidateSurfacesV25 => {
+                        Cause::Binding
+                    }
                 },
             ),
             E::F7Readiness(error) => (

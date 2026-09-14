@@ -52,6 +52,14 @@ pub(crate) enum ProductionBootstrapRuntimeErrorV16 {
     Mailbox,
     #[error("XMR requires its authenticated adaptor refund and compensation graph")]
     XmrRecoveryGraphRequired,
+    /// The peer's graph candidate arrived before this side retained the
+    /// surfaces it binds to (offer, setup, private bootstrap, cancelled
+    /// contracts or F6 principal slots). Not a refusal of the candidate:
+    /// it stays memory-only and unacknowledged, the peer re-sends it, and
+    /// a later round consumes it through the full validation once the
+    /// surfaces exist.
+    #[error("bootstrap has not yet retained the surfaces a peer graph candidate binds to")]
+    AwaitingGraphCandidateSurfacesV25,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProductionBootstrapStepV16 {
