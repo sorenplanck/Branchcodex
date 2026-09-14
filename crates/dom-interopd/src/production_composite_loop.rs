@@ -388,10 +388,11 @@ impl ProductionCompositeRelayLoopV1 {
                 .1
                 .saturating_add(u64::from(report.exchange.envelopes_received)),
         );
-        // Whether this leg's own contracts had anything to hand the sender.
-        // A driver that keeps re-staging while this stays Idle is staging into
-        // a sender that never sees the envelope, which no number of further
-        // rounds can resolve.
+        // Whether this leg's own contracts had anything to hand the sender
+        // *before* this tick's exchange. Every other tag below is sampled after
+        // the exchange and the inbound poll, so this one may describe an
+        // envelope staged for the next tick: do not read it and a bootstrap tag
+        // on the same line as two observations of the same envelope.
         let outbound = match report.outbound {
             RelayOutboundStepV1::Idle => "idle",
             RelayOutboundStepV1::Acked { .. } => "acked",
@@ -444,7 +445,7 @@ impl ProductionCompositeRelayLoopV1 {
             "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 actor={actor} leg={index} graph={graph} \
              candidate={candidate} public={public} cancelled_complete={cancelled} \
              bootstrap_complete={bootstrap} c_output={c_output} d_output={d_output} \
-             needs_refund_binding={refund} c_bp={c_bp} d_bp={d_bp} sender={sender} \
+             needs_refund_binding={refund} c_bp={c_bp} d_bp={d_bp} sender_pre_exchange={sender} \
              out_backlog={out_backlog} in_backlog={in_backlog} blocked_by_f6={blocked_f6} \
              failed_closed={failed_closed} applied={applied} duplicate={duplicate} \
              ingested={ingested} ingest_dup={ingest_dup} refused={refused} \

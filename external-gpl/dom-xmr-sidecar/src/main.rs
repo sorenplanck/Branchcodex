@@ -184,15 +184,17 @@ async fn verify_funding_endpoint(
     let result = verify_funding(config, &request).await;
     match result {
         Ok(response) => write_json(stream, 200, &response).await.map_err(Into::into),
-        Err(SidecarOperationError::Retryable) => write_error(
-            stream,
-            503,
-            "monerod_unavailable",
-            "Monero backend unavailable",
-            true,
-        )
-        .await
-        .map_err(Into::into),
+        Err(SidecarOperationError::Retryable | SidecarOperationError::RetryableBuild(_)) => {
+            write_error(
+                stream,
+                503,
+                "monerod_unavailable",
+                "Monero backend unavailable",
+                true,
+            )
+            .await
+            .map_err(Into::into)
+        }
         Err(SidecarOperationError::Rejected(message)) => {
             write_error(stream, 422, "funding_rejected", &message, false)
                 .await
@@ -279,15 +281,17 @@ async fn build_sweep_endpoint(stream: &mut TcpStream, config: &Config, body: &[u
             }
             write_json(stream, 200, &response).await.map_err(Into::into)
         }
-        Err(SidecarOperationError::Retryable) => write_error(
-            stream,
-            503,
-            "monerod_unavailable",
-            "Monero backend unavailable",
-            true,
-        )
-        .await
-        .map_err(Into::into),
+        Err(SidecarOperationError::Retryable | SidecarOperationError::RetryableBuild(_)) => {
+            write_error(
+                stream,
+                503,
+                "monerod_unavailable",
+                "Monero backend unavailable",
+                true,
+            )
+            .await
+            .map_err(Into::into)
+        }
         Err(SidecarOperationError::Rejected(message)) => {
             write_error(stream, 422, "sweep_rejected", &message, false)
                 .await
@@ -299,7 +303,21 @@ async fn build_sweep_endpoint(stream: &mut TcpStream, config: &Config, body: &[u
 #[derive(Debug)]
 enum SidecarOperationError {
     Retryable,
+    /// Fixed, non-secret build-stage identifier safe to expose as an error code.
+    RetryableBuild(&'static str),
     Rejected(String),
+}
+
+fn build_unavailable(
+    reason: &'static str,
+    prefix: &'static str,
+    message: &'static str,
+) -> SidecarResponseV2 {
+    SidecarResponseV2::Error(SidecarErrorBody {
+        code: format!("{prefix}_{reason}"),
+        message: message.to_owned(),
+        retryable: true,
+    })
 }
 
 async fn monerod(
@@ -609,13 +627,16 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
         SidecarRequestV2::LoadLocalRefundWithProofsV24(request) => {
             match build_proof_v23::load_local_refund(&config, &request).await {
                 Ok(response) => SidecarResponseV2::LocalRefundWithProofsV24(response),
-                Err(SidecarOperationError::Retryable) => {
-                    SidecarResponseV2::Error(SidecarErrorBody {
-                        code: "v24_local_refund_read_unavailable".to_owned(),
-                        message: "complete local Refund result unavailable".to_owned(),
-                        retryable: true,
-                    })
-                }
+                Err(SidecarOperationError::RetryableBuild(reason)) => build_unavailable(
+                    reason,
+                    "v24_local_refund_read_unavailable",
+                    "complete local Refund result unavailable",
+                ),
+                Err(SidecarOperationError::Retryable) => build_unavailable(
+                    "unspecified",
+                    "v24_local_refund_read_unavailable",
+                    "complete local Refund result unavailable",
+                ),
                 Err(SidecarOperationError::Rejected(_)) => {
                     SidecarResponseV2::Error(SidecarErrorBody {
                         code: "v24_local_refund_read_rejected".to_owned(),
@@ -628,13 +649,16 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
         SidecarRequestV2::BuildLocalRefundWithProofsV24(request) => {
             match build_proof_v23::build_local_refund(&config, &request).await {
                 Ok(response) => SidecarResponseV2::LocalRefundWithProofsV24(response),
-                Err(SidecarOperationError::Retryable) => {
-                    SidecarResponseV2::Error(SidecarErrorBody {
-                        code: "v24_local_refund_unavailable".to_owned(),
-                        message: "local Refund builder temporarily unavailable".to_owned(),
-                        retryable: true,
-                    })
-                }
+                Err(SidecarOperationError::RetryableBuild(reason)) => build_unavailable(
+                    reason,
+                    "v24_local_refund_unavailable",
+                    "local Refund builder temporarily unavailable",
+                ),
+                Err(SidecarOperationError::Retryable) => build_unavailable(
+                    "unspecified",
+                    "v24_local_refund_unavailable",
+                    "local Refund builder temporarily unavailable",
+                ),
                 Err(SidecarOperationError::Rejected(_)) => {
                     SidecarResponseV2::Error(SidecarErrorBody {
                         code: "v24_local_refund_rejected".to_owned(),
@@ -647,13 +671,16 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
         SidecarRequestV2::BuildWithProofsV23(request) => {
             match build_proof_v23::build(&config, &request).await {
                 Ok(response) => SidecarResponseV2::SweepWithProofsV23(response),
-                Err(SidecarOperationError::Retryable) => {
-                    SidecarResponseV2::Error(SidecarErrorBody {
-                        code: "v23_build_unavailable".to_owned(),
-                        message: "V23 builder temporarily unavailable".to_owned(),
-                        retryable: true,
-                    })
-                }
+                Err(SidecarOperationError::RetryableBuild(reason)) => build_unavailable(
+                    reason,
+                    "v23_build_unavailable",
+                    "V23 builder temporarily unavailable",
+                ),
+                Err(SidecarOperationError::Retryable) => build_unavailable(
+                    "unspecified",
+                    "v23_build_unavailable",
+                    "V23 builder temporarily unavailable",
+                ),
                 Err(SidecarOperationError::Rejected(_)) => {
                     SidecarResponseV2::Error(SidecarErrorBody {
                         code: "v23_build_rejected".to_owned(),
@@ -666,13 +693,13 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
         SidecarRequestV2::ProveInputV23(request) => {
             match input_proof_v23::prove_cached(&config, &request).await {
                 Ok(proof) => SidecarResponseV2::InputProofV23(proof),
-                Err(SidecarOperationError::Retryable) => {
-                    SidecarResponseV2::Error(SidecarErrorBody {
-                        code: "input_proof_unavailable".to_owned(),
-                        message: "input proof backend unavailable".to_owned(),
-                        retryable: true,
-                    })
-                }
+                Err(
+                    SidecarOperationError::Retryable | SidecarOperationError::RetryableBuild(_),
+                ) => SidecarResponseV2::Error(SidecarErrorBody {
+                    code: "input_proof_unavailable".to_owned(),
+                    message: "input proof backend unavailable".to_owned(),
+                    retryable: true,
+                }),
                 Err(SidecarOperationError::Rejected(_)) => {
                     SidecarResponseV2::Error(SidecarErrorBody {
                         code: "input_proof_rejected".to_owned(),
@@ -694,13 +721,13 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
             } else {
                 match verify_funding(&config, &request).await {
                     Ok(value) => SidecarResponseV2::Funding(value),
-                    Err(SidecarOperationError::Retryable) => {
-                        SidecarResponseV2::Error(SidecarErrorBody {
-                            code: "monerod_unavailable".to_owned(),
-                            message: "Monero backend unavailable".to_owned(),
-                            retryable: true,
-                        })
-                    }
+                    Err(
+                        SidecarOperationError::Retryable | SidecarOperationError::RetryableBuild(_),
+                    ) => SidecarResponseV2::Error(SidecarErrorBody {
+                        code: "monerod_unavailable".to_owned(),
+                        message: "Monero backend unavailable".to_owned(),
+                        retryable: true,
+                    }),
                     Err(SidecarOperationError::Rejected(message)) => {
                         SidecarResponseV2::Error(SidecarErrorBody {
                             code: "funding_rejected".to_owned(),
@@ -769,13 +796,14 @@ async fn handle_uds(mut stream: tokio::net::UnixStream, config: Arc<Config>) -> 
                                 }),
                             }
                         }
-                        Err(SidecarOperationError::Retryable) => {
-                            SidecarResponseV2::Error(SidecarErrorBody {
-                                code: "monerod_unavailable".to_owned(),
-                                message: "Monero backend unavailable".to_owned(),
-                                retryable: true,
-                            })
-                        }
+                        Err(
+                            SidecarOperationError::Retryable
+                            | SidecarOperationError::RetryableBuild(_),
+                        ) => SidecarResponseV2::Error(SidecarErrorBody {
+                            code: "monerod_unavailable".to_owned(),
+                            message: "Monero backend unavailable".to_owned(),
+                            retryable: true,
+                        }),
                         Err(SidecarOperationError::Rejected(message)) => {
                             SidecarResponseV2::Error(SidecarErrorBody {
                                 code: "sweep_rejected".to_owned(),

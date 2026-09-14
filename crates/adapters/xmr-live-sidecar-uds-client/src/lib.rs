@@ -39,6 +39,8 @@ use zeroize::Zeroizing;
 const WORLD_WRITABLE_ROOTS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 /// The hello proof is one small JSON object; anything larger is an impostor.
 const MAX_HELLO_PROOF_BYTES: usize = 1024;
+/// Error codes are diagnostic labels, never free-form log content.
+const MAX_SIDECAR_ERROR_CODE_BYTES: usize = 128;
 
 /// Preferred Linux sidecar transport.
 pub struct BlockingUdsSidecarPort {
@@ -179,12 +181,57 @@ impl BlockingUdsSidecarPort {
     }
 
     fn classify_error(error: xmr_live_sidecar_api::SidecarErrorBody) -> SpendPortError {
+        // Preserve the stable, non-secret sidecar code at the process boundary.
+        // SpendPortError intentionally remains the coarse retry/reject contract
+        // consumed by the state machine, but operators must not lose the stage
+        // that produced that classification.
+        //
+        // `retryable` is the only authority on that classification. The code is
+        // a diagnostic label: it is sanitized for logging and never consulted
+        // for the outcome. Rejecting on a malformed label would turn a backend
+        // outage the sidecar declared retryable into a permanent refusal, which
+        // downstream reads as a retained-state conflict on a settlement child
+        // rather than "try again" — a settlement decision taken on the shape of
+        // a string.
+        //
+        // The warning below needs an installed tracing subscriber to appear;
+        // the daemon does not install one today, so the durable record of the
+        // stage is the code the sidecar returns, not this line.
+        let safe_code = sanitized_error_code(&error.code);
+        tracing::warn!(
+            sidecar_code = %safe_code,
+            retryable = error.retryable,
+            "XMR sidecar request failed"
+        );
         if error.retryable {
             SpendPortError::Retryable
         } else {
             SpendPortError::Rejected
         }
     }
+}
+
+/// Renders a sidecar error code safe to place in a log line.
+///
+/// The sidecar's own codes are already fixed `[a-z0-9_]` labels, so this is a
+/// boundary guard, not a translation: a code that is empty, over-long, or
+/// carries anything else — a newline that would forge a second log line, say —
+/// is truncated and folded to underscores instead of being trusted verbatim.
+/// It never inspects meaning and never influences the retry classification.
+fn sanitized_error_code(code: &str) -> String {
+    if code.is_empty() {
+        return "absent".to_owned();
+    }
+    code.bytes()
+        .take(MAX_SIDECAR_ERROR_CODE_BYTES)
+        .map(|byte| {
+            if byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' {
+                char::from(byte)
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn path_in_world_writable_root(path: &Path) -> bool {
@@ -585,7 +632,7 @@ mod tests {
                 UnixListener::bind(&path)?,
                 KEY,
                 SidecarResponseV2::Error(xmr_live_sidecar_api::SidecarErrorBody {
-                    code: "funding-unavailable".into(),
+                    code: "funding_unavailable".into(),
                     message: "funding unavailable".into(),
                     retryable,
                 }),
@@ -599,6 +646,60 @@ mod tests {
             assert!(worker.join().expect("sidecar thread").0);
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_malformed_error_code_is_sanitized_and_never_changes_the_classification() -> TestResult {
+        // A diagnostic label must not decide a settlement outcome. Whatever the
+        // code looks like, `retryable` alone separates "try again" from a
+        // permanent refusal, because downstream a refusal reads as a retained
+        // state conflict on a settlement child rather than a backend outage.
+        for code in ["", "funding\nunavailable", "funding-UNAVAILABLE", "x"] {
+            for retryable in [true, false] {
+                let directory = socket_scratch_dir();
+                let path = directory.path().join("sidecar.sock");
+                let worker = one_shot_sidecar_response(
+                    UnixListener::bind(&path)?,
+                    KEY,
+                    SidecarResponseV2::Error(xmr_live_sidecar_api::SidecarErrorBody {
+                        code: code.into(),
+                        message: "untrusted diagnostic".into(),
+                        retryable,
+                    }),
+                );
+                let mut client = BlockingUdsSidecarPort::new(&path, SidecarAuthKey::new(KEY)?)?;
+                match client.verify_funding(funding_request()) {
+                    Err(SpendPortError::Retryable) => assert!(retryable),
+                    Err(SpendPortError::Rejected) => assert!(!retryable),
+                    Ok(_) => panic!("error response cannot authorize funding"),
+                }
+                assert!(worker.join().expect("sidecar thread").0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sanitizing_a_code_bounds_it_and_cannot_forge_a_second_log_line() {
+        assert_eq!(sanitized_error_code(""), "absent");
+        assert_eq!(
+            sanitized_error_code("v23_build_unavailable"),
+            "v23_build_unavailable"
+        );
+        assert_eq!(
+            sanitized_error_code("funding\nunavailable"),
+            "funding_unavailable"
+        );
+        // Uppercase and the hyphen each fold to one underscore, byte for byte.
+        assert_eq!(
+            sanitized_error_code("Funding-Unavailable"),
+            "_unding__navailable"
+        );
+        let long = "a".repeat(MAX_SIDECAR_ERROR_CODE_BYTES + 64);
+        assert_eq!(
+            sanitized_error_code(&long).len(),
+            MAX_SIDECAR_ERROR_CODE_BYTES
+        );
     }
 
     #[test]

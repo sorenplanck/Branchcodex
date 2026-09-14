@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 xmr-live-sidecar-api = { path = "../xmr-live-sidecar-api" }
