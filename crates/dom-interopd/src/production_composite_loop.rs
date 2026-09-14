@@ -253,6 +253,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     backoff: Duration,
     last_relay_time_seconds: u64,
     last_bootstrap_progress_v25: [Option<[&'static str; 5]>; 2],
+    exchanged_envelopes_v25: [(u64, u64); 2],
 }
 
 impl core::fmt::Debug for ProductionCompositeRelayLoopV1 {
@@ -329,6 +330,7 @@ impl ProductionCompositeRelayLoopV1 {
 
             last_relay_time_seconds,
             last_bootstrap_progress_v25: [None, None],
+            exchanged_envelopes_v25: [(0, 0); 2],
         })
     }
 
@@ -339,27 +341,42 @@ impl ProductionCompositeRelayLoopV1 {
     ) -> Result<ProductionCompositeRelayStepReportV1, ProductionCompositeLoopErrorV1> {
         self.validate_retained_peer_scope_v23()?;
         self.step_local_bootstrap_v23(leg)?;
-        self.report_bootstrap_progress_v25(leg);
-        self.step_exchange_and_poll_v23(leg)
+        let report = self.step_exchange_and_poll_v23(leg)?;
+        self.report_bootstrap_progress_v25(leg, &report);
+        Ok(report)
     }
 
-    /// Emits one line the first time a leg's bootstrap progress tags change.
-    /// A daemon that expires its transport lifetime therefore ends with the
-    /// exact stage it reached rather than a silent hour. Diagnostics only:
+    /// Emits one line whenever a leg's bootstrap progress tags change, with
+    /// the envelopes that leg has exchanged so far. A daemon that expires its
+    /// transport lifetime therefore ends with both the exact stage it reached
+    /// and whether its peer traffic was still moving. Diagnostics only:
     /// nothing here is read back, and a leg that keeps progressing prints a
     /// handful of lines for the whole ceremony.
-    fn report_bootstrap_progress_v25(&mut self, leg: LegIdV1) {
+    fn report_bootstrap_progress_v25(
+        &mut self,
+        leg: LegIdV1,
+        report: &ProductionCompositeRelayStepReportV1,
+    ) {
         let index = relay_index(leg);
+        self.exchanged_envelopes_v25[index] = (
+            self.exchanged_envelopes_v25[index]
+                .0
+                .saturating_add(u64::from(report.exchange.envelopes_sent)),
+            self.exchanged_envelopes_v25[index]
+                .1
+                .saturating_add(u64::from(report.exchange.envelopes_received)),
+        );
         let progress = self.owner.bootstrap_progress_v25(leg);
         if self.last_bootstrap_progress_v25[index] == Some(progress) {
             return;
         }
         self.last_bootstrap_progress_v25[index] = Some(progress);
+        let (sent, received) = self.exchanged_envelopes_v25[index];
         let [graph, candidate, public, cancelled, bootstrap] = progress;
         eprintln!(
-            "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 leg={} graph={graph} candidate={candidate} \
-             public={public} cancelled_complete={cancelled} bootstrap_complete={bootstrap}",
-            index
+            "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 leg={index} graph={graph} \
+             candidate={candidate} public={public} cancelled_complete={cancelled} \
+             bootstrap_complete={bootstrap} envelopes_sent={sent} envelopes_received={received}"
         );
     }
 
