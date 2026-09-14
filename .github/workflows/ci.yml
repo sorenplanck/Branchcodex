@@ -50,8 +50,11 @@ on:
 # A new push to the same PR supersedes the run in flight. Pushes to the
 # protected branches are never cancelled: every commit there gets a full run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A superseded commit's run is cancelled on branch pushes too, not only on
+  # pull requests: its result is read by nobody and the queue it occupies is
+  # the same one the replacement commit waits in.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

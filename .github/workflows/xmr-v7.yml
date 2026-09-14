@@ -9,6 +9,11 @@ on:
       - 'external-gpl/dom-xmr-sidecar/**'
       - 'scripts/xmr-v7-**'
 
+concurrency:
+  # One run per branch per trigger; a new commit supersedes the one it fixes.
+  group: xmr-v7-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
 jobs:
   dom-xmr:
     runs-on: ubuntu-latest

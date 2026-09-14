@@ -3,9 +3,12 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 concurrency:
-  # Preserve the previous commit's running checks while publishing a fix.
-  group: interop-hardening-${{ github.ref }}-${{ github.sha }}
-  cancel-in-progress: false
+  # One run per branch per trigger. This fires on every push, so keying the
+  # group on the commit left every superseded run queued behind the fix that
+  # replaced it and starved the runner pool. The event name stays in the key
+  # so the push and pull_request runs of one commit remain distinct checks.
+  group: interop-hardening-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 jobs:
   production-preflight:
     name: "preflight / environment, custody and input boundaries"

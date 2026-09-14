@@ -50,9 +50,13 @@ permissions:
   contents: read
 
 concurrency:
-  # A correction must not cancel another commit before its failures are saved.
-  group: heavy-tests-${{ github.ref }}-${{ github.sha }}
-  cancel-in-progress: false
+  # One run per branch per trigger. A correction supersedes the commit it
+  # corrects: keeping both queued only starved the runner pool, so the older
+  # run is cancelled instead of waiting behind a result nobody will read.
+  # Keying on the event name as well leaves an operator's dispatched run out
+  # of the push group, so routine pushes never cancel a deliberate run.
+  group: heavy-tests-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

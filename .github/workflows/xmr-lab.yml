@@ -18,6 +18,11 @@ on:
       - 'ACTIVE_COMPONENTS.json'
       - 'SOURCE_LOCK.json'
 
+concurrency:
+  # One run per branch per trigger; a new commit supersedes the one it fixes.
+  group: xmr-lab-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
 jobs:
   xmr-lab:
     runs-on: ubuntu-latest
