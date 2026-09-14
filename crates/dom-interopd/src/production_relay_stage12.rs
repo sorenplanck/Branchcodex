@@ -753,6 +753,30 @@ impl ProductionRelayStage12OwnerV1 {
         Ok(())
     }
 
+    /// One leg's bootstrap progress as fixed tags, for stall diagnostics.
+    /// Pure read of already-owned state: it takes no lock, touches no store
+    /// and is never a decision input.
+    pub(crate) fn bootstrap_progress_v25(&self, leg: LegIdV1) -> [&'static str; 5] {
+        let index = match leg {
+            LegIdV1::Upstream => 0,
+            LegIdV1::Downstream => 1,
+        };
+        let yes_no = |flag: bool| if flag { "y" } else { "n" };
+        [
+            self.xmr_graph_templates_v23[index].progress_code_v25(),
+            yes_no(self.xmr_graph_candidates_v22[index].is_some()),
+            yes_no(self.xmr_graph_public_v22[index].is_some()),
+            match self.cancelled_v22[index].as_ref() {
+                None => "-",
+                Some(owner) => yes_no(owner.driver.complete()),
+            },
+            match self.bootstrap_v16[index].as_ref() {
+                None => "-",
+                Some(driver) => yes_no(driver.complete()),
+            },
+        ]
+    }
+
     /// Proves that the retained pair receiver was minted by the exact split
     /// whose two activation handles were installed into these two legs.
     pub(crate) fn matches_f6_pair_receiver(

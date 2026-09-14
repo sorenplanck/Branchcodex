@@ -252,6 +252,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     exchange_timeout: Duration,
     backoff: Duration,
     last_relay_time_seconds: u64,
+    last_bootstrap_progress_v25: [Option<[&'static str; 5]>; 2],
 }
 
 impl core::fmt::Debug for ProductionCompositeRelayLoopV1 {
@@ -327,6 +328,7 @@ impl ProductionCompositeRelayLoopV1 {
             backoff: config.backoff,
 
             last_relay_time_seconds,
+            last_bootstrap_progress_v25: [None, None],
         })
     }
 
@@ -337,7 +339,28 @@ impl ProductionCompositeRelayLoopV1 {
     ) -> Result<ProductionCompositeRelayStepReportV1, ProductionCompositeLoopErrorV1> {
         self.validate_retained_peer_scope_v23()?;
         self.step_local_bootstrap_v23(leg)?;
+        self.report_bootstrap_progress_v25(leg);
         self.step_exchange_and_poll_v23(leg)
+    }
+
+    /// Emits one line the first time a leg's bootstrap progress tags change.
+    /// A daemon that expires its transport lifetime therefore ends with the
+    /// exact stage it reached rather than a silent hour. Diagnostics only:
+    /// nothing here is read back, and a leg that keeps progressing prints a
+    /// handful of lines for the whole ceremony.
+    fn report_bootstrap_progress_v25(&mut self, leg: LegIdV1) {
+        let index = relay_index(leg);
+        let progress = self.owner.bootstrap_progress_v25(leg);
+        if self.last_bootstrap_progress_v25[index] == Some(progress) {
+            return;
+        }
+        self.last_bootstrap_progress_v25[index] = Some(progress);
+        let [graph, candidate, public, cancelled, bootstrap] = progress;
+        eprintln!(
+            "DOM_NATIVE_BOOTSTRAP_PROGRESS_V25 leg={} graph={graph} candidate={candidate} \
+             public={public} cancelled_complete={cancelled} bootstrap_complete={bootstrap}",
+            index
+        );
     }
 
     /// One retained public-refund cycle after route termination. This never

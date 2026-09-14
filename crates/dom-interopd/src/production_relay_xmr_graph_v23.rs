@@ -468,3 +468,18 @@ pub(crate) fn form_xmr_graph_templates_v23(
         .map_err(|_| Error::Binding)?;
     Ok(PreparedXmrGraphV23 { templates, keys })
 }
+
+impl GraphLifecycleV23 {
+    /// Fixed tag for one leg's graph lifecycle, for progress diagnostics only.
+    /// Never a decision input: no caller branches on this string.
+    pub(crate) const fn progress_code_v25(&self) -> &'static str {
+        match self {
+            Self::Awaiting => "awaiting",
+            Self::Signing(_) => "signing",
+            Self::Completing => "completing",
+            Self::Produced(_) => "produced",
+            Self::Custodied { .. } => "custodied",
+            Self::Failed => "failed",
+        }
+    }
+}
