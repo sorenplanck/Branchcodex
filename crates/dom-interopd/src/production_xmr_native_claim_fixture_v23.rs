@@ -274,6 +274,19 @@ pub(in super::super) fn claim_after_observed_funding(
         for message in &messages {
             store.accept_prepared_operational_signing_transport_message(&transport, message)?;
         }
+        // Accepting the six retained transport messages replays the whole
+        // growing transport-record scan and, under the crypto-test profile,
+        // takes longer than MAX_V11_EXTERNAL_ANCHOR_AGE (60s). The freshly
+        // consumed authority observed at consume time above is therefore stale
+        // by the time the pre-signature transport is prepared, and
+        // prepare_f7_claim_pre_signature_transport_v12 -> require_recent_observation
+        // would reject it as ClaimSigningAuthorityUnavailable. Re-observe here,
+        // mirroring both the signing loop and the pre-expose revalidate below;
+        // this models a live caller and does not relax the 60s window.
+        store.revalidate_consumed_f7_claim_authorization_v12(
+            &consumed,
+            observe(actor, &request, &produced[actor])?,
+        )?;
         let pre_transport = store.prepare_f7_claim_pre_signature_transport_v12(&consumed, chain)?;
         store.accept_prepared_f7_claim_pre_signature_transport_v12(&pre_transport, &pre_message)?;
         assert_eq!(before.as_bytes(), store.load_session(session)?.as_bytes());
