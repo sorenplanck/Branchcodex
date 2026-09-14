@@ -418,7 +418,9 @@ mod local_refund_tests_v24 {
         let result = crate::build_proof_v23::load_local_refund(&config, &public).await;
         assert!(matches!(
             result,
-            Err(crate::SidecarOperationError::Retryable)
+            Err(crate::SidecarOperationError::RetryableBuild(
+                "local_refund_result_absent"
+            ))
         ));
         let retained = config.cache.lookup_local_refund_v24(request_nonce).unwrap();
         assert!(
