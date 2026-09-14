@@ -93,6 +93,25 @@ const KDF_ITERATIONS: u32 = 3;
 const KDF_LANES: u32 = 1;
 const ENVELOPE_DIGEST_TAG: &str = "DOM:contracts-transport-identity-envelope:v1";
 const RETAINED_ENVELOPE_DIGEST_TAG: &str = "DOM:contracts-transport-identity-retained-envelope:v1";
+const KDF_MEMO_TAG: &str = "DOM:contracts-transport-identity-kdf-memo:v1";
+const KDF_MEMO_CAPACITY: usize = 16;
+
+/// Process-local memo of completed Argon2id derivations.
+///
+/// The runtime re-opens the identity envelope many times per process — every
+/// durable resume derives the same key from the same salt and passphrase —
+/// and each derivation costs a full 64 MiB Argon2id pass. The memo is keyed
+/// by a domain-separated digest over every KDF input (the passphrase bytes
+/// and the salt, each length-prefixed, plus the fixed parameters), so only
+/// byte-identical inputs are served the key an earlier COMPLETED derivation
+/// of those same bytes produced. Any other input, and any lock failure,
+/// takes the uncached Argon2id path with its canonical errors: no derivation
+/// is weakened and no key material ever exists without the full KDF having
+/// run in this process. Entries hold the same 32-byte key an open envelope
+/// already keeps in process memory while in use, are zeroized on eviction,
+/// and grant no authority a process holding the passphrase lacks.
+static KDF_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
+    std::sync::Mutex::new(Vec::new());
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
@@ -879,6 +898,25 @@ fn derive_key(
     passphrase: &ContractsIdentityPassphraseV1,
     salt: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, IdentityStoreError> {
+    // Memo key over every KDF input, length-prefixed so no two input pairs
+    // share an encoding. The digest is an equality oracle only; it reveals
+    // nothing a process already holding the passphrase does not have.
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        8 + passphrase.bytes.len() + 8 + salt.len() + 12,
+    ));
+    material.extend_from_slice(&(passphrase.bytes.len() as u64).to_le_bytes());
+    material.extend_from_slice(&passphrase.bytes);
+    material.extend_from_slice(&(salt.len() as u64).to_le_bytes());
+    material.extend_from_slice(salt);
+    material.extend_from_slice(&KDF_MEMORY_KIB.to_le_bytes());
+    material.extend_from_slice(&KDF_ITERATIONS.to_le_bytes());
+    material.extend_from_slice(&KDF_LANES.to_le_bytes());
+    let memo_key = *blake2b_256_tagged(KDF_MEMO_TAG, &material).as_bytes();
+    if let Ok(memo) = KDF_MEMO.lock() {
+        if let Some((_, key)) = memo.iter().find(|(retained, _)| *retained == memo_key) {
+            return Ok(key.clone());
+        }
+    }
     let params = Params::new(KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES, Some(32))
         .map_err(|_| IdentityStoreError::KeyDerivation)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -886,6 +924,13 @@ fn derive_key(
     argon
         .hash_password_into(&passphrase.bytes, salt, key.as_mut())
         .map_err(|_| IdentityStoreError::KeyDerivation)?;
+    if let Ok(mut memo) = KDF_MEMO.lock() {
+        if memo.len() >= KDF_MEMO_CAPACITY {
+            // Zeroizing zeroizes the evicted key on drop.
+            memo.remove(0);
+        }
+        memo.push((memo_key, key.clone()));
+    }
     Ok(key)
 }
 
