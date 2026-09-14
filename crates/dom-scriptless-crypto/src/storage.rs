@@ -1061,7 +1061,61 @@ fn expand_unlock_kek(
     derive_hkdf_sha256(salt, argon_output, &info)
 }
 
+/// Process-local memo of completed vault Argon2id derivations.
+///
+/// The runtime re-opens the master-key envelope on every vault provisioning
+/// and durable resume, and each open re-derives the same Argon2 output from
+/// the same passphrase and salt through a full 64 MiB pass. The memo is
+/// keyed by a domain-separated digest over every KDF input (the passphrase
+/// bytes and the salt, each length-prefixed, plus the fixed parameters), so
+/// only byte-identical inputs are served the output an earlier COMPLETED
+/// derivation of those same bytes produced. Any other input, and any lock
+/// failure, takes the uncached Argon2id path with its canonical errors: no
+/// derivation is weakened and no key material ever exists without the full
+/// KDF having run in this process. Entries are Zeroizing, are zeroized on
+/// eviction, and grant no authority a process already holding the
+/// passphrase lacks — the opened vault keeps the derived KEK in process
+/// memory while in use.
+const ARGON_MEMO_TAG: &str = "DOM:vault-master-kdf-memo:v1";
+const ARGON_MEMO_CAPACITY: usize = 16;
+static ARGON_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
+    std::sync::Mutex::new(Vec::new());
+
 fn derive_argon_output(
+    passphrase: &Passphrase,
+    salt: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    // Length-prefixed so no two input pairs share an encoding; the digest is
+    // an equality oracle only and reveals nothing a process already holding
+    // the passphrase does not have.
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        8 + passphrase.as_bytes().len() + 8 + salt.len() + 12,
+    ));
+    material.extend_from_slice(&(passphrase.as_bytes().len() as u64).to_le_bytes());
+    material.extend_from_slice(passphrase.as_bytes());
+    material.extend_from_slice(&(salt.len() as u64).to_le_bytes());
+    material.extend_from_slice(salt);
+    material.extend_from_slice(&65_536_u32.to_le_bytes());
+    material.extend_from_slice(&3_u32.to_le_bytes());
+    material.extend_from_slice(&1_u32.to_le_bytes());
+    let memo_key = *dom_crypto::blake2b_256_tagged(ARGON_MEMO_TAG, &material).as_bytes();
+    if let Ok(memo) = ARGON_MEMO.lock() {
+        if let Some((_, output)) = memo.iter().find(|(retained, _)| *retained == memo_key) {
+            return Ok(output.clone());
+        }
+    }
+    let output = derive_argon_output_uncached(passphrase, salt)?;
+    if let Ok(mut memo) = ARGON_MEMO.lock() {
+        if memo.len() >= ARGON_MEMO_CAPACITY {
+            // Zeroizing zeroizes the evicted output on drop.
+            memo.remove(0);
+        }
+        memo.push((memo_key, output.clone()));
+    }
+    Ok(output)
+}
+
+fn derive_argon_output_uncached(
     passphrase: &Passphrase,
     salt: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
