@@ -490,26 +490,22 @@ fn real_graph_offer_warm_repeat64_reports_actual_verifier_counts_v24() -> TestRe
     let cache = VerificationCacheV24::default();
     verify_using(&cache, &offer, &f.terms, &f.policy, &scope)?;
     assert_eq!(calls(&cache), 1);
-    let warm_start = std::time::Instant::now();
     for _ in 0..64 {
         verify_using(&cache, &offer, &f.terms, &f.policy, &scope)?;
     }
-    let warm_elapsed = warm_start.elapsed();
     assert_eq!(
         calls(&cache),
         1,
         "all64 exact repeats must reuse the GraphOffer-layer result"
     );
-    let original_start = std::time::Instant::now();
     let mut original_verified = 0usize;
     for _ in 0..64 {
         offer.verify_uncached_v24(&f.terms, &f.policy, &scope)?;
         original_verified += 1;
     }
-    let original_elapsed = original_start.elapsed();
     assert_eq!(original_verified, 64);
-    eprintln!("real graph-offer layer repeat64: cold_offer_body_entries={} warm_extra_offer_body_entries=0 direct_offer_body_successes={} warm_layer_us={} direct_layer_us={} nested_public_proof_cache=may-be-enabled old_whole_stack_baseline=false",
-        calls(&cache), original_verified, warm_elapsed.as_micros(), original_elapsed.as_micros());
-    // Timing is evidence, never a flaky pass condition or a promised bound.
+    // Per-layer timing was previously emitted here as informational evidence.
+    // Direct stderr output is refused in active XMR sources, and the timing was
+    // never a pass condition or a promised bound, so it is simply not printed.
     Ok(())
 }

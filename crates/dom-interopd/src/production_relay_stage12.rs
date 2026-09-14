@@ -356,15 +356,23 @@ impl ProductionRelayStage12OwnerV1 {
         {
             return Err(Error::Binding);
         }
+        // The cancelled-contracts owner this candidate binds to is moved out of
+        // `_private_bootstrap_v13._cancelled_contracts` into the prepared
+        // `cancelled_v22` relay owner at Stage-12 construction (see the
+        // `.take()` there). Read the surviving prepared owner here; the emptied
+        // bootstrap slot would otherwise always report the surface as absent.
+        let xmr_funder = self.cancelled_v22[index]
+            .as_ref()
+            .ok_or(missing(Surface::CancelledContracts))?
+            .policy
+            .policy()
+            .xmr_funder;
         let private = self
             ._private_bootstrap_v13
             .as_mut()
             .ok_or(missing(Surface::PrivateBootstrap))?;
-        let cancelled = private._cancelled_contracts[index]
-            .as_ref()
-            .ok_or(missing(Surface::CancelledContracts))?;
         let material = &mut private._shares[index];
-        if material.capability.binding().participant_id() != &cancelled.policy.policy().xmr_funder {
+        if material.capability.binding().participant_id() != &xmr_funder {
             // The publish target must exist before anything is retained, so
             // an awaiting round leaves no partial state behind.
             let publisher = private._f6_native_principals_v25[index]
