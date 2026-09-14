@@ -27,6 +27,29 @@ fn retain_stderr_once_v24(
     }
 }
 
+/// The one daemon line shape this harness echoes while a run is still in
+/// flight. It carries fixed progress tags only, never a payload, path or
+/// credential, so echoing it cannot leak what the capture bound protects.
+const ECHOED_PROGRESS_PREFIX_V25: &[u8] = b"DOM_NATIVE_BOOTSTRAP_PROGRESS_V25";
+
+/// Echoes complete progress lines from the freshly read bytes.
+///
+/// The retained capture is unchanged: this only mirrors the exact lines whose
+/// fixed prefix marks them as progress tags, so a daemon that never exits
+/// still reports where its bootstrap stopped advancing instead of going
+/// silent until a lifetime expires.
+fn echo_progress_lines_v25(bytes: &[u8], scanned: &mut usize) {
+    while let Some(offset) = bytes[*scanned..].iter().position(|byte| *byte == b'\n') {
+        let line = &bytes[*scanned..*scanned + offset];
+        *scanned += offset + 1;
+        if line.starts_with(ECHOED_PROGRESS_PREFIX_V25) {
+            if let Ok(text) = std::str::from_utf8(line) {
+                eprintln!("{text}");
+            }
+        }
+    }
+}
+
 fn drain(mut stream: impl Read + Send + 'static) -> Capture {
     let (send, receive) = mpsc::sync_channel(1);
     thread::spawn(move || {
@@ -34,6 +57,7 @@ fn drain(mut stream: impl Read + Send + 'static) -> Capture {
             // Allocate before reading so a reallocation cannot leave a copy.
             let mut bytes = Zeroizing::new(vec![0; MAX_CAPTURE + 1]);
             let mut length = 0;
+            let mut echoed = 0;
             loop {
                 match stream.read(&mut bytes[length..]) {
                     Ok(0) => break,
@@ -42,6 +66,7 @@ fn drain(mut stream: impl Read + Send + 'static) -> Capture {
                         if length > MAX_CAPTURE {
                             return Err(std::io::Error::other("daemon output exceeded bound"));
                         }
+                        echo_progress_lines_v25(&bytes[..length], &mut echoed);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
