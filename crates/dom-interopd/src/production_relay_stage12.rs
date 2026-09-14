@@ -356,15 +356,23 @@ impl ProductionRelayStage12OwnerV1 {
         {
             return Err(Error::Binding);
         }
+        // Read the compensation policy from the prepared cancelled owner, not
+        // from the private bootstrap slot: constructing this owner moves the
+        // mounted contracts out of `_cancelled_contracts` with `take()` into
+        // `cancelled_v22`, so the private slot is always empty by the time any
+        // peer graph candidate can arrive. The policy itself is carried across
+        // that move unchanged, so this reads the same funder it always meant
+        // to read.
+        let funder = self.cancelled_v22[index]
+            .as_ref()
+            .map(|owner| owner.policy.policy().xmr_funder)
+            .ok_or(missing(Surface::CancelledContracts))?;
         let private = self
             ._private_bootstrap_v13
             .as_mut()
             .ok_or(missing(Surface::PrivateBootstrap))?;
-        let cancelled = private._cancelled_contracts[index]
-            .as_ref()
-            .ok_or(missing(Surface::CancelledContracts))?;
         let material = &mut private._shares[index];
-        if material.capability.binding().participant_id() != &cancelled.policy.policy().xmr_funder {
+        if material.capability.binding().participant_id() != &funder {
             // The publish target must exist before anything is retained, so
             // an awaiting round leaves no partial state behind.
             let publisher = private._f6_native_principals_v25[index]
