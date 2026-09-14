@@ -8533,6 +8533,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "tracing",
  "xmr-live-sidecar-api",
  "xmr-sidecar-auth",
  "xmr-spend-port",

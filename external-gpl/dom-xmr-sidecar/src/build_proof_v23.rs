@@ -39,7 +39,7 @@ fn cache_error(error: CacheError) -> SidecarOperationError {
 /// is ever recorded, and the returned classification is unchanged.
 fn retryable(reason: &'static str) -> SidecarOperationError {
     tracing::warn!(reason, "sweep build step temporarily unavailable");
-    SidecarOperationError::Retryable
+    SidecarOperationError::RetryableBuild(reason)
 }
 fn rejected() -> SidecarOperationError {
     SidecarOperationError::Rejected("native V23 build scope or durable state mismatch".to_owned())

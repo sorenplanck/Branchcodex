@@ -179,6 +179,15 @@ impl BlockingUdsSidecarPort {
     }
 
     fn classify_error(error: xmr_live_sidecar_api::SidecarErrorBody) -> SpendPortError {
+        // Preserve the stable, non-secret sidecar code at the process boundary.
+        // SpendPortError intentionally remains the coarse retry/reject contract
+        // consumed by the state machine, but operators must not lose the stage
+        // that produced that classification.
+        tracing::warn!(
+            sidecar_code = %error.code,
+            retryable = error.retryable,
+            "XMR sidecar request failed"
+        );
         if error.retryable {
             SpendPortError::Retryable
         } else {
