@@ -703,7 +703,10 @@ trait CompositeActivationRelayV1 {
     fn resume_local_activation_v23(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
-    fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error>;
+    /// Returns whether the leg moved authenticated relay traffic this round;
+    /// see [`CompositeRelayCycleV1::step_relay_leg`]. Used only to skip the
+    /// idle backoff between actively exchanging rounds.
+    fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error>;
     fn activation_backoff(&self) -> Duration;
     fn bootstrap_ready_v16(&self) -> bool {
         true
@@ -722,12 +725,12 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
         self.step_local_bootstrap_v23(LegIdV1::Downstream)
     }
 
-    fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+    fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
         match self.step_leg(leg) {
-            Ok(_) => Ok(()),
-            Err(error) if is_f6_activation_awaiting(&error) => Ok(()),
-            Err(error) if is_template_construction_awaiting_v17(&error) => Ok(()),
-            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(()),
+            Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
+            Err(error) if is_f6_activation_awaiting(&error) => Ok(false),
+            Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -828,10 +831,11 @@ where
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
             }
         }
-        relay
+        let mut relay_moved_traffic = false;
+        relay_moved_traffic |= relay
             .step_activation_leg(LegIdV1::Upstream)
             .map_err(CompositeActivationCoreErrorV1::Relay)?;
-        relay
+        relay_moved_traffic |= relay
             .step_activation_leg(LegIdV1::Downstream)
             .map_err(CompositeActivationCoreErrorV1::Relay)?;
         if relay.bootstrap_ready_v16() {
@@ -842,9 +846,16 @@ where
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
             }
         }
-        control
-            .wait(relay.activation_backoff())
-            .map_err(CompositeActivationCoreErrorV1::Control)?;
+        // Back off only on an idle round: the bootstrap/BP/signing ceremony
+        // is a strict message ping-pong, and adding a poll interval after a
+        // round that moved envelopes would pace the whole ceremony at the
+        // idle interval. A silent peer reports no traffic and waits exactly
+        // as before.
+        if !relay_moved_traffic {
+            control
+                .wait(relay.activation_backoff())
+                .map_err(CompositeActivationCoreErrorV1::Control)?;
+        }
     }
     Ok(CompositeActivationCoreExitV1::RoundBudgetExhausted)
 }
@@ -939,8 +950,26 @@ trait CompositeRelayCycleV1 {
         Duration::ZERO
     }
 
-    fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error>;
+    /// Returns whether the leg demonstrably moved authenticated relay
+    /// traffic this round (an envelope submitted, sent or received, or an
+    /// authenticated backlog still staged). The interleaved loop uses this
+    /// only to skip the idle backoff while a ceremony is actively
+    /// exchanging; a tolerated absence (silent peer, awaited finality)
+    /// reports `false` and paces exactly as before.
+    fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error>;
     fn backoff(&self) -> Duration;
+}
+
+/// Whether one relay step moved authenticated traffic. Every bound, refusal
+/// and audit in the step itself is unchanged; this only classifies the
+/// completed report so the caller can pace an idle loop without slowing an
+/// active ceremony.
+fn relay_step_moved_traffic_v1(report: &ProductionCompositeRelayStepReportV1) -> bool {
+    !matches!(report.outbound, RelayOutboundStepV1::Idle)
+        || report.exchange.envelopes_sent > 0
+        || report.exchange.envelopes_received > 0
+        || report.exchange.outbound_backlog_remains
+        || report.exchange.inbound_backlog_remains
 }
 
 impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
@@ -950,18 +979,18 @@ impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
         self.blocking_bound
     }
 
-    fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+    fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
         match self.step_leg(leg) {
-            Ok(_) => Ok(()),
+            Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
             // The exact 0x12 remains in the durable inbox. Return to the root
             // so its scanner can acquire finality, and continue the other leg
             // and recovery clock. Never ACK or classify bad evidence as absent.
-            Err(error) if is_claim_finality_awaiting_v16(&error) => Ok(()),
-            Err(error) if is_template_construction_awaiting_v17(&error) => Ok(()),
+            Err(error) if is_claim_finality_awaiting_v16(&error) => Ok(false),
+            Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
             // Socket absence cannot suppress an already authorized local
             // recovery tick. step_leg still polls the authenticated durable
             // inbox, and any local refusal takes precedence over network loss.
-            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(()),
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -1036,11 +1065,12 @@ where
         {
             return Ok(ProductionCompositeRuntimeExitV1::Shutdown { rounds });
         }
+        let mut relay_moved_traffic = false;
         for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
             route
                 .prepare_relay_block_v23(relay.blocking_bound_v23())
                 .map_err(CompositeCoreErrorV1::Route)?;
-            relay
+            relay_moved_traffic |= relay
                 .step_relay_leg(leg)
                 .map_err(CompositeCoreErrorV1::Relay)?;
         }
@@ -1054,10 +1084,16 @@ where
         if report.disposition == RouteDriveDispositionV1::Terminal {
             return Ok(ProductionCompositeRuntimeExitV1::Terminal { rounds, report });
         }
+        // Back off only when the round was genuinely idle: a route waiting on
+        // chain finality while the Relay legs are mid-ceremony must not add a
+        // poll interval to every envelope of the signing choreography. A
+        // silent peer reports no traffic and paces exactly as before, so
+        // every network bound and refusal is unchanged.
         if matches!(
             report.disposition,
             RouteDriveDispositionV1::Waiting | RouteDriveDispositionV1::RecoveryRequired
-        ) {
+        ) && !relay_moved_traffic
+        {
             control
                 .wait(relay.backoff())
                 .map_err(CompositeCoreErrorV1::Control)?;
@@ -1348,12 +1384,12 @@ mod tests {
     impl CompositeRelayCycleV1 for TestRelayV1 {
         type Error = ();
 
-        fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+        fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
             self.log.borrow_mut().push(match leg {
                 LegIdV1::Upstream => "upstream-relay",
                 LegIdV1::Downstream => "downstream-relay",
             });
-            Ok(())
+            Ok(false)
         }
 
         fn backoff(&self) -> Duration {
@@ -1364,7 +1400,7 @@ mod tests {
     impl CompositeActivationRelayV1 for TestRelayV1 {
         type Error = ();
 
-        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
             self.step_relay_leg(leg)
         }
 
@@ -1384,9 +1420,9 @@ mod tests {
     }
     impl CompositeActivationRelayV1 for BootstrapBarrierRelayV16 {
         type Error = ();
-        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
             self.ticks[relay_index(leg)] += 1;
-            Ok(())
+            Ok(false)
         }
         fn activation_backoff(&self) -> Duration {
             Duration::from_millis(1)
@@ -1599,6 +1635,118 @@ mod tests {
         assert!(control.waits.is_empty());
     }
 
+    /// Reports moved traffic for the first `busy_rounds` full rounds (two leg
+    /// steps each) and idles afterwards.
+    struct BusyThenIdleRelayV1 {
+        leg_steps: u64,
+        busy_rounds: u64,
+        backoff: Duration,
+    }
+
+    impl CompositeRelayCycleV1 for BusyThenIdleRelayV1 {
+        type Error = ();
+
+        fn step_relay_leg(&mut self, _: LegIdV1) -> Result<bool, Self::Error> {
+            self.leg_steps += 1;
+            Ok(self.leg_steps <= self.busy_rounds * 2)
+        }
+
+        fn backoff(&self) -> Duration {
+            self.backoff
+        }
+    }
+
+    impl CompositeActivationRelayV1 for BusyThenIdleRelayV1 {
+        type Error = ();
+
+        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
+            self.step_relay_leg(leg)
+        }
+
+        fn activation_backoff(&self) -> Duration {
+            self.backoff
+        }
+
+        fn bootstrap_ready_v16(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn waiting_route_does_not_pace_rounds_that_moved_relay_traffic() {
+        let backoff = Duration::from_millis(9);
+        let mut relay = BusyThenIdleRelayV1 {
+            leg_steps: 0,
+            busy_rounds: 2,
+            backoff,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut route = TestRouteV1 {
+            log,
+            reports: vec![
+                report(RouteDriveDispositionV1::Waiting, 1),
+                report(RouteDriveDispositionV1::Waiting, 2),
+                report(RouteDriveDispositionV1::Waiting, 3),
+            ],
+        };
+        let mut control = TestControlV1::default();
+        assert_eq!(
+            run_interleaved_core_v1(&mut relay, &mut route, &mut control, 3)
+                .expect("bounded schedule"),
+            ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { rounds: 3 }
+        );
+        // Two ceremony rounds proceeded at line rate; only the idle third
+        // round paid the poll interval.
+        assert_eq!(control.waits, vec![backoff]);
+    }
+
+    #[test]
+    fn waiting_route_still_paces_every_idle_round() {
+        let backoff = Duration::from_millis(9);
+        let mut relay = BusyThenIdleRelayV1 {
+            leg_steps: 0,
+            busy_rounds: 0,
+            backoff,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut route = TestRouteV1 {
+            log,
+            reports: vec![
+                report(RouteDriveDispositionV1::Waiting, 1),
+                report(RouteDriveDispositionV1::Waiting, 2),
+            ],
+        };
+        let mut control = TestControlV1::default();
+        assert_eq!(
+            run_interleaved_core_v1(&mut relay, &mut route, &mut control, 2)
+                .expect("bounded schedule"),
+            ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { rounds: 2 }
+        );
+        assert_eq!(control.waits, vec![backoff, backoff]);
+    }
+
+    #[test]
+    fn activation_does_not_pace_rounds_that_moved_relay_traffic() {
+        let backoff = Duration::from_millis(13);
+        let mut relay = BusyThenIdleRelayV1 {
+            leg_steps: 0,
+            busy_rounds: 1,
+            backoff,
+        };
+        let mut receiver = TestActivationReceiverV1 {
+            calls: 0,
+            ready_on_call: u64::MAX,
+        };
+        let mut control = TestControlV1::default();
+        assert!(matches!(
+            run_activation_core_v1(&mut relay, &mut receiver, &mut control, 3),
+            Ok(CompositeActivationCoreExitV1::RoundBudgetExhausted)
+        ));
+        // The first round exchanged envelopes and skipped the poll interval;
+        // the two idle rounds paid it exactly as before.
+        assert_eq!(control.waits, vec![backoff, backoff]);
+    }
+
     #[test]
     fn activation_checks_retained_receiver_before_and_after_network_round() {
         let log = Rc::new(RefCell::new(Vec::new()));
@@ -1664,7 +1812,7 @@ mod tests {
             Ok(())
         }
 
-        fn step_activation_leg(&mut self, _: LegIdV1) -> Result<(), Self::Error> {
+        fn step_activation_leg(&mut self, _: LegIdV1) -> Result<bool, Self::Error> {
             self.network_calls += 1;
             Err(ProductionCompositeLoopErrorV1::Network(
                 ProductionRelayNetworkRuntimeErrorV1::ConnectUnavailable,
@@ -1820,7 +1968,7 @@ mod tests {
 
     impl CompositeRelayCycleV1 for UnavailableCycleV23 {
         type Error = ProductionCompositeLoopErrorV1;
-        fn step_relay_leg(&mut self, _: LegIdV1) -> Result<(), Self::Error> {
+        fn step_relay_leg(&mut self, _: LegIdV1) -> Result<bool, Self::Error> {
             let result = complete_exchange_poll_v23::<(), _>(
                 Err(ProductionCompositeLoopErrorV1::Network(self.error)),
                 |_| {
@@ -1829,8 +1977,8 @@ mod tests {
                 },
             );
             match result {
-                Ok(_) => Ok(()),
-                Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(()),
+                Ok(_) => Ok(false),
+                Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
                 Err(error) => Err(error),
             }
         }
@@ -1842,7 +1990,7 @@ mod tests {
     impl CompositeActivationRelayV1 for UnavailableCycleV23 {
         type Error = ProductionCompositeLoopErrorV1;
 
-        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<(), Self::Error> {
+        fn step_activation_leg(&mut self, leg: LegIdV1) -> Result<bool, Self::Error> {
             self.step_relay_leg(leg)
         }
 
