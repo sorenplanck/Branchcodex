@@ -39911,9 +39911,16 @@ fn transport_message_accepts_phase(message_type: u8, phase: SessionPhaseV1) -> b
                 | SessionPhaseV1::RefundEligible
                 | SessionPhaseV1::RefundBroadcast
         ),
+        // FundingBroadcast is valid only for the native XMR refund transport,
+        // whose action-specific gate (`require_xmr_remote_sweep_phase_v23`)
+        // admits it alongside FundingConfirmed/RefundEligible/RefundBroadcast.
+        // The Claim and legacy-refund actions stay constrained to their own
+        // historical phases by that same action gate, so widening this coarse
+        // gate cannot admit them at FundingBroadcast.
         0x19 | 0x1a => matches!(
             phase,
-            SessionPhaseV1::FundingConfirmed
+            SessionPhaseV1::FundingBroadcast
+                | SessionPhaseV1::FundingConfirmed
                 | SessionPhaseV1::ClaimBroadcast
                 | SessionPhaseV1::RefundEligible
                 | SessionPhaseV1::RefundBroadcast
