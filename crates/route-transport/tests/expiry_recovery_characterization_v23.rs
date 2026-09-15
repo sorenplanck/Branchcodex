@@ -8,7 +8,8 @@ use std::{error::Error, os::unix::fs::PermissionsExt};
 use btc_crypto::SecpContext;
 use relay::auth::{AuthRefusal, RosterMemberV1, RosterRegistryV1, RosterSnapshotV1};
 use relay::production::{
-    DeliveryPageLimitsV2, ProductionRelayV1, RelayDatabaseConfigV1, RelayDatabaseIdV1,
+    DeliveryPageLimitsV3, DeliveryScopeV3, ProductionRelayV1, RelayDatabaseConfigV1,
+    RelayDatabaseIdV1,
 };
 use relay::server::{AckV1, RelayV1};
 use relay::{ParticipantId, RelayEnvelopeV1, SenderRoleV1, TimelockSpec};
@@ -150,11 +151,12 @@ fn accepted_before_expiry_recovers_lost_acks_after_all_stores_reopen_v23() -> Te
         Some(exact.as_slice())
     );
 
-    let cursor = relay.acknowledged_delivery_cursor_v2(&RECIPIENT)?;
-    let page = relay.delivery_page_v2(
-        &RECIPIENT,
+    let scope = DeliveryScopeV3::new(RECIPIENT, wire().route_id, wire().session_id)?;
+    let cursor = relay.acknowledged_delivery_cursor_v3(&scope)?;
+    let page = relay.delivery_page_v3(
+        &scope,
         &cursor,
-        DeliveryPageLimitsV2::new(1, relay::MAX_ENVELOPE_BYTES as u32)?,
+        DeliveryPageLimitsV3::new(1, relay::MAX_ENVELOPE_BYTES as u32)?,
     )?;
     assert_eq!(page.envelopes(), [exact.clone()]);
     let next_cursor = *page.next_cursor();
@@ -167,7 +169,7 @@ fn accepted_before_expiry_recovers_lost_acks_after_all_stores_reopen_v23() -> Te
     let accepted = inbox.ingest_ephemeral_v1(&replay_mailbox, &rosters, time(FIRST_ACCEPTANCE))?;
     assert_eq!((accepted.accepted, accepted.duplicates), (1, 0));
     assert!(accepted.refused.is_empty());
-    assert_eq!(relay.acknowledged_delivery_cursor_v2(&RECIPIENT)?, cursor);
+    assert_eq!(relay.acknowledged_delivery_cursor_v3(&scope)?, cursor);
     let original_stats = inbox.stats()?;
     drop(inbox);
     drop(relay);
@@ -221,10 +223,7 @@ fn accepted_before_expiry_recovers_lost_acks_after_all_stores_reopen_v23() -> Te
     assert_eq!((duplicate.accepted, duplicate.duplicates), (0, 1));
     assert!(duplicate.refused.is_empty());
     assert_eq!(inbox.stats()?, original_stats);
-    assert_eq!(
-        relay.acknowledged_delivery_cursor_v2(&RECIPIENT)?,
-        next_cursor
-    );
+    assert_eq!(relay.acknowledged_delivery_cursor_v3(&scope)?, next_cursor);
     assert_eq!(relay.len()?, 0);
     // Even after delivery GC, retained flow receipts preserve the exact ACK.
     assert_eq!(

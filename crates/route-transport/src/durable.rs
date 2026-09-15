@@ -28,7 +28,8 @@ use rustix::fs::{flock, FlockOperation};
 use rustix::process::geteuid;
 
 use crate::{
-    BridgeRefusal, DurableProductionCreationStateV1, RelayQueueV1, RelayQueueV2, RouteWireContextV1,
+    BridgeRefusal, DurableProductionCreationStateV1, RelayQueueV1, RelayQueueV2, RelayQueueV3,
+    RouteWireContextV1,
 };
 
 const DATABASE_FILE_NAME: &str = "route-inbox-v1.sqlite3";
@@ -108,8 +109,8 @@ CREATE TABLE inbox_entries (
 CREATE TABLE inbox_quarantine (
     ordinal_be          BLOB PRIMARY KEY CHECK (length(ordinal_be) = 8),
     relay_ordinal_be    BLOB NOT NULL UNIQUE CHECK (length(relay_ordinal_be) = 8),
-    current_cursor      BLOB NOT NULL UNIQUE CHECK (length(current_cursor) = 146),
-    next_cursor         BLOB NOT NULL CHECK (length(next_cursor) = 146),
+    current_cursor      BLOB NOT NULL UNIQUE CHECK (length(current_cursor) IN (146, 210)),
+    next_cursor         BLOB NOT NULL CHECK (length(next_cursor) IN (146, 210)),
     sender_id           BLOB NOT NULL CHECK (length(sender_id) = 32),
     recipient_id        BLOB NOT NULL CHECK (length(recipient_id) = 32),
     network_id          BLOB NOT NULL CHECK (length(network_id) = 32),
@@ -393,8 +394,8 @@ pub struct DurableQuarantineResolutionRequestV1<'a> {
     sender_id: ParticipantId,
     recipient_id: ParticipantId,
     wire: RouteWireContextV1,
-    current_cursor: relay::production::DeliveryCursorV2,
-    next_cursor: relay::production::DeliveryCursorV2,
+    current_cursor: Vec<u8>,
+    next_cursor: Vec<u8>,
     canonical_bytes: &'a [u8],
 }
 
@@ -453,13 +454,13 @@ impl DurableQuarantineResolutionRequestV1<'_> {
     }
 
     /// Cursor immediately before the quarantined Relay ordinal.
-    pub const fn current_cursor(&self) -> relay::production::DeliveryCursorV2 {
-        self.current_cursor
+    pub fn current_cursor(&self) -> &[u8] {
+        &self.current_cursor
     }
 
     /// Cursor the Relay advanced only after this record became durable.
-    pub const fn next_cursor(&self) -> relay::production::DeliveryCursorV2 {
-        self.next_cursor
+    pub fn next_cursor(&self) -> &[u8] {
+        &self.next_cursor
     }
 
     /// Exact bounded envelope bytes. They are intentionally available only at
@@ -865,11 +866,43 @@ struct StoredEntryV1 {
 }
 
 #[derive(Clone)]
+struct StoredDeliveryCursorV1 {
+    canonical_bytes: Vec<u8>,
+    database_id: relay::production::RelayDatabaseIdV1,
+    recipient_id: ParticipantId,
+    route_id: Option<Digest32>,
+    session_id: Option<Digest32>,
+    position: u64,
+}
+
+impl core::fmt::Debug for StoredDeliveryCursorV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("StoredDeliveryCursorV1")
+            .field("database_id", &self.database_id)
+            .field("recipient_id", &self.recipient_id)
+            .field("route_id", &self.route_id)
+            .field("session_id", &self.session_id)
+            .field("position", &self.position)
+            .field("canonical_bytes", &"[redacted]")
+            .finish()
+    }
+}
+
+impl PartialEq for StoredDeliveryCursorV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_bytes == other.canonical_bytes
+    }
+}
+
+impl Eq for StoredDeliveryCursorV1 {}
+
+#[derive(Clone)]
 struct StoredQuarantineV1 {
     ordinal: u64,
     relay_ordinal: u64,
-    current_cursor: relay::production::DeliveryCursorV2,
-    next_cursor: relay::production::DeliveryCursorV2,
+    current_cursor: StoredDeliveryCursorV1,
+    next_cursor: StoredDeliveryCursorV1,
     sender_id: ParticipantId,
     envelope_recipient_id: ParticipantId,
     envelope_network_id: Digest32,
@@ -1231,9 +1264,81 @@ impl DurableRelayInboxV1 {
         rosters: &RosterRegistryV1,
         now: TimelockSpec,
     ) -> Result<DurableInboxIngestReportV1, DurableInboxError> {
-        self.ingest_v2(queue, rosters, now)
+        self.ingest_v3(queue, rosters, now)
     }
 
+    fn ingest_v3<Q: RelayQueueV3>(
+        &mut self,
+        queue: &mut Q,
+        rosters: &RosterRegistryV1,
+        now: TimelockSpec,
+    ) -> Result<DurableInboxIngestReportV1, DurableInboxError> {
+        if queue.queue_database_id_v3().as_bytes() != &self.config.expected_relay_database_id {
+            return Err(DurableInboxError::WrongRelayDatabase);
+        }
+        let scope = relay::production::DeliveryScopeV3::new(
+            self.config.recipient_id,
+            self.config.wire.route_id,
+            self.config.wire.session_id,
+        )
+        .map_err(|error| DurableInboxError::Queue(BridgeRefusal::DurableRelay(error)))?;
+        let current = queue
+            .queue_acknowledged_cursor_v3(&scope)
+            .map_err(DurableInboxError::Queue)?;
+        let limits =
+            relay::production::DeliveryPageLimitsV3::new(1, relay::MAX_ENVELOPE_BYTES as u32)
+                .map_err(|error| DurableInboxError::Queue(BridgeRefusal::DurableRelay(error)))?;
+        let page = queue
+            .queue_delivery_page_v3(&scope, &current, limits)
+            .map_err(DurableInboxError::Queue)?;
+        if page.envelopes().is_empty() {
+            if page.current_cursor() != page.next_cursor() || page.has_more() {
+                return Err(DurableInboxError::CorruptState);
+            }
+            return Ok(DurableInboxIngestReportV1::default());
+        }
+        if page.envelopes().len() != 1
+            || page.ordinals().len() != 1
+            || page.current_cursor() != &current
+        {
+            return Err(DurableInboxError::CorruptState);
+        }
+        let mut state = self.reconstruct_transcript(rosters)?;
+        let mut report = DurableInboxIngestReportV1::default();
+        let outcome =
+            self.ingest_one(&page.envelopes()[0], rosters, now, &mut state, &mut report)?;
+        let fully_processed = match outcome {
+            IngestOneOutcomeV1::Processed => true,
+            IngestOneOutcomeV1::Refused(reason) => {
+                let duplicate = self.persist_quarantine(
+                    page.ordinals()[0],
+                    &cursor_record_from_v3(page.current_cursor()),
+                    &cursor_record_from_v3(page.next_cursor()),
+                    &page.envelopes()[0],
+                    reason,
+                    now,
+                )?;
+                if duplicate {
+                    report.quarantine_duplicates += 1;
+                } else {
+                    report.quarantined += 1;
+                }
+                true
+            }
+            IngestOneOutcomeV1::Unquarantinable => false,
+        };
+        if fully_processed {
+            let ack = queue
+                .queue_acknowledge_delivery_page_v3(&scope, page.next_cursor())
+                .map_err(DurableInboxError::Queue)?;
+            if ack.cursor() != page.next_cursor() {
+                return Err(DurableInboxError::CorruptState);
+            }
+        }
+        Ok(report)
+    }
+
+    #[allow(dead_code)]
     fn ingest_v2<Q: RelayQueueV2>(
         &mut self,
         queue: &mut Q,
@@ -1274,8 +1379,8 @@ impl DurableRelayInboxV1 {
             IngestOneOutcomeV1::Refused(reason) => {
                 let duplicate = self.persist_quarantine(
                     page.ordinals()[0],
-                    page.current_cursor(),
-                    page.next_cursor(),
+                    &cursor_record_from_v2(page.current_cursor()),
+                    &cursor_record_from_v2(page.next_cursor()),
                     &page.envelopes()[0],
                     reason,
                     now,
@@ -1557,8 +1662,8 @@ impl DurableRelayInboxV1 {
             sender_id: retained.sender_id,
             recipient_id: self.config.recipient_id,
             wire: self.config.wire,
-            current_cursor: retained.current_cursor,
-            next_cursor: retained.next_cursor,
+            current_cursor: retained.current_cursor.canonical_bytes.clone(),
+            next_cursor: retained.next_cursor.canonical_bytes.clone(),
             canonical_bytes: &retained.canonical_bytes,
         };
         let commit = authority
@@ -1740,20 +1845,28 @@ impl DurableRelayInboxV1 {
     fn persist_quarantine(
         &mut self,
         relay_ordinal: u64,
-        current_cursor: &relay::production::DeliveryCursorV2,
-        next_cursor: &relay::production::DeliveryCursorV2,
+        current_cursor: &StoredDeliveryCursorV1,
+        next_cursor: &StoredDeliveryCursorV1,
         raw: &[u8],
         reason: DurableQuarantineReasonV1,
         now: TimelockSpec,
     ) -> Result<bool, DurableInboxError> {
         if raw.len() > relay::MAX_ENVELOPE_BYTES
-            || current_cursor.database_id().as_bytes() != &self.config.expected_relay_database_id
-            || next_cursor.database_id().as_bytes() != &self.config.expected_relay_database_id
-            || current_cursor.recipient_id() != self.config.recipient_id
-            || next_cursor.recipient_id() != self.config.recipient_id
-            || current_cursor.database_id() != next_cursor.database_id()
-            || current_cursor.position() >= relay_ordinal
-            || next_cursor.position() != relay_ordinal
+            || current_cursor.database_id.as_bytes() != &self.config.expected_relay_database_id
+            || next_cursor.database_id.as_bytes() != &self.config.expected_relay_database_id
+            || current_cursor.recipient_id != self.config.recipient_id
+            || next_cursor.recipient_id != self.config.recipient_id
+            || current_cursor.database_id != next_cursor.database_id
+            || current_cursor.route_id != next_cursor.route_id
+            || current_cursor.session_id != next_cursor.session_id
+            || current_cursor
+                .route_id
+                .is_some_and(|route| route != self.config.wire.route_id)
+            || current_cursor
+                .session_id
+                .is_some_and(|session| session != self.config.wire.session_id)
+            || current_cursor.position >= relay_ordinal
+            || next_cursor.position != relay_ordinal
         {
             return Err(DurableInboxError::CorruptState);
         }
@@ -1800,7 +1913,7 @@ impl DurableRelayInboxV1 {
             "SELECT EXISTS(
                  SELECT 1 FROM inbox_quarantine WHERE current_cursor = ?1
              )",
-            params![current_cursor.canonical_bytes().as_slice()],
+            params![current_cursor.canonical_bytes.as_slice()],
             |row| row.get(0),
         )?;
         if cursor_exists != 0 {
@@ -1875,8 +1988,8 @@ impl DurableRelayInboxV1 {
             params![
                 ordinal.to_be_bytes().as_slice(),
                 relay_ordinal.to_be_bytes().as_slice(),
-                current_cursor.canonical_bytes().as_slice(),
-                next_cursor.canonical_bytes().as_slice(),
+                current_cursor.canonical_bytes.as_slice(),
+                next_cursor.canonical_bytes.as_slice(),
                 envelope.sender_id.0.as_slice(),
                 envelope.recipient_id.0.as_slice(),
                 envelope.network_id.as_slice(),
@@ -2639,8 +2752,8 @@ struct RawQuarantineRowV1 {
 struct QuarantineRecordMaterialV1<'a> {
     ordinal: u64,
     relay_ordinal: u64,
-    current_cursor: &'a relay::production::DeliveryCursorV2,
-    next_cursor: &'a relay::production::DeliveryCursorV2,
+    current_cursor: &'a StoredDeliveryCursorV1,
+    next_cursor: &'a StoredDeliveryCursorV1,
     envelope: &'a RelayEnvelopeV1,
     reason: DurableQuarantineReasonV1,
     envelope_digest: &'a Digest32,
@@ -2649,6 +2762,44 @@ struct QuarantineRecordMaterialV1<'a> {
     now_domain: u8,
     now_value: u64,
     previous_record_digest: &'a Digest32,
+}
+
+fn cursor_record_from_v2(cursor: &relay::production::DeliveryCursorV2) -> StoredDeliveryCursorV1 {
+    StoredDeliveryCursorV1 {
+        canonical_bytes: cursor.canonical_bytes().to_vec(),
+        database_id: cursor.database_id(),
+        recipient_id: cursor.recipient_id(),
+        route_id: None,
+        session_id: None,
+        position: cursor.position(),
+    }
+}
+
+fn cursor_record_from_v3(cursor: &relay::production::DeliveryCursorV3) -> StoredDeliveryCursorV1 {
+    StoredDeliveryCursorV1 {
+        canonical_bytes: cursor.canonical_bytes().to_vec(),
+        database_id: cursor.database_id(),
+        recipient_id: cursor.scope().recipient_id(),
+        route_id: Some(*cursor.scope().route_id()),
+        session_id: Some(*cursor.scope().session_id()),
+        position: cursor.position(),
+    }
+}
+
+fn decode_cursor_record(raw: &[u8]) -> Result<StoredDeliveryCursorV1, DurableInboxError> {
+    match raw.len() {
+        relay::production::DELIVERY_CURSOR_V2_LEN => {
+            let cursor = relay::production::DeliveryCursorV2::decode(raw)
+                .map_err(|_| DurableInboxError::CorruptState)?;
+            Ok(cursor_record_from_v2(&cursor))
+        }
+        relay::production::DELIVERY_CURSOR_V3_LEN => {
+            let cursor = relay::production::DeliveryCursorV3::decode(raw)
+                .map_err(|_| DurableInboxError::CorruptState)?;
+            Ok(cursor_record_from_v3(&cursor))
+        }
+        _ => Err(DurableInboxError::CorruptState),
+    }
 }
 
 fn quarantine_row_from_sql(row: &rusqlite::Row<'_>) -> Result<RawQuarantineRowV1, rusqlite::Error> {
@@ -2806,10 +2957,8 @@ fn validate_quarantine_row(
         return Err(DurableInboxError::CorruptState);
     }
     let relay_ordinal = as_u64_be(&raw.relay_ordinal)?;
-    let current_cursor = relay::production::DeliveryCursorV2::decode(&raw.current_cursor)
-        .map_err(|_| DurableInboxError::CorruptState)?;
-    let next_cursor = relay::production::DeliveryCursorV2::decode(&raw.next_cursor)
-        .map_err(|_| DurableInboxError::CorruptState)?;
+    let current_cursor = decode_cursor_record(&raw.current_cursor)?;
+    let next_cursor = decode_cursor_record(&raw.next_cursor)?;
     let sender_id = ParticipantId(as_digest(&raw.sender_id)?);
     let recipient_id = ParticipantId(as_digest(&raw.recipient_id)?);
     let network_id = as_digest(&raw.network_id)?;
@@ -2838,13 +2987,21 @@ fn validate_quarantine_row(
     let previous_compact_root = as_digest(&raw.previous_compact_root)?;
     let compact_digest = as_digest(&raw.compact_digest)?;
     if raw.canonical_bytes.len() > relay::MAX_ENVELOPE_BYTES
-        || current_cursor.recipient_id() != config.recipient_id
-        || next_cursor.recipient_id() != config.recipient_id
-        || current_cursor.database_id().as_bytes() != &config.expected_relay_database_id
-        || next_cursor.database_id().as_bytes() != &config.expected_relay_database_id
-        || current_cursor.database_id() != next_cursor.database_id()
-        || current_cursor.position() >= relay_ordinal
-        || next_cursor.position() != relay_ordinal
+        || current_cursor.recipient_id != config.recipient_id
+        || next_cursor.recipient_id != config.recipient_id
+        || current_cursor.database_id.as_bytes() != &config.expected_relay_database_id
+        || next_cursor.database_id.as_bytes() != &config.expected_relay_database_id
+        || current_cursor.database_id != next_cursor.database_id
+        || current_cursor.route_id != next_cursor.route_id
+        || current_cursor.session_id != next_cursor.session_id
+        || current_cursor
+            .route_id
+            .is_some_and(|route| route != config.wire.route_id)
+        || current_cursor
+            .session_id
+            .is_some_and(|session| session != config.wire.session_id)
+        || current_cursor.position >= relay_ordinal
+        || next_cursor.position != relay_ordinal
         || quarantine_resolution_digest(
             config,
             &record_digest,
@@ -2978,8 +3135,8 @@ fn load_quarantine_by_relay_ordinal(
 
 fn quarantine_context_digest(
     config: &DurableInboxConfigV1,
-    current_cursor: &relay::production::DeliveryCursorV2,
-    next_cursor: &relay::production::DeliveryCursorV2,
+    current_cursor: &StoredDeliveryCursorV1,
+    next_cursor: &StoredDeliveryCursorV1,
     relay_ordinal: u64,
     envelope: &RelayEnvelopeV1,
 ) -> Result<Digest32, DurableInboxError> {
@@ -2994,8 +3151,8 @@ fn quarantine_context_digest(
             config.wire.roster_snapshot.as_slice(),
             &config.wire.policy_version.to_be_bytes(),
             config.recipient_id.0.as_slice(),
-            current_cursor.canonical_bytes().as_slice(),
-            next_cursor.canonical_bytes().as_slice(),
+            current_cursor.canonical_bytes.as_slice(),
+            next_cursor.canonical_bytes.as_slice(),
             &relay_ordinal.to_be_bytes(),
             envelope.network_id.as_slice(),
             envelope.session_id.as_slice(),
@@ -3021,8 +3178,8 @@ fn quarantine_record_digest(
             config.inbox_id.as_slice(),
             &material.ordinal.to_be_bytes(),
             &material.relay_ordinal.to_be_bytes(),
-            material.current_cursor.canonical_bytes().as_slice(),
-            material.next_cursor.canonical_bytes().as_slice(),
+            material.current_cursor.canonical_bytes.as_slice(),
+            material.next_cursor.canonical_bytes.as_slice(),
             material.envelope.sender_id.0.as_slice(),
             material.envelope.recipient_id.0.as_slice(),
             material.envelope.network_id.as_slice(),
@@ -3079,8 +3236,8 @@ fn quarantine_compact_digest(
             previous_compact_root.as_slice(),
             &retained.ordinal.to_be_bytes(),
             &retained.relay_ordinal.to_be_bytes(),
-            retained.current_cursor.canonical_bytes().as_slice(),
-            retained.next_cursor.canonical_bytes().as_slice(),
+            retained.current_cursor.canonical_bytes.as_slice(),
+            retained.next_cursor.canonical_bytes.as_slice(),
             retained.sender_id.0.as_slice(),
             retained.envelope_recipient_id.0.as_slice(),
             retained.envelope_network_id.as_slice(),
@@ -3908,6 +4065,8 @@ mod applied_f6_replay_tests {
     const NETWORK: Digest32 = [0x11; 32];
     const SESSION: Digest32 = [0x22; 32];
     const ROUTE: Digest32 = [0x33; 32];
+    const OTHER_SESSION: Digest32 = [0x24; 32];
+    const OTHER_ROUTE: Digest32 = [0x35; 32];
     const SNAPSHOT: Digest32 = [0x44; 32];
     const INITIATOR: ParticipantId = ParticipantId([0x51; 32]);
     const SOLVER: ParticipantId = ParticipantId([0x52; 32]);
@@ -4039,6 +4198,46 @@ mod applied_f6_replay_tests {
         }
     }
 
+    impl RelayQueueV3 for RefuseDeliveryAckOnce {
+        fn queue_database_id_v3(&self) -> RelayDatabaseIdV1 {
+            self.relay.database_id()
+        }
+
+        fn queue_acknowledged_cursor_v3(
+            &self,
+            scope: &relay::production::DeliveryScopeV3,
+        ) -> Result<relay::production::DeliveryCursorV3, BridgeRefusal> {
+            self.relay
+                .acknowledged_delivery_cursor_v3(scope)
+                .map_err(BridgeRefusal::DurableRelay)
+        }
+
+        fn queue_delivery_page_v3(
+            &mut self,
+            scope: &relay::production::DeliveryScopeV3,
+            current: &relay::production::DeliveryCursorV3,
+            limits: relay::production::DeliveryPageLimitsV3,
+        ) -> Result<relay::production::DeliveryPageV3, BridgeRefusal> {
+            self.relay
+                .delivery_page_v3(scope, current, limits)
+                .map_err(BridgeRefusal::DurableRelay)
+        }
+
+        fn queue_acknowledge_delivery_page_v3(
+            &mut self,
+            scope: &relay::production::DeliveryScopeV3,
+            next: &relay::production::DeliveryCursorV3,
+        ) -> Result<relay::production::DeliveryAckV3, BridgeRefusal> {
+            if self.refuse_next_ack {
+                self.refuse_next_ack = false;
+                return Err(BridgeRefusal::AckDigestMismatch);
+            }
+            self.relay
+                .acknowledge_delivery_page_v3(scope, next)
+                .map_err(BridgeRefusal::DurableRelay)
+        }
+    }
+
     impl F6TransportPortV1 for DurableTestF6Port {
         type Error = TestF6Error;
 
@@ -4131,7 +4330,7 @@ mod applied_f6_replay_tests {
         let inbox_root = temporary.path().join("inbox-lost-delivery-ack");
         let mut inbox = DurableRelayInboxV1::create(&inbox_root, config()?, &rosters()?)?;
         assert!(matches!(
-            inbox.ingest_v2(&mut queue, &rosters()?, now()),
+            inbox.ingest_v3(&mut queue, &rosters()?, now()),
             Err(DurableInboxError::Queue(BridgeRefusal::AckDigestMismatch))
         ));
         assert_eq!(inbox.stats()?.pending_f6, 1);
@@ -4139,7 +4338,7 @@ mod applied_f6_replay_tests {
         drop(inbox);
 
         let mut inbox = DurableRelayInboxV1::open(&inbox_root, config()?, &rosters()?)?;
-        let retry = inbox.ingest_v2(&mut queue, &rosters()?, now())?;
+        let retry = inbox.ingest_v3(&mut queue, &rosters()?, now())?;
         assert_eq!((retry.accepted, retry.duplicates), (0, 1));
         assert_eq!(
             queue.relay.len()?,
@@ -4173,6 +4372,55 @@ mod applied_f6_replay_tests {
         let reopened = DurableRelayInboxV1::open(&inbox_root, config()?, &rosters()?)?;
         assert_eq!(reopened.stats()?.quarantined, 1);
         assert!(!format!("{reopened:?}").contains("quarantine-secret-payload"));
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_ingest_does_not_steal_sibling_session_envelope() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
+        let relay_root = temporary.path().join("relay-scoped-sibling-sessions");
+        let relay_config = RelayDatabaseConfigV1::new(RelayDatabaseIdV1::new([0x91; 32])?, 64)?;
+        let mut relay = ProductionRelayV1::create(&relay_root, relay_config)?;
+        let (parent, _) = envelope_for_wire(
+            wire(),
+            message_type::RFQ,
+            0,
+            ZERO_DIGEST,
+            b"parent-offer",
+            0x46,
+            SNAPSHOT,
+        )?;
+        let (sibling, _) = envelope_for_wire(
+            wire_for(OTHER_SESSION, OTHER_ROUTE),
+            message_type::RFQ,
+            0,
+            ZERO_DIGEST,
+            b"sibling-offer",
+            0x47,
+            SNAPSHOT,
+        )?;
+        relay.submit(&parent)?;
+        relay.submit(&sibling)?;
+
+        let sibling_root = temporary.path().join("sibling-inbox");
+        let sibling_config = config_for([0x57; 32], wire_for(OTHER_SESSION, OTHER_ROUTE))?;
+        let mut sibling_inbox =
+            DurableRelayInboxV1::create(&sibling_root, sibling_config, &rosters()?)?;
+        let sibling_report = sibling_inbox.ingest(&mut relay, &rosters()?, now())?;
+        assert_eq!(
+            (sibling_report.accepted, sibling_report.quarantined),
+            (1, 0)
+        );
+        assert_eq!(relay.len()?, 1, "parent envelope remains retained");
+
+        let parent_root = temporary.path().join("parent-inbox");
+        let mut parent_inbox = DurableRelayInboxV1::create(&parent_root, config()?, &rosters()?)?;
+        let parent_report = parent_inbox.ingest(&mut relay, &rosters()?, now())?;
+        assert_eq!((parent_report.accepted, parent_report.quarantined), (1, 0));
+        assert_eq!(relay.len()?, 0);
+        assert_eq!(parent_inbox.stats()?.pending_f6, 1);
+        assert_eq!(sibling_inbox.stats()?.pending_f6, 1);
         Ok(())
     }
 
@@ -4235,7 +4483,7 @@ mod applied_f6_replay_tests {
         let inbox_root = temporary.path().join("inbox-quarantine-lost-ack");
         let mut inbox = DurableRelayInboxV1::create(&inbox_root, config()?, &rosters()?)?;
         assert!(matches!(
-            inbox.ingest_v2(&mut queue, &rosters()?, now()),
+            inbox.ingest_v3(&mut queue, &rosters()?, now()),
             Err(DurableInboxError::Queue(BridgeRefusal::AckDigestMismatch))
         ));
         assert_eq!(inbox.stats()?.quarantined, 1);
@@ -4243,7 +4491,7 @@ mod applied_f6_replay_tests {
         drop(inbox);
 
         let mut inbox = DurableRelayInboxV1::open(&inbox_root, config()?, &rosters()?)?;
-        let retry = inbox.ingest_v2(&mut queue, &rosters()?, now())?;
+        let retry = inbox.ingest_v3(&mut queue, &rosters()?, now())?;
         assert_eq!((retry.quarantined, retry.quarantine_duplicates), (0, 1));
         assert_eq!(queue.relay.len()?, 0);
         assert_eq!(inbox.stats()?.quarantined, 1);
@@ -4682,15 +4930,18 @@ mod applied_f6_replay_tests {
         )?;
         relay.submit(&first)?;
         relay.submit(&second)?;
-        let current = relay.acknowledged_delivery_cursor_v2(&SOLVER)?;
-        let page = relay.delivery_page_v2(
-            &SOLVER,
+        let scope = relay::production::DeliveryScopeV3::new(SOLVER, ROUTE, SESSION)?;
+        let current = relay.acknowledged_delivery_cursor_v3(&scope)?;
+        let page = relay.delivery_page_v3(
+            &scope,
             &current,
-            relay::production::DeliveryPageLimitsV2::new(1, relay::MAX_ENVELOPE_BYTES as u32)?,
+            relay::production::DeliveryPageLimitsV3::new(1, relay::MAX_ENVELOPE_BYTES as u32)?,
         )?;
         let old_relay_ordinal = page.ordinals()[0];
         let old_current = *page.current_cursor();
         let old_next = *page.next_cursor();
+        let old_current_record = cursor_record_from_v3(&old_current);
+        let old_next_record = cursor_record_from_v3(&old_next);
         drop(page);
 
         let inbox_root = temporary.path().join("inbox-old-compact-replay");
@@ -4702,8 +4953,8 @@ mod applied_f6_replay_tests {
         let recent_before = inbox.stats()?;
         assert!(inbox.persist_quarantine(
             old_relay_ordinal,
-            &old_current,
-            &old_next,
+            &old_current_record,
+            &old_next_record,
             &first,
             DurableQuarantineReasonV1::WrongRosterSnapshot,
             now(),
@@ -4722,8 +4973,8 @@ mod applied_f6_replay_tests {
         assert!(matches!(
             inbox.persist_quarantine(
                 old_relay_ordinal,
-                &old_current,
-                &old_next,
+                &old_current_record,
+                &old_next_record,
                 &first,
                 DurableQuarantineReasonV1::WrongRosterSnapshot,
                 now(),
@@ -4772,12 +5023,14 @@ mod applied_f6_replay_tests {
             &current,
             relay::production::DeliveryPageLimitsV2::new(1, relay::MAX_ENVELOPE_BYTES as u32)?,
         )?;
+        let current_record = cursor_record_from_v2(page.current_cursor());
+        let next_record = cursor_record_from_v2(page.next_cursor());
         let inbox_root = temporary.path().join("inbox-quarantine-equivocation");
         let mut inbox = DurableRelayInboxV1::create(&inbox_root, config()?, &rosters()?)?;
         assert!(!inbox.persist_quarantine(
             page.ordinals()[0],
-            page.current_cursor(),
-            page.next_cursor(),
+            &current_record,
+            &next_record,
             &first,
             DurableQuarantineReasonV1::WrongRosterSnapshot,
             now(),
@@ -4785,8 +5038,8 @@ mod applied_f6_replay_tests {
         assert!(matches!(
             inbox.persist_quarantine(
                 page.ordinals()[0],
-                page.current_cursor(),
-                page.next_cursor(),
+                &current_record,
+                &next_record,
                 &different,
                 DurableQuarantineReasonV1::WrongRosterSnapshot,
                 now(),
@@ -5071,17 +5324,28 @@ mod applied_f6_replay_tests {
     }
 
     fn wire() -> RouteWireContextV1 {
+        wire_for(SESSION, ROUTE)
+    }
+
+    fn wire_for(session_id: Digest32, route_id: Digest32) -> RouteWireContextV1 {
         RouteWireContextV1 {
             network_id: NETWORK,
-            session_id: SESSION,
-            route_id: ROUTE,
+            session_id,
+            route_id,
             roster_snapshot: SNAPSHOT,
             policy_version: 1,
         }
     }
 
     fn config() -> Result<DurableInboxConfigV1, DurableInboxError> {
-        DurableInboxConfigV1::new([0x54; 32], [0x91; 32], wire(), SOLVER, 16)
+        config_for([0x54; 32], wire())
+    }
+
+    fn config_for(
+        inbox_id: Digest32,
+        wire: RouteWireContextV1,
+    ) -> Result<DurableInboxConfigV1, DurableInboxError> {
+        DurableInboxConfigV1::new(inbox_id, [0x91; 32], wire, SOLVER, 16)
     }
 
     fn config_with_max(max_entries: u32) -> Result<DurableInboxConfigV1, DurableInboxError> {
@@ -5147,6 +5411,38 @@ mod applied_f6_replay_tests {
             payload: payload.to_vec(),
             expiry: TimelockSpec::TimestampSeconds { value: 10_000 },
             policy_version: 1,
+            roster_snapshot,
+            signature: [0; 64],
+        };
+        let digest = envelope.envelope_digest()?;
+        envelope.signature = SecpContext::new(&[0x55; 32])
+            .sign_bip340(&INITIATOR_SECRET, &digest, &[aux; 32])?
+            .0;
+        Ok((envelope.canonical_bytes()?, digest))
+    }
+
+    fn envelope_for_wire(
+        wire: RouteWireContextV1,
+        kind: u16,
+        sequence: u64,
+        previous: Digest32,
+        payload: &[u8],
+        aux: u8,
+        roster_snapshot: Digest32,
+    ) -> Result<(Vec<u8>, Digest32), Box<dyn Error>> {
+        let mut envelope = RelayEnvelopeV1 {
+            network_id: wire.network_id,
+            message_type: kind,
+            session_id: wire.session_id,
+            route_id: wire.route_id,
+            sender_id: INITIATOR,
+            recipient_id: SOLVER,
+            sender_role: SenderRoleV1::Initiator,
+            sequence,
+            previous_transcript_hash: previous,
+            payload: payload.to_vec(),
+            expiry: TimelockSpec::TimestampSeconds { value: 10_000 },
+            policy_version: wire.policy_version,
             roster_snapshot,
             signature: [0; 64],
         };
