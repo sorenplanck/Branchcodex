@@ -64,7 +64,7 @@ def source_digest():
     paths = sorted(set(os.fsdecode(p) for p in raw.split(b"\0") if p))
     digest = hashlib.sha256()
     for name in paths:
-        if name.startswith("artifacts/"):
+        if name.startswith(("artifacts/", ".ci-eigenwallet/", ".ci-eigenwallet.partial-")):
             continue
         path = ROOT / name
         if path.is_file():

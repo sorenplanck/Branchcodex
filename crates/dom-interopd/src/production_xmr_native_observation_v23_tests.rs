@@ -435,6 +435,7 @@ pub(super) fn run_claim(
         signed,
         work,
         &native,
+        &snapshot.runtime()?,
         claim_capture::capture,
         |store, actor, participant, exact| {
             let facts = store
