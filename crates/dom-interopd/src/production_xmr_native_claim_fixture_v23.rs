@@ -241,8 +241,14 @@ pub(in super::super) fn claim_after_observed_funding(
     drop(identities);
     drop(stores);
     let mut captured = None;
+    // DIAG harness: run every reopen actor and the receiver phase to the end,
+    // catching each Err and panic so one run surfaces ALL downstream failures
+    // instead of aborting at the first. Dependent steps that cannot run without
+    // a failed prerequisite are reported as SKIPPED.
+    let mut ceremony_failures: Vec<String> = Vec::new();
     for actor in 0..2 {
         let actor_started = Instant::now();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
             Arc::new(root(actor)?),
             "runtime-contracts",
@@ -433,37 +439,84 @@ pub(in super::super) fn claim_after_observed_funding(
                     .adaptor_secret_exposed
             );
         }
-        eprintln!(
-            "native Claim actor={actor}: independent reopen, replay and scoped exposure checks passed after {:?}",
-            actor_started.elapsed(),
-        );
+        Ok(())
+        }));
+        match outcome {
+            Ok(Ok(())) => eprintln!(
+                "native Claim actor={actor}: independent reopen, replay and scoped exposure checks passed after {:?}",
+                actor_started.elapsed(),
+            ),
+            Ok(Err(e)) => {
+                eprintln!("DIAG FAILURE actor={actor} reopen (Err): {e}");
+                ceremony_failures.push(format!("reopen actor {actor}: {e}"));
+            }
+            Err(_) => {
+                eprintln!("DIAG FAILURE actor={actor} reopen: panicked (message above)");
+                ceremony_failures.push(format!("reopen actor {actor}: panicked"));
+            }
+        }
     }
-    let (sender, exact) = captured.ok_or("native exposed Claim was not captured")?;
-    let receiver = sender ^ 1;
-    for restart in 0..2 {
-        let observation_started = Instant::now();
-        let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
-            Arc::new(root(receiver)?),
-            "runtime-contracts",
-            budget.clone(),
-            chain,
-        )?;
-        receive(
-            &store,
-            receiver,
-            wallets[receiver].0.participant().participant_id(),
-            &exact,
-        )?;
-        assert!(
-            store
-                .load_session(session)?
-                .irreversible()
-                .adaptor_secret_exposed
-        );
+    match captured {
+        Some((sender, exact)) => {
+            let receiver = sender ^ 1;
+            for restart in 0..2 {
+                let observation_started = Instant::now();
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                    let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
+                        Arc::new(root(receiver)?),
+                        "runtime-contracts",
+                        budget.clone(),
+                        chain,
+                    )?;
+                    receive(
+                        &store,
+                        receiver,
+                        wallets[receiver].0.participant().participant_id(),
+                        &exact,
+                    )?;
+                    assert!(
+                        store
+                            .load_session(session)?
+                            .irreversible()
+                            .adaptor_secret_exposed
+                    );
+                    Ok(())
+                }));
+                match outcome {
+                    Ok(Ok(())) => eprintln!(
+                        "native Claim receiver: canonical observation and extraction restart={restart} passed after {:?}",
+                        observation_started.elapsed(),
+                    ),
+                    Ok(Err(e)) => {
+                        eprintln!("DIAG FAILURE receiver restart={restart} (Err): {e}");
+                        ceremony_failures.push(format!("receiver restart {restart}: {e}"));
+                    }
+                    Err(_) => {
+                        eprintln!("DIAG FAILURE receiver restart={restart}: panicked (message above)");
+                        ceremony_failures.push(format!("receiver restart {restart}: panicked"));
+                    }
+                }
+            }
+        }
+        None => {
+            eprintln!("DIAG SKIP receiver phase: no exposed claim captured (sender exposure did not complete)");
+            ceremony_failures
+                .push("receiver phase SKIPPED: sender exposure never captured".to_string());
+        }
+    }
+    if !ceremony_failures.is_empty() {
         eprintln!(
-            "native Claim receiver: canonical observation and extraction restart={restart} passed after {:?}",
-            observation_started.elapsed(),
+            "=== DIAG CEREMONY FAILURES: {} collected (ran to end) ===",
+            ceremony_failures.len()
         );
+        for (i, f) in ceremony_failures.iter().enumerate() {
+            eprintln!("  [{}] {}", i + 1, f);
+        }
+        return Err(format!(
+            "claim ceremony collected {} failure(s) running to the end; see DIAG CEREMONY FAILURES",
+            ceremony_failures.len()
+        )
+        .into());
     }
     eprintln!("native Claim: complete after {:?}", claim_started.elapsed());
     Ok(())
