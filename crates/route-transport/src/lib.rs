@@ -231,6 +231,7 @@ impl<T: RelayQueueV1 + ?Sized> RelaySubmitQueueV1 for T {
 /// never exposes a recipient's full retained history: one page is durably
 /// pinned, locally persisted by the inbox, and only then acknowledged.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 trait RelayQueueV2 {
     /// Stable database identity retained by the concrete Relay authority.
     fn queue_database_id_v2(&self) -> relay::production::RelayDatabaseIdV1;
@@ -255,6 +256,36 @@ trait RelayQueueV2 {
         recipient: &ParticipantId,
         next: &relay::production::DeliveryCursorV2,
     ) -> Result<relay::production::DeliveryAckV2, BridgeRefusal>;
+}
+
+/// Scoped production delivery surface. Each durable inbox consumes only its
+/// configured route/session scope so sibling workers sharing a recipient
+/// cannot advance its cursor or garbage-collect its envelopes.
+#[cfg(target_os = "linux")]
+trait RelayQueueV3 {
+    /// Stable database identity retained by the concrete Relay authority.
+    fn queue_database_id_v3(&self) -> relay::production::RelayDatabaseIdV1;
+
+    /// Exact currently acknowledged cursor for one recipient/route/session.
+    fn queue_acknowledged_cursor_v3(
+        &self,
+        scope: &relay::production::DeliveryScopeV3,
+    ) -> Result<relay::production::DeliveryCursorV3, BridgeRefusal>;
+
+    /// Pins or redelivers one exact bounded scoped page.
+    fn queue_delivery_page_v3(
+        &mut self,
+        scope: &relay::production::DeliveryScopeV3,
+        current: &relay::production::DeliveryCursorV3,
+        limits: relay::production::DeliveryPageLimitsV3,
+    ) -> Result<relay::production::DeliveryPageV3, BridgeRefusal>;
+
+    /// Durably advances only the exact pending scoped page.
+    fn queue_acknowledge_delivery_page_v3(
+        &mut self,
+        scope: &relay::production::DeliveryScopeV3,
+        next: &relay::production::DeliveryCursorV3,
+    ) -> Result<relay::production::DeliveryAckV3, BridgeRefusal>;
 }
 
 impl RelayQueueV1 for RelayV1 {
@@ -307,6 +338,40 @@ impl RelayQueueV2 for relay::production::ProductionRelayV1 {
         next: &relay::production::DeliveryCursorV2,
     ) -> Result<relay::production::DeliveryAckV2, BridgeRefusal> {
         self.acknowledge_delivery_page_v2(recipient, next)
+            .map_err(BridgeRefusal::DurableRelay)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RelayQueueV3 for relay::production::ProductionRelayV1 {
+    fn queue_database_id_v3(&self) -> relay::production::RelayDatabaseIdV1 {
+        self.database_id()
+    }
+
+    fn queue_acknowledged_cursor_v3(
+        &self,
+        scope: &relay::production::DeliveryScopeV3,
+    ) -> Result<relay::production::DeliveryCursorV3, BridgeRefusal> {
+        self.acknowledged_delivery_cursor_v3(scope)
+            .map_err(BridgeRefusal::DurableRelay)
+    }
+
+    fn queue_delivery_page_v3(
+        &mut self,
+        scope: &relay::production::DeliveryScopeV3,
+        current: &relay::production::DeliveryCursorV3,
+        limits: relay::production::DeliveryPageLimitsV3,
+    ) -> Result<relay::production::DeliveryPageV3, BridgeRefusal> {
+        self.delivery_page_v3(scope, current, limits)
+            .map_err(BridgeRefusal::DurableRelay)
+    }
+
+    fn queue_acknowledge_delivery_page_v3(
+        &mut self,
+        scope: &relay::production::DeliveryScopeV3,
+        next: &relay::production::DeliveryCursorV3,
+    ) -> Result<relay::production::DeliveryAckV3, BridgeRefusal> {
+        self.acknowledge_delivery_page_v3(scope, next)
             .map_err(BridgeRefusal::DurableRelay)
     }
 }
