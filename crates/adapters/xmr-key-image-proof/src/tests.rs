@@ -68,10 +68,13 @@ fn equations_roundtrip_and_fresh_nonce() {
     );
 }
 
+/// One in-place edit of a scope field, used to prove each one is bound.
+type ScopeMutation = Box<dyn Fn(&mut InputSpendContextV23)>;
+
 #[test]
 fn every_scope_field_and_both_statement_points_are_bound() {
     let (ctx, p, i, proof) = fixture();
-    let mutations: Vec<Box<dyn Fn(&mut InputSpendContextV23)>> = vec![
+    let mutations: Vec<ScopeMutation> = vec![
         Box::new(|v| v.network_genesis[0] ^= 1),
         Box::new(|v| v.route[0] ^= 1),
         Box::new(|v| v.session[0] ^= 1),

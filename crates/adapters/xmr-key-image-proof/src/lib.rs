@@ -110,8 +110,7 @@ impl InputSpendContextV23 {
             self.sweep_tx,
             self.destination,
         ]
-        .iter()
-        .any(|v| *v == [0; 32])
+        .contains(&[0; 32])
             || self.funded_amount == 0
             || self.fee == 0
             || self.fee >= self.funded_amount
