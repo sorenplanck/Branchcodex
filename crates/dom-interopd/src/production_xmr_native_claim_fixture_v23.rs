@@ -304,6 +304,7 @@ pub(in super::super) fn claim_after_observed_funding(
         );
         if request.role().dom_claim_sender_id().0 == wallets[actor].0.participant().participant_id()
         {
+            eprintln!("DIAG sender actor={actor}: entered sender branch");
             // The effect is explicitly local component scope, not a fabricated
             // route coordinator/F6 grant. The actuator still fences it durably.
             let binding = wallets[actor].0;
@@ -328,6 +329,7 @@ pub(in super::super) fn claim_after_observed_funding(
                 10_000,
             )?;
             control.bind_session(lease, binding, now)?;
+            eprintln!("DIAG sender actor={actor}: lease+bind_session OK, testing wrong-side expose");
             // A valid actor on the opposite side must never release its U as T.
             assert!(native
                 .expose_native_claim_v23(
@@ -349,10 +351,12 @@ pub(in super::super) fn claim_after_observed_funding(
                     .irreversible()
                     .adaptor_secret_exposed
             );
+            eprintln!("DIAG sender actor={actor}: wrong-side expose rejected OK, revalidating for real expose");
             store.revalidate_consumed_f7_claim_authorization_v12(
                 &consumed,
                 observe(actor, &request, &produced[actor])?,
             )?;
+            eprintln!("DIAG sender actor={actor}: entering real expose_native_claim_v23");
             let submission = native.expose_native_claim_v23(
                 actor,
                 &store,
@@ -365,6 +369,7 @@ pub(in super::super) fn claim_after_observed_funding(
                 scope,
                 now,
             )?;
+            eprintln!("DIAG sender actor={actor}: real expose OK");
             let tx_hash = submission.tx_hash();
             assert_ne!(tx_hash, [0; 32]);
             assert_eq!(
@@ -410,8 +415,10 @@ pub(in super::super) fn claim_after_observed_funding(
                 now + 1,
                 10_000,
             )?;
+            eprintln!("DIAG sender actor={actor}: entering resume_f7_claim_child_v21 (second reopen)");
             dom_actuator::DomContractsActuatorV1::bind(&store, binding)?
                 .resume_f7_claim_child_v21(&mut control, lease, &chain, scope, now + 1)?;
+            eprintln!("DIAG sender actor={actor}: resume_f7_claim_child_v21 OK");
             let mirror = control.audit_final_claim_custody_v2(lease, binding, now + 1)?;
             assert_eq!(mirror.tx_hash(), tx_hash);
             assert_eq!(mirror.exposure_record_digest(), exposure);

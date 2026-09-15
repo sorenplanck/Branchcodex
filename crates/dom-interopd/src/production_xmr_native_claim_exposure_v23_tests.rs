@@ -42,7 +42,9 @@ impl NativeXmrCustodyFixtureV23 {
             owner.role,
         )?;
         // Refuse stale or wrong-sender authority before decrypting local T.
+        eprintln!("DIAG expose: passed scope checks, calling revalidate_f7_final_claim_authority_v14 (recency)");
         store.revalidate_f7_final_claim_authority_v14(authority, chain, local)?;
+        eprintln!("DIAG expose: authority recency OK, loading secret + prepare_and_expose");
         let material = owner
             .secrets
             .load(&self.setup.settlement_id(), &self.setup.terms_hash())?;
