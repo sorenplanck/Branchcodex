@@ -60,6 +60,7 @@ impl NativeXmrCustodyFixtureV23 {
             let bytes = Zeroizing::new(scalar.dom_secret_big_endian());
             let secret = dom_adaptor::AdaptorSecret::from_be_bytes(*bytes)?;
             let height = store.load_session(binding.session_id())?.chain().tip_height;
+            eprintln!("DIAG expose: validation_height (session tip_height) = {height}");
             Ok(dom_actuator::DomContractsActuatorV1::bind(store, binding)?
                 .prepare_and_expose_f7_final_claim_v14(
                     control,
