@@ -7,7 +7,7 @@ use crate::production_dom_vaults_v12::{
 };
 use crate::production_xmr_round_runtime_v12::{
     require_xmr_recovery_signing_scope_v23, tick_xmr_recovery_round_v12,
-    ProductionXmrRecoveryRoundKindV12, ProductionXmrRoundProgressV12,
+    ProductionXmrRecoveryRoundKindV12, ProductionXmrRoundErrorV12, ProductionXmrRoundProgressV12,
 };
 use dom_actuator::{participant_retained_vault_signer_v12, RetainedParticipantVaultSignerV12};
 use dom_adaptor::{canonical_template_v1, AcceptedSigningSessionV1};
@@ -146,7 +146,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             return Ok(());
         }
         let mut relay = self.relay.try_borrow_mut().map_err(|_| Refused)?;
-        let progress = tick_xmr_recovery_round_v12(
+        match tick_xmr_recovery_round_v12(
             &self.store,
             &self.identity,
             &mut relay,
@@ -157,10 +157,17 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             parent_binding,
             &mut owner.signers[index],
             expiry,
-        )
-        .map_err(|_| Refused)?;
-        if matches!(progress, ProductionXmrRoundProgressV12::Complete) {
-            owner.auxiliary_complete[complete] = true;
+        ) {
+            Ok(ProductionXmrRoundProgressV12::Complete) => {
+                owner.auxiliary_complete[complete] = true;
+            }
+            Ok(
+                ProductionXmrRoundProgressV12::AwaitingPeer | ProductionXmrRoundProgressV12::Staged,
+            ) => {}
+            // The Relay may still be draining an earlier durable graph edge.
+            // Keep the owner alive and retry after the worker polls it.
+            Err(ProductionXmrRoundErrorV12::Transport) => {}
+            Err(_) => return Err(Refused),
         }
         Ok(())
     }
@@ -331,7 +338,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         // The auxiliary signers at indices 0 and 2 remain held. Sending them
         // through this parent's session-scoped Relay is forbidden.
         let mut relay = self.relay.try_borrow_mut().map_err(|_| Error::Binding)?;
-        let progress = tick_xmr_recovery_round_v12(
+        match tick_xmr_recovery_round_v12(
             &self.store,
             &self.identity,
             &mut relay,
@@ -342,10 +349,17 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             parent_binding,
             &mut owner.signers[1],
             expiry,
-        )
-        .map_err(|_| Error::Binding)?;
-        if matches!(progress, ProductionXmrRoundProgressV12::Complete) {
-            owner.refund_complete = true;
+        ) {
+            Ok(ProductionXmrRoundProgressV12::Complete) => {
+                owner.refund_complete = true;
+            }
+            Ok(
+                ProductionXmrRoundProgressV12::AwaitingPeer | ProductionXmrRoundProgressV12::Staged,
+            ) => {}
+            // The parent Relay can still hold the graph-agreement 0x18 edge;
+            // retry recovery signing after that durable transport clears.
+            Err(ProductionXmrRoundErrorV12::Transport) => {}
+            Err(_) => return Err(Error::Binding),
         }
         Ok(())
     }
