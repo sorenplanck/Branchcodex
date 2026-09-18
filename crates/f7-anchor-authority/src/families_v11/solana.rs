@@ -8,7 +8,8 @@ use solana_escrow_wire::{EscrowStateV1, EscrowStatus};
 use solana_evidence::SolanaEvidenceBodyV1;
 use solana_observer::{ObservationKind, ObserverError, SolanaSettlementObserver};
 use solana_profile::{
-    validate_setup, SolanaAdapterProfileV1, SolanaAssetV1, SolanaNetwork, ValidatedSolanaSetup,
+    revalidate_setup_for_chain_profile_v25, validate_setup, SolanaAdapterProfileV1, SolanaAssetV1,
+    SolanaNetwork, ValidatedSolanaSetup,
 };
 use solana_rpc::{HttpSolanaRpc, RpcError, SolanaRpc};
 use solana_rpc_pool::SolanaRpcPool;
@@ -99,8 +100,15 @@ impl SolanaFundingAuthorityV11 {
             profile.program_id.0,
             setup.program_data_hash(),
         )?;
-        let verified =
-            validate_setup(&profile, terms, setup.binding().clone()).map_err(|_| Error::Binding)?;
+        // A frozen V1 setup pins the operational adapter hash; a V25 setup pins
+        // the registry chain-profile digest and pays proven accounts. The two
+        // hashes are distinct domains, so exactly one rule can ever accept.
+        let verified = if terms.counterparty_leg.adapter_profile_hash == profile.profile_hash() {
+            validate_setup(&profile, terms, setup.binding().clone())
+        } else {
+            revalidate_setup_for_chain_profile_v25(&profile, terms, setup, deployment.profile())
+        }
+        .map_err(|_| Error::Binding)?;
         if verified.binding_hash() != setup.binding_hash() {
             return Err(Error::Binding);
         }

@@ -342,8 +342,29 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
         let version = reader.u16()?;
         let enrollment = magic == *claim_enrollment_v23::MAGIC_V23
             && version == claim_enrollment_v23::VERSION_V23;
-        if (!enrollment && (magic != *BUNDLE_MAGIC_V7 || version != BUNDLE_VERSION_V7))
+        let sol_enrollment = magic == *claim_enrollment_v23::MAGIC_SOL_V25
+            && version == claim_enrollment_v23::VERSION_SOL_V25;
+        if (!enrollment
+            && !sol_enrollment
+            && (magic != *BUNDLE_MAGIC_V7 || version != BUNDLE_VERSION_V7))
             || reader.u16()? != 0
+        {
+            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        }
+        // The Solana enrollment exists only for two authenticated Solana
+        // sessions whose escrow accounts were proven by V25 account bindings.
+        if sol_enrollment
+            && [
+                route_executor::LegIdV1::Upstream,
+                route_executor::LegIdV1::Downstream,
+            ]
+            .iter()
+            .any(|leg| {
+                authenticated
+                    .solana_session(*leg)
+                    .and_then(|session| session.account_binding_v25())
+                    .is_none()
+            })
         {
             return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
         }
@@ -391,6 +412,10 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             ClaimPlanProfileV23::Enrollment(claim_enrollment_v23::NativeClaimEnrollmentV23::decode(
                 &mut reader,
             )?)
+        } else if sol_enrollment {
+            ClaimPlanProfileV23::SolEnrollment(
+                claim_enrollment_v23::SolClaimEnrollmentV25::decode(&mut reader)?,
+            )
         } else {
             let role_plan = ComposedFinalClaimRolePlanV1::decode_canonical(
                 reader.bytes_exact(FINAL_CLAIM_ROLE_PLAN_BYTES_V7)?,
@@ -784,6 +809,38 @@ impl AuthenticatedProductionF6FinalClaimPlanV7 {
         self.profile
             .materialize(self.route_id, composition, bindings)
     }
+
+    /// DOMF6A25: the plan is materialized from the Store's reconstructed
+    /// native DOM claim template once the bilateral bootstrap completed.
+    pub(crate) fn requires_bootstrap_claim_templates_v25(&self) -> bool {
+        matches!(self.profile, ClaimPlanProfileV23::SolEnrollment(_))
+    }
+
+    pub(crate) fn materialize_sol_v25(
+        self,
+        composition: &ComposedBindingV2,
+        downstream_claim_template_hash: [u8; 32],
+        upstream_source_commitment: [u8; 32],
+    ) -> Result<
+        (
+            ComposedFinalClaimRolePlanV1,
+            FinalClaimSecretSourceScopeV1,
+            FinalClaimSecretSourceScopeV1,
+        ),
+        ProductionF6ActivationRefusalV2,
+    > {
+        if composition.binding_digest() != self.composition_digest
+            || composition.route_scope_digest() != self.route_scope_digest
+        {
+            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        }
+        self.profile.materialize_sol_v25(
+            self.route_id,
+            composition,
+            downstream_claim_template_hash,
+            upstream_source_commitment,
+        )
+    }
 }
 
 struct ProductionF6BoundPairV7 {
@@ -1049,9 +1106,11 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
         let downstream_scope = pre_f6_scope(&self.route, downstream_wire, &downstream_rfq)?;
         // The signed enrollment profile is authenticated against both XMR
         // admissions before this factory exists; no caller-selected flag.
+        // The DOM-mainnet PreF6 policy reads only the DOM clock; both native
+        // enrollments were authenticated against their sessions at decode.
         let build_policy = if matches!(
             &self.bundle.claim_profile,
-            ClaimPlanProfileV23::Enrollment(_)
+            ClaimPlanProfileV23::Enrollment(_) | ClaimPlanProfileV23::SolEnrollment(_)
         ) {
             PreF6TimePolicyV2::from_registry_dom_mainnet_v23
         } else {

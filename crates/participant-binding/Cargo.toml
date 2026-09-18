@@ -11,6 +11,7 @@ publish = false
 adapter-evm = { path = "../adapters/evm", default-features = false }
 btc-crypto = { path = "../adapters/btc-crypto" }
 deployment-registry = { path = "../deployment-registry" }
+ed25519-dalek = { workspace = true }
 k256 = { workspace = true, features = ["ecdsa"] }
 kaystra-core = { path = "../kaystra-core", default-features = false }
 sha3 = { version = "0.10", default-features = false, features = ["std"] }

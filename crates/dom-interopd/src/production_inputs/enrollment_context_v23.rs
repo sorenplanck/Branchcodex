@@ -161,7 +161,7 @@ pub(crate) fn load(
     validate_roster_terms(&roster, &up, &down, &secp).map_err(|_| Error::Context)?;
     let participants = ProductionParticipantBindingBundleV1::decode_canonical(&bytes(
         ProductionPathRoleV1::ParticipantBindings,
-        MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 as u64,
+        MAX_PRODUCTION_PARTICIPANT_BUNDLE_SOLANA_ACCOUNTS_BYTES_V25 as u64,
     )?)
     .map_err(|_| Error::Context)?;
     if participants.bundle_digest().map_err(|_| Error::Context)? != pins.participant_bindings_digest

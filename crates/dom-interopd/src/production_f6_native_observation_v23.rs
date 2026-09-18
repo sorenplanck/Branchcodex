@@ -299,7 +299,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
     ) -> Result<Option<NativeF6ObservationBodyV23>, ProductionF6ActivationRefusalV2> {
         if !matches!(
             &self.bundle.claim_profile,
-            ClaimPlanProfileV23::Enrollment(_)
+            ClaimPlanProfileV23::Enrollment(_) | ClaimPlanProfileV23::SolEnrollment(_)
         ) {
             if self.native_xmr_inventory_required || self.native_xmr_inventory.is_some() {
                 return Err(ProductionF6ActivationRefusalV2::InvalidBinding);

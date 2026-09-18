@@ -923,6 +923,32 @@ pub(super) fn run(
                         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
                 ],
             )
+        } else if f6_final_claim_plan.requires_bootstrap_claim_templates_v25() {
+            // DOMF6A25: the downstream LocalOrigin source commits the real
+            // native DOM claim template, which exists only now that the
+            // bilateral bootstrap completed. The V20 gate below rebinds it
+            // against the same Store before any funding.
+            // Recheck the authenticated account links at their point of use.
+            // The A25 decoder checked them before the bundle was admitted;
+            // retaining this boundary ensures a later caller cannot select a
+            // template from a SOL setup while omitting the account authority
+            // that binds the escrow's funder/refund and recipient accounts.
+            let upstream_session = inputs
+                .solana_session(LegIdV1::Upstream)
+                .filter(|session| session.account_binding_v25().is_some())
+                .ok_or(ProductionRunErrorV1::SettlementChildAuthority)?;
+            inputs
+                .solana_session(LegIdV1::Downstream)
+                .filter(|session| session.account_binding_v25().is_some())
+                .ok_or(ProductionRunErrorV1::SettlementChildAuthority)?;
+            let upstream_setup = upstream_session.setup().binding_hash();
+            let selected = relay_stage12_owner.leg_mut(LegIdV1::Downstream);
+            let chain = selected.trusted_chain_id();
+            let template = selected
+                .contracts_mut()
+                .bootstrap_claim_template_hash_v25(chain)
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            f6_final_claim_plan.materialize_sol_v25(inputs.composition(), template, upstream_setup)
         } else {
             f6_final_claim_plan.into_parts()
         }

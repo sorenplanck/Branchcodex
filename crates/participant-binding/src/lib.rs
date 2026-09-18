@@ -19,6 +19,16 @@ use kaystra_core::{
 };
 use sha3::{Digest, Keccak256};
 
+mod solana_v25;
+pub use solana_v25::{
+    bind_solana_session_v25, solana_account_binding_digest_v25,
+    verify_solana_account_binding_v25, AuthenticatedSolanaAccountBindingV25,
+    AuthenticatedSolanaSessionAccountsV25, SolanaAccountBindingErrorV25,
+    SolanaAccountBindingProofV25, SolanaAccountBindingStatementV25, SolanaBindingRoleV25,
+    SolanaSettlementPositionV25, SOLANA_ACCOUNT_BINDING_PROOF_BYTES_V25,
+    SOLANA_ACCOUNT_SIGNATURE_BYTES_V25,
+};
+
 const DOMAIN_NAME: &[u8] = b"DOM Interop";
 const DOMAIN_VERSION: &[u8] = b"1";
 const DOMAIN_TYPE: &[u8] = b"EIP712Domain(string name,string version,uint256 chainId,bytes32 salt)";

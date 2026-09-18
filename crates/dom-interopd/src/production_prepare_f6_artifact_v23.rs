@@ -32,7 +32,7 @@ const FINAL: &str = "finalized";
 const BUNDLE: &str = "authority.bundle";
 const FINAL_REPORT: &str = "bundle-report.json";
 
-pub const PREPARE_F6_ARTIFACT_USAGE_V23: &str = "F6 public artifact workflow (no authority granted):\nprepare-f6-artifact-v23 --input ABSOLUTE_PRIVATE_JSON --output-dir ABSOLUTE_NEW_DIRECTORY\nprepare-f6-artifact-v23 --resume --request-dir ABSOLUTE_PRIVATE_DIRECTORY\nprepare-f6-artifact-v23 --finalize --request-dir ABSOLUTE_PRIVATE_DIRECTORY --signatures ABSOLUTE_PRIVATE_JSON\nInputs and files: 0600, owner-only, bounded; parent directories: canonical 0700. No private keys are accepted. Registry owners sign the reported digest externally. Final bytes remain subject to independent daemon admission. See docs/interop/hardening/PREPARE-F6-ARTIFACT-V23.md.";
+pub const PREPARE_F6_ARTIFACT_USAGE_V23: &str = "F6 public artifact workflow (no authority granted):\nprepare-f6-artifact-v23 --input ABSOLUTE_PRIVATE_JSON --output-dir ABSOLUTE_NEW_DIRECTORY\nprepare-f6-artifact-v23 --resume --request-dir ABSOLUTE_PRIVATE_DIRECTORY\nprepare-f6-artifact-v23 --finalize --request-dir ABSOLUTE_PRIVATE_DIRECTORY --signatures ABSOLUTE_PRIVATE_JSON\nInputs and files: 0600, owner-only, bounded; parent directories: canonical 0700. No private keys are accepted. Registry owners sign the reported digest externally. Claim profiles: bound, native_enrollment, solana_enrollment; solana_enrollment requires two policy-17 conditioned SOL legs and is independently rechecked by the daemon. Final bytes remain subject to independent daemon admission. See docs/interop/hardening/PREPARE-F6-ARTIFACT-V23.md.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareF6ArtifactErrorV23 {
@@ -108,6 +108,8 @@ struct Signer {
 #[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
 enum ClaimProfile {
     NativeEnrollment,
+    /// DOMF6A25: Solana role enrollment for a DOM-mainnet SOL route.
+    SolanaEnrollment,
     Bound {
         role_plan: ArtifactSource,
         sources: [ArtifactSource; 2],
@@ -248,6 +250,10 @@ fn prepare_snapshot(
     }
     let claim_profile = match &mut input.claim_profile {
         ClaimProfile::NativeEnrollment => PublicF6ClaimProfileV23::NativeEnrollment {
+            upstream: up,
+            downstream: down,
+        },
+        ClaimProfile::SolanaEnrollment => PublicF6ClaimProfileV23::SolanaEnrollment {
             upstream: up,
             downstream: down,
         },

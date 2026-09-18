@@ -18,7 +18,9 @@ fn legacy_codec_and_mainnet_refusal_remain_distinct() -> Result<(), Box<dyn std:
     assert_eq!(&bytes[10..12], &[0, 0]);
     assert_eq!(RouteTimePolicyV2::decode(&bytes)?, fixture.policy);
     let mut unknown = bytes.clone();
-    unknown[11] = 2;
+    // Tag 2 is now the DOM/SOL profile (refused here by validation, not by
+    // the codec); 3 is the first tag with no profile at all.
+    unknown[11] = 3;
     assert_eq!(
         RouteTimePolicyV2::decode(&unknown),
         Err(RouteTimeAnchorErrorV2::NonCanonicalEncoding)

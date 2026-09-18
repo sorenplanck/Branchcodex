@@ -61,3 +61,43 @@ fn every_public_network_requires_an_immutable_program() {
         SolanaAdapterProfileV1::new(SolanaNetwork::LocalValidator, program, 3, 2).expect("profile");
     assert!(!local.require_immutable_program);
 }
+
+#[test]
+fn the_attested_profile_requires_an_immutable_program_on_every_network() {
+    let program = SolanaPubkey([7; 32]);
+    for network in [
+        SolanaNetwork::Devnet,
+        SolanaNetwork::Testnet,
+        SolanaNetwork::LocalValidator,
+    ] {
+        let attested =
+            SolanaAdapterProfileV1::new_attested(network, program, 3, 2).expect("profile");
+        assert!(attested.require_immutable_program);
+        // Only the attestation flag differs from `new`, and it is part of the
+        // profile hash: an attested local profile can never be confused with
+        // the unattested one the daemon refuses.
+        let plain = SolanaAdapterProfileV1::new(network, program, 3, 2).expect("profile");
+        assert_eq!(
+            SolanaAdapterProfileV1 {
+                require_immutable_program: plain.require_immutable_program,
+                ..attested
+            },
+            plain
+        );
+        if network == SolanaNetwork::LocalValidator {
+            assert_ne!(attested.profile_hash(), plain.profile_hash());
+        }
+    }
+    // Validation is shared with `new`, not relaxed.
+    assert!(SolanaAdapterProfileV1::new_attested(
+        SolanaNetwork::LocalValidator,
+        SolanaPubkey([0; 32]),
+        3,
+        2
+    )
+    .is_err());
+    assert!(
+        SolanaAdapterProfileV1::new_attested(SolanaNetwork::LocalValidator, program, 2, 3)
+            .is_err()
+    );
+}

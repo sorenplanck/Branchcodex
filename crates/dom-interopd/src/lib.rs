@@ -221,6 +221,9 @@ mod production_xmr_native_binary_v23_tests;
 #[cfg(all(test, feature = "production"))]
 mod production_xmr_native_registry_fixture_v23;
 
+#[cfg(all(test, feature = "production", target_os = "linux"))]
+mod production_sol_native_registry_fixture_v23;
+
 // The production unit tests share one authenticated route-time fixture. It is
 // declared exactly once at the crate root so Clippy's duplicate-module guard
 // also guarantees that every consumer exercises the same Rust types/statics.
@@ -341,9 +344,11 @@ pub use production_signal::{
 };
 #[cfg(feature = "production")]
 pub use production_universal_leg_authority::{
-    encode_evm_leg_authority_bundle_v22, encode_xmr_enrollment_leg_authority_bundle_v23,
-    ProductionEvmLegBundleParametersV22, ProductionLegBundleIdentityV22, ProductionLegBundleV22,
-    ProductionXmrEnrollmentFundingFileV23, ProductionXmrEnrollmentLegResourcesV23,
+    encode_evm_leg_authority_bundle_v22, encode_solana_leg_authority_bundle_v25,
+    encode_xmr_enrollment_leg_authority_bundle_v23, ProductionEvmLegBundleParametersV22,
+    ProductionLegBundleIdentityV22, ProductionLegBundleV22,
+    ProductionSolanaLegBundleParametersV25, ProductionSolanaLegRoleV25,
+    ProductionSolanaLegTokenAccountsV25, ProductionXmrEnrollmentFundingFileV23, ProductionXmrEnrollmentLegResourcesV23,
 };
 #[cfg(feature = "production")]
 pub use relay_worker::{

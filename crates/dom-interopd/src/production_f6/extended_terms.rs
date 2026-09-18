@@ -55,6 +55,7 @@ pub(crate) struct ProductionSolanaF6TermsOwnerV7 {
     setup: ValidatedSolanaSetup,
     profile: SolanaAdapterProfileV1,
     deployment: ResolvedSolanaDeploymentV1,
+    account_binding: Option<crate::production_inputs::ProductionSolanaAccountBindingV25>,
 }
 
 pub(crate) struct ProductionXmrF6TermsOwnerV7 {
@@ -191,6 +192,7 @@ impl ProductionSolanaF6TermsOwnerV7 {
             setup: session.setup().clone(),
             profile: *session.profile(),
             deployment: session.deployment().clone(),
+            account_binding: session.account_binding_v25().copied(),
         }
     }
 
@@ -215,15 +217,33 @@ impl ProductionSolanaF6TermsOwnerV7 {
         let setup = &self.setup;
         // The adapter profile hash and registry chain-profile digest are distinct
         // domains. Compare each to its corresponding authenticated object.
-        if self.profile.profile_hash() != terms.counterparty_leg.adapter_profile_hash
+        // A frozen V1 setup pins the operational hash and pays the participant
+        // identities; a V25 setup pins the registry digest and pays the
+        // accounts its dual-signed proofs authenticated.
+        let (expected_hash, accounts_match) = match &self.account_binding {
+            None => (
+                self.profile.profile_hash(),
+                setup.recipient().0 == terms.counterparty_leg.beneficiary.0
+                    && setup.refund_recipient().0 == terms.counterparty_leg.refund_to.0,
+            ),
+            Some(binding) => (
+                self.deployment.profile_digest(),
+                setup.funder() == binding.funder()
+                    && setup.recipient() == binding.recipient()
+                    && setup.refund_recipient() == binding.refund_recipient()
+                    && setup.funder() == setup.refund_recipient()
+                    && binding.funder() == binding.refund_recipient()
+                    && setup.funder() != setup.recipient(),
+            ),
+        };
+        if expected_hash != terms.counterparty_leg.adapter_profile_hash
             || self.deployment.profile().chain_id != terms.counterparty_leg.chain_id
             || self.deployment.asset_binding().asset_id != terms.counterparty_leg.asset_id
             || terms.counterparty_leg.mechanism != LockMechanism::CrossCurveConditionLock
             || setup.settlement_id() != terms.settlement_id.0
             || setup.terms_hash() != self.scope.terms_hash
             || u128::from(setup.amount()) != terms.counterparty_leg.amount
-            || setup.recipient().0 != terms.counterparty_leg.beneficiary.0
-            || setup.refund_recipient().0 != terms.counterparty_leg.refund_to.0
+            || !accounts_match
         {
             return Err(ProductionF6ErrorV2::InvalidTerms);
         }
@@ -257,6 +277,12 @@ impl ProductionSolanaF6TermsOwnerV7 {
             setup.claim().ed_compressed,
         ] {
             record.extend_from_slice(&field);
+        }
+        // Both daemons derive the same V25 proof digests from the same
+        // authenticated bundle; a V1 record keeps its exact earlier bytes.
+        if let Some(binding) = &self.account_binding {
+            record.extend_from_slice(&binding.funder_binding_digest());
+            record.extend_from_slice(&binding.beneficiary_binding_digest());
         }
         record.extend_from_slice(&setup.claim().secp_compressed);
         record.push(setup.asset().decimals());

@@ -100,6 +100,26 @@ impl SolanaAdapterProfileV1 {
         })
     }
 
+    /// The same profile with the immutable-program attestation required on
+    /// every network, the local validator included.
+    ///
+    /// The production input loader and the F7 funding authority refuse any
+    /// profile without that requirement, so a local-validator deployment can
+    /// only reach the daemon through this constructor. A validator can satisfy
+    /// it for real: loading the escrow with `--upgradeable-program <id> <so>
+    /// none` produces the upgradeable-loader ProgramData with no upgrade
+    /// authority that `attest_immutable_program` checks, so nothing is waived.
+    pub fn new_attested(
+        network: SolanaNetwork,
+        program_id: SolanaPubkey,
+        rpc_node_count: u16,
+        rpc_quorum: u16,
+    ) -> Result<Self, SetupError> {
+        let mut profile = Self::new(network, program_id, rpc_node_count, rpc_quorum)?;
+        profile.require_immutable_program = true;
+        Ok(profile)
+    }
+
     pub fn profile_hash(&self) -> [u8; 32] {
         let mut hasher = Blake2b256::new();
         hasher.update(PROFILE_DOMAIN);
@@ -363,15 +383,178 @@ pub fn validate_setup(
     terms: &SettlementTermsV1,
     binding: SolanaSetupBindingV1,
 ) -> Result<ValidatedSolanaSetup, SetupError> {
+    validate_setup_inner(
+        profile,
+        terms,
+        binding,
+        profile.profile_hash(),
+        EscrowAccountsRuleV25::ParticipantIds,
+    )
+}
+
+/// The escrow accounts of one settlement, as authenticated by the dual-signed
+/// Solana account binding (`participant_binding::bind_solana_session_v25`).
+///
+/// This crate checks public bindings only. It cannot tell an authenticated
+/// account from a chosen one, so production callers must build this value from
+/// the verified account-binding proofs and never from peer-supplied keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolanaSetupAccountsV25 {
+    /// Account that initializes and funds the escrow.
+    pub funder: SolanaPubkey,
+    /// Account the escrow pays on claim.
+    pub recipient: SolanaPubkey,
+    /// Account the escrow pays on refund.
+    pub refund_recipient: SolanaPubkey,
+}
+
+#[derive(Clone, Copy)]
+enum EscrowAccountsRuleV25 {
+    /// Frozen V1 rule: the escrow pays the participant identities themselves.
+    ParticipantIds,
+    /// The escrow pays accounts authenticated by an account binding.
+    Accounts(SolanaSetupAccountsV25),
+}
+
+/// Validates a setup whose terms pin the registry chain-profile digest and
+/// whose escrow pays authenticated Solana accounts instead of participant
+/// identities.
+///
+/// The frozen V1 [`validate_setup`] requires the escrow recipient to be the
+/// beneficiary's participant identity. A DOM participant identity is a Blake2b
+/// digest, for which no Ed25519 key exists, so V1 can only pay an address
+/// nobody controls. V25 keeps every other V1 check (DLEQ, adaptor point, PDAs,
+/// deadline, amount, setup id) and replaces exactly two rules: the adapter hash
+/// in the terms is the registry chain-profile digest, as for XMR V24 and as the
+/// daemon admission requires, and the three escrow accounts are the ones given.
+///
+/// The DLEQ context is unchanged: it still commits the participant identities
+/// and the funding account, and the operational profile hash.
+pub fn validate_setup_for_chain_profile_v25(
+    profile: &SolanaAdapterProfileV1,
+    terms: &SettlementTermsV1,
+    binding: SolanaSetupBindingV1,
+    registry_profile: &chain_profile::ChainProfileV1,
+    accounts: SolanaSetupAccountsV25,
+) -> Result<ValidatedSolanaSetup, SetupError> {
+    let digest = require_chain_profile_v25(terms, profile, registry_profile)?;
+    match registry_profile.kind {
+        chain_profile::ChainKindV1::Solana {
+            program_data_hash, ..
+        } if binding.program_data_hash == program_data_hash => {}
+        _ => return Err(SetupError::BindingMismatch),
+    }
+    validate_setup_inner(
+        profile,
+        terms,
+        binding,
+        digest,
+        EscrowAccountsRuleV25::Accounts(accounts),
+    )
+}
+
+/// Revalidates an already validated V25 setup against the registry profile,
+/// for consumers that hold the opaque setup and must not trust it blindly.
+///
+/// The accounts are taken from the setup itself, so this adds no account
+/// authority: it only proves the setup still satisfies every V25 rule under
+/// this registry profile. A V1 setup can never pass, because V1 requires the
+/// operational profile hash in the terms and V25 the registry digest.
+pub fn revalidate_setup_for_chain_profile_v25(
+    profile: &SolanaAdapterProfileV1,
+    terms: &SettlementTermsV1,
+    setup: &ValidatedSolanaSetup,
+    registry_profile: &chain_profile::ChainProfileV1,
+) -> Result<ValidatedSolanaSetup, SetupError> {
+    let revalidated = validate_setup_for_chain_profile_v25(
+        profile,
+        terms,
+        setup.binding.clone(),
+        registry_profile,
+        SolanaSetupAccountsV25 {
+            funder: setup.funder(),
+            recipient: setup.recipient(),
+            refund_recipient: setup.refund_recipient(),
+        },
+    )?;
+    if revalidated.binding_hash != setup.binding_hash {
+        return Err(SetupError::BindingMismatch);
+    }
+    Ok(revalidated)
+}
+
+/// Exact public registry/profile boundary for a V25 Solana leg. Returns the
+/// registry chain-profile digest the terms must carry.
+pub fn require_chain_profile_v25(
+    terms: &SettlementTermsV1,
+    profile: &SolanaAdapterProfileV1,
+    registry_profile: &chain_profile::ChainProfileV1,
+) -> Result<[u8; 32], SetupError> {
+    registry_profile
+        .validate()
+        .map_err(|_| SetupError::BindingMismatch)?;
+    let digest = registry_profile
+        .profile_digest()
+        .map_err(|_| SetupError::BindingMismatch)?;
+    let (network, escrow_program) = match registry_profile.kind {
+        chain_profile::ChainKindV1::Solana {
+            network,
+            escrow_program,
+            ..
+        } => (network as u8, escrow_program),
+        _ => return Err(SetupError::BindingMismatch),
+    };
+    if network != profile.network as u8
+        || escrow_program != profile.program_id.0
+        || !profile.require_immutable_program
+        || terms.counterparty_leg.adapter_profile_hash != digest
+        || terms.counterparty_leg.chain_id != registry_profile.chain_id
+        || (terms.counterparty_leg.asset_id != registry_profile.native_asset
+            && !registry_profile
+                .allowed_assets
+                .contains(&terms.counterparty_leg.asset_id))
+        || terms.counterparty_leg.finality != registry_profile.finality
+        || terms.counterparty_leg.mechanism != LockMechanism::CrossCurveConditionLock
+    {
+        return Err(SetupError::BindingMismatch);
+    }
+    Ok(digest)
+}
+
+fn validate_setup_inner(
+    profile: &SolanaAdapterProfileV1,
+    terms: &SettlementTermsV1,
+    binding: SolanaSetupBindingV1,
+    expected_adapter_profile_hash: [u8; 32],
+    accounts_rule: EscrowAccountsRuleV25,
+) -> Result<ValidatedSolanaSetup, SetupError> {
     terms.validate()?;
     let terms_hash = terms.terms_hash()?;
+    let accounts_match = match accounts_rule {
+        EscrowAccountsRuleV25::ParticipantIds => {
+            binding.recipient.0 == terms.counterparty_leg.beneficiary.0
+                && binding.refund_recipient.0 == terms.counterparty_leg.refund_to.0
+        }
+        EscrowAccountsRuleV25::Accounts(accounts) => {
+            binding.funder == accounts.funder
+                && binding.recipient == accounts.recipient
+                && binding.refund_recipient == accounts.refund_recipient
+                && !accounts.recipient.is_zero()
+                && !accounts.refund_recipient.is_zero()
+                && accounts.funder != accounts.recipient
+                // The V25 account binding gives the funding account both
+                // funding and refund authority. A third refund destination
+                // would let a caller bypass that single economic binding.
+                && accounts.refund_recipient == accounts.funder
+        }
+    };
     if binding.settlement_id != terms.settlement_id.0
         || binding.terms_hash != terms_hash
         || binding.program_id != profile.program_id
-        || terms.counterparty_leg.adapter_profile_hash != profile.profile_hash()
+        || expected_adapter_profile_hash == [0; 32]
+        || terms.counterparty_leg.adapter_profile_hash != expected_adapter_profile_hash
         || terms.counterparty_leg.mechanism != LockMechanism::CrossCurveConditionLock
-        || binding.recipient.0 != terms.counterparty_leg.beneficiary.0
-        || binding.refund_recipient.0 != terms.counterparty_leg.refund_to.0
+        || !accounts_match
         || binding.amount as u128 != terms.counterparty_leg.amount
         || binding.funder.is_zero()
     {

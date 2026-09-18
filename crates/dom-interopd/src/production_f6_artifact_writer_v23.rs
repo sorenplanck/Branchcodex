@@ -60,6 +60,12 @@ pub enum PublicF6ClaimProfileV23 {
         upstream: SettlementTermsV1,
         downstream: SettlementTermsV1,
     },
+    /// DOMF6A25: Solana role enrollment. The downstream claim template later
+    /// originates from the actual bilateral native Store, as for XMR.
+    SolanaEnrollment {
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+    },
 }
 
 /// Every economic value and authority is explicit; there are no defaults.
@@ -102,6 +108,11 @@ impl PreparedUntrustedF6ArtifactV23 {
                 claim_enrollment_v23::MAGIC_V23,
                 claim_enrollment_v23::VERSION_V23,
                 claim_enrollment_v23::DOMAIN_V23,
+            ),
+            PublicF6ClaimProfileV23::SolanaEnrollment { .. } => (
+                claim_enrollment_v23::MAGIC_SOL_V25,
+                claim_enrollment_v23::VERSION_SOL_V25,
+                claim_enrollment_v23::DOMAIN_SOL_V25,
             ),
         };
         let mut prefix = Vec::new();
@@ -183,6 +194,18 @@ impl PreparedUntrustedF6ArtifactV23 {
                 downstream,
             } => {
                 prefix.extend_from_slice(&public_enrollment_bytes(upstream, downstream)?);
+            }
+            PublicF6ClaimProfileV23::SolanaEnrollment {
+                upstream,
+                downstream,
+            } => {
+                // Same encoder the daemon rederives from its admitted
+                // composition; public terms only, no admission implied.
+                prefix.extend_from_slice(
+                    claim_enrollment_v23::SolClaimEnrollmentV25::from_terms(upstream, downstream)
+                        .map_err(|_| F6ArtifactWriteErrorV23::InvalidInput)?
+                        .bytes(),
+                );
             }
         }
         // Reserve enough room for every supplied root signature before anyone
@@ -358,19 +381,26 @@ fn validate_public_input(input: &PublicF6ArtifactInputsV23, secp: &SecpContext) 
             }
         }
     }
-    if let PublicF6ClaimProfileV23::Bound { role_plan, sources } = &input.claim_profile {
-        let profile = ClaimPlanProfileV23::Bound {
-            role_plan: role_plan.clone(),
-            upstream: sources[0].clone(),
-            downstream: sources[1].clone(),
-        };
-        profile
-            .validate_scope(
-                route.route_id,
-                route.route_scope_digest,
-                route.composition_digest,
-            )
-            .map_err(invalid)?;
+    match &input.claim_profile {
+        PublicF6ClaimProfileV23::Bound { role_plan, sources } => {
+            let profile = ClaimPlanProfileV23::Bound {
+                role_plan: role_plan.clone(),
+                upstream: sources[0].clone(),
+                downstream: sources[1].clone(),
+            };
+            profile
+                .validate_scope(
+                    route.route_id,
+                    route.route_scope_digest,
+                    route.composition_digest,
+                )
+                .map_err(invalid)?;
+        }
+        PublicF6ClaimProfileV23::SolanaEnrollment { upstream, downstream } => {
+            claim_enrollment_v23::validate_solana_enrollment_terms_v25(upstream, downstream)
+                .map_err(invalid)?;
+        }
+        PublicF6ClaimProfileV23::NativeEnrollment { .. } => {}
     }
     Ok(())
 }
@@ -692,6 +722,82 @@ mod tests {
         // Even replacing just the public profile marker changes the signing
         // domain; an A07 signature can never authorize A23 enrollment.
         prepared.prefix[..8].copy_from_slice(claim_enrollment_v23::MAGIC_V23);
+        assert_eq!(
+            prepared.finalize(&signatures, &secp),
+            Err(F6ArtifactWriteErrorV23::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn public_f6_solana_enrollment_is_a25_under_its_own_domain() {
+        let secp = SecpContext::new(&[35; 32]);
+        let mut invalid = input(&secp);
+        let PublicF6ClaimProfileV23::NativeEnrollment { upstream, downstream } = invalid.claim_profile
+        else {
+            unreachable!()
+        };
+        invalid.claim_profile = PublicF6ClaimProfileV23::SolanaEnrollment {
+            upstream,
+            downstream,
+        };
+        assert!(matches!(
+            PreparedUntrustedF6ArtifactV23::prepare(invalid, &secp),
+            Err(F6ArtifactWriteErrorV23::InvalidInput)
+        ));
+        let mut supplied = input(&secp);
+        let PublicF6ClaimProfileV23::NativeEnrollment {
+            mut upstream,
+            mut downstream,
+        } = supplied.claim_profile
+        else {
+            unreachable!()
+        };
+        upstream.policy_version = dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17;
+        downstream.policy_version = dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17;
+        // The ordinary route topology: the DOM roles swap between positions,
+        // so the upstream DOM receiver is the downstream DOM sender and one
+        // party owns T on the whole route.
+        std::mem::swap(
+            &mut downstream.dom_leg.beneficiary,
+            &mut downstream.dom_leg.refund_to,
+        );
+        std::mem::swap(
+            &mut downstream.counterparty_leg.beneficiary,
+            &mut downstream.counterparty_leg.refund_to,
+        );
+        let expected =
+            claim_enrollment_v23::SolClaimEnrollmentV25::from_terms(&upstream, &downstream)
+                .unwrap();
+        let xmr = public_enrollment_bytes(&upstream, &downstream).unwrap();
+        // Same width, different roles: the upstream T origin is the upstream
+        // DOM receiver, not the downstream DOM beneficiary.
+        assert_ne!(expected.bytes(), xmr.as_slice());
+        supplied.claim_profile = PublicF6ClaimProfileV23::SolanaEnrollment {
+            upstream,
+            downstream,
+        };
+        let mut prepared = PreparedUntrustedF6ArtifactV23::prepare(supplied, &secp).unwrap();
+        assert_eq!(
+            prepared.signing_digest(),
+            digest_parts(&[
+                claim_enrollment_v23::DOMAIN_SOL_V25,
+                prepared.canonical_signing_prefix()
+            ])
+            .unwrap()
+        );
+        let prefix = prepared.canonical_signing_prefix().to_vec();
+        let mut reader = BundleReaderV7::new(&prefix);
+        assert_eq!(
+            &reader.take::<8>().unwrap(),
+            claim_enrollment_v23::MAGIC_SOL_V25
+        );
+        assert_eq!(reader.u16().unwrap(), 25);
+        assert_eq!(reader.u16().unwrap(), 0);
+        assert!(prefix.ends_with(expected.bytes()));
+        let signatures = signatures(&secp, prepared.signing_digest());
+        // An A25 signature never authorizes the XMR A23 enrollment, nor A07.
+        prepared.prefix[..8].copy_from_slice(claim_enrollment_v23::MAGIC_V23);
+        prepared.prefix[8..10].copy_from_slice(&claim_enrollment_v23::VERSION_V23.to_be_bytes());
         assert_eq!(
             prepared.finalize(&signatures, &secp),
             Err(F6ArtifactWriteErrorV23::InvalidSignature)

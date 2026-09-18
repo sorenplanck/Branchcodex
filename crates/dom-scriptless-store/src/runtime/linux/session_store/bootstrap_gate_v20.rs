@@ -10,6 +10,36 @@ use dom_scriptless_crypto::{
 };
 
 impl ContractsSessionStoreV1 {
+    /// Canonical hash of the native DOM claim template this Store reconstructs
+    /// for `session` from its authenticated bootstrap history, exactly as
+    /// [`Self::prepare_bootstrapped_plain_f7_gate_v20`] does. A public value
+    /// only: it lets a Solana enrollment commit its `LocalOrigin` source
+    /// scope, which that gate then rebinds against this same reconstruction.
+    pub fn bootstrapped_claim_template_hash_v25(
+        &self,
+        chain: TrustedChainIdV1,
+        session: [u8; 32],
+    ) -> Result<[u8; 32], SessionStoreError> {
+        let templates = {
+            let _guard = self.operation_lock()?;
+            if self.policy.profile() != BudgetPolicyProfileV1::ProductionRatified {
+                return Err(SessionStoreError::InvalidTransition);
+            }
+            let record = self.read_bootstrap_wallet_keys_v18(session)?;
+            if !matches!(
+                record.terms.counterparty_leg.mechanism,
+                kaystra_core::types::LockMechanism::ConditionLock
+                    | kaystra_core::types::LockMechanism::CrossCurveConditionLock
+            ) {
+                return Err(SessionStoreError::InvalidTransition);
+            }
+            self.reconstruct_bootstrap_wallet_templates_v20(&record, chain.as_bytes())?
+        };
+        canonical_template_v1(templates.claim.transaction_template())
+            .map(|(_, hash)| hash)
+            .map_err(|_| SessionStoreError::Canonical)
+    }
+
     /// Construct the EVM/Solana prefunding gate from the actual wallet/BP,
     /// bilateral DSC1 template and refund histories in this Store. Reopens
     /// require the same role, source, terms and exact native templates.

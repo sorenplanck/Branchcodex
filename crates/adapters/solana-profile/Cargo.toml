@@ -15,7 +15,8 @@ solana-types = { path = "../solana-types" }
 solana-pda = { path = "../solana-pda" }
 solana-route-secret = { path = "../solana-route-secret" }
 xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+chain-profile = { path = "../../chain-profile" }
 
 [dev-dependencies]
-chain-profile = { path = "../../chain-profile" }
+adapter-btc = { path = "../btc", default-features = false }
 rand = { workspace = true }

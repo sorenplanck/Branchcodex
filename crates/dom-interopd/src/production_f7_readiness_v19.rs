@@ -36,6 +36,18 @@ pub(crate) enum ProductionF7ReadinessStepV19 {
 }
 
 impl<F: F6TransportPortV1> ProductionContractsV1<F> {
+    /// Public hash of the native DOM claim template this leg's Store
+    /// reconstructs from its completed bootstrap; the same reconstruction the
+    /// V20 gate binds. Grants nothing: it only lets a DOMF6A25 plan commit it.
+    pub(crate) fn bootstrap_claim_template_hash_v25(
+        &self,
+        chain: TrustedChainIdV1,
+    ) -> Result<[u8; 32], ProductionF7ReadinessErrorV19> {
+        Ok(self
+            .store
+            .bootstrapped_claim_template_hash_v25(chain, self.session_id)?)
+    }
+
     /// Called by the concrete roots only after F6 and ordinary refund
     /// bootstrap completed. All transaction/proof inputs come from this Store.
     pub(crate) fn prepare_bootstrap_gate_v20(

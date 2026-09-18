@@ -39,8 +39,9 @@ pub use types::{
     CanonicalTimeRangeV2, CanonicalTipObservationV2, CheckpointBindingV2, CheckpointRoleV2,
     ClockKindV2, CurrentRouteTimeLadderV2, DeadlineIntervalV2, FrozenRouteTimeCheckpointV2,
     FrozenRouteTimeProofCheckpointV2, LadderIntervalProofV2, RouteTimeEvidenceV2,
-    RouteTimePolicyLimitsV2, RouteTimePolicyV2, VerifiedFrozenRouteTimeLadderV2,
+    RouteTimePolicyLimitsV2, RouteTimePolicyV2, RouteTimeProfileV2, VerifiedFrozenRouteTimeLadderV2,
     VerifiedRouteTimeLadderV2, BTC_MTP_SAMPLE_INTERVALS_V2, MAX_TIME_ANCHOR_AUTHORITIES_V2,
+    SOLANA_CLOCK_DRIFT_SECONDS_V2,
 };
 
 /// Domain separator for the canonical V2 route scope.

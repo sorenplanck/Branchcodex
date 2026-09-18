@@ -21,6 +21,10 @@ use crate::{
 mod mainnet_dom_xmr_v23;
 use mainnet_dom_xmr_v23::{native_counterparty_binding_v23, require_mainnet_dom_xmr_terms_v23};
 
+#[path = "mainnet_dom_sol_v25.rs"]
+mod mainnet_dom_sol_v25;
+use mainnet_dom_sol_v25::{native_counterparty_binding_sol_v25, require_mainnet_dom_sol_terms_v25};
+
 const DOM_PROFILE_DOMAIN_V1: &[u8] = b"DOM-INTEROPD/DOM-PROFILE/V1\0";
 
 /// Maximum number of keys accepted by one time-authority threshold set.
@@ -147,10 +151,53 @@ pub struct RouteTimePolicyLimitsV2 {
     pub counterparty_margin_seconds: u64,
 }
 
+/// Registry-reconstruction profile selected by the canonical policy bytes.
+///
+/// The discriminant is the frozen `u16` written right after the format
+/// version. `Generic` and `DomXmrMainnetV23` keep the exact bytes they had
+/// when that field was a boolean (0 and 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum RouteTimeProfileV2 {
+    /// Three distinct chains; public mainnet DOM refused.
+    Generic = 0,
+    /// Mainnet DOM with both counterparty positions on one Monero mainnet chain.
+    DomXmrMainnetV23 = 1,
+    /// Mainnet DOM with both counterparty positions on one Solana chain.
+    DomSolMainnetV25 = 2,
+}
+
+impl RouteTimeProfileV2 {
+    /// Frozen canonical tag.
+    pub const fn tag(self) -> u16 {
+        self as u16
+    }
+
+    /// Strict tag decoding; unknown tags are refused.
+    pub(crate) fn from_tag(tag: u16) -> Result<Self> {
+        match tag {
+            0 => Ok(Self::Generic),
+            1 => Ok(Self::DomXmrMainnetV23),
+            2 => Ok(Self::DomSolMainnetV25),
+            _ => Err(RouteTimeAnchorErrorV2::NonCanonicalEncoding),
+        }
+    }
+
+    /// Native mainnet profile in which one counterparty chain observation
+    /// serves both role-scoped counterparty checkpoints.
+    const fn shared_counterparty_clock(self) -> Option<ClockKindV2> {
+        match self {
+            Self::Generic => None,
+            Self::DomXmrMainnetV23 => Some(ClockKindV2::Monero),
+            Self::DomSolMainnetV25 => Some(ClockKindV2::Solana),
+        }
+    }
+}
+
 /// Static route-scoped policy reconstructed from an authenticated registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteTimePolicyV2 {
-    pub(crate) native_dom_xmr_v23: bool,
+    pub(crate) profile: RouteTimeProfileV2,
     pub(crate) network_id: Digest32,
     pub(crate) registry_digest: Digest32,
     pub(crate) registry_epoch: u64,
@@ -170,7 +217,13 @@ impl RouteTimePolicyV2 {
         downstream: &SettlementTermsV1,
         limits: RouteTimePolicyLimitsV2,
     ) -> Result<Self> {
-        Self::from_registry_profile_v23(registry, upstream, downstream, limits, false)
+        Self::from_registry_profile_v23(
+            registry,
+            upstream,
+            downstream,
+            limits,
+            RouteTimeProfileV2::Generic,
+        )
     }
 
     /// Mainnet DOM/XMR profile with separate role checkpoints on one XMR chain.
@@ -181,12 +234,48 @@ impl RouteTimePolicyV2 {
         downstream: &SettlementTermsV1,
         limits: RouteTimePolicyLimitsV2,
     ) -> Result<Self> {
-        Self::from_registry_profile_v23(registry, upstream, downstream, limits, true)
+        Self::from_registry_profile_v23(
+            registry,
+            upstream,
+            downstream,
+            limits,
+            RouteTimeProfileV2::DomXmrMainnetV23,
+        )
+    }
+
+    /// Mainnet DOM/SOL profile with separate role checkpoints on one Solana
+    /// chain. Requires registry-authenticated mainnet DOM, a registry Solana
+    /// deployment and the registry chain-profile digest in both counterparty
+    /// legs; grants only time bounds. Solana projections keep the full
+    /// [`SOLANA_CLOCK_DRIFT_SECONDS_V2`] band on both sides.
+    pub fn from_registry_dom_sol_v25(
+        registry: &ResolvedRegistryV1,
+        upstream: &SettlementTermsV1,
+        downstream: &SettlementTermsV1,
+        limits: RouteTimePolicyLimitsV2,
+    ) -> Result<Self> {
+        Self::from_registry_profile_v23(
+            registry,
+            upstream,
+            downstream,
+            limits,
+            RouteTimeProfileV2::DomSolMainnetV25,
+        )
     }
 
     /// Whether canonical policy bytes select the explicit mainnet DOM/XMR profile.
     pub const fn is_dom_xmr_mainnet_v23(&self) -> bool {
-        self.native_dom_xmr_v23
+        matches!(self.profile, RouteTimeProfileV2::DomXmrMainnetV23)
+    }
+
+    /// Whether canonical policy bytes select the explicit mainnet DOM/SOL profile.
+    pub const fn is_dom_sol_mainnet_v25(&self) -> bool {
+        matches!(self.profile, RouteTimeProfileV2::DomSolMainnetV25)
+    }
+
+    /// Reconstruction profile frozen in the canonical policy bytes.
+    pub const fn profile(&self) -> RouteTimeProfileV2 {
+        self.profile
     }
 
     fn from_registry_profile_v23(
@@ -194,8 +283,9 @@ impl RouteTimePolicyV2 {
         upstream: &SettlementTermsV1,
         downstream: &SettlementTermsV1,
         limits: RouteTimePolicyLimitsV2,
-        native_dom_xmr_v23: bool,
+        profile: RouteTimeProfileV2,
     ) -> Result<Self> {
+        let native = profile != RouteTimeProfileV2::Generic;
         upstream
             .validate()
             .map_err(|_| RouteTimeAnchorErrorV2::InvalidTerms)?;
@@ -215,8 +305,7 @@ impl RouteTimePolicyV2 {
         {
             return Err(RouteTimeAnchorErrorV2::UnsupportedTopology);
         }
-        if (!native_dom_xmr_v23
-            && upstream.counterparty_leg.chain_id == downstream.counterparty_leg.chain_id)
+        if (!native && upstream.counterparty_leg.chain_id == downstream.counterparty_leg.chain_id)
             || upstream.counterparty_leg.chain_id == upstream.dom_leg.chain_id
             || downstream.counterparty_leg.chain_id == upstream.dom_leg.chain_id
         {
@@ -226,11 +315,17 @@ impl RouteTimePolicyV2 {
         }
 
         let manifest = registry.manifest();
-        if !native_dom_xmr_v23 && manifest.dom.runtime_identity.network == DomNetworkV1::Mainnet {
+        if !native && manifest.dom.runtime_identity.network == DomNetworkV1::Mainnet {
             return Err(RouteTimeAnchorErrorV2::MainnetDisabled);
         }
-        if native_dom_xmr_v23 {
-            require_mainnet_dom_xmr_terms_v23(registry, upstream, downstream)?;
+        match profile {
+            RouteTimeProfileV2::Generic => {}
+            RouteTimeProfileV2::DomXmrMainnetV23 => {
+                require_mainnet_dom_xmr_terms_v23(registry, upstream, downstream)?;
+            }
+            RouteTimeProfileV2::DomSolMainnetV25 => {
+                require_mainnet_dom_sol_terms_v25(registry, upstream, downstream)?;
+            }
         }
         if manifest.network_id == [0; 32]
             || registry.manifest_digest() == [0; 32]
@@ -259,10 +354,14 @@ impl RouteTimePolicyV2 {
             timing: manifest.dom.timing,
             finality: manifest.dom.finality,
         };
-        let derive_counterparty = if native_dom_xmr_v23 {
-            native_counterparty_binding_v23
-        } else {
-            counterparty_binding
+        let derive_counterparty: fn(
+            &ResolvedRegistryV1,
+            &kaystra_core::types::LegTermsV1,
+            CheckpointRoleV2,
+        ) -> Result<CheckpointBindingV2> = match profile {
+            RouteTimeProfileV2::Generic => counterparty_binding,
+            RouteTimeProfileV2::DomXmrMainnetV23 => native_counterparty_binding_v23,
+            RouteTimeProfileV2::DomSolMainnetV25 => native_counterparty_binding_sol_v25,
         };
         let upstream_counterparty = derive_counterparty(
             registry,
@@ -290,7 +389,7 @@ impl RouteTimePolicyV2 {
             .map_err(|_| RouteTimeAnchorErrorV2::InvalidTerms)?;
         let route_scope_digest = route_scope_digest(upstream, downstream)?;
         let value = Self {
-            native_dom_xmr_v23,
+            profile,
             network_id: manifest.network_id,
             registry_digest: registry.manifest_digest(),
             registry_epoch: manifest.epoch,
@@ -315,7 +414,7 @@ impl RouteTimePolicyV2 {
             upstream,
             downstream,
             self.limits,
-            self.native_dom_xmr_v23,
+            self.profile,
         )?;
         if expected != *self {
             return Err(RouteTimeAnchorErrorV2::RegistryMismatch);
@@ -355,17 +454,17 @@ impl RouteTimePolicyV2 {
             || self.checkpoints[0].clock_kind != ClockKindV2::DomHeight
             || self.checkpoints[0].chain_id == self.checkpoints[1].chain_id
             || self.checkpoints[0].chain_id == self.checkpoints[2].chain_id
-            || (!self.native_dom_xmr_v23
+            || (self.profile == RouteTimeProfileV2::Generic
                 && self.checkpoints[1].chain_id == self.checkpoints[2].chain_id)
         {
             return Err(RouteTimeAnchorErrorV2::InvalidPolicy);
         }
-        if self.native_dom_xmr_v23 {
+        // Native mainnet profiles: one counterparty chain observation serves
+        // both role-scoped positions, on the profile's own clock only.
+        if let Some(clock) = self.profile.shared_counterparty_clock() {
             let mut downstream = self.checkpoints[2];
             downstream.role = CheckpointRoleV2::UpstreamCounterparty;
-            if self.checkpoints[1].clock_kind != ClockKindV2::Monero
-                || self.checkpoints[1] != downstream
-            {
+            if self.checkpoints[1].clock_kind != clock || self.checkpoints[1] != downstream {
                 return Err(RouteTimeAnchorErrorV2::InvalidPolicy);
             }
         }
@@ -650,7 +749,7 @@ impl RouteTimeEvidenceV2 {
         {
             return Err(RouteTimeAnchorErrorV2::EvidenceStale);
         }
-        if policy.native_dom_xmr_v23 {
+        if policy.profile.shared_counterparty_clock().is_some() {
             let mut downstream = self.checkpoints[2];
             downstream.role = CheckpointRoleV2::UpstreamCounterparty;
             if self.checkpoints[1] != downstream {

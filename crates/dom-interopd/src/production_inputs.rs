@@ -45,9 +45,11 @@ use kaystra_core::{
     types::{Digest32, ParticipantId},
 };
 use participant_binding::{
-    bind_evm_session_v1, verify_evm_account_binding_v1, AuthenticatedEvmSessionBindingsV1,
+    bind_evm_session_v1, bind_solana_session_v25, verify_evm_account_binding_v1,
+    verify_solana_account_binding_v25, AuthenticatedEvmSessionBindingsV1,
     EvmAccountBindingProofV1, EvmBindingRoleV1, EvmSettlementPositionV1,
-    EVM_ACCOUNT_BINDING_PROOF_BYTES_V1,
+    SolanaAccountBindingProofV25, SolanaBindingRoleV25, SolanaSettlementPositionV25,
+    EVM_ACCOUNT_BINDING_PROOF_BYTES_V1, SOLANA_ACCOUNT_BINDING_PROOF_BYTES_V25,
 };
 use relay::auth::{RosterMemberV1, RosterRegistryV1, RosterSnapshotV1};
 use relay::SenderRoleV1;
@@ -60,10 +62,12 @@ use route_time_anchor::{
     route_scope_digest, DurableRouteTimeAnchorStoreV2, FrozenRouteTimeCheckpointV2,
     FrozenRouteTimeProofCheckpointV2, RouteTimeAnchorErrorV2, RouteTimeAnchorStoreConfigV2,
     RouteTimeEvidenceV2, RouteTimeEvidenceVerificationContextV2, RouteTimePolicyV2,
-    RouteTimePolicyVerificationContextV2, SignedRouteTimeEvidenceV2, SignedRouteTimePolicyV2,
+    RouteTimePolicyVerificationContextV2, RouteTimeProfileV2, SignedRouteTimeEvidenceV2,
+    SignedRouteTimePolicyV2,
 };
 use solana_profile::{
-    validate_setup as validate_solana_setup, SolanaAdapterProfileV1, SolanaAssetV1,
+    validate_setup as validate_solana_setup, validate_setup_for_chain_profile_v25,
+    SolanaAdapterProfileV1, SolanaAssetV1, SolanaSetupAccountsV25,
     SolanaNetwork as SolanaAdapterNetworkV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
 };
 use solana_types::SolanaPubkey;
@@ -122,6 +126,13 @@ pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1: usize =
             + 2 * xmr_dleq_sigma::MAX_PROOF_BYTES
             + 2
             + 2 * xmr_live_sidecar_api::MAX_DESTINATION_BYTES);
+/// Maximum size of a participant bundle that also carries the V25 Solana
+/// account proofs. Only layouts with that section may use the extra bytes; every
+/// earlier layout keeps its own bound.
+pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_SOLANA_ACCOUNTS_BYTES_V25: usize =
+    MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1
+        + 4
+        + 2 * (4 + 2 * SOLANA_ACCOUNT_BINDING_PROOF_BYTES_V25);
 /// Fixed-width prefix of one Monero leg setup: adapter profile plus every
 /// binding field except the variable-length DLEQ proof body and destination.
 pub const XMR_LEG_SETUP_FIXED_BYTES_V1: usize = 11 // adapter profile
@@ -180,6 +191,13 @@ impl ProductionRoutePositionV1 {
         match self {
             Self::Upstream => EvmSettlementPositionV1::Upstream,
             Self::Downstream => EvmSettlementPositionV1::Downstream,
+        }
+    }
+
+    pub(crate) const fn solana_position(self) -> SolanaSettlementPositionV25 {
+        match self {
+            Self::Upstream => SolanaSettlementPositionV25::Upstream,
+            Self::Downstream => SolanaSettlementPositionV25::Downstream,
         }
     }
 
@@ -1372,6 +1390,137 @@ impl ProductionXmrLegSetupV1 {
     }
 }
 
+/// The two dual-signed Solana account links for one Solana settlement.
+///
+/// Without them a Solana leg keeps the frozen V1 setup rule, in which the
+/// escrow pays the participant identities themselves. A DOM participant
+/// identity is a digest with no Ed25519 key, so only a leg that carries these
+/// proofs can pay accounts somebody controls.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProductionSolanaLegAccountProofsV25 {
+    position: ProductionRoutePositionV1,
+    funder: SolanaAccountBindingProofV25,
+    beneficiary: SolanaAccountBindingProofV25,
+}
+
+impl core::fmt::Debug for ProductionSolanaLegAccountProofsV25 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionSolanaLegAccountProofsV25")
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProductionSolanaLegAccountProofsV25 {
+    /// Groups the mandatory funding and beneficiary proofs for one Solana leg.
+    pub fn new(
+        position: ProductionRoutePositionV1,
+        funder: SolanaAccountBindingProofV25,
+        beneficiary: SolanaAccountBindingProofV25,
+    ) -> Result<Self, ProductionInputErrorV1> {
+        if funder.statement().position != position.solana_position()
+            || beneficiary.statement().position != position.solana_position()
+            || funder.statement().role != SolanaBindingRoleV25::Funder
+            || beneficiary.statement().role != SolanaBindingRoleV25::Beneficiary
+        {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        Ok(Self {
+            position,
+            funder,
+            beneficiary,
+        })
+    }
+
+    /// Route position of this proof pair.
+    pub const fn position(&self) -> ProductionRoutePositionV1 {
+        self.position
+    }
+
+    /// Funding-account proof.
+    pub const fn funder(&self) -> &SolanaAccountBindingProofV25 {
+        &self.funder
+    }
+
+    /// Beneficiary-account proof.
+    pub const fn beneficiary(&self) -> &SolanaAccountBindingProofV25 {
+        &self.beneficiary
+    }
+
+    fn encode_into(&self, bytes: &mut Vec<u8>) -> Result<(), ProductionInputErrorV1> {
+        bytes.push(self.position.tag());
+        bytes.extend_from_slice(&[0; 3]);
+        for proof in [&self.funder, &self.beneficiary] {
+            bytes.extend_from_slice(
+                &proof
+                    .canonical_bytes()
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn decode_from(cursor: &mut InputCursorV1<'_>) -> Result<Self, ProductionInputErrorV1> {
+        let position = ProductionRoutePositionV1::from_tag(cursor.u8()?)?;
+        if cursor.take::<3>()? != [0; 3] {
+            return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+        }
+        let funder = SolanaAccountBindingProofV25::decode_canonical(
+            cursor.bytes(SOLANA_ACCOUNT_BINDING_PROOF_BYTES_V25)?,
+        )
+        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+        let beneficiary = SolanaAccountBindingProofV25::decode_canonical(
+            cursor.bytes(SOLANA_ACCOUNT_BINDING_PROOF_BYTES_V25)?,
+        )
+        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+        Self::new(position, funder, beneficiary)
+    }
+}
+
+/// Escrow accounts and proof digests authenticated for one V25 Solana leg.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProductionSolanaAccountBindingV25 {
+    funder: SolanaPubkey,
+    recipient: SolanaPubkey,
+    refund_recipient: SolanaPubkey,
+    roster_snapshot: Digest32,
+    funder_binding_digest: Digest32,
+    beneficiary_binding_digest: Digest32,
+}
+
+impl ProductionSolanaAccountBindingV25 {
+    /// Account that initializes and funds the escrow.
+    pub const fn funder(&self) -> SolanaPubkey {
+        self.funder
+    }
+
+    /// Account the escrow pays on claim.
+    pub const fn recipient(&self) -> SolanaPubkey {
+        self.recipient
+    }
+
+    /// Account the escrow pays on refund.
+    pub const fn refund_recipient(&self) -> SolanaPubkey {
+        self.refund_recipient
+    }
+
+    /// Relay roster snapshot shared by both participant proofs.
+    pub const fn roster_snapshot(&self) -> Digest32 {
+        self.roster_snapshot
+    }
+
+    /// Dual-signed proof digest for the funding account.
+    pub const fn funder_binding_digest(&self) -> Digest32 {
+        self.funder_binding_digest
+    }
+
+    /// Dual-signed proof digest for the beneficiary account.
+    pub const fn beneficiary_binding_digest(&self) -> Digest32 {
+        self.beneficiary_binding_digest
+    }
+}
+
 /// Canonical set of participant proofs for exactly the applicable route legs.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProductionParticipantBindingBundleV1 {
@@ -1380,6 +1529,7 @@ pub struct ProductionParticipantBindingBundleV1 {
     bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
     solana_legs: Vec<ProductionSolanaLegSetupV1>,
     monero_legs: Vec<ProductionXmrLegSetupV1>,
+    solana_account_legs: Vec<ProductionSolanaLegAccountProofsV25>,
 }
 
 impl core::fmt::Debug for ProductionParticipantBindingBundleV1 {
@@ -1389,6 +1539,10 @@ impl core::fmt::Debug for ProductionParticipantBindingBundleV1 {
             .field("evm_proof_leg_count", &self.legs.len())
             .field("bitcoin_proof_leg_count", &self.bitcoin_legs.len())
             .field("solana_setup_leg_count", &self.solana_legs.len())
+            .field(
+                "solana_account_proof_leg_count",
+                &self.solana_account_legs.len(),
+            )
             .field("monero_setup_leg_count", &self.monero_legs.len())
             .finish_non_exhaustive()
     }
@@ -1436,7 +1590,42 @@ impl ProductionParticipantBindingBundleV1 {
         solana_legs: Vec<ProductionSolanaLegSetupV1>,
         monero_legs: Vec<ProductionXmrLegSetupV1>,
     ) -> Result<Self, ProductionInputErrorV1> {
+        Self::new_with_solana_account_proofs_v25(
+            route_id,
+            legs,
+            bitcoin_legs,
+            solana_legs,
+            monero_legs,
+            Vec::new(),
+        )
+    }
+
+    /// Builds every set, including the V25 Solana account proofs. Each proof
+    /// pair must belong to a Solana setup at the same position and settlement.
+    pub fn new_with_solana_account_proofs_v25(
+        route_id: RouteIdV1,
+        legs: Vec<ProductionEvmLegProofsV1>,
+        bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
+        solana_legs: Vec<ProductionSolanaLegSetupV1>,
+        monero_legs: Vec<ProductionXmrLegSetupV1>,
+        solana_account_legs: Vec<ProductionSolanaLegAccountProofsV25>,
+    ) -> Result<Self, ProductionInputErrorV1> {
         if route_id == ZERO_DIGEST
+            || solana_account_legs.len() > 2
+            || solana_account_legs
+                .windows(2)
+                .any(|pair| pair[0].position >= pair[1].position)
+            || solana_account_legs.iter().any(|proofs| {
+                proofs.funder.statement().route_id != route_id
+                    || proofs.beneficiary.statement().route_id != route_id
+                    || !solana_legs.iter().any(|leg| {
+                        leg.position == proofs.position
+                            && proofs.funder.statement().settlement_id
+                                == leg.binding.settlement_id
+                            && proofs.beneficiary.statement().settlement_id
+                                == leg.binding.settlement_id
+                    })
+            })
             || legs.len() > 2
             || bitcoin_legs.len() > 2
             || solana_legs.len() > 2
@@ -1466,6 +1655,7 @@ impl ProductionParticipantBindingBundleV1 {
             bitcoin_legs,
             solana_legs,
             monero_legs,
+            solana_account_legs,
         })
     }
 
@@ -1494,6 +1684,11 @@ impl ProductionParticipantBindingBundleV1 {
         &self.monero_legs
     }
 
+    /// Canonical V25 Solana account proofs, one pair per proven Solana leg.
+    pub fn solana_account_legs(&self) -> &[ProductionSolanaLegAccountProofsV25] {
+        &self.solana_account_legs
+    }
+
     /// Bounded reject-trailing representation.
     ///
     /// The reserved field after the version doubles as the layout marker: a
@@ -1501,12 +1696,13 @@ impl ProductionParticipantBindingBundleV1 {
     /// pre-Solana encoding; a bundle with Solana legs writes `1` and appends
     /// the Solana section after the Bitcoin one.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ProductionInputErrorV1> {
-        Self::new_with_all_counterparty_bindings(
+        Self::new_with_solana_account_proofs_v25(
             self.route_id,
             self.legs.clone(),
             self.bitcoin_legs.clone(),
             self.solana_legs.clone(),
             self.monero_legs.clone(),
+            self.solana_account_legs.clone(),
         )?;
         let mut layout: u16 = 0;
         if !self.solana_legs.is_empty() {
@@ -1514,6 +1710,11 @@ impl ProductionParticipantBindingBundleV1 {
         }
         if !self.monero_legs.is_empty() {
             layout |= 2;
+        }
+        // Bit 4 appends the V25 Solana account proofs after the Monero
+        // section; every bundle without them keeps its exact earlier bytes.
+        if !self.solana_account_legs.is_empty() {
+            layout |= 4;
         }
         let mut bytes = Vec::with_capacity(MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1);
         bytes.extend_from_slice(PARTICIPANT_BUNDLE_MAGIC_V1);
@@ -1574,10 +1775,22 @@ impl ProductionParticipantBindingBundleV1 {
                 leg.encode_into(&mut bytes)?;
             }
         }
+        if layout & 4 != 0 {
+            bytes.push(
+                u8::try_from(self.solana_account_legs.len())
+                    .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?,
+            );
+            bytes.extend_from_slice(&[0; 3]);
+            for proofs in &self.solana_account_legs {
+                proofs.encode_into(&mut bytes)?;
+            }
+        }
         let bound = if layout == 0 {
             MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1
-        } else {
+        } else if layout & 4 == 0 {
             MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1
+        } else {
+            MAX_PRODUCTION_PARTICIPANT_BUNDLE_SOLANA_ACCOUNTS_BYTES_V25
         };
         if bytes.len() > bound {
             return Err(ProductionInputErrorV1::InputBoundExceeded);
@@ -1587,7 +1800,7 @@ impl ProductionParticipantBindingBundleV1 {
 
     /// Strictly decodes a participant proof bundle.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ProductionInputErrorV1> {
-        if bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 {
+        if bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_SOLANA_ACCOUNTS_BYTES_V25 {
             return Err(ProductionInputErrorV1::InputBoundExceeded);
         }
         let mut cursor = InputCursorV1::new(bytes);
@@ -1596,10 +1809,14 @@ impl ProductionParticipantBindingBundleV1 {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
         }
         let layout = cursor.u16()?;
-        if layout > 3 {
+        // Account proofs (bit 4) only ever accompany Solana setups (bit 1).
+        if layout > 7 || (layout & 4 != 0 && layout & 1 == 0) {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
         }
         if layout == 0 && bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 {
+            return Err(ProductionInputErrorV1::InputBoundExceeded);
+        }
+        if layout & 4 == 0 && bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 {
             return Err(ProductionInputErrorV1::InputBoundExceeded);
         }
         let route_id = cursor.take::<32>()?;
@@ -1674,13 +1891,26 @@ impl ProductionParticipantBindingBundleV1 {
                 monero_legs.push(ProductionXmrLegSetupV1::decode_from(&mut cursor)?);
             }
         }
+        let mut solana_account_legs = Vec::new();
+        if layout & 4 != 0 {
+            let proof_count = usize::from(cursor.u8()?);
+            if proof_count == 0 || proof_count > 2 || cursor.take::<3>()? != [0; 3] {
+                return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+            }
+            for _ in 0..proof_count {
+                solana_account_legs.push(ProductionSolanaLegAccountProofsV25::decode_from(
+                    &mut cursor,
+                )?);
+            }
+        }
         cursor.finish()?;
-        let value = Self::new_with_all_counterparty_bindings(
+        let value = Self::new_with_solana_account_proofs_v25(
             route_id,
             legs,
             bitcoin_legs,
             solana_legs,
             monero_legs,
+            solana_account_legs,
         )?;
         if value.canonical_bytes()?.as_slice() != bytes {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
@@ -1781,6 +2011,7 @@ pub struct AuthenticatedSolanaSessionBindingsV1 {
     deployment: ResolvedSolanaDeploymentV1,
     profile: SolanaAdapterProfileV1,
     setup: ValidatedSolanaSetup,
+    account_binding: Option<ProductionSolanaAccountBindingV25>,
 }
 
 impl core::fmt::Debug for AuthenticatedSolanaSessionBindingsV1 {
@@ -1831,6 +2062,12 @@ impl AuthenticatedSolanaSessionBindingsV1 {
     /// DLEQ-verified, PDA-verified escrow setup.
     pub const fn setup(&self) -> &ValidatedSolanaSetup {
         &self.setup
+    }
+
+    /// The V25 account binding when the leg carried dual-signed account
+    /// proofs; `None` for a frozen V1 setup that pays participant identities.
+    pub const fn account_binding_v25(&self) -> Option<&ProductionSolanaAccountBindingV25> {
+        self.account_binding.as_ref()
     }
 }
 
@@ -2372,7 +2609,7 @@ fn load_authenticated_production_inputs_inner_v1(
     validate_roster_terms(&roster_bundle, &upstream, &downstream, &secp)?;
 
     let participant_bundle =
-        read_participant_bundle_v24(layout.path(ProductionPathRoleV1::ParticipantBindings))?;
+        read_participant_bundle_v25(layout.path(ProductionPathRoleV1::ParticipantBindings))?;
     if participant_bundle.bundle_digest()? != pins.participant_bindings_digest
         || participant_bundle.route_id != pins.route_id
     {
@@ -2495,20 +2732,27 @@ fn load_authenticated_production_inputs_inner_v1(
     {
         return Err(ProductionInputErrorV1::PinMismatch);
     }
-    let reconstructed_policy = if decoded_policy.is_dom_xmr_mainnet_v23() {
-        RouteTimePolicyV2::from_registry_dom_xmr_v23(
+    // The profile is part of the signed, pinned policy bytes; the reconstruction
+    // under that same profile must reproduce them exactly.
+    let reconstructed_policy = match decoded_policy.profile() {
+        RouteTimeProfileV2::Generic => RouteTimePolicyV2::from_registry(
             &resolved_registry,
             &upstream,
             &downstream,
             decoded_policy.limits(),
-        )
-    } else {
-        RouteTimePolicyV2::from_registry(
+        ),
+        RouteTimeProfileV2::DomXmrMainnetV23 => RouteTimePolicyV2::from_registry_dom_xmr_v23(
             &resolved_registry,
             &upstream,
             &downstream,
             decoded_policy.limits(),
-        )
+        ),
+        RouteTimeProfileV2::DomSolMainnetV25 => RouteTimePolicyV2::from_registry_dom_sol_v25(
+            &resolved_registry,
+            &upstream,
+            &downstream,
+            decoded_policy.limits(),
+        ),
     }
     .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
     if reconstructed_policy != decoded_policy {
@@ -3433,14 +3677,100 @@ fn authenticate_participant_bundle(
                     .admission
                     .solana_deployment_capability(position.leg())
                     .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                // One registry object, not two: the V25 account binding pins
+                // the genesis of the admitted deployment and the escrow
+                // program of the resolved chain profile.
+                if deployment.profile_digest()
+                    != chain
+                        .profile()
+                        .profile_digest()
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?
+                {
+                    return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+                }
                 let terms_digest = terms
                     .terms_hash()
                     .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
                 // The DLEQ inside the binding is the authentication anchor:
                 // validate_setup verifies it against the frozen terms, the
                 // adaptor point, the closed role byte and the derived PDAs.
-                let setup = validate_solana_setup(&leg.profile, terms, leg.binding.clone())
-                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let proofs = bundle
+                    .solana_account_legs
+                    .iter()
+                    .find(|candidate| candidate.position == position);
+                let (setup, account_binding) = match proofs {
+                    // Frozen V1: the escrow pays the participant identities.
+                    None => (
+                        validate_solana_setup(&leg.profile, terms, leg.binding.clone())
+                            .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?,
+                        None,
+                    ),
+                    // V25: both accounts are proven by the account itself and
+                    // by the participant's roster key, exactly as for EVM, and
+                    // the terms pin the registry chain-profile digest.
+                    Some(proofs) => {
+                        let snapshot = context.rosters.legs[index].roster_snapshot;
+                        let funder_key = context
+                            .rosters
+                            .member_key(position, terms.counterparty_leg.refund_to)?;
+                        let beneficiary_key = context
+                            .rosters
+                            .member_key(position, terms.counterparty_leg.beneficiary)?;
+                        let funder = verify_solana_account_binding_v25(
+                            &proofs.funder,
+                            funder_key,
+                            snapshot,
+                            context.registry.manifest().network_id,
+                            context.registry.manifest_digest(),
+                            context.now,
+                        )
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                        let beneficiary = verify_solana_account_binding_v25(
+                            &proofs.beneficiary,
+                            beneficiary_key,
+                            snapshot,
+                            context.registry.manifest().network_id,
+                            context.registry.manifest_digest(),
+                            context.now,
+                        )
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                        let accounts = bind_solana_session_v25(
+                            terms,
+                            bundle.route_id,
+                            context.admission.frozen_bindings().terms_digest,
+                            position.solana_position(),
+                            deployment.deployment().genesis_hash,
+                            escrow_program,
+                            context.registry.manifest().network_id,
+                            context.registry.manifest_digest(),
+                            context.now,
+                            &funder,
+                            &beneficiary,
+                        )
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                        let binding = ProductionSolanaAccountBindingV25 {
+                            funder: SolanaPubkey(accounts.funder()),
+                            recipient: SolanaPubkey(accounts.recipient()),
+                            refund_recipient: SolanaPubkey(accounts.refund_recipient()),
+                            roster_snapshot: accounts.roster_snapshot(),
+                            funder_binding_digest: accounts.funder_binding_digest(),
+                            beneficiary_binding_digest: accounts.beneficiary_binding_digest(),
+                        };
+                        let setup = validate_setup_for_chain_profile_v25(
+                            &leg.profile,
+                            terms,
+                            leg.binding.clone(),
+                            chain.profile(),
+                            SolanaSetupAccountsV25 {
+                                funder: binding.funder,
+                                recipient: binding.recipient,
+                                refund_recipient: binding.refund_recipient,
+                            },
+                        )
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                        (setup, Some(binding))
+                    }
+                };
                 solana_sessions[index] = Some(AuthenticatedSolanaSessionBindingsV1 {
                     position,
                     network_id: context.registry.manifest().network_id,
@@ -3450,6 +3780,7 @@ fn authenticate_participant_bundle(
                     deployment,
                     profile: leg.profile,
                     setup,
+                    account_binding,
                 });
             }
             ChainKindV1::Monero { network } => {
@@ -3574,6 +3905,19 @@ fn read_participant_bundle_v24(
     let bytes = read_bounded(
         path,
         MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 as u64,
+    )?;
+    ProductionParticipantBindingBundleV1::decode_canonical(&bytes)
+}
+
+/// The V24 reader with the outer file cap raised to the V25 Solana account
+/// layout. The canonical decoder still holds every earlier layout to its own
+/// bound, so only a bundle that carries the account proofs may use the bytes.
+fn read_participant_bundle_v25(
+    path: &std::path::Path,
+) -> Result<ProductionParticipantBindingBundleV1, ProductionInputErrorV1> {
+    let bytes = read_bounded(
+        path,
+        MAX_PRODUCTION_PARTICIPANT_BUNDLE_SOLANA_ACCOUNTS_BYTES_V25 as u64,
     )?;
     ProductionParticipantBindingBundleV1::decode_canonical(&bytes)
 }
@@ -5854,5 +6198,126 @@ mod tests {
         let decoded =
             ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
         assert!(decoded.solana_legs().is_empty());
+        assert!(decoded.solana_account_legs().is_empty());
+    }
+
+    /// Structural wire fixtures only: these signatures authenticate nothing,
+    /// and the codec never verifies them. The real input path does.
+    fn synthetic_solana_account_proofs(
+        position: ProductionRoutePositionV1,
+        settlement_id: Digest32,
+    ) -> ProductionSolanaLegAccountProofsV25 {
+        let proof = |role: SolanaBindingRoleV25, account: u8, participant: u8| {
+            SolanaAccountBindingProofV25::new(
+                participant_binding::SolanaAccountBindingStatementV25 {
+                    network_id: [0x81; 32],
+                    registry_digest: [0x82; 32],
+                    route_id: ROUTE_ID,
+                    settlement_id,
+                    session_id: [0x83; 32],
+                    terms_digest: [0x84; 32],
+                    roster_snapshot: [0x85; 32],
+                    participant_id: ParticipantId([participant; 32]),
+                    participant_xonly_key: [participant.wrapping_add(1); 32],
+                    account: [account; 32],
+                    position: position.solana_position(),
+                    role,
+                    issued_at: 1_900_000_000,
+                    valid_until: 1_900_086_400,
+                    genesis_hash: [0x86; 32],
+                    escrow_program: [0x11; 32],
+                },
+                [account; 64],
+                [participant; 64],
+            )
+        };
+        ProductionSolanaLegAccountProofsV25::new(
+            position,
+            proof(SolanaBindingRoleV25::Funder, 0x61, 0xb1),
+            proof(SolanaBindingRoleV25::Beneficiary, 0x62, 0xb2),
+        )
+        .expect("solana account proofs")
+    }
+
+    fn solana_account_bundle() -> ProductionParticipantBindingBundleV1 {
+        ProductionParticipantBindingBundleV1::new_with_solana_account_proofs_v25(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            vec![synthetic_solana_leg(ProductionRoutePositionV1::Upstream)],
+            Vec::new(),
+            vec![synthetic_solana_account_proofs(
+                ProductionRoutePositionV1::Upstream,
+                [0x31; 32],
+            )],
+        )
+        .expect("bundle")
+    }
+
+    #[test]
+    fn solana_account_proof_section_round_trips_under_its_own_layout_bit() {
+        let bundle = solana_account_bundle();
+        let bytes = bundle.canonical_bytes().expect("encode");
+        // Layout bitmask: Solana setups plus the V25 account proofs.
+        assert_eq!(&bytes[10..12], &[0, 5]);
+        assert!(bytes.len() <= MAX_PRODUCTION_PARTICIPANT_BUNDLE_SOLANA_ACCOUNTS_BYTES_V25);
+        let decoded =
+            ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
+        assert_eq!(decoded.solana_account_legs().len(), 1);
+        assert_eq!(
+            decoded.solana_account_legs()[0].funder().statement().role,
+            SolanaBindingRoleV25::Funder
+        );
+        assert_eq!(decoded.canonical_bytes().expect("re-encode"), bytes);
+        assert_eq!(decoded, bundle);
+        // The same bundle without the proofs keeps the earlier bytes exactly.
+        let without = ProductionParticipantBindingBundleV1::new_with_counterparty_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            vec![synthetic_solana_leg(ProductionRoutePositionV1::Upstream)],
+        )
+        .expect("bundle");
+        let earlier = without.canonical_bytes().expect("encode");
+        assert_eq!(&earlier[10..12], &[0, 1]);
+        assert_eq!(&bytes[..earlier.len()], earlier.as_slice());
+    }
+
+    #[test]
+    fn solana_account_proof_section_refuses_relabelling_and_orphan_proofs() {
+        let bytes = solana_account_bundle().canonical_bytes().expect("encode");
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(ProductionParticipantBindingBundleV1::decode_canonical(&trailing).is_err());
+        // Dropping the marker while still carrying the section, and claiming
+        // account proofs without the Solana setups they belong to.
+        for layout in [1u8, 4] {
+            let mut relabeled = bytes.clone();
+            relabeled[11] = layout;
+            assert_eq!(
+                ProductionParticipantBindingBundleV1::decode_canonical(&relabeled)
+                    .expect_err("relabelled layout"),
+                ProductionInputErrorV1::NonCanonicalEncoding
+            );
+        }
+        // A proof pair whose position carries no Solana setup, and one whose
+        // settlement is not the settlement of that setup.
+        for (position, settlement) in [
+            (ProductionRoutePositionV1::Downstream, [0x31; 32]),
+            (ProductionRoutePositionV1::Upstream, [0x39; 32]),
+        ] {
+            assert_eq!(
+                ProductionParticipantBindingBundleV1::new_with_solana_account_proofs_v25(
+                    ROUTE_ID,
+                    Vec::new(),
+                    Vec::new(),
+                    vec![synthetic_solana_leg(ProductionRoutePositionV1::Upstream)],
+                    Vec::new(),
+                    vec![synthetic_solana_account_proofs(position, settlement)],
+                )
+                .expect_err("orphan account proofs"),
+                ProductionInputErrorV1::InvalidParticipantBundle
+            );
+        }
     }
 }

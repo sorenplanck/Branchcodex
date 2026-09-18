@@ -1089,6 +1089,78 @@ pub fn encode_evm_leg_authority_bundle_v22(
     )
 }
 
+/// Which of the two escrow keys this daemon signs with locally; the other one
+/// is served by the peer signer on `peer_socket`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductionSolanaLegRoleV25 {
+    /// Initializes and funds the escrow.
+    Funder,
+    /// Claims the escrow with the revealed secret.
+    Beneficiary,
+}
+
+/// Explicit legacy SPL token accounts. Native SOL takes none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProductionSolanaLegTokenAccountsV25 {
+    /// Funder's source token account.
+    pub source: [u8; 32],
+    /// Beneficiary's destination token account.
+    pub recipient: [u8; 32],
+    /// Funder's refund token account.
+    pub refund: [u8; 32],
+}
+
+/// The Solana position's own local values, in the units the decoder reads.
+pub struct ProductionSolanaLegBundleParametersV25 {
+    /// The key this daemon holds; the peer socket serves the other one.
+    pub local_role: ProductionSolanaLegRoleV25,
+    /// `None` for native SOL; all three accounts for legacy SPL.
+    pub token_accounts: Option<ProductionSolanaLegTokenAccountsV25>,
+    /// Normal relative path inside the state directory.
+    pub peer_socket: String,
+    /// Non-zero, at most 60_000.
+    pub peer_timeout_ms: u64,
+}
+
+/// Encodes one Solana leg authority bundle.
+///
+/// Same reasoning as the EVM writer: the decoder requires the bytes to
+/// re-serialize to themselves, so they are produced from `WireV11` here rather
+/// than from a second description of the schema. Only the checks that stand
+/// without the authenticated inputs are applied: the socket path, the timeout
+/// bound, and non-zero token accounts. Whether the asset admits token accounts
+/// at all, whether one of them is the vault PDA, and whether funder and
+/// recipient differ are judged by the decoder against the admitted setup.
+pub fn encode_solana_leg_authority_bundle_v25(
+    identity: &ProductionLegBundleIdentityV22,
+    parameters: ProductionSolanaLegBundleParametersV25,
+) -> Result<ProductionLegBundleV22, Refusal> {
+    relative_path(&parameters.peer_socket)?;
+    require_milliseconds(parameters.peer_timeout_ms, 60_000)?;
+    if let Some(accounts) = parameters.token_accounts {
+        if [accounts.source, accounts.recipient, accounts.refund].contains(&[0; 32]) {
+            return Err(Refusal::Conflict);
+        }
+    }
+    encode_wire_v22(
+        identity,
+        WireAuthorityV11::Solana(ProductionUniversalSolanaAuthorityV11 {
+            scope: None,
+            local_role: match parameters.local_role {
+                ProductionSolanaLegRoleV25::Funder => SolanaRoleV11::Funder,
+                ProductionSolanaLegRoleV25::Beneficiary => SolanaRoleV11::Beneficiary,
+            },
+            token_accounts: parameters.token_accounts.map(|accounts| TokenAccountsV11 {
+                source: accounts.source,
+                recipient: accounts.recipient,
+                refund: accounts.refund,
+            }),
+            peer_socket: parameters.peer_socket,
+            peer_timeout_ms: parameters.peer_timeout_ms,
+        }),
+    )
+}
+
 fn encode_wire_v22(
     identity: &ProductionLegBundleIdentityV22,
     authority: WireAuthorityV11,
@@ -1130,6 +1202,101 @@ mod tests {
             observation_valid_for_ms: 45_000,
             remote_custody_lease_duration_ms: 600_000,
         }
+    }
+
+    fn solana_parameters() -> ProductionSolanaLegBundleParametersV25 {
+        ProductionSolanaLegBundleParametersV25 {
+            local_role: ProductionSolanaLegRoleV25::Funder,
+            token_accounts: None,
+            peer_socket: "sol-peer-0.sock".to_owned(),
+            peer_timeout_ms: 30_000,
+        }
+    }
+
+    /// The Solana bytes must re-serialize to themselves, carry the identity
+    /// unchanged and spell the role exactly as the decoder's enum does.
+    #[test]
+    fn encoded_solana_bundle_satisfies_the_decoder_checks_that_stand_alone() {
+        let identity = identity();
+        let bundle = encode_solana_leg_authority_bundle_v25(&identity, solana_parameters())
+            .expect("valid parameters");
+        let wire: WireV11 = serde_json::from_slice(bundle.bytes()).expect("decodes");
+        assert_eq!(serde_json::to_vec(&wire).expect("re-encodes"), bundle.bytes());
+        assert_eq!(wire.format, FORMAT);
+        assert_eq!(wire.settlement_id, identity.settlement_id);
+        assert_eq!(wire.session_id, identity.session_id);
+        assert_eq!(wire.chain_id, identity.chain_id);
+        assert_eq!(wire.terms_hash, identity.terms_hash);
+        assert_eq!(
+            bundle.digest(),
+            ProductionUniversalLegV11::bundle_digest(bundle.bytes()).expect("digest")
+        );
+        match wire.authority {
+            WireAuthorityV11::Solana(value) => {
+                assert!(matches!(value.local_role, SolanaRoleV11::Funder));
+                assert!(value.token_accounts.is_none());
+                assert_eq!(value.peer_socket, "sol-peer-0.sock");
+                assert_eq!(value.peer_timeout_ms, 30_000);
+            }
+            _ => panic!("the Solana writer must produce the SOL authority"),
+        }
+        let text = std::str::from_utf8(bundle.bytes()).expect("utf8");
+        assert!(text.ends_with(
+            "\"authority\":{\"family\":\"SOL\",\"parameters\":{\"local_role\":\"funder\",\
+             \"token_accounts\":null,\"peer_socket\":\"sol-peer-0.sock\",\"peer_timeout_ms\":30000}}}"
+        ));
+        let beneficiary = encode_solana_leg_authority_bundle_v25(
+            &identity,
+            ProductionSolanaLegBundleParametersV25 {
+                local_role: ProductionSolanaLegRoleV25::Beneficiary,
+                ..solana_parameters()
+            },
+        )
+        .expect("encodes");
+        assert_ne!(beneficiary.digest(), bundle.digest());
+    }
+
+    #[test]
+    fn the_solana_writer_refuses_what_it_can_judge_without_the_admitted_inputs() {
+        let refused = |parameters| {
+            matches!(
+                encode_solana_leg_authority_bundle_v25(&identity(), parameters),
+                Err(Refusal::Conflict)
+            )
+        };
+        for socket in ["", "/abs/sol.sock", "../sol.sock", "a//sol.sock", "a\\sol.sock"] {
+            assert!(refused(ProductionSolanaLegBundleParametersV25 {
+                peer_socket: socket.to_owned(),
+                ..solana_parameters()
+            }));
+        }
+        for timeout in [0, 60_001] {
+            assert!(refused(ProductionSolanaLegBundleParametersV25 {
+                peer_timeout_ms: timeout,
+                ..solana_parameters()
+            }));
+        }
+        assert!(refused(ProductionSolanaLegBundleParametersV25 {
+            token_accounts: Some(ProductionSolanaLegTokenAccountsV25 {
+                source: [1; 32],
+                recipient: [0; 32],
+                refund: [3; 32],
+            }),
+            ..solana_parameters()
+        }));
+        assert!(encode_solana_leg_authority_bundle_v25(
+            &identity(),
+            ProductionSolanaLegBundleParametersV25 {
+                token_accounts: Some(ProductionSolanaLegTokenAccountsV25 {
+                    source: [1; 32],
+                    recipient: [2; 32],
+                    refund: [3; 32],
+                }),
+                peer_timeout_ms: 60_000,
+                ..solana_parameters()
+            }
+        )
+        .is_ok());
     }
 
     /// The encoder's output must satisfy every decoder check that does not

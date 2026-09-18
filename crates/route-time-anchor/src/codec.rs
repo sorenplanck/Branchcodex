@@ -3,7 +3,7 @@ use kaystra_core::types::{ChainId, FinalityPolicyV1};
 
 use crate::types::{
     CanonicalTimeCheckpointV2, CheckpointBindingV2, CheckpointRoleV2, ClockKindV2,
-    RouteTimeEvidenceV2, RouteTimePolicyLimitsV2, RouteTimePolicyV2,
+    RouteTimeEvidenceV2, RouteTimePolicyLimitsV2, RouteTimePolicyV2, RouteTimeProfileV2,
 };
 use crate::{Result, RouteTimeAnchorErrorV2, ROUTE_TIME_VERSION_V2};
 
@@ -16,7 +16,7 @@ pub(crate) fn encode_policy_v2(policy: &RouteTimePolicyV2) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(640);
     output.extend_from_slice(POLICY_MAGIC_V2);
     put_u16(&mut output, ROUTE_TIME_VERSION_V2);
-    put_u16(&mut output, u16::from(policy.native_dom_xmr_v23));
+    put_u16(&mut output, policy.profile.tag());
     output.extend_from_slice(&policy.network_id);
     output.extend_from_slice(&policy.registry_digest);
     put_u64(&mut output, policy.registry_epoch);
@@ -41,13 +41,10 @@ pub(crate) fn decode_policy_v2(bytes: &[u8]) -> Result<RouteTimePolicyV2> {
     if reader.take::<8>()? != *POLICY_MAGIC_V2 || reader.u16()? != ROUTE_TIME_VERSION_V2 {
         return Err(RouteTimeAnchorErrorV2::NonCanonicalEncoding);
     }
-    let native_dom_xmr_v23 = match reader.u16()? {
-        0 => false,
-        1 => true,
-        _ => return Err(RouteTimeAnchorErrorV2::NonCanonicalEncoding),
-    };
+    // 0 and 1 are byte-identical to the former boolean; 2 selects DOM/SOL.
+    let profile = RouteTimeProfileV2::from_tag(reader.u16()?)?;
     let value = RouteTimePolicyV2 {
-        native_dom_xmr_v23,
+        profile,
         network_id: reader.take()?,
         registry_digest: reader.take()?,
         registry_epoch: reader.u64()?,
