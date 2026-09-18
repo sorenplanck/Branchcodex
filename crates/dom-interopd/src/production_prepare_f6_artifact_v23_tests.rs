@@ -102,6 +102,56 @@ fn public_input(secp: &SecpContext) -> PublicInput {
         claim_profile: ClaimProfile::NativeEnrollment,
     }
 }
+
+/// Convert the public fixture into the exact policy-17 shape that the A25
+/// profile admits. The CLI still receives public bytes only; admission later
+/// proves that both selected positions are Solana and carry account proofs.
+fn solana_enrollment_input(secp: &SecpContext) -> PublicInput {
+    let mut input = public_input(secp);
+    let ArtifactSource::CanonicalHex { hex } = &input.upstream_terms else {
+        unreachable!()
+    };
+    let mut upstream = SettlementTermsV1::decode(&hex::decode(hex).unwrap()).unwrap();
+    let ArtifactSource::CanonicalHex { hex } = &input.downstream_terms else {
+        unreachable!()
+    };
+    let mut downstream = SettlementTermsV1::decode(&hex::decode(hex).unwrap()).unwrap();
+    upstream.policy_version = dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17;
+    downstream.policy_version = dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17;
+    // The ordinary route topology A25 requires: the DOM roles swap between
+    // positions, so the upstream DOM receiver is the downstream DOM sender.
+    std::mem::swap(
+        &mut downstream.dom_leg.beneficiary,
+        &mut downstream.dom_leg.refund_to,
+    );
+    std::mem::swap(
+        &mut downstream.counterparty_leg.beneficiary,
+        &mut downstream.counterparty_leg.refund_to,
+    );
+    input.route.route_scope_digest =
+        route_time_anchor::route_scope_digest(&upstream, &downstream).unwrap();
+    input.upstream_terms = inline(upstream.canonical_bytes().unwrap());
+    input.downstream_terms = inline(downstream.canonical_bytes().unwrap());
+
+    let ArtifactSource::CanonicalHex { hex } = &input.relay_roster else {
+        unreachable!()
+    };
+    let roster = ProductionRelayRosterBundleV1::decode_canonical(&hex::decode(hex).unwrap())
+        .unwrap();
+    let mut legs = roster.legs().clone();
+    for leg in &mut legs {
+        leg.policy_version = dom_adaptor::DOM_NATIVE_BOOTSTRAP_POLICY_V17;
+    }
+    input.relay_roster = inline(
+        ProductionRelayRosterBundleV1::new(roster.network_id(), roster.route_id(), legs)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+    );
+    input.claim_profile = ClaimProfile::SolanaEnrollment;
+    input
+}
+
 fn private_temp() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -205,6 +255,29 @@ fn public_f6_commands_prepare_snapshot_resume_and_finalize_exact_external_signat
         Err(PrepareF6ArtifactErrorV23::RetainedRequest)
     ));
     assert_eq!(std::fs::read(bundle_path).unwrap(), corrupted);
+}
+
+#[test]
+fn public_f6_cli_refuses_solana_enrollment_outside_policy_17() {
+    let secp = SecpContext::new(&[50; 32]);
+    let mut input = public_input(&secp);
+    input.claim_profile = ClaimProfile::SolanaEnrollment;
+    assert!(matches!(
+        prepare_snapshot(&mut input, true, &secp),
+        Err(PrepareF6ArtifactErrorV23::Input)
+    ));
+}
+
+#[test]
+fn public_f6_cli_uses_the_a25_envelope_for_solana_enrollment() {
+    let secp = SecpContext::new(&[50; 32]);
+    let mut input = solana_enrollment_input(&secp);
+    let (prepared, report) = prepare_snapshot(&mut input, true, &secp).unwrap();
+    assert_eq!(
+        &prepared.canonical_signing_prefix()[..8],
+        b"DOMF6A25"
+    );
+    assert_eq!(report.signing_digest_hex, hex::encode(prepared.signing_digest()));
 }
 
 #[test]

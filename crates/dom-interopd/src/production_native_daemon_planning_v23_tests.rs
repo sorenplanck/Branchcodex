@@ -35,6 +35,15 @@ pub(crate) struct NativeDaemonPlanningInputsV23 {
     pub now_seconds: u64,
 }
 
+/// Completes the participant bundle from the planning admission and registry.
+pub(crate) type ParticipantFinisherV25<'a> = Box<
+    dyn FnOnce(
+            &AuthenticatedRouteAdmissionV1,
+            &ResolvedRegistryV1,
+        ) -> Result<ProductionParticipantBindingBundleV1>
+        + 'a,
+>;
+
 /// Private fields can only be populated after native verification below.
 /// No secret, transport grant, F6 approval, or substitute production token.
 pub(crate) struct NativeDaemonPlanningContextV23 {
@@ -43,7 +52,7 @@ pub(crate) struct NativeDaemonPlanningContextV23 {
     registry: ResolvedRegistryV1,
     authorities: ProductionAuthorityBundleV1,
     rosters: ProductionRelayRosterBundleV1,
-    sessions: [AuthenticatedXmrSessionBindingsV1; 2],
+    sessions: NativeDaemonSessionsV25,
     contracts: AuthenticatedContractsBootstrapV1,
     secp: SecpContext,
     policy_authority_digest: Digest32,
@@ -55,12 +64,67 @@ pub(crate) struct NativeDaemonPlanningContextV23 {
     root: PathBuf,
 }
 
+/// The single admitted counterparty family of both positions. Exactly one
+/// variant is populated by native verification; no mixed pair is represented.
+enum NativeDaemonSessionsV25 {
+    Monero([AuthenticatedXmrSessionBindingsV1; 2]),
+    Solana([AuthenticatedSolanaSessionBindingsV1; 2]),
+}
+
 impl NativeDaemonPlanningContextV23 {
     pub(crate) fn prepare(
         root: &Path,
         paths: ProductionPathReferencesV1,
         input: NativeDaemonPlanningInputsV23,
     ) -> Result<Self> {
+        Self::prepare_for_families_v25(
+            root,
+            paths,
+            input,
+            [crate::production_config::ProductionChainFamilyV11::Xmr; 2],
+        )
+    }
+
+    /// Same planning checkpoint for an explicitly selected same-family pair.
+    /// XMR keeps its original refusal text; SOL requires two DLEQ admissions.
+    pub(crate) fn prepare_for_families_v25(
+        root: &Path,
+        paths: ProductionPathReferencesV1,
+        input: NativeDaemonPlanningInputsV23,
+        families: [crate::production_config::ProductionChainFamilyV11; 2],
+    ) -> Result<Self> {
+        Self::prepare_inner_v25(root, paths, input, families, None)
+    }
+
+    /// Planning for participant proofs that sign the admission's frozen terms
+    /// digest, which exists only once the time ladder and the admission have
+    /// run. `finish` receives that admission and the resolved registry, and
+    /// returns the complete bundle; the bundle is then authenticated exactly
+    /// as the daemon loader will authenticate it. `input.participants` is the
+    /// bundle without those proofs and is replaced.
+    pub(crate) fn prepare_for_families_with_participants_v25(
+        root: &Path,
+        paths: ProductionPathReferencesV1,
+        input: NativeDaemonPlanningInputsV23,
+        families: [crate::production_config::ProductionChainFamilyV11; 2],
+        finish: ParticipantFinisherV25<'_>,
+    ) -> Result<Self> {
+        Self::prepare_inner_v25(root, paths, input, families, Some(finish))
+    }
+
+    fn prepare_inner_v25(
+        root: &Path,
+        paths: ProductionPathReferencesV1,
+        input: NativeDaemonPlanningInputsV23,
+        families: [crate::production_config::ProductionChainFamilyV11; 2],
+        finish: Option<ParticipantFinisherV25<'_>>,
+    ) -> Result<Self> {
+        use crate::production_config::ProductionChainFamilyV11;
+        if families != [ProductionChainFamilyV11::Xmr; 2]
+            && families != [ProductionChainFamilyV11::Sol; 2]
+        {
+            return Err("native planning requires one selected XMR or SOL family pair".into());
+        }
         require_private_parent(root)?;
         if input.now_seconds == 0 || input.route_id == [0; 32] {
             return Err("native planning scope".into());
@@ -91,8 +155,14 @@ impl NativeDaemonPlanningContextV23 {
         let planning =
             ProductionPreF6PlanningContextV23::prepare(store, &mut time, &planning_input, &secp)?;
         let (admission, composition, registry) = planning.into_parts();
+        // Proofs that sign the frozen terms digest can only be produced now,
+        // after admission; without a finisher the supplied bundle stands.
+        let participants = match finish {
+            None => input.participants.clone(),
+            Some(finish) => finish(&admission, &registry)?,
+        };
         let authenticated = authenticate_participant_bundle(
-            &input.participants,
+            &participants,
             ParticipantAuthenticationContextV1 {
                 secp: &secp,
                 rosters: &input.rosters,
@@ -103,15 +173,30 @@ impl NativeDaemonPlanningContextV23 {
                 now: input.now_seconds,
             },
         )?;
-        if authenticated.monero.iter().any(Option::is_none)
-            || authenticated.evm.iter().any(Option::is_some)
-            || authenticated.bitcoin.iter().any(Option::is_some)
-            || authenticated.solana.iter().any(Option::is_some)
-        {
-            return Err("native planning requires two actual XMR admissions".into());
-        }
-        let [Some(up), Some(down)] = authenticated.monero else {
-            return Err("native planning missing native sessions".into());
+        let sessions = if families == [ProductionChainFamilyV11::Xmr; 2] {
+            if authenticated.monero.iter().any(Option::is_none)
+                || authenticated.evm.iter().any(Option::is_some)
+                || authenticated.bitcoin.iter().any(Option::is_some)
+                || authenticated.solana.iter().any(Option::is_some)
+            {
+                return Err("native planning requires two actual XMR admissions".into());
+            }
+            let [Some(up), Some(down)] = authenticated.monero else {
+                return Err("native planning missing native sessions".into());
+            };
+            NativeDaemonSessionsV25::Monero([up, down])
+        } else {
+            if authenticated.solana.iter().any(Option::is_none)
+                || authenticated.evm.iter().any(Option::is_some)
+                || authenticated.bitcoin.iter().any(Option::is_some)
+                || authenticated.monero.iter().any(Option::is_some)
+            {
+                return Err("native planning requires two actual SOL admissions".into());
+            }
+            let [Some(up), Some(down)] = authenticated.solana else {
+                return Err("native planning missing native SOL sessions".into());
+            };
+            NativeDaemonSessionsV25::Solana([up, down])
         };
         let contracts = authenticate_contracts_bootstrap_v1(
             &input.contracts_bootstrap,
@@ -136,7 +221,7 @@ impl NativeDaemonPlanningContextV23 {
             ),
             (
                 ProductionPathRoleV1::ParticipantBindings,
-                input.participants.canonical_bytes()?,
+                participants.canonical_bytes()?,
             ),
             (
                 ProductionPathRoleV1::RelayRoster,
@@ -160,14 +245,14 @@ impl NativeDaemonPlanningContextV23 {
             registry,
             authorities: input.authorities,
             rosters: input.rosters,
-            sessions: [up, down],
+            sessions,
             contracts,
             secp,
             policy_authority_digest,
             evidence_authority_digest,
             signed_policy: input.signed_policy,
             signed_evidence: input.signed_evidence,
-            participants: input.participants,
+            participants,
             paths,
             root: root.to_path_buf(),
         })
@@ -194,11 +279,37 @@ impl NativeDaemonPlanningContextV23 {
     pub(crate) fn roster_bundle(&self) -> &ProductionRelayRosterBundleV1 {
         &self.rosters
     }
+    /// Callers select this only for an XMR-planned context; a SOL context has
+    /// no Monero session and refuses loudly instead of inventing one.
     pub(crate) fn monero_session(&self, leg: LegIdV1) -> &AuthenticatedXmrSessionBindingsV1 {
-        &self.sessions[match leg {
+        let NativeDaemonSessionsV25::Monero(sessions) = &self.sessions else {
+            panic!("native planning context was admitted for SOL, not XMR");
+        };
+        &sessions[match leg {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
         }]
+    }
+    /// DLEQ-authenticated Solana escrow session of a SOL-planned context.
+    pub(crate) fn solana_session(&self, leg: LegIdV1) -> Result<&AuthenticatedSolanaSessionBindingsV1> {
+        let NativeDaemonSessionsV25::Solana(sessions) = &self.sessions else {
+            return Err("native planning context has no SOL sessions".into());
+        };
+        Ok(&sessions[match leg {
+            LegIdV1::Upstream => 0,
+            LegIdV1::Downstream => 1,
+        }])
+    }
+    /// Family of both positions, fixed by native verification in `prepare`.
+    pub(crate) fn families_v25(&self) -> [crate::production_config::ProductionChainFamilyV11; 2] {
+        match self.sessions {
+            NativeDaemonSessionsV25::Monero(_) => {
+                [crate::production_config::ProductionChainFamilyV11::Xmr; 2]
+            }
+            NativeDaemonSessionsV25::Solana(_) => {
+                [crate::production_config::ProductionChainFamilyV11::Sol; 2]
+            }
+        }
     }
     pub(crate) fn contracts_bootstrap(&self) -> &AuthenticatedContractsBootstrapV1 {
         &self.contracts

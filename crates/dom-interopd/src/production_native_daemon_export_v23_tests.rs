@@ -32,6 +32,9 @@ pub(crate) enum NativeF6ClaimInputsV23 {
     },
     /// Initial roles/T/terms only. Real Store templates are required later.
     NativeEnrollment,
+    /// DOMF6A25 Solana enrollment; the downstream claim template comes later
+    /// from the bilateral native Store.
+    SolanaEnrollment,
 }
 
 /// Economic inputs must come from the scenario's actual inventory/bond owners.
@@ -69,6 +72,10 @@ pub(crate) fn encode_native_f6_bundle_v23(
             sources: sources.clone(),
         },
         NativeF6ClaimInputsV23::NativeEnrollment => PublicF6ClaimProfileV23::NativeEnrollment {
+            upstream: admitted.composition().upstream().clone(),
+            downstream: admitted.composition().downstream().clone(),
+        },
+        NativeF6ClaimInputsV23::SolanaEnrollment => PublicF6ClaimProfileV23::SolanaEnrollment {
             upstream: admitted.composition().upstream().clone(),
             downstream: admitted.composition().downstream().clone(),
         },
@@ -148,10 +155,35 @@ pub(crate) fn export_native_daemon_v23(
     state: &Path,
     admitted: &AuthenticatedProductionInputsV1,
     common: [ProductionBootstrapConfigV1; 2],
+    fields: ProductionUniversalBootstrapFieldsV11,
+    bundle: &[u8],
+    leg_bundles: [&[u8]; 2],
+    stdin_v4: Zeroizing<Vec<u8>>,
+) -> Result<ExportedNativeDaemonV23> {
+    export_native_daemon_for_families_v25(
+        state,
+        admitted,
+        common,
+        fields,
+        bundle,
+        leg_bundles,
+        stdin_v4,
+        [ProductionChainFamilyV11::Xmr; 2],
+    )
+}
+
+/// Same exporter for an explicitly selected pair of positions. Each admitted
+/// topology face must match its family; XMR keeps its original refusal text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_native_daemon_for_families_v25(
+    state: &Path,
+    admitted: &AuthenticatedProductionInputsV1,
+    common: [ProductionBootstrapConfigV1; 2],
     mut fields: ProductionUniversalBootstrapFieldsV11,
     bundle: &[u8],
     leg_bundles: [&[u8]; 2],
     stdin_v4: Zeroizing<Vec<u8>>,
+    families: [ProductionChainFamilyV11; 2],
 ) -> Result<ExportedNativeDaemonV23> {
     use settlement_coordinator::SettlementFaceV1;
     let topology =
@@ -166,11 +198,21 @@ pub(crate) fn export_native_daemon_v23(
     .enumerate()
     {
         let leg = topology.legs[index];
-        if leg.face != SettlementFaceV1::Monero {
-            return Err("native daemon exporter requires XMR positions".into());
+        let expected = match families[index] {
+            ProductionChainFamilyV11::Xmr => SettlementFaceV1::Monero,
+            ProductionChainFamilyV11::Sol => SettlementFaceV1::Solana,
+            _ => return Err("native daemon exporter supports only XMR or SOL positions".into()),
+        };
+        if leg.face != expected {
+            return Err(if families == [ProductionChainFamilyV11::Xmr; 2] {
+                "native daemon exporter requires XMR positions"
+            } else {
+                "native daemon exporter position family mismatch"
+            }
+            .into());
         }
         fields.legs[index] = ProductionUniversalLegV11 {
-            family: ProductionChainFamilyV11::Xmr,
+            family: families[index],
             settlement_id: leg.settlement_id,
             session_id: terms.session_id.0,
             chain_id: leg.chain_id,
@@ -194,7 +236,7 @@ pub(crate) fn export_native_daemon_v23(
     }
     let decoded = crate::production_node::ProductionSecretsV4::read(stdin_v4.as_slice())?;
     // Parsing and exact family matching precede filesystem publication.
-    let _ = decoded.into_parts([ProductionChainFamilyV11::Xmr; 2])?;
+    let _ = decoded.into_parts(families)?;
     for config in &common {
         let pins = config.pins();
         if pins.network_id != admitted.roster_bundle().network_id()

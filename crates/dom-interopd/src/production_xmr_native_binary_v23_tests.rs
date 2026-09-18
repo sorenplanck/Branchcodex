@@ -205,6 +205,31 @@ impl NativeDaemonBinaryV23 {
         credentials: Zeroizing<Vec<u8>>,
         mode: NativeDaemonModeV23,
     ) -> Result<NativeDaemonProcessV23> {
+        self.launch_for_families_v25(
+            state_dir,
+            credentials,
+            mode,
+            [crate::production_config::ProductionChainFamilyV11::Xmr; 2],
+        )
+    }
+
+    /// Same launch boundary for an explicitly selected pair of positions. The
+    /// V4 stream and the selected-service document must both name exactly
+    /// these families; no family is inferred from the state directory.
+    pub(crate) fn launch_for_families_v25(
+        &self,
+        state_dir: &Path,
+        credentials: Zeroizing<Vec<u8>>,
+        mode: NativeDaemonModeV23,
+        families: [crate::production_config::ProductionChainFamilyV11; 2],
+    ) -> Result<NativeDaemonProcessV23> {
+        use crate::production_config::ProductionChainFamilyV11;
+        if families
+            .iter()
+            .any(|family| !matches!(family, ProductionChainFamilyV11::Xmr | ProductionChainFamilyV11::Sol))
+        {
+            return Err("native harness supports only selected XMR or SOL positions".into());
+        }
         if !state_dir.is_absolute() || credentials.len() > 65_536 {
             return Err("bounded credentials and absolute state directory required".into());
         }
@@ -218,11 +243,19 @@ impl NativeDaemonBinaryV23 {
         }
         let parsed = crate::production_node::ProductionSecretsV4::read(credentials.as_slice())
             .map_err(|_| "private V4 stream rejected before launch")?;
-        parsed
-            .require_families([crate::production_config::ProductionChainFamilyV11::Xmr; 2])
-            .map_err(|_| "native harness requires two selected XMR positions")?;
+        parsed.require_families(families).map_err(|_| {
+            if families == [ProductionChainFamilyV11::Xmr; 2] {
+                "native harness requires two selected XMR positions"
+            } else {
+                "native harness requires the exact selected position families"
+            }
+        })?;
         drop(parsed);
-        network::require_local_services(state_dir)?;
+        if families == [ProductionChainFamilyV11::Xmr; 2] {
+            network::require_local_services(state_dir)?;
+        } else {
+            network::require_local_services_for_families_v25(state_dir, families)?;
+        }
         self.require_fingerprint()?;
         let mut command = self.command();
         command.arg("run").arg("--state-dir").arg(state_dir);

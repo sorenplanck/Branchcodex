@@ -65,6 +65,9 @@ mod xmr_cancelled_tests;
 #[cfg(target_os = "linux")]
 #[path = "production_xmr_native_coldstart_v23_tests.rs"]
 pub(crate) mod xmr_coldstart_v23;
+#[cfg(target_os = "linux")]
+#[path = "production_sol_native_coldstart_v23_tests.rs"]
+pub(crate) mod sol_coldstart_v23;
 #[path = "production_xmr_graph_replay_v23_tests.rs"]
 mod xmr_graph_replay_tests;
 #[path = "production_xmr_graph_wallet_v22_tests.rs"]
@@ -88,6 +91,20 @@ fn fixture_with_xmr_context_v23(
 
 fn fixture_with_registry_configuration_v23(
     xmr: bool,
+    configure: impl FnOnce(&mut deployment_registry::RegistryManifestV1, [&mut SettlementTermsV1; 2]),
+) -> Fixture {
+    fixture_with_route_topology_v25(xmr, false, configure)
+}
+
+/// `ordinary_route_topology` selects the real `X -> DOM -> Y` shape: the user
+/// funds the counterparty leg it gives (upstream) and receives the one the
+/// solver delivers (downstream), so the solver owns the route secret and funds
+/// only what it delivers. That inverts the upstream roles relative to the
+/// symmetric assignment the XMR scenarios keep, where both positions repeat
+/// the same roles and the solver funds both counterparty legs.
+fn fixture_with_route_topology_v25(
+    xmr: bool,
+    ordinary_route_topology: bool,
     configure: impl FnOnce(&mut deployment_registry::RegistryManifestV1, [&mut SettlementTermsV1; 2]),
 ) -> Fixture {
     let root = tempfile::tempdir().unwrap();
@@ -167,12 +184,18 @@ fn fixture_with_registry_configuration_v23(
     }
     let mut sorted = [participants[0], participants[1]];
     sorted.sort();
-    for terms in [&mut up, &mut down] {
+    for (position, terms) in [&mut up, &mut down].into_iter().enumerate() {
+        // Upstream is the inverted position: the user funds the counterparty
+        // asset it gives there, while the solver keeps the downstream roles.
+        let swapped = ordinary_route_topology && position == 0;
+        let dom_beneficiary = participants[usize::from(!swapped)];
+        let dom_refund_to = participants[usize::from(swapped)];
         terms.roster = sorted;
-        terms.dom_leg.beneficiary = participants[1];
-        terms.dom_leg.refund_to = participants[0];
-        terms.counterparty_leg.beneficiary = participants[0];
-        terms.counterparty_leg.refund_to = participants[1];
+        terms.dom_leg.beneficiary = dom_beneficiary;
+        terms.dom_leg.refund_to = dom_refund_to;
+        // The frozen topology: each DOM role is the counterparty's opposite.
+        terms.counterparty_leg.beneficiary = dom_refund_to;
+        terms.counterparty_leg.refund_to = dom_beneficiary;
     }
     let terms_paths = [root.path().join("up.terms"), root.path().join("down.terms")];
     let mut terms = [up, down];

@@ -5,7 +5,7 @@ use super::*;
 use crate::production_config::{
     load_production_create_or_resume_bootstrap_v11, production_f6_authority_bundle_digest_v8,
     provisioning_binding_for_v11_bootstrap, ProductionBootstrapConfigV1, ProductionBootstrapModeV1,
-    ProductionChainFamilyV11, ProductionUniversalBootstrapFieldsV11, ProductionUniversalLegV11,
+    ProductionUniversalBootstrapFieldsV11, ProductionUniversalLegV11,
     PRODUCTION_CREATE_CONFIG_FILE_V11, PRODUCTION_REOPEN_CONFIG_FILE_V11,
 };
 use crate::production_f6_factory::{
@@ -23,8 +23,10 @@ impl NativeDaemonPlanningContextV23 {
         stdin_v4: Zeroizing<Vec<u8>>,
         now_seconds: u64,
     ) -> Result<ExportedNativeDaemonV23> {
+        // XMR-planned contexts still select exactly [Xmr; 2] here.
+        let families = self.families_v25();
         crate::production_node::ProductionSecretsV4::read(stdin_v4.as_slice())?
-            .into_parts([ProductionChainFamilyV11::Xmr; 2])?;
+            .into_parts(families)?;
         let [create, reopen] = common;
         if create.mode() != ProductionBootstrapModeV1::Create
             || reopen.mode() != ProductionBootstrapModeV1::ReopenExisting
@@ -65,7 +67,7 @@ impl NativeDaemonPlanningContextV23 {
             .enumerate()
         {
             fields.legs[index] = ProductionUniversalLegV11 {
-                family: ProductionChainFamilyV11::Xmr,
+                family: families[index],
                 settlement_id: terms.settlement_id.0,
                 session_id: terms.session_id.0,
                 chain_id: terms.counterparty_leg.chain_id.0,

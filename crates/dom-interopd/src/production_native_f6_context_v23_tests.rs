@@ -95,6 +95,9 @@ pub(super) fn validate_input(
                 sources[1].clone(),
             )?;
         }
+        NativeF6ClaimInputsV23::SolanaEnrollment => {
+            claim_enrollment_v23::SolClaimEnrollmentV25::from_composition(context.composition())?;
+        }
         NativeF6ClaimInputsV23::NativeEnrollment => {
             claim_enrollment_v23::NativeClaimEnrollmentV23::from_composition(
                 context.composition(),

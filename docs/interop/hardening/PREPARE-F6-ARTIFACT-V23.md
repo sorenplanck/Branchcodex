@@ -66,6 +66,20 @@ Isso produz **DOMF6A23**, com papéis/T/termos públicos, nunca um plano execut�
 de claim. O daemon ainda exige as duas sessões com enrollment/DLEQ reais e
 templates provenientes do Store bilateral. Não há fallback automático para A07.
 
+Para uma rota DOM mainnet com as duas pernas Solana, selecione:
+
+```json
+{"profile":"solana_enrollment"}
+```
+
+Isso produz **DOMF6A25**. O preparador aceita esse perfil somente para os dois
+termos policy 17 com `ConditionLock` ou `CrossCurveConditionLock`; ele não aceita
+um plano A25 como codificação alternativa de um plano Bound. As duas sessões
+Solana e suas provas V25 de conta continuam obrigatórias na admissão. Após o
+bootstrap bilateral, o daemon relê o hash do template DOM downstream do Store e
+reconfere ambas as provas antes de materializar o plano final. O perfil não cria
+contas, não assina as provas e não autoriza funding.
+
 Quando o plano real já existe, `claim_profile` é:
 
 ```json

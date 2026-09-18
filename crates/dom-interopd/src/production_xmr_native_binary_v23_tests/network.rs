@@ -24,6 +24,19 @@ fn local_http(endpoint: &str) -> Result<()> {
 }
 
 pub(super) fn require_local_services(state: &Path) -> Result<()> {
+    require_local_services_for_families_v25(
+        state,
+        [crate::production_config::ProductionChainFamilyV11::Xmr; 2],
+    )
+}
+
+/// Each position must carry exactly the service of its selected family. An
+/// XMR-only pair keeps the original refusal of every other selected service.
+pub(super) fn require_local_services_for_families_v25(
+    state: &Path,
+    families: [crate::production_config::ProductionChainFamilyV11; 2],
+) -> Result<()> {
+    use crate::production_config::ProductionChainFamilyV11;
     use crate::production_config::{read_owner_file_bounded, ProductionConfigErrorV1};
     use crate::production_relay_network_config::{
         load_production_relay_network_config_v1, ProductionRelayLinkPositionV1,
@@ -42,14 +55,18 @@ pub(super) fn require_local_services(state: &Path) -> Result<()> {
     .map_err(|_| "harness selected services unavailable")?;
     let services =
         RouteServicesV8::decode(&bytes).map_err(|_| "harness selected services rejected")?;
-    for leg in services.legs {
-        match leg.service {
-            ServiceV8::Monero { endpoints, .. } => {
+    for (leg, family) in services.legs.into_iter().zip(families) {
+        match (leg.service, family) {
+            (ServiceV8::Monero { endpoints, .. }, ProductionChainFamilyV11::Xmr)
+            | (ServiceV8::Solana { endpoints, .. }, ProductionChainFamilyV11::Sol) => {
                 for endpoint in endpoints {
                     local_http(&endpoint)?;
                 }
             }
-            _ => return Err("harness requires XMR-only selected services".into()),
+            _ if families == [ProductionChainFamilyV11::Xmr; 2] => {
+                return Err("harness requires XMR-only selected services".into())
+            }
+            _ => return Err("harness selected service differs from its position family".into()),
         }
     }
     let relay = load_production_relay_network_config_v1(state)
