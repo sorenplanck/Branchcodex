@@ -769,9 +769,12 @@ mod tests {
             claim_enrollment_v23::SolClaimEnrollmentV25::from_terms(&upstream, &downstream)
                 .unwrap();
         let xmr = public_enrollment_bytes(&upstream, &downstream).unwrap();
-        // Same width, different roles: the upstream T origin is the upstream
-        // DOM receiver, not the downstream DOM beneficiary.
-        assert_ne!(expected.bytes(), xmr.as_slice());
+        // In the topology A25 requires, the upstream DOM receiver is the
+        // downstream DOM sender, so both enrollments name the same origin,
+        // senders and receivers: identical bytes by construction. Only the
+        // signing domain separates the two profiles, which the end of this
+        // test proves.
+        assert_eq!(expected.bytes(), xmr.as_slice());
         supplied.claim_profile = PublicF6ClaimProfileV23::SolanaEnrollment {
             upstream,
             downstream,

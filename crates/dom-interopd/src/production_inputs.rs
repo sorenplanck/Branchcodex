@@ -6280,7 +6280,10 @@ mod tests {
         .expect("bundle");
         let earlier = without.canonical_bytes().expect("encode");
         assert_eq!(&earlier[10..12], &[0, 1]);
-        assert_eq!(&bytes[..earlier.len()], earlier.as_slice());
+        // Every byte except the layout marker itself: the V25 section is
+        // appended after the earlier encoding, which is otherwise unchanged.
+        assert_eq!(&bytes[..10], &earlier[..10]);
+        assert_eq!(&bytes[12..earlier.len()], &earlier[12..]);
     }
 
     #[test]
