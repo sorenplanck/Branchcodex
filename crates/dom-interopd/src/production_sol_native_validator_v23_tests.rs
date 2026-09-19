@@ -33,13 +33,14 @@ pub(crate) struct SolanaTestValidatorOwnerV23 {
 }
 
 impl SolanaTestValidatorOwnerV23 {
-    /// Spawns the real validator from `DOM_SOL_TEST_VALIDATOR_V23` and makes
-    /// `DOM_SOL_ESCROW_PROGRAM_V23` immutable the way a real deployment does:
-    /// the program is loaded under an upgrade authority this fixture holds,
-    /// then finalized with `solana program set-upgrade-authority --final`.
-    /// Loading it with authority `none` is not enough: validator 4.2.2 records
-    /// that as `Some(default pubkey)`, which the production attestation rightly
-    /// refuses as an authority that is still present.
+    /// Spawns the real validator from `DOM_SOL_TEST_VALIDATOR_V23` with
+    /// `DOM_SOL_ESCROW_PROGRAM_V23` loaded as an immutable upgradeable-loader
+    /// program. `--upgradeable-program ... none` cannot express that:
+    /// validator 4.2.2 records `none` as `Some(Pubkey::default())`, an
+    /// authority the production attestation rightly treats as present, and
+    /// its loader then refuses to finalize a genesis program. The fixture
+    /// therefore writes the loader's two accounts itself, with
+    /// `upgrade_authority_address: None`, and preloads them at genesis.
     pub(crate) fn from_environment(program_id: SolanaPubkey) -> Result<Self> {
         let validator = explicit_dependency("DOM_SOL_TEST_VALIDATOR_V23", true)?;
         let program = explicit_dependency("DOM_SOL_ESCROW_PROGRAM_V23", false)?;
@@ -51,16 +52,12 @@ impl SolanaTestValidatorOwnerV23 {
             .prefix("sol-ledger-")
             .tempdir()?;
         std::fs::set_permissions(ledger.path(), std::fs::Permissions::from_mode(0o700))?;
-        let cli = validator
-            .parent()
-            .ok_or("validator has no parent directory")?
-            .join("solana");
-        if !std::fs::metadata(&cli).is_ok_and(|meta| meta.is_file() && meta.mode() & 0o111 != 0) {
-            return Err("the solana CLI must sit beside solana-test-validator".into());
-        }
-        let home = ledger.path().to_path_buf();
-        let authority_path = ledger.path().join("upgrade-authority.json");
-        let authority = write_upgrade_authority_v25(&authority_path)?;
+        let [(program_address, program_account), (data_address, data_account)] =
+            write_immutable_program_accounts_v25(
+                ledger.path(),
+                program_id,
+                &std::fs::read(&program)?,
+            )?;
         let rpc = reserve_loopback_port()?;
         let faucet = reserve_loopback_port()?;
         // The validator's websocket listens on rpc+1. A taken port is a
@@ -101,10 +98,12 @@ impl SolanaTestValidatorOwnerV23 {
                 .arg(rpc.port().to_string())
                 .arg("--faucet-port")
                 .arg(faucet.port().to_string())
-                .arg("--upgradeable-program")
-                .arg(program_id.to_base58())
-                .arg(&program)
-                .arg(authority.to_base58())
+                .arg("--account")
+                .arg(program_address.to_base58())
+                .arg(&program_account)
+                .arg("--account")
+                .arg(data_address.to_base58())
+                .arg(&data_account)
                 .arg("--quiet");
         }
         let child = command
@@ -119,15 +118,6 @@ impl SolanaTestValidatorOwnerV23 {
             _ledger: ledger,
         };
         owner.genesis_hash = owner.wait_genesis()?;
-        // The authority pays the finalization fee from a faucet grant.
-        owner.airdrop(authority, 1_000_000_000)?;
-        finalize_upgrade_authority_v25(
-            &cli,
-            &home,
-            &authority_path,
-            &owner.endpoint(),
-            program_id,
-        )?;
         owner.program_data_hash = owner.wait_immutable_program()?;
         eprintln!(
             "native SOL validator: genesis and immutable escrow program attested at {}",
@@ -438,64 +428,98 @@ fn reserve_loopback_port() -> Result<SocketAddr> {
 
 /// Absolute, canonical (no symlink), owner-controlled regular file. The
 /// validator must be executable; the `.so` is data and needs no X bit.
-/// A fresh upgrade authority as a Solana CLI keypair file (the 64-byte
-/// secret-then-public array), created owner-only inside the private ledger.
-fn write_upgrade_authority_v25(path: &Path) -> Result<SolanaPubkey> {
-    use rand::RngCore;
+/// The loader's two genesis accounts for an immutable program: the program
+/// account naming its ProgramData, and the ProgramData whose metadata carries
+/// `upgrade_authority_address: None` (tag 0, then the 32 reserved zero bytes
+/// the attestation checks) followed by the exact code. Written owner-only
+/// inside the private ledger, in the JSON account form the validator loads.
+fn write_immutable_program_accounts_v25(
+    directory: &Path,
+    program_id: SolanaPubkey,
+    code: &[u8],
+) -> Result<[(SolanaPubkey, PathBuf); 2]> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut secret = zeroize::Zeroizing::new([0_u8; 32]);
-    rand::thread_rng().fill_bytes(secret.as_mut());
-    let authority = SolanaPubkey(
-        ed25519_dalek::SigningKey::from_bytes(&secret)
-            .verifying_key()
-            .to_bytes(),
-    );
-    let mut keypair = zeroize::Zeroizing::new(secret.to_vec());
-    keypair.extend_from_slice(&authority.0);
-    let encoded = zeroize::Zeroizing::new(serde_json::to_vec(keypair.as_slice())?);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(&encoded)?;
-    file.sync_all()?;
-    Ok(authority)
+    if code.is_empty() {
+        return Err("escrow program code is empty".into());
+    }
+    let (program_data, _) =
+        solana_pda::find_program_address(&[&program_id.0], &BPF_LOADER_UPGRADEABLE_ID)
+            .map_err(|_| "ProgramData address derivation failed")?;
+    let mut program = Vec::with_capacity(36);
+    program.extend_from_slice(&2_u32.to_le_bytes());
+    program.extend_from_slice(&program_data.0);
+    let mut data = Vec::with_capacity(45 + code.len());
+    data.extend_from_slice(&3_u32.to_le_bytes());
+    data.extend_from_slice(&0_u64.to_le_bytes());
+    data.push(0);
+    data.extend_from_slice(&[0; 32]);
+    data.extend_from_slice(code);
+    let mut written = Vec::with_capacity(2);
+    for (address, bytes, executable, name) in [
+        (program_id, program, true, "escrow-program-account.json"),
+        (program_data, data, false, "escrow-programdata-account.json"),
+    ] {
+        let space = u64::try_from(bytes.len())?;
+        let lamports = space
+            .checked_add(128)
+            .and_then(|size| size.checked_mul(3_480 * 2))
+            .ok_or("rent-exempt balance overflow")?;
+        let document = serde_json::json!({
+            "pubkey": address.to_base58(),
+            "account": {
+                "lamports": lamports,
+                "data": [base64_standard_v25(&bytes), "base64"],
+                "owner": BPF_LOADER_UPGRADEABLE_ID.to_base58(),
+                "executable": executable,
+                "rentEpoch": 0,
+                "space": space,
+            }
+        });
+        let path = directory.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&serde_json::to_vec(&document)?)?;
+        file.sync_all()?;
+        written.push((address, path));
+    }
+    written
+        .try_into()
+        .map_err(|_| "two program accounts expected".into())
 }
 
-/// Removes the upgrade authority for good, confirmed at finalized commitment.
-fn finalize_upgrade_authority_v25(
-    cli: &Path,
-    home: &Path,
-    authority: &Path,
-    endpoint: &str,
-    program_id: SolanaPubkey,
-) -> Result<()> {
-    let status = Command::new(cli)
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .arg("program")
-        .arg("set-upgrade-authority")
-        .arg(program_id.to_base58())
-        .arg("--final")
-        .arg("--upgrade-authority")
-        .arg(authority)
-        .arg("--keypair")
-        .arg(authority)
-        .arg("--url")
-        .arg(endpoint)
-        .arg("--commitment")
-        .arg("finalized")
-        .status()
-        .map_err(|_| "the solana CLI could not start")?;
-    if !status.success() {
-        return Err("solana program set-upgrade-authority --final failed".into());
+fn base64_standard_v25(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        for index in 0..4 {
+            if index <= chunk.len() {
+                output.push(char::from(ALPHABET[((triple >> (18 - 6 * index)) & 63) as usize]));
+            } else {
+                output.push('=');
+            }
+        }
     }
-    Ok(())
+    output
+}
+
+#[test]
+fn base64_matches_the_standard_padding_v25() {
+    for (input, expected) in [
+        (&b""[..], ""),
+        (&b"f"[..], "Zg=="),
+        (&b"fo"[..], "Zm8="),
+        (&b"foo"[..], "Zm9v"),
+        (&b"foob"[..], "Zm9vYg=="),
+    ] {
+        assert_eq!(base64_standard_v25(input), expected);
+    }
 }
 
 fn explicit_dependency(name: &str, executable: bool) -> Result<PathBuf> {
