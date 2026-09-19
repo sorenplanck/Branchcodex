@@ -259,8 +259,8 @@ fn only_fixture_generated_accounts_have_a_seed_v25() -> Result<()> {
     assert_ne!(funder, keys.funder(1)?);
     assert_ne!(recipient, keys.recipient(1)?);
     assert_ne!(funder, recipient);
-    assert_eq!(public_key(&keys.seed_for(0, funder)?), funder);
-    assert_eq!(public_key(&keys.seed_for(0, recipient)?), recipient);
+    assert_eq!(public_key(&*keys.seed_for(0, funder)?), funder);
+    assert_eq!(public_key(&*keys.seed_for(0, recipient)?), recipient);
     // An account is never valid on the other position, and a digest-shaped
     // ParticipantId has no seed at all.
     assert!(keys.seed_for(1, funder).is_err());

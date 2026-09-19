@@ -166,7 +166,8 @@ mod tests {
     use super::*;
     use route_executor::{EffectReferenceV1, FrozenBindingsV1};
     use settlement_coordinator::{
-        ChildExposureV1, SecretRequirementV1, SettlementChildPlanV1, SettlementPlanBindingsV1,
+        CanonicalSettlementPlanV1, ChildExposureV1, SecretRequirementV1, SettlementChildPlanV1,
+        SettlementPlanBindingsV1,
     };
 
     fn fixture() -> Result<(RouteSnapshotV1, CompositeSettlementPlanV1)> {
