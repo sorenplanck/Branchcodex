@@ -81,7 +81,8 @@ jobs:
 
   # Runs after a green build on every push, or on a manual dispatch with e2e.
   e2e-scenario:
-    needs: build-and-test
+    # Independent of build-and-test: it builds its own binary, so the unit
+    # suite no longer delays each scenario iteration.
     if: ${{ github.event_name == 'push' || inputs.e2e == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
@@ -125,11 +126,16 @@ jobs:
           DOM_INTEROP_REAL_BINARY_V23: ${{ github.workspace }}/target/crypto-test/dom-interopd
           DOM_SOL_TEST_VALIDATOR_V23: /home/runner/.local/share/solana/install/active_release/bin/solana-test-validator
           DOM_SOL_ESCROW_PROGRAM_V23: ${{ github.workspace }}/programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so
-        run: >
-          python3 scripts/run_native_sol_daemon_scenario_v23.py
-          --evidence-dir "$RUNNER_TEMP/evidence"
-          --scenario native_real_daemon_two_sol_claims_survive_original_store_reopen_v23
-          --timeout-seconds 9000
+        # The runner binds its evidence to the exact daemon bytes, so the
+        # fingerprint is taken from the binary this job just built.
+        run: |
+          DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23="$(python3 -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read(), digest_size=32).hexdigest())' "$DOM_INTEROP_REAL_BINARY_V23")"
+          export DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23
+          echo "daemon blake2b256 $DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23"
+          python3 scripts/run_native_sol_daemon_scenario_v23.py \
+            --evidence-dir "$RUNNER_TEMP/evidence" \
+            --scenario native_real_daemon_two_sol_claims_survive_original_store_reopen_v23 \
+            --timeout-seconds 9000
       - name: Evidence
         if: always()
         uses: actions/upload-artifact@v4
