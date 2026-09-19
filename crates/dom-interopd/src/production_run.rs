@@ -154,6 +154,10 @@ pub struct ProductionRunOptionsV1 {
 
 pub use crate::production_composite_loop::ProductionCompositeFailureV25;
 
+#[path = "production_f6_stage_failure_v25.rs"]
+mod f6_stage_failure_v25;
+pub use f6_stage_failure_v25::ProductionF6StageFailureV25;
+
 /// Redacted refusal from the composition root. No variant carries a path, a
 /// credential, or any byte of either.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
@@ -267,6 +271,10 @@ pub enum ProductionRunErrorV1 {
     /// or resume its exact Stage-11 prefixes, or retain both activation owners.
     #[error("production F6 authorities unavailable")]
     F6Authorities,
+    /// The same refusal, naming which Stage-11 step failed. Closed step tags
+    /// only; never a path, an input byte, a credential or a nested message.
+    #[error("production F6 authorities unavailable: {0}")]
+    F6AuthoritiesDetail(ProductionF6StageFailureV25),
     /// The central Relay and the two single-owner Contracts/F6 workers could
     /// not be constructed or resumed under the Stage-12 journal boundary.
     #[error("production Relay/Contracts authorities unavailable")]

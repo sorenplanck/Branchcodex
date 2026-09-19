@@ -193,6 +193,17 @@ impl NativeDaemonProcessV23 {
         Ok(self.status)
     }
 
+    /// The bounded stderr already captured for diagnostics, as lossy text.
+    /// Present only after a failed exit was noticed; never consumed from the
+    /// pipe a second time, and never stdout or self-check evidence.
+    pub(crate) fn failure_text_v25(&self) -> Option<String> {
+        self.captured_stderr
+            .as_ref()?
+            .as_ref()
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+    }
+
     pub(crate) fn require_running(&mut self) -> Result<()> {
         if self.poll()?.is_some() {
             return Err("daemon exited before the required durable boundary".into());

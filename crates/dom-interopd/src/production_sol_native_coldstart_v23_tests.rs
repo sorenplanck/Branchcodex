@@ -103,6 +103,11 @@ impl NativeSolRunningColdStartV23 {
             .poll()
     }
 
+    /// The bounded stderr of a failed actor, for the scenario's evidence.
+    pub(crate) fn actor_failure_text_v25(&self, actor: usize) -> Option<String> {
+        self.processes.get(actor)?.as_ref()?.failure_text_v25()
+    }
+
     /// Reap a successful natural terminal exit, never substitute SIGTERM or
     /// SIGKILL for proof that the real daemon completed its own run function.
     pub(crate) fn reap_successful_actor_v23(&mut self, actor: usize) -> ColdStartResult<()> {

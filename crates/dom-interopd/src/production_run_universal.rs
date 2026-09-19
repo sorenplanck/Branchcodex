@@ -17,6 +17,7 @@ use crate::production_plan_source::{
     ProductionPublicSecretSourceV1,
 };
 use crate::production_relay_stage12::ProductionRelayStage12OwnerV1;
+use crate::production_run::ProductionF6StageFailureV25;
 use crate::production_route_services::{LegClientsV8, SelectedServicesV8};
 use crate::production_universal_leg_authority::{
     ProductionUniversalEvmSignerPairV11, ProductionUniversalLegAuthorityV11,
@@ -26,6 +27,12 @@ use evm_actuator::EvmRpcV1 as _;
 use route_composer::{ComposedFinalClaimRolePlanV1, FinalClaimSecretSourceScopeV1};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
+
+/// Names which Stage-11 step refused. The refusal itself is unchanged: the
+/// step tag is closed and carries no path, byte, credential or nested text.
+const fn f6_step_v25(step: ProductionF6StageFailureV25) -> ProductionRunErrorV1 {
+    ProductionRunErrorV1::F6AuthoritiesDetail(step)
+}
 #[cfg(test)]
 #[path = "production_xmr_custody_startup_paths_v23_tests.rs"]
 mod custody_startup_paths_v23;
@@ -418,18 +425,18 @@ pub(super) fn run(
     let f6_bundle_path = bootstrap
         .layout()
         .f6_path_v8(ProductionF6PathRoleV8::AuthorityBundleV7)
-        .ok_or(ProductionRunErrorV1::F6Authorities)?;
+        .ok_or(f6_step_v25(ProductionF6StageFailureV25::BundlePath))?;
     let f6_bundle_bytes = read_owner_file_bounded(
         f6_bundle_path,
         MAX_PRODUCTION_F6_AUTHORITY_BUNDLE_BYTES_V8,
         ProductionConfigErrorV1::InputArtifactUnavailable,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::BundleRead))?;
     let f6_bundle = AuthenticatedProductionF6AuthorityBundleV7::decode_and_authenticate(
         &f6_bundle_bytes,
         &inputs,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::BundleDecode))?;
     let f6_solver = f6_bundle.solver();
     let native_xmr_inventory_max_age_seconds = f6_bundle.inventory_proof_max_age_seconds();
     let historical_f6_recovery_v24 = if options.mode == ProductionRunModeV1::ReopenExisting {
@@ -489,37 +496,37 @@ pub(super) fn run(
                 .to_path_buf(),
         ],
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::ActivationPaths))?;
     let f6_external_prepared = ProductionF6ExternalPreparedBindingsV7::derive_stage11(
         provisioning_binding,
         route_id,
         composition_digest,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Prefix))?;
     let upstream_f6_prepared = ProductionF6PreparedBindingsV2::derive_stage11(
         provisioning_binding,
         route_id,
         composition_digest,
         SettlementPositionV2::Upstream,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Prefix))?;
     let downstream_f6_prepared = ProductionF6PreparedBindingsV2::derive_stage11(
         provisioning_binding,
         route_id,
         composition_digest,
         SettlementPositionV2::Downstream,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Prefix))?;
     let upstream_f6_paths = ProductionF6ActivationPathsV2::from_v4_layout(
         bootstrap.layout(),
         SettlementPositionV2::Upstream,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::ActivationPaths))?;
     let downstream_f6_paths = ProductionF6ActivationPathsV2::from_v4_layout(
         bootstrap.layout(),
         SettlementPositionV2::Downstream,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::ActivationPaths))?;
 
     // Only selected Bitcoin positions reopen a native prebroadcast owner.
     let mut bitcoin_owners = open_bitcoin_owners_v11(&bootstrap, &inputs, &selected)?;
@@ -553,7 +560,7 @@ pub(super) fn run(
                     ProductionF6PathRoleV4::UpstreamCandidateBook,
                 )?,
             })
-            .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+            .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Prefix))?;
         downstream_f6_prepared
             .prepare_stage11(ProductionF6PathsV2 {
                 binding_log: required_f6_v4_path(
@@ -569,10 +576,10 @@ pub(super) fn run(
                     ProductionF6PathRoleV4::DownstreamCandidateBook,
                 )?,
             })
-            .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+            .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Prefix))?;
         f6_external_prepared
             .prepare_stage11(&f6_external_paths)
-            .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+            .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Prefix))?;
     }
 
     // The wallet, not this root, selects the unique commitments. Both session
@@ -593,13 +600,13 @@ pub(super) fn run(
         LegIdV1::Upstream,
         upstream_payout,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::CounterpartyFace))?;
     let downstream_counterparty = ProductionF6CounterpartyTermsOwnerV7::from_authenticated(
         &inputs,
         LegIdV1::Downstream,
         downstream_payout,
     )
-    .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::CounterpartyFace))?;
     let mut f6_pair_factory =
         ProductionF6PairAuthoritiesFactoryV7::new(ProductionF6PairFactoryRequestV7 {
             bundle: f6_bundle,
@@ -623,18 +630,18 @@ pub(super) fn run(
                 downstream: downstream_f6_hsm_credentials,
             },
         })
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+        .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Factory))?;
     if let Some(recovery) = &historical_f6_recovery_v24 {
         f6_pair_factory = f6_pair_factory
             .with_historical_recovery_v24(recovery.clone())
-            .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+            .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::HistoricalRecovery))?;
     }
     let f6_final_claim_plan = f6_pair_factory
         .take_final_claim_plan()
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+        .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::ClaimPlan))?;
     let route_store = inputs
         .take_route_store_for_f6()
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+        .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::RouteStore))?;
     let (upstream_f6_activation, downstream_f6_activation, f6_runtime_receiver) =
         ProductionF6PairActivationRequestV2 {
             route_store,
@@ -657,7 +664,7 @@ pub(super) fn run(
             authority_factory: Box::new(f6_pair_factory),
         }
         .into_authorities()
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+        .map_err(|_| f6_step_v25(ProductionF6StageFailureV25::Activation))?;
 
     // Completion certifies that every move-only Stage-11 owner exists in this
     // process. It is deliberately after the one-shot RouteStore transfer and

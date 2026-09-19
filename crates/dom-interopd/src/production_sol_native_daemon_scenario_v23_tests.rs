@@ -125,6 +125,11 @@ fn wait_claims(
         for actor in 0..2 {
             let exited = running.poll_actor_v23(actor)?;
             if exited.is_some_and(|status| !status.success()) {
+                // The daemon's own refusal text, which names the stage and,
+                // for Stage 11, the exact step that fell closed.
+                if let Some(text) = running.actor_failure_text_v25(actor) {
+                    eprintln!("native SOL real daemon actor={actor} refusal: {text}");
+                }
                 return Err("real daemon exited unsuccessfully before final claims".into());
             }
             match observers[actor].poll()? {
