@@ -7,7 +7,9 @@
 #[path = "xmr_bounded_v23.rs"]
 mod xmr_bounded_v23;
 pub use xmr_bounded_v23::{
-    verify_f7_xmr_bounded_anchor_authorization_v23, DomXmrBoundedAnchorValidationRequestV23,
+    verify_f7_xmr_bounded_anchor_authorization_v23,
+    verify_f7_xmr_bounded_anchor_authorization_with_progress_v24,
+    DomXmrBoundedAnchorValidationRequestV23,
 };
 
 use super::{

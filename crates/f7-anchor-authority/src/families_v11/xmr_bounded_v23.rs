@@ -30,6 +30,19 @@ pub fn verify_f7_xmr_bounded_anchor_authorization_v23(
     request: DomXmrBoundedAnchorValidationRequestV23<'_>,
     xmr: VerifiedXmrFundingV11,
 ) -> Result<VerifiedF7AnchorAuthorizationV12, Error> {
+    let mut progress = crate::DomFundingScanProgressV24::new();
+    verify_f7_xmr_bounded_anchor_authorization_with_progress_v24(dom, request, xmr, &mut progress)
+}
+
+/// Promote a fresh opaque XMR observation while retaining only a public,
+/// hash-anchored DOM scan prefix between calls. Every call still observes a
+/// fresh DOM tip and rejects any new spend or reorganization.
+pub fn verify_f7_xmr_bounded_anchor_authorization_with_progress_v24(
+    dom: &DomHttpChainAdapterV1,
+    request: DomXmrBoundedAnchorValidationRequestV23<'_>,
+    xmr: VerifiedXmrFundingV11,
+    progress: &mut crate::DomFundingScanProgressV24,
+) -> Result<VerifiedF7AnchorAuthorizationV12, Error> {
     super::super::xmr::require_funding_request_v23(&request.xmr, &xmr)?;
     let role = request.role;
     let terms = role.terms();
@@ -101,7 +114,7 @@ pub fn verify_f7_xmr_bounded_anchor_authorization_v23(
         .observed_at
         .checked_add(Duration::from_secs(60))
         .ok_or(Error::Bounds)?;
-    let snapshot = crate::verify_dom_funding_evidence_until_v23(
+    let snapshot = crate::verify_dom_funding_evidence_with_progress_v24(
         dom,
         request.expected_dom_funding_txid,
         scope.funding_commitment,
@@ -111,6 +124,7 @@ pub fn verify_f7_xmr_bounded_anchor_authorization_v23(
             .max(terms.dom_leg.finality.min_confirmations),
         true,
         Some(external_deadline),
+        progress,
     )
     .map_err(map_dom_v12)?;
     require_native_dom_identity_v23(

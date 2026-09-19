@@ -38,6 +38,8 @@ closed_tags!(Stage {
 
 closed_tags!(Cause {
     InvalidConfiguration => "invalid_configuration", Clock => "clock_unavailable",
+    ActuatorLeaseRenewal => "actuator_lease_renewal",
+    ActivationStalled => "activation_stalled",
     Binding => "binding", Crypto => "crypto", Vault => "vault", Expired => "expired",
     Mailbox => "mailbox", XmrGraph => "xmr_recovery_graph_required",
     JournalBinding => "journal_binding", JournalCrypto => "journal_crypto",
@@ -254,6 +256,7 @@ impl ProductionCompositeLoopErrorV1 {
         use ProductionCompositeLoopErrorV1 as E;
         let (stage, cause) = match self {
             E::InvalidConfiguration => (Stage::Composite, Cause::InvalidConfiguration),
+            E::ActuatorLeaseRenewal => (Stage::Composite, Cause::ActuatorLeaseRenewal),
             E::ClockUnavailable => (Stage::Composite, Cause::Clock),
             E::Bootstrap(error) | E::BootstrapAtV25 { error, .. } => (
                 match self {
@@ -271,6 +274,9 @@ impl ProductionCompositeLoopErrorV1 {
                     _ => Stage::Bootstrap,
                 },
                 match error {
+                    ProductionBootstrapRuntimeErrorV16::ActuatorLeaseRenewalV25 => {
+                        Cause::ActuatorLeaseRenewal
+                    }
                     ProductionBootstrapRuntimeErrorV16::Binding => Cause::Binding,
                     ProductionBootstrapRuntimeErrorV16::Crypto => Cause::Crypto,
                     ProductionBootstrapRuntimeErrorV16::Vault => Cause::Vault,
@@ -334,6 +340,11 @@ impl ProductionCompositeLoopErrorV1 {
                     ProductionRelayNetworkRuntimeErrorV1::AuthenticatedExchangeFailed => {
                         Cause::AuthenticatedExchange
                     }
+                    ProductionRelayNetworkRuntimeErrorV1::IdentityAuthenticationRefused => {
+                        Cause::Identity
+                    }
+                    ProductionRelayNetworkRuntimeErrorV1::ProtocolRefused => Cause::Protocol,
+                    ProductionRelayNetworkRuntimeErrorV1::PeerRefused => Cause::Peer,
                     ProductionRelayNetworkRuntimeErrorV1::ChannelUnavailable => Cause::Channel,
                     ProductionRelayNetworkRuntimeErrorV1::DurableRelayUnavailable => {
                         Cause::DurableRelay
@@ -381,6 +392,8 @@ impl ProductionCompositeLoopErrorV1 {
                 Stage::RecoverySigningInbound,
                 poll(error, |_| Cause::F6ActivationUnavailable),
             ),
+            E::RecoverySigningEnvelopeRefused => (Stage::RecoverySigningInbound, Cause::Inbox),
+            E::ActivationStalled => (Stage::Composite, Cause::ActivationStalled),
             E::Activation(error) => (
                 Stage::Activation,
                 match error {
@@ -461,7 +474,10 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
             | C::PendingEvmAccount
     );
     match stage {
-        Stage::Composite => matches!(cause, C::InvalidConfiguration | C::Clock),
+        Stage::Composite => matches!(
+            cause,
+            C::InvalidConfiguration | C::Clock | C::ActuatorLeaseRenewal | C::ActivationStalled
+        ),
         Stage::Bootstrap
         | Stage::LocalBootstrap
         | Stage::GraphCandidate
@@ -487,6 +503,7 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                         | C::GraphCandidatePrivateBootstrap
                         | C::GraphCandidateCancelled
                         | C::GraphCandidateF6Principal
+                        | C::ActuatorLeaseRenewal
                 )
         }
         Stage::F7 => ingress || outbound || matches!(cause, C::Identity | C::Clock),
@@ -498,6 +515,9 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                 | C::Listen
                 | C::AcceptDeadline
                 | C::AuthenticatedExchange
+                | C::Identity
+                | C::Protocol
+                | C::Peer
                 | C::Channel
                 | C::DurableRelay
         ),
@@ -702,6 +722,48 @@ mod tests {
             "network/connect_unavailable"
         );
         assert!(is_peer_temporarily_unavailable_v23(&error));
+    }
+
+    #[test]
+    fn composite_failure_v25_names_lease_refusal_and_quarantine_causes() {
+        // Each of these is fatal and must reach the exit diagnostic as a
+        // classified code rather than `unknown`; none may be retried as a
+        // temporarily absent peer.
+        assert_projection(
+            ProductionCompositeLoopErrorV1::ActuatorLeaseRenewal,
+            "composite/actuator_lease_renewal",
+        );
+        assert_projection(
+            ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+                context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
+                error: ProductionBootstrapRuntimeErrorV16::ActuatorLeaseRenewalV25,
+            },
+            "local_bootstrap/actuator_lease_renewal",
+        );
+        assert_projection(
+            ProductionCompositeLoopErrorV1::RecoverySigningEnvelopeRefused,
+            "recovery_signing_inbound/inbox_refused",
+        );
+        assert_projection(
+            ProductionCompositeLoopErrorV1::ActivationStalled,
+            "composite/activation_stalled",
+        );
+        for (error, expected) in [
+            (
+                ProductionRelayNetworkRuntimeErrorV1::IdentityAuthenticationRefused,
+                "network/identity_refused",
+            ),
+            (
+                ProductionRelayNetworkRuntimeErrorV1::ProtocolRefused,
+                "network/protocol_refused",
+            ),
+            (
+                ProductionRelayNetworkRuntimeErrorV1::PeerRefused,
+                "network/peer_refused",
+            ),
+        ] {
+            assert_projection(ProductionCompositeLoopErrorV1::Network(error), expected);
+        }
     }
 
     #[test]

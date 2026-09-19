@@ -658,22 +658,33 @@ where
         if self.completed {
             return Ok(ProductionF7StepV12::Complete);
         }
-        let request = self
-            .store
-            .f7_anchor_request_binding_v12(&self.gate, self.chain)?;
-        let anchors = match self.observer.observe(self.scanner.as_ref(), &request)? {
-            ProductionF7ObservationV12::FundingAbsent => {
-                return Ok(ProductionF7StepV12::FundingAbsent)
-            }
-            ProductionF7ObservationV12::AwaitingFinality => {
-                return Ok(ProductionF7StepV12::AwaitingFinality)
-            }
-            ProductionF7ObservationV12::TemporarilyUnavailable => {
-                return Ok(ProductionF7StepV12::TemporarilyUnavailable)
-            }
-            ProductionF7ObservationV12::Verified(value) => value,
+        let claim_authority_recent = self
+            .claim
+            .as_ref()
+            .is_some_and(|claim| claim.universal_authority_recent_v12());
+        let anchors = if claim_authority_recent {
+            None
+        } else {
+            let request = self
+                .store
+                .f7_anchor_request_binding_v12(&self.gate, self.chain)?;
+            Some(
+                match self.observer.observe(self.scanner.as_ref(), &request)? {
+                    ProductionF7ObservationV12::FundingAbsent => {
+                        return Ok(ProductionF7StepV12::FundingAbsent)
+                    }
+                    ProductionF7ObservationV12::AwaitingFinality => {
+                        return Ok(ProductionF7StepV12::AwaitingFinality)
+                    }
+                    ProductionF7ObservationV12::TemporarilyUnavailable => {
+                        return Ok(ProductionF7StepV12::TemporarilyUnavailable)
+                    }
+                    ProductionF7ObservationV12::Verified(value) => value,
+                },
+            )
         };
         if self.claim.is_none() {
+            let anchors = anchors.ok_or(ProductionF7RuntimeErrorV12::Scope)?;
             // Arm the terminal state before moving either capability. Only a
             // successful retained native owner may clear it. Earlier observer
             // failures leave both the state and original custody untouched.
@@ -701,11 +712,10 @@ where
             .claim
             .as_mut()
             .ok_or(ProductionF7RuntimeErrorV12::Consumed)?;
-        match claim.step(
-            owner,
-            ProductionDomClaimAnchorsV12::Universal(anchors),
-            expiry,
-        )? {
+        let claim_anchors = anchors
+            .map(ProductionDomClaimAnchorsV12::Universal)
+            .unwrap_or(ProductionDomClaimAnchorsV12::UniversalRecent);
+        match claim.step(owner, claim_anchors, expiry)? {
             ProductionDomClaimStepV12::AwaitingPeer => Ok(ProductionF7StepV12::AwaitingPeer),
             ProductionDomClaimStepV12::Staged(value) => Ok(ProductionF7StepV12::Staged(value)),
             ProductionDomClaimStepV12::Complete => {

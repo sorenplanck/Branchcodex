@@ -156,6 +156,26 @@ impl NativeDaemonProcessV23 {
             } else {
                 eprintln!("DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code={code}");
             }
+
+            if let Some(Ok(bytes)) = self.captured_stderr.as_ref() {
+                let text = String::from_utf8_lossy(bytes);
+                for line in text.lines() {
+                    if line.contains("DOM_ACTIVATION_STALL_V25")
+                        || line.contains("DOM_F6_INITIATOR_DIAG_V25")
+                        || line.contains("DOM_F6_BIND_DIAG_V25")
+                        || line.contains("DOM_PHASE_SLOW_V25")
+                        || line.contains("DOM_LEASE_GAP_V25")
+                        || line.contains("DOM_LEASE_DIAG_V25")
+                        || line.contains("DOM_ACTUATOR_OPEN_DIAG_V25")
+                        || line.contains("production DOM actuator store unavailable")
+                        || line.contains("production settlement child authority unavailable")
+                        || line.contains("production route runtime failed")
+                        || line.contains("production composite relay loop failed")
+                    {
+                        eprintln!("DOM_DAEMON_STDERR_V25 {line}");
+                    }
+                }
+            }
             self.failure_reported = true;
         }
         Ok(self.status)

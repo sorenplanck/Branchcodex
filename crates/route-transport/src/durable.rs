@@ -740,7 +740,28 @@ pub struct F6PayloadDeliveryV1<'a> {
     payload: &'a [u8],
 }
 
-impl F6PayloadDeliveryV1<'_> {
+impl<'a> F6PayloadDeliveryV1<'a> {
+    /// Local, deterministic RFQ delivery emitted by the route initiator to
+    /// its own F6 port. The F6 protocol is a replicated machine: the same
+    /// RFQ object the initiator sends over the Relay must also activate the
+    /// initiator's own port. This constructor is deliberately restricted to
+    /// the RFQ kind at sequence zero so no caller can synthesize an
+    /// arbitrary network delivery; the receiving port still authenticates
+    /// the payload content against its pinned bindings.
+    pub const fn local_initiator_rfq_v25(
+        sender_id: ParticipantId,
+        envelope_digest: Digest32,
+        payload: &'a [u8],
+    ) -> Self {
+        Self {
+            sender_id,
+            sequence: 0,
+            message_type: message_type::RFQ,
+            envelope_digest,
+            payload,
+        }
+    }
+
     /// Relay-roster-authenticated sender.
     pub const fn sender_id(&self) -> ParticipantId {
         self.sender_id

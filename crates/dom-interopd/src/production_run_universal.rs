@@ -632,6 +632,14 @@ pub(super) fn run(
     let f6_final_claim_plan = f6_pair_factory
         .take_final_claim_plan()
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    // The initiator side of F6 is a replicated machine: the daemon whose
+    // roster member holds the Initiator role derives the exact RFQ for its
+    // leg from already-authenticated inputs, submits it once over the Relay
+    // and applies the same object to its own F6 port. Payloads must be built
+    // while the route store is still inside `inputs` (the audited checkpoint
+    // supplies the deterministic clock authority scope).
+    let mut f6_initiator_rfq_payloads_v25 =
+        build_f6_initiator_rfq_payloads_v25(&inputs, chain_signers.participant_id())?;
     let route_store = inputs
         .take_route_store_for_f6()
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
@@ -658,6 +666,24 @@ pub(super) fn run(
         }
         .into_authorities()
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+
+    // F6 authority construction can consume a material fraction of the
+    // retained DOM actuator lease. Renew only the exact still-live fenced
+    // ownership; renew_lease refuses expired or stale ownership.
+    dom_lease = dom_actuator_store
+        .renew_lease(
+            dom_lease,
+            trusted_now_millis_v1()?,
+            runtime_bounds.actuator_lease_ms,
+        )
+        .map_err(|error| {
+            eprintln!(
+                "DOM_LEASE_DIAG_V25 phase=post_f6_authorities error={:?} lease_until_ms={}",
+                error,
+                dom_lease.lease_until_unix_ms()
+            );
+            ProductionRunErrorV1::DomActuatorStore
+        })?;
 
     // Completion certifies that every move-only Stage-11 owner exists in this
     // process. It is deliberately after the one-shot RouteStore transfer and
@@ -708,6 +734,25 @@ pub(super) fn run(
     let relay_stage12_owner = relay_stage12
         .finish(&provisioning)
         .map_err(|_| ProductionRunErrorV1::RelayAuthorities)?;
+
+    // Stage-12 construction/recovery is another potentially long preparation
+    // interval. Revalidate the same fenced ownership before activation.
+    // Expired ownership remains a hard failure and is never reacquired here.
+    dom_lease = dom_actuator_store
+        .renew_lease(
+            dom_lease,
+            trusted_now_millis_v1()?,
+            runtime_bounds.actuator_lease_ms,
+        )
+        .map_err(|error| {
+            eprintln!(
+                "DOM_LEASE_DIAG_V25 phase=post_relay_stage12 error={:?} lease_until_ms={}",
+                error,
+                dom_lease.lease_until_unix_ms()
+            );
+            ProductionRunErrorV1::DomActuatorStore
+        })?;
+
     // ------------------------------------------------------------------
     // Activate the same Relay/F6 owners before asking for bilateral ready.
     // Child funding is still impossible: no child/router exists yet.
@@ -741,15 +786,120 @@ pub(super) fn run(
         composite_config,
     )
     .map_err(|error| ProductionRunErrorV1::CompositeLoopDetail(error.failure_v25()))?;
+    // The F6 claim context must be installed while activation is still
+    // running: `prepare_xmr_graph_completion_v23` refuses to produce the
+    // signed graph without it, and activation readiness requires that
+    // produced graph. `bound_xmr_setup_v23` is itself the readiness test,
+    // refusing until both native refund bindings are durable, so this
+    // attempt adds no check and skips no check - it only stops the two
+    // gates from waiting on each other.
+    let mut f6_final_claim_plan_v25 = Some(f6_final_claim_plan);
+    let mut claim_context_parts_v25 = None;
     let (mut relay_loop, route_store) = loop {
+        if claim_context_parts_v25.is_none() {
+            let plan = f6_final_claim_plan_v25
+                .take()
+                .ok_or(ProductionRunErrorV1::SettlementChildAuthority)?;
+            let native = plan.requires_native_templates();
+            let bindings_ready = !native || {
+                let owner = activation.stage12_owner_mut_v25();
+                owner.bound_xmr_setup_v23(LegIdV1::Upstream).is_ok()
+                    && owner.bound_xmr_setup_v23(LegIdV1::Downstream).is_ok()
+            };
+            if bindings_ready {
+                let owner = activation.stage12_owner_mut_v25();
+                let parts = if native {
+                    let upstream = owner
+                        .bound_xmr_setup_v23(LegIdV1::Upstream)
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    let downstream = owner
+                        .bound_xmr_setup_v23(LegIdV1::Downstream)
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    plan.materialize_native(
+                        inputs.composition(),
+                        [
+                            upstream
+                                .native_refund_binding_v23()
+                                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
+                            downstream
+                                .native_refund_binding_v23()
+                                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
+                        ],
+                    )
+                } else {
+                    plan.into_parts()
+                }
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                owner
+                    .install_xmr_claim_context_v23(&parts.0, &parts.1, &parts.2)
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                claim_context_parts_v25 = Some(parts);
+            } else {
+                f6_final_claim_plan_v25 = Some(plan);
+            }
+        }
+        // Pair-ordered F6 history recovery, then the initiator-side RFQs.
+        // Both run before this round's lease renewal because pair binding
+        // (`bind_pair`, authority construction and store opens) executes
+        // inside them. Every effect is idempotent: a deferred replay still
+        // demands exact duplicates, the durable sender never prepares a
+        // second RFQ envelope, and the pair activation registers an identical
+        // RFQ without consuming anything. `Awaiting` is progress deferred to
+        // the next bounded round, never an error.
+        activation
+            .stage12_owner_mut_v25()
+            .retry_deferred_f6_recovery_v25()
+            .map_err(|_| ProductionRunErrorV1::RelayAuthorities)?;
+        drive_f6_initiator_rfq_round_v25(
+            activation.stage12_owner_mut_v25(),
+            &mut f6_initiator_rfq_payloads_v25,
+        )?;
         dom_lease = dom_actuator_store
             .renew_lease(
                 dom_lease,
                 trusted_now_millis_v1()?,
                 runtime_bounds.actuator_lease_ms,
             )
-            .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?;
-        match activation.activate_bounded(&mut _run_control) {
+            .map_err(|error| {
+                eprintln!(
+                    "DOM_LEASE_DIAG_V25 phase=activation error={:?} lease_until_ms={}",
+                    error,
+                    dom_lease.lease_until_unix_ms()
+                );
+                ProductionRunErrorV1::DomActuatorStore
+            })?;
+        // A single activation round can spend the full connect/accept/exchange
+        // bound on each leg, outlasting the lease if it is renewed only here.
+        // Hand the loop a renewal hook so the cadence matches the real work.
+        let renewed = std::cell::Cell::new(dom_lease);
+        let store = std::cell::RefCell::new(&mut dom_actuator_store);
+        let lease_ms = runtime_bounds.actuator_lease_ms;
+        let last_renewal_v25 = std::cell::Cell::new(std::time::Instant::now());
+        let mut renew_actuator_lease = || -> Result<(), ()> {
+            // Diagnostic: name the phase behind any renewal gap over 30 s.
+            let gap = last_renewal_v25.get().elapsed();
+            if gap > Duration::from_secs(30) {
+                eprintln!(
+                    "DOM_LEASE_GAP_V25 gap_ms={} phase={}",
+                    gap.as_millis(),
+                    crate::production_relay_stage12::lease_phase_v25()
+                );
+            }
+            let now = trusted_now_millis_v1().map_err(|_| ())?;
+            let next = store
+                .borrow_mut()
+                .renew_lease(renewed.get(), now, lease_ms)
+                .map_err(|_| ())?;
+            renewed.set(next);
+            last_renewal_v25.set(std::time::Instant::now());
+            Ok(())
+        };
+        let exit = activation
+            .activate_bounded_with_renewal_v25(&mut _run_control, &mut renew_actuator_lease);
+        drop(renew_actuator_lease);
+        drop(store);
+        dom_lease = renewed.get();
+        match exit {
             ProductionCompositeActivationExitV1::Ready { relay, route_store } => {
                 break (relay, route_store);
             }
@@ -904,32 +1054,10 @@ pub(super) fn run(
         ProductionProvisioningStageV1::RefundArmingAuthority,
         &mut provisioning,
     )?;
+    // Installed during activation, above: graph completion needs this context
+    // before activation can report readiness.
     let (role_plan, upstream_source_scope, downstream_source_scope) =
-        if f6_final_claim_plan.requires_native_templates() {
-            let upstream = relay_stage12_owner
-                .bound_xmr_setup_v23(LegIdV1::Upstream)
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-            let downstream = relay_stage12_owner
-                .bound_xmr_setup_v23(LegIdV1::Downstream)
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-            f6_final_claim_plan.materialize_native(
-                inputs.composition(),
-                [
-                    upstream
-                        .native_refund_binding_v23()
-                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
-                    downstream
-                        .native_refund_binding_v23()
-                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?,
-                ],
-            )
-        } else {
-            f6_final_claim_plan.into_parts()
-        }
-        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-    relay_stage12_owner
-        .install_xmr_claim_context_v23(&role_plan, &upstream_source_scope, &downstream_source_scope)
-        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+        claim_context_parts_v25.ok_or(ProductionRunErrorV1::SettlementChildAuthority)?;
     // Build the selected plain-recovery F7 gate from native retained
     // bootstrap before children can request funding materialization.
     for (leg, position, terms, source) in [
@@ -1062,7 +1190,14 @@ pub(super) fn run(
             trusted_now_millis_v1()?,
             runtime_bounds.actuator_lease_ms,
         )
-        .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?;
+        .map_err(|error| {
+            eprintln!(
+                "DOM_LEASE_DIAG_V25 phase=post_activation error={:?} lease_until_ms={}",
+                error,
+                dom_lease.lease_until_unix_ms()
+            );
+            ProductionRunErrorV1::DomActuatorStore
+        })?;
     let dom_child_composition = crate::production_child_dom::compose_production_dom_child_port_v23(
         dom_actuator_store,
         ProductionDomChildBindingsV1 {
@@ -1421,6 +1556,44 @@ pub(super) fn run(
             }
         };
     }
+    macro_rules! drain_terminal_relay_v24 {
+        () => {{
+            let relay_bound = relay_loop.terminal_refund_relay_bound_v24();
+            let mut idle_rounds = 0_u8;
+            for _ in 0..16 {
+                let mut moved = false;
+                for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+                    {
+                        break;
+                    }
+                    route_runtime
+                        .prepare_bounded_external_block(relay_bound)
+                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    actuator_heartbeat
+                        .renew()
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    moved |= relay_loop
+                        .step_terminal_relay_drain_v24(leg, &mut || {
+                            actuator_heartbeat.renew().map_err(|_| ())
+                        })
+                        .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
+                }
+                if moved {
+                    idle_rounds = 0;
+                    continue;
+                }
+                idle_rounds = idle_rounds.saturating_add(1);
+                if idle_rounds >= 2 {
+                    break;
+                }
+                let backoff = relay_backoff.min(Duration::from_millis(10));
+                crate::RouteRunControlV1::wait(&mut _run_control, backoff)
+                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+            }
+        }};
+    }
     macro_rules! drain_terminal_refund_v24 {
         ($snapshot:expr) => {{
             use crate::production_composite_loop::{
@@ -1552,6 +1725,7 @@ pub(super) fn run(
             }
         }};
     }
+    let mut terminal_continuation_rounds_v24 = 0_u8;
     loop {
         let before_round = route_runtime
             .snapshot()
@@ -1683,27 +1857,57 @@ pub(super) fn run(
                 Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
             }
         }
-        refresh_funding_window_v23!();
-        match run_production_composite_runtime_bounded_v1(
+        // One interleaved round (M.8 must be interleaved with each real route
+        // step), split in its relay half and its route half. The funding
+        // window is valid for a bounded time from its observation, and the
+        // route step is what consumes it; refreshing it before two relay
+        // legs let those legs spend the window. It is refreshed between the
+        // halves, right before the step that uses it.
+        //
+        // The DOM actuator lease now lives in the DOM child; its heartbeat is
+        // the only renewal. It is carried through the relay legs, their
+        // bootstraps and the route step, where the wall clock is spent.
+        let relay_half = crate::production_composite_loop::run_production_composite_relay_half_v25(
             &mut relay_loop,
             &mut route_runtime,
             &mut _run_control,
-            // M.8 must be interleaved with each real route step. Running a
-            // large batch first could leave the first-exposure guard waiting
-            // for the pump which the same root had not yet called.
-            1,
+            &mut || actuator_heartbeat.renew().map_err(|_| ()),
         )
-        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
-        {
+        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+        let round_exit = match relay_half {
+            crate::production_composite_loop::CompositeRelayHalfV25::Shutdown => {
+                ProductionCompositeRuntimeExitV1::Shutdown { rounds: 0 }
+            }
+            crate::production_composite_loop::CompositeRelayHalfV25::Stepped { moved } => {
+                refresh_funding_window_v23!();
+                crate::production_composite_loop::run_production_composite_route_half_v25(
+                    &mut relay_loop,
+                    &mut route_runtime,
+                    &mut _run_control,
+                    &mut || actuator_heartbeat.renew().map_err(|_| ()),
+                    moved,
+                )
+                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+            }
+        };
+        match round_exit {
             ProductionCompositeRuntimeExitV1::Terminal { .. } => {
                 let terminal = route_runtime
                     .snapshot()
                     .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
                 drain_terminal_refund_v24!(terminal);
+                drain_terminal_relay_v24!();
+                if terminal_continuation_rounds_v24 < 16 {
+                    terminal_continuation_rounds_v24 =
+                        terminal_continuation_rounds_v24.saturating_add(1);
+                    continue;
+                }
                 break;
             }
             ProductionCompositeRuntimeExitV1::Shutdown { .. } => break,
-            ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { .. } => {}
+            ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { .. } => {
+                terminal_continuation_rounds_v24 = 0;
+            }
         }
         if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
             .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
@@ -1785,6 +1989,189 @@ pub(super) fn run(
     // ------------------------------------------------------------------
     drop(route_runtime);
     drop(relay_loop);
+    Ok(())
+}
+
+/// Deterministic initiator-side F6 RFQ payloads, one per settlement leg
+/// whose roster member with the Initiator role is this daemon's participant.
+/// Every field is derived from already-authenticated inputs — composed
+/// settlement terms, the audited admission checkpoint and the resolved
+/// registry — so a restarted process reconstructs the byte-identical RFQ and
+/// both the durable sender guard and the F6 pair registration stay
+/// idempotent. A leg whose initiator is the remote participant stays `None`:
+/// its RFQ arrives over the Relay exactly as before.
+fn build_f6_initiator_rfq_payloads_v25(
+    inputs: &AuthenticatedProductionInputsV1,
+    local_participant: relay::ParticipantId,
+) -> Result<[Option<Vec<u8>>; 2], ProductionRunErrorV1> {
+    // The reason string carries only static phase names and redacted enum
+    // variants — never identifiers or amounts.
+    let fail = |reason: &str| {
+        eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=build reason={reason}");
+        ProductionRunErrorV1::F6Authorities
+    };
+    let checkpoint = inputs
+        .audited_route_checkpoint()
+        .map_err(|_| fail("checkpoint"))?;
+    let registry = inputs.resolved_registry();
+    let negotiation_clock = rfq::v2::NegotiationClockV2 {
+        chain_id: registry.manifest().dom.chain_id,
+        profile_digest: route_time_anchor::resolved_dom_profile_digest_v1(registry)
+            .map_err(|_| fail("dom_profile_digest"))?,
+        authority_scope: checkpoint.time_policy_authority_set_digest,
+        kind: rfq::v2::NativeClockKindV2::BlockHeight,
+    };
+    let composition_id = inputs.composition().binding_digest();
+    let mut payloads = [None, None];
+    let legs = [
+        (
+            SettlementPositionV2::Upstream,
+            crate::production_inputs::ProductionRoutePositionV1::Upstream,
+            inputs.composition().upstream(),
+            checkpoint.upstream_terms_digest,
+        ),
+        (
+            SettlementPositionV2::Downstream,
+            crate::production_inputs::ProductionRoutePositionV1::Downstream,
+            inputs.composition().downstream(),
+            checkpoint.downstream_terms_digest,
+        ),
+    ];
+    for (index, (position, roster_position, terms, terms_digest)) in legs.into_iter().enumerate() {
+        let roster_leg = &inputs.roster_bundle().legs()[index];
+        if roster_leg.position != roster_position {
+            return Err(fail("roster_position"));
+        }
+        let initiator = roster_leg
+            .members
+            .iter()
+            .find(|member| member.role == relay::SenderRoleV1::Initiator)
+            .map(|member| member.participant_id)
+            .ok_or_else(|| fail("roster_initiator_missing"))?;
+        if initiator != local_participant {
+            continue;
+        }
+        // The negotiation clock is the authenticated DOM finalized height, so
+        // the quote deadline must already be expressed as a DOM block height.
+        let relay::TimelockSpec::BlockHeight {
+            value: deadline_height,
+        } = terms.dom_leg.deadline
+        else {
+            return Err(fail("dom_deadline_not_block_height"));
+        };
+        let (gives, receives) = match position {
+            SettlementPositionV2::Upstream => (&terms.counterparty_leg, &terms.dom_leg),
+            SettlementPositionV2::Downstream => (&terms.dom_leg, &terms.counterparty_leg),
+        };
+        let rfq = rfq::v2::RfqV2::create(rfq::v2::RfqRequestV2 {
+            initiator,
+            route: rfq::v2::RouteV2 {
+                composition_id,
+                position,
+                legs: [
+                    rfq::RouteLegV1 {
+                        chain_id: gives.chain_id,
+                        asset: gives.asset_id,
+                        direction: rfq::LegDirectionV1::UserGives,
+                    },
+                    rfq::RouteLegV1 {
+                        chain_id: receives.chain_id,
+                        asset: receives.asset_id,
+                        direction: rfq::LegDirectionV1::UserReceives,
+                    },
+                ],
+            },
+            mode: rfq::RfqModeV1::ExactIn {
+                input_amount: gives.amount,
+                minimum_output: receives.amount,
+            },
+            fee_limit: terms.fee_limit,
+            negotiation_clock,
+            quote_deadline: rfq::v2::NegotiationInstantV2 {
+                clock: negotiation_clock,
+                value: deadline_height,
+            },
+            assurance_policy_ref: rfq::PolicyId(
+                terms.assurance_policy_hash.unwrap_or(terms_digest),
+            ),
+            policy_version: roster_leg.policy_version,
+            session_id: roster_leg.session_id,
+        })
+        .map_err(|error| {
+            eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=build reason=rfq_create error={error:?}");
+            ProductionRunErrorV1::F6Authorities
+        })?;
+        payloads[index] = Some(rfq.canonical_bytes().map_err(|error| {
+            eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=build reason=rfq_encode error={error:?}");
+            ProductionRunErrorV1::F6Authorities
+        })?);
+        eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=build built_leg={index}");
+    }
+    Ok(payloads)
+}
+
+/// Drives every still-pending initiator RFQ once against its leg's retained
+/// Contracts owner. `Accepted` clears the slot; `Awaiting` and a busy owner
+/// slot keep it for the next bounded activation round; any other refusal is
+/// fail-closed. The Relay envelope expiry is only submission plumbing — the
+/// prepared-once guard inside the drive keeps the RFQ content deterministic.
+fn drive_f6_initiator_rfq_round_v25(
+    owner: &mut ProductionRelayStage12OwnerV1,
+    payloads: &mut [Option<Vec<u8>>; 2],
+) -> Result<(), ProductionRunErrorV1> {
+    use crate::production_contracts::{
+        ProductionContractsF6InitiatorErrorV25, ProductionF6InitiatorRfqStepV25,
+    };
+    use crate::relay_worker::RelayWorkerOutboundErrorV1;
+    use route_transport::DurableRelaySenderErrorV1;
+
+    let expiry_seconds = trusted_now_millis_v1()?
+        .checked_div(1000)
+        .and_then(|seconds| seconds.checked_add(3600))
+        .ok_or(ProductionRunErrorV1::F6Authorities)?;
+
+    // Two passes: accepting the downstream RFQ completes the pair, which lets
+    // an upstream RFQ that answered `Awaiting` activate in the same round.
+    for (index, leg) in [
+        LegIdV1::Upstream,
+        LegIdV1::Downstream,
+        LegIdV1::Upstream,
+        LegIdV1::Downstream,
+    ]
+    .into_iter()
+    .map(|leg| (usize::from(leg == LegIdV1::Downstream), leg))
+    {
+        let Some(payload) = payloads[index].as_deref() else {
+            continue;
+        };
+        let step = owner.leg_mut(leg).contracts_mut().drive_f6_initiator_rfq_v25(
+            payload,
+            relay::TimelockSpec::TimestampSeconds {
+                value: expiry_seconds,
+            },
+        );
+        match step {
+            Ok(ProductionF6InitiatorRfqStepV25::Accepted) => {
+                eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=drive leg={index} accepted");
+                payloads[index] = None;
+            }
+            Ok(ProductionF6InitiatorRfqStepV25::Awaiting)
+            | Err(ProductionContractsF6InitiatorErrorV25::OwnerBusy)
+            | Err(ProductionContractsF6InitiatorErrorV25::Outbound(
+                RelayWorkerOutboundErrorV1::OwnerBusy
+                | RelayWorkerOutboundErrorV1::Sender(
+                    DurableRelaySenderErrorV1::PendingEnvelopeExists
+                    | DurableRelaySenderErrorV1::FramedTransferActive,
+                ),
+            )) => {}
+            Err(error) => {
+                eprintln!(
+                    "DOM_F6_INITIATOR_DIAG_V25 phase=drive leg={index} error={error:?}"
+                );
+                return Err(ProductionRunErrorV1::F6Authorities);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1955,10 +2342,29 @@ impl SelectedLegV11 {
                     std::mem::replace(sidecar_auth, Zeroizing::new([0; 32])),
                 )
                 .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-            let funding = opened
-                .enrolled
-                .observe_reopen_funding_v24(deployment, funding_daemon_urls_v22)
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            // Unavailable means no quorum yet, the tip moved between the
+            // observation's two reads, or the deposit is not at depth yet.
+            // This runs once at startup, typically right after the chain was
+            // advanced while the process was down, so one transient answer
+            // must not end the process. Only a conflict is final. The
+            // observation's own bound is unchanged; this only retries it a
+            // fixed number of times.
+            const REOPEN_FUNDING_ATTEMPTS_V25: u8 = 4;
+            let mut attempt = 1_u8;
+            let funding = loop {
+                match opened
+                    .enrolled
+                    .observe_reopen_funding_v24(deployment, funding_daemon_urls_v22)
+                {
+                    Ok(funding) => break funding,
+                    Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable)
+                        if attempt < REOPEN_FUNDING_ATTEMPTS_V25 =>
+                    {
+                        attempt += 1;
+                    }
+                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                }
+            };
             let recovery = candidate
                 .authenticate(inputs, coordinator, funding)
                 .map_err(|_| ProductionRunErrorV1::Inputs)?;

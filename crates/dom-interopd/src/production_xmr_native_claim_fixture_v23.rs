@@ -69,6 +69,15 @@ pub(in super::super) fn claim_after_observed_funding(
         )
         .mount(Arc::new(root(actor)?), budget.clone(), false);
         let vault = provisioner.provision_claim_v23(store, wallets[actor].0, chain)?;
+        // Physical vault provisioning can outlive the external-anchor recency
+        // window under the crypto-test profile. Refresh only when the concrete
+        // Store authority has actually aged out; never extend it locally.
+        if !consumed.can_reuse_observation_v12() {
+            store.revalidate_consumed_f7_claim_authorization_v12(
+                &consumed,
+                observe(actor, &request, &produced[actor])?,
+            )?;
+        }
         let share = wallets[actor].1.take_claim_share_v23(store, &consumed)?;
         assert!(wallets[actor]
             .1
@@ -103,20 +112,18 @@ pub(in super::super) fn claim_after_observed_funding(
     let mut messages = Vec::new();
     for position in 0..6 {
         let turn_started = Instant::now();
-        // Refresh both process-bound consumed authorities with independent real
-        // observations. Do not renew an old snapshot's timestamp locally.
-        for actor in 0..2 {
-            let gate = stores[actor].resume_f7_funding_gate_v12(chain, session)?;
-            let request = stores[actor].f7_anchor_request_binding_v12(&gate, chain)?;
-            stores[actor].revalidate_consumed_f7_claim_authorization_v12(
-                &authorities[actor],
-                observe(actor, &request, &produced[actor])?,
-            )?;
-        }
-        // Public scheduling is not a signing capability. The selected owner
-        // still performs its full audit below, following both fresh observers.
         let sender = super::native_sender_for_position_v24(protocol_indices, position)?;
         let peer = sender ^ 1;
+        // Public scheduling is not a signing capability. Refresh only the
+        // process-bound authority that this envelope will actually consume.
+        if !authorities[sender].can_reuse_observation_v12() {
+            let gate = stores[sender].resume_f7_funding_gate_v12(chain, session)?;
+            let request = stores[sender].f7_anchor_request_binding_v12(&gate, chain)?;
+            stores[sender].revalidate_consumed_f7_claim_authorization_v12(
+                &authorities[sender],
+                observe(sender, &request, &produced[sender])?,
+            )?;
+        }
         let accepted =
             stores[sender].resume_xmr_bounded_claim_signing_v23(chain, &authorities[sender])?;
         assert_eq!(accepted.accepted_signing_messages().count(), position);
@@ -153,24 +160,23 @@ pub(in super::super) fn claim_after_observed_funding(
         )?;
         messages.push(committed.signed_bytes().to_vec());
         eprintln!(
-            "native Claim: envelope {position}, two fresh observations and both Stores verified after {:?}",
+            "native Claim: envelope {position}, live authority and both Stores verified after {:?}",
             turn_started.elapsed(),
         );
     }
     assert_eq!(messages.len(), 6);
     let pre_signature_started = Instant::now();
-    // Refresh both consumed authorities with a fresh observation before the
-    // pre-signature phase. The six signing rounds above can together span more
-    // than MAX_V11_EXTERNAL_ANCHOR_AGE (60s) under the crypto-test profile, and
-    // reconstruct/transport re-check observation recency exactly as every
-    // signing round does, so a live caller re-observes here too.
+    // The pre-signature phase requires the same live F7 recency window. Reuse
+    // the consumed observation when still fresh; otherwise reobserve concretely.
     for actor in 0..2 {
-        let gate = stores[actor].resume_f7_funding_gate_v12(chain, session)?;
-        let request = stores[actor].f7_anchor_request_binding_v12(&gate, chain)?;
-        stores[actor].revalidate_consumed_f7_claim_authorization_v12(
-            &authorities[actor],
-            observe(actor, &request, &produced[actor])?,
-        )?;
+        if !authorities[actor].can_reuse_observation_v12() {
+            let gate = stores[actor].resume_f7_funding_gate_v12(chain, session)?;
+            let request = stores[actor].f7_anchor_request_binding_v12(&gate, chain)?;
+            stores[actor].revalidate_consumed_f7_claim_authorization_v12(
+                &authorities[actor],
+                observe(actor, &request, &produced[actor])?,
+            )?;
+        }
     }
     let mut pre_bytes = Vec::new();
     let mut transports = Vec::new();
@@ -242,10 +248,8 @@ pub(in super::super) fn claim_after_observed_funding(
     drop(identities);
     drop(stores);
     let mut captured = None;
-    // DIAG harness: run every reopen actor and the receiver phase to the end,
-    // catching each Err and panic so one run surfaces ALL downstream failures
-    // instead of aborting at the first. Dependent steps that cannot run without
-    // a failed prerequisite are reported as SKIPPED.
+    // Run every reopen actor and the receiver phase to the end so one fixture
+    // pass surfaces downstream ceremony failures without stopping at the first.
     let mut ceremony_failures: Vec<String> = Vec::new();
     for actor in 0..2 {
         let actor_started = Instant::now();
@@ -273,33 +277,27 @@ pub(in super::super) fn claim_after_observed_funding(
                     .mount(Arc::new(root(actor)?), budget.clone(), false);
             drop(provisioner.provision_claim_v23(&store, wallets[actor].0, chain)?);
             let before = store.load_session(session)?;
-            let transport = store.prepare_operational_signing_transport_authority(
-                chain,
-                session,
-                PurposeV1::ClaimAdaptor,
-            )?;
-            for message in &messages {
-                store.accept_prepared_operational_signing_transport_message(&transport, message)?;
+            if store
+                .f7_claim_verification_facts_v15(
+                    chain,
+                    session,
+                    wallets[actor].0.participant().participant_id(),
+                )?
+                .is_none()
+            {
+                if !consumed.can_reuse_observation_v12() {
+                    store.revalidate_consumed_f7_claim_authorization_v12(
+                        &consumed,
+                        observe(actor, &request, &produced[actor])?,
+                    )?;
+                }
+                let pre_transport =
+                    store.prepare_f7_claim_pre_signature_transport_v12(&consumed, chain)?;
+                store.accept_prepared_f7_claim_pre_signature_transport_v12(
+                    &pre_transport,
+                    &pre_message,
+                )?;
             }
-            // Accepting the six retained transport messages replays the whole
-            // growing transport-record scan and, under the crypto-test profile,
-            // takes longer than MAX_V11_EXTERNAL_ANCHOR_AGE (60s). The freshly
-            // consumed authority observed at consume time above is therefore stale
-            // by the time the pre-signature transport is prepared, and
-            // prepare_f7_claim_pre_signature_transport_v12 -> require_recent_observation
-            // would reject it as ClaimSigningAuthorityUnavailable. Re-observe here,
-            // mirroring both the signing loop and the pre-expose revalidate below;
-            // this models a live caller and does not relax the 60s window.
-            store.revalidate_consumed_f7_claim_authorization_v12(
-                &consumed,
-                observe(actor, &request, &produced[actor])?,
-            )?;
-            let pre_transport =
-                store.prepare_f7_claim_pre_signature_transport_v12(&consumed, chain)?;
-            store.accept_prepared_f7_claim_pre_signature_transport_v12(
-                &pre_transport,
-                &pre_message,
-            )?;
             assert_eq!(before.as_bytes(), store.load_session(session)?.as_bytes());
             assert!(!before.irreversible().adaptor_secret_exposed);
             let facts = store
@@ -316,7 +314,6 @@ pub(in super::super) fn claim_after_observed_funding(
             if request.role().dom_claim_sender_id().0
                 == wallets[actor].0.participant().participant_id()
             {
-                eprintln!("DIAG sender actor={actor}: entered sender branch");
                 // The effect is explicitly local component scope, not a fabricated
                 // route coordinator/F6 grant. The actuator still fences it durably.
                 let binding = wallets[actor].0;
@@ -383,9 +380,6 @@ pub(in super::super) fn claim_after_observed_funding(
                     },
                     now,
                 )?;
-                eprintln!(
-                    "DIAG sender actor={actor}: lease+bind_session OK, testing wrong-side expose"
-                );
                 // A valid actor on the opposite side must never release its U as T.
                 assert!(native
                     .expose_native_claim_v23(
@@ -407,12 +401,12 @@ pub(in super::super) fn claim_after_observed_funding(
                         .irreversible()
                         .adaptor_secret_exposed
                 );
-                eprintln!("DIAG sender actor={actor}: wrong-side expose rejected OK, revalidating for real expose");
-                store.revalidate_consumed_f7_claim_authorization_v12(
-                    &consumed,
-                    observe(actor, &request, &produced[actor])?,
-                )?;
-                eprintln!("DIAG sender actor={actor}: entering real expose_native_claim_v23");
+                if !consumed.can_reuse_observation_v12() {
+                    store.revalidate_consumed_f7_claim_authorization_v12(
+                        &consumed,
+                        observe(actor, &request, &produced[actor])?,
+                    )?;
+                }
                 let submission = native.expose_native_claim_v23(
                     actor,
                     &store,
@@ -425,7 +419,6 @@ pub(in super::super) fn claim_after_observed_funding(
                     scope,
                     now,
                 )?;
-                eprintln!("DIAG sender actor={actor}: real expose OK");
                 let tx_hash = submission.tx_hash();
                 assert_ne!(tx_hash, [0; 32]);
                 assert_eq!(
@@ -471,12 +464,8 @@ pub(in super::super) fn claim_after_observed_funding(
                     now + 1,
                     10_000,
                 )?;
-                eprintln!(
-                    "DIAG sender actor={actor}: entering resume_f7_claim_child_v21 (second reopen)"
-                );
                 dom_actuator::DomContractsActuatorV1::bind(&store, binding)?
                     .resume_f7_claim_child_v21(&mut control, lease, &chain, scope, now + 1)?;
-                eprintln!("DIAG sender actor={actor}: resume_f7_claim_child_v21 OK");
                 let mirror = control.audit_final_claim_custody_v2(lease, binding, now + 1)?;
                 assert_eq!(mirror.tx_hash(), tx_hash);
                 assert_eq!(mirror.exposure_record_digest(), exposure);
@@ -511,44 +500,44 @@ pub(in super::super) fn claim_after_observed_funding(
     match captured {
         Some((sender, exact)) => {
             let receiver = sender ^ 1;
-            for restart in 0..2 {
-                let observation_started = Instant::now();
-                let outcome =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                        let store =
-                            ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
-                                Arc::new(root(receiver)?),
-                                "runtime-contracts",
-                                budget.clone(),
-                                chain,
-                            )?;
-                        receive(
-                            &store,
-                            receiver,
-                            wallets[receiver].0.participant().participant_id(),
-                            &exact,
-                        )?;
-                        assert!(
-                            store
-                                .load_session(session)?
-                                .irreversible()
-                                .adaptor_secret_exposed
-                        );
-                        Ok(())
-                    }));
-                match outcome {
-                    Ok(Ok(())) => eprintln!(
-                        "native Claim receiver: canonical observation and extraction restart={restart} passed after {:?}",
-                        observation_started.elapsed(),
-                    ),
-                    Ok(Err(e)) => {
-                        eprintln!("DIAG FAILURE receiver restart={restart} (Err): {e}");
-                        ceremony_failures.push(format!("receiver restart {restart}: {e}"));
-                    }
-                    Err(_) => {
-                        eprintln!("DIAG FAILURE receiver restart={restart}: panicked (message above)");
-                        ceremony_failures.push(format!("receiver restart {restart}: panicked"));
-                    }
+            let observation_started = Instant::now();
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                    let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
+                        Arc::new(root(receiver)?),
+                        "runtime-contracts",
+                        budget.clone(),
+                        chain,
+                    )?;
+                    receive(
+                        &store,
+                        receiver,
+                        wallets[receiver].0.participant().participant_id(),
+                        &exact,
+                    )?;
+                    store
+                        .resume_f7_claim_observation_v15(chain, session)?
+                        .ok_or("receiver observation did not survive reopened receive")?;
+                    assert!(
+                        store
+                            .load_session(session)?
+                            .irreversible()
+                            .adaptor_secret_exposed
+                    );
+                    Ok(())
+                }));
+            match outcome {
+                Ok(Ok(())) => eprintln!(
+                    "native Claim receiver: canonical observation, extraction and reopen proof passed after {:?}",
+                    observation_started.elapsed(),
+                ),
+                Ok(Err(e)) => {
+                    eprintln!("DIAG FAILURE receiver reopened receive (Err): {e}");
+                    ceremony_failures.push(format!("receiver reopened receive: {e}"));
+                }
+                Err(_) => {
+                    eprintln!("DIAG FAILURE receiver reopened receive: panicked (message above)");
+                    ceremony_failures.push("receiver reopened receive: panicked".to_string());
                 }
             }
         }

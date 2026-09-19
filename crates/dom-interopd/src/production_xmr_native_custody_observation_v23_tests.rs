@@ -6,6 +6,7 @@ impl NativeXmrCustodyFixtureV23 {
         &self,
         actor: usize,
         dom: &dom_scriptless_chain_adapter::DomHttpChainAdapterV1,
+        dom_progress: &mut f7_anchor_authority::DomFundingScanProgressV24,
         request: &dom_scriptless_store::F7AnchorRequestBindingV12,
         produced: &xmr_refund_policy::graph_builder::ProducedXmrRecoveryGraphV12,
         deployment: &deployment_registry::ResolvedMoneroDeploymentV1,
@@ -13,7 +14,7 @@ impl NativeXmrCustodyFixtureV23 {
         sidecar: &mut xmr_live_sidecar_uds_client::BlockingUdsSidecarPort,
     ) -> Result<f7_anchor_authority::families_v11::VerifiedF7AnchorAuthorizationV12> {
         use f7_anchor_authority::families_v11::{
-            verify_f7_xmr_bounded_anchor_authorization_v23, verify_xmr_funding_v11,
+            verify_f7_xmr_bounded_anchor_authorization_with_progress_v24, verify_xmr_funding_v11,
             DomXmrBoundedAnchorValidationRequestV23, XmrFundingObservationRequestV11,
         };
         let owner = self
@@ -45,23 +46,26 @@ impl NativeXmrCustodyFixtureV23 {
         // The DOM adapter is blocking: never invoke it inside the Tokio runtime.
         // Reconstruct the exact same XMR scope for opaque proof authentication.
         drop(runtime);
-        Ok(verify_f7_xmr_bounded_anchor_authorization_v23(
-            dom,
-            DomXmrBoundedAnchorValidationRequestV23 {
-                role: request.role(),
-                produced,
-                refund_share_proof: &self.refund_proof,
-                expected_dom_funding_txid: request.dom_funding_txid(),
-                claim_round_start_transcript_hash: request.round_start_transcript_hash(),
-                xmr: XmrFundingObservationRequestV11 {
-                    terms: request.role().terms(),
-                    setup: &self.setup,
-                    profile: &self.profile,
-                    deployment,
-                    daemon_urls: urls,
+        Ok(
+            verify_f7_xmr_bounded_anchor_authorization_with_progress_v24(
+                dom,
+                DomXmrBoundedAnchorValidationRequestV23 {
+                    role: request.role(),
+                    produced,
+                    refund_share_proof: &self.refund_proof,
+                    expected_dom_funding_txid: request.dom_funding_txid(),
+                    claim_round_start_transcript_hash: request.round_start_transcript_hash(),
+                    xmr: XmrFundingObservationRequestV11 {
+                        terms: request.role().terms(),
+                        setup: &self.setup,
+                        profile: &self.profile,
+                        deployment,
+                        daemon_urls: urls,
+                    },
                 },
-            },
-            funding,
-        )?)
+                funding,
+                dom_progress,
+            )?,
+        )
     }
 }

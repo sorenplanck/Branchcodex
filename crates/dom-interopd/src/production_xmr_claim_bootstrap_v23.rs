@@ -95,6 +95,21 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                         .map_err(|_| Error::Custody)?,
                 );
             }
+            // First-time physical vault provisioning may outlive the external
+            // anchor's recency window. Reobserve through the concrete scanner
+            // only when the consumed authority actually aged out.
+            if !authorization.can_reuse_observation_v12() {
+                let fresh_anchors = match selected.observe(scanner.as_ref(), &request)? {
+                    ProductionF7ObservationV12::Verified(value) => value,
+                    ProductionF7ObservationV12::FundingAbsent
+                    | ProductionF7ObservationV12::AwaitingFinality
+                    | ProductionF7ObservationV12::TemporarilyUnavailable => return Ok(()),
+                };
+                self.store.revalidate_consumed_f7_claim_authorization_v12(
+                    &authorization,
+                    fresh_anchors,
+                )?;
+            }
             // From this point any failure requires authenticated reopen. Do not
             // recreate a share or silently retry with a partially moved owner.
             owner.native_xmr_start_failed_v23 = true;

@@ -49,6 +49,22 @@ pub(crate) struct ProductionXmrRecoverySigningOwnerV23 {
 }
 
 impl ProductionXmrRecoverySigningOwnerV23 {
+    /// Closed progress tokens for the activation stall diagnostic.
+    pub(crate) fn stall_tokens_v25(&self) -> (bool, [bool; 2]) {
+        (self.refund_complete, self.auxiliary_complete)
+    }
+
+    /// The three signing-session ids (cancel, refund, compensation), for the
+    /// stall diagnostic's revision progress tokens only.
+    pub(crate) fn signing_session_ids_v25(&self) -> [[u8; 32]; 3] {
+        [
+            self.bindings[0].session_id(),
+            self.bindings[1].session_id(),
+            self.bindings[2].session_id(),
+        ]
+    }
+
+
     pub(crate) fn auxiliary_binding_v23(
         &self,
         edge: XmrGraphRecoverySigningEdgeV23,
@@ -62,6 +78,89 @@ impl ProductionXmrRecoverySigningOwnerV23 {
 }
 
 impl<F: F6TransportPortV1> ProductionContractsV1<F> {
+    /// Durable revisions of the parent and the three signing sessions, for
+    /// the activation stall diagnostic. Reads only; a missing session reads
+    /// as revision 0.
+    pub(crate) fn stall_revisions_v25(&self, signing: [[u8; 32]; 3]) -> [u64; 4] {
+        let read = |id: [u8; 32]| {
+            self.store
+                .load_session(id)
+                .map(|record| record.revision())
+                .unwrap_or(0)
+        };
+        [
+            read(self.session_id),
+            read(signing[0]),
+            read(signing[1]),
+            read(signing[2]),
+        ]
+    }
+
+    /// Phase-independent durable progress of this leg for the activation
+    /// stall diagnostic: the parent session revision plus the Relay
+    /// transcript's acknowledged envelopes and committed inbound deliveries.
+    /// Bootstrap and graph traffic both advance at least one of them, so a
+    /// long but live ceremony is never mistaken for a stall. Reads only; an
+    /// unreadable or busy source reads as 0 and cannot fake progress.
+    pub(crate) fn stall_transcript_v25(&self) -> [u64; 3] {
+        let parent = self
+            .store
+            .load_session(self.session_id)
+            .map(|record| record.revision())
+            .unwrap_or(0);
+        let (sent, delivered) = self
+            .relay
+            .try_borrow()
+            .map(|relay| {
+                (
+                    relay
+                        .sender_stats()
+                        .map(|stats| u64::from(stats.completed))
+                        .unwrap_or(0),
+                    relay
+                        .inbox_stats()
+                        .map(|stats| stats.delivered as u64)
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+        [parent, sent, delivered]
+    }
+
+    fn stage_or_wait_xmr_graph_commit_pending_v23(
+        &mut self,
+        pending: OutboundDsc1RecoveryV1,
+        expiry: relay::TimelockSpec,
+    ) -> Result<bool, ProductionBootstrapRuntimeErrorV16> {
+        use ProductionBootstrapRuntimeErrorV16 as Error;
+        match pending {
+            OutboundDsc1RecoveryV1::SigningRequest(request) => Ok(request.message_type() == 0x18),
+            OutboundDsc1RecoveryV1::Committed(record) => {
+                let message =
+                    dom_scriptless_transport::SignedMessageV1::decode_exact(record.signed_bytes())
+                        .map_err(|_| Error::Binding)?;
+                if message.unsigned().kind() as u8 != 0x18 {
+                    return Ok(false);
+                }
+                if record.session_id() != &self.session_id
+                    || record.sender_id() != &self.local_participant
+                {
+                    return Err(Error::Binding);
+                }
+                if self.outbound_dsc1_route_pending_v24(&record)? {
+                    return Ok(true);
+                }
+                self.relay
+                    .try_borrow_mut()
+                    .map_err(|_| ProductionContractsOutboundErrorV1::OwnerBusy)?
+                    .stage_store_outbound_dsc1(*record, expiry)
+                    .map_err(ProductionContractsOutboundErrorV1::Relay)?;
+                Ok(false)
+            }
+            OutboundDsc1RecoveryV1::None => Ok(false),
+        }
+    }
+
     /// Reissue and verify all three terminal equations before consuming templates.
     /// The retained signer/vault owners are deliberately not moved or dropped.
     pub(crate) fn prepare_xmr_graph_completion_v23(
@@ -198,7 +297,24 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                 .store
                 .load_session(self.session_id)
                 .map_err(|_| Error::Binding)?;
-            if current.revision() < 19 {
+            // The owner is rebuilt in exactly the phases in which the refund
+            // round below is resumed. Admitting only TemplatesCommitted here
+            // meant a restart after the first local 0x0c (the parent is then
+            // in RefundSigning) could never rebuild the owner, so the round
+            // resume below was never reached. Vaults and signing sessions are
+            // reopened from their durable state, never recreated.
+            if current.revision() < 19
+                || !matches!(
+                    current.phase(),
+                    dom_scriptless_store::SessionPhaseV1::TemplatesCommitted
+                        | dom_scriptless_store::SessionPhaseV1::RefundSigning
+                )
+                || current.irreversible().funding_authorized
+            {
+                return Ok(());
+            }
+            let pending = self.store.resume_outbound_dsc1(self.session_id)?;
+            if self.stage_or_wait_xmr_graph_commit_pending_v23(pending, expiry)? {
                 return Ok(());
             }
             let cancel_hash = canonical_template_v1(templates.cancel())
@@ -235,19 +351,22 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                 ProductionXmrRecoveryRoundKindV12::Compensation,
             ];
             for index in 0..3 {
-                self.store
-                    .prepare_xmr_graph_signing_session_v23(
-                        bindings[index].session_id(),
-                        edges[index],
-                    )
-                    .map_err(|_| Error::Binding)?;
-                let accepted = self
-                    .store
-                    .resume_xmr_graph_signing_session_v23(
-                        bindings[index].session_id(),
-                        edges[index],
-                    )
-                    .map_err(|_| Error::Binding)?;
+                match self.store.prepare_xmr_graph_signing_session_v23(
+                    bindings[index].session_id(),
+                    edges[index],
+                ) {
+                    Ok(_) => {}
+                    Err(dom_scriptless_store::SessionStoreError::SessionNotFound) => return Ok(()),
+                    Err(_) => return Err(Error::Binding),
+                }
+                let accepted = match self.store.resume_xmr_graph_signing_session_v23(
+                    bindings[index].session_id(),
+                    edges[index],
+                ) {
+                    Ok(accepted) => accepted,
+                    Err(dom_scriptless_store::SessionStoreError::SessionNotFound) => return Ok(()),
+                    Err(_) => return Err(Error::Binding),
+                };
                 require_xmr_recovery_signing_scope_v23(
                     keys,
                     templates,
@@ -324,6 +443,23 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         let owner = retained.as_mut().ok_or(Error::Binding)?;
         if owner.parent != self.session_id || owner.bindings[1] != parent_binding {
             return Err(Error::Binding);
+        }
+        let parent_head = self.store.load_session(self.session_id)?;
+        // Resume the authenticated refund round in its signing phase too.
+        // Keep the existing revision floor and prefunding restriction.
+        if parent_head.revision() < 19
+            || !matches!(
+                parent_head.phase(),
+                dom_scriptless_store::SessionPhaseV1::TemplatesCommitted
+                    | dom_scriptless_store::SessionPhaseV1::RefundSigning
+            )
+            || parent_head.irreversible().funding_authorized
+        {
+            return Ok(());
+        }
+        let pending = self.store.resume_outbound_dsc1(self.session_id)?;
+        if self.stage_or_wait_xmr_graph_commit_pending_v23(pending, expiry)? {
+            return Ok(());
         }
         let ingress = self.store.prepare_xmr_graph_signing_ingress_v23(
             self.session_id,

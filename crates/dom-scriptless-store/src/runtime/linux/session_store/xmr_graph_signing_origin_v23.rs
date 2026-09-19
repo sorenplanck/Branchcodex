@@ -179,6 +179,40 @@ impl ContractsSessionStoreV1 {
         Ok(expected.digest)
     }
 
+    pub(in super::super) fn retain_terminal_xmr_graph_signing_origins_v23(
+        &self,
+        chain: TrustedChainIdV1,
+        route: [u8; 32],
+        parent: [u8; 32],
+    ) -> Result<(), SessionStoreError> {
+        let current = self.load_session(parent)?;
+        let context = self.load_xmr_graph_commit_context_v23(parent)?;
+        if context.chain != *chain.as_bytes() || context.route != route || context.session != parent
+        {
+            return Err(SessionStoreError::Conflict);
+        }
+        if current.revision()
+            != context
+                .revision
+                .checked_add(2)
+                .ok_or(SessionStoreError::CapacityExceeded)?
+            || current.phase() != SessionPhaseV1::TemplatesCommitted
+            || current.irreversible().funding_authorized
+            || current.irreversible().any_signing_share_sent
+            || current.irreversible().adaptor_secret_exposed
+        {
+            return Ok(());
+        }
+        for edge in [
+            XmrGraphRecoverySigningEdgeV23::Cancel,
+            XmrGraphRecoverySigningEdgeV23::RefundAdaptor,
+            XmrGraphRecoverySigningEdgeV23::Compensation,
+        ] {
+            self.retain_xmr_graph_signing_origin_v23(chain, route, parent, edge)?;
+        }
+        Ok(())
+    }
+
     /// Caller holds the operation lock. Reconstructs unsigned native inputs,
     /// never creates a target session or moves it past a signing gate.
     pub(in super::super) fn authenticate_xmr_graph_signing_origin_v23(

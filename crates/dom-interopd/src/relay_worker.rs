@@ -2079,15 +2079,71 @@ where
         Ok(prepared_report(&pending))
     }
 
+    /// Returns true when an RFQ envelope was ever prepared by this durable
+    /// sender (still pending or already handed to the Relay). The initiator's
+    /// RFQ is deterministic for the route, so crash recovery must not prepare
+    /// a second RFQ envelope with a fresh expiry.
+    pub fn f6_rfq_already_prepared_v25(&mut self) -> Result<bool, RelayWorkerOutboundErrorV1> {
+        Ok(self
+            .sender
+            .kind_ever_prepared_v25(message_type::RFQ)
+            .map_err(RelayWorkerOutboundErrorV1::from)?)
+    }
+
+    /// Applies the initiator's own deterministic RFQ to the local F6 port.
+    ///
+    /// F6 is a replicated machine: the same RFQ object the initiator submits
+    /// over the Relay must also activate the initiator's own F6 authority.
+    /// This method only forwards a kind-restricted local delivery into the
+    /// same `accept_f6` boundary used by network traffic — the port itself
+    /// re-authenticates the payload against its pinned bindings, and the
+    /// F6 lifecycle authority is never exposed to the caller. The delivery
+    /// digest is derived deterministically from the exact payload bytes so
+    /// crash-recovery redelivery presents the same evidence.
+    pub fn accept_local_initiator_rfq_v25(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<DurablePayloadCommitV1, F::Error> {
+        let mut hasher = Blake2bVar::new(32).expect("BLAKE2b-256 output length is valid");
+        hasher.update(b"DOM-INTEROP/F6/LOCAL-INITIATOR-RFQ/V25\0");
+        hasher.update(payload);
+        let mut digest: Digest32 = ZERO_DIGEST;
+        hasher
+            .finalize_variable(&mut digest)
+            .expect("BLAKE2b-256 output length is valid");
+        let sender_id = self.contracts.contracts_mut().local_participant;
+        let delivery = F6PayloadDeliveryV1::local_initiator_rfq_v25(sender_id, digest, payload);
+        self.f6.accept_f6(delivery)
+    }
+
+    /// Returns true when the exact Store-owned DSC1 application is already
+    /// durable in the route sender and still waiting for Relay ACK. Crash
+    /// recovery must wait in that state instead of preparing the same
+    /// application again with a fresh expiry.
+    pub(crate) fn store_outbound_dsc1_pending_v24(
+        &mut self,
+        outbound: &CommittedOutboundDsc1V1,
+    ) -> Result<bool, RelayWorkerOutboundErrorV1> {
+        let store = Rc::clone(&self.contracts.contracts_mut().store);
+        store
+            .revalidate_committed_outbound_dsc1(outbound)
+            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+
+        Ok(self
+            .sender
+            .pending_envelope()?
+            .is_some_and(|pending| pending.application_id() == Some(outbound.application_id())))
+    }
+
     /// Stages or reconciles one DSC1 object already signed and committed by
     /// the same physical Contracts Store opening embedded in this worker.
     ///
     /// The opaque handle is reauthenticated before its exact signed bytes are
     /// decoded and cross-checked against both the handle and the worker's
-    /// frozen sender/session.  The bytes then enter only the durable Route
+    /// frozen sender/session. The bytes then enter only the durable Route
     /// application V2 API under the Store-minted application identifier.
     /// `AlreadyAcked` is returned only after the Store has durably recorded
-    /// the completed Relay handoff.  A pending handle is deliberately not
+    /// the completed Relay handoff. A pending handle is deliberately not
     /// returned: crash recovery reissues it from the same Store journal.
     pub fn stage_store_outbound_dsc1(
         &mut self,

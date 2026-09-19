@@ -430,6 +430,7 @@ pub(super) fn run_claim(
     eprintln!("native claim: private-fork refund recovery complete");
     let claim_bindings = [signed.wallets[0].0, signed.wallets[1].0];
     let funding_owner = std::cell::RefCell::new(funding);
+    let mut dom_scan_progress = f7_anchor_authority::DomFundingScanProgressV24::new();
     let mut built_sweep = None;
     native_funding_v23::native_claim_v23::claim_after_observed_funding(
         signed,
@@ -504,6 +505,7 @@ pub(super) fn run_claim(
             native.observe_claim_anchors_v23(
                 actor,
                 snapshot.adapter(),
+                &mut dom_scan_progress,
                 request,
                 produced,
                 &deployment,

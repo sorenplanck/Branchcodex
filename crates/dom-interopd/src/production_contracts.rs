@@ -88,7 +88,7 @@ use dom_adaptor::TrustedChainIdV1;
 use dom_core::Hash256;
 use dom_scriptless_identity_store::{ContractsTransportIdentityStoreV1, IdentityStoreError};
 use dom_scriptless_store::{
-    AcceptedXmrRemoteSweepRequestV23, ClaimSigningAuthorizationV2,
+    AcceptedXmrRemoteSweepRequestV23, ClaimSigningAuthorizationV2, CommittedOutboundDsc1V1,
     ConsumedClaimSigningAuthorizationV2, ContractsNonceVaultV1, ContractsSessionStoreV1,
     OutboundDsc1RecoveryV1, PreparedDsc1SigningRequestV1, PreparedEvmSignedActionImportV1,
     PreparedOperationalFinalRefundTransportAuthorityV1, PreparedOperationalM8FundingGateV2,
@@ -173,9 +173,9 @@ use crate::production_refund_arming::{
 };
 use crate::relay_worker::{
     ContractsRelayIngressErrorV1, ContractsSessionStatusV1, DurableRelayWorkerV1,
-    PreparedContractsIngressV1, RelayInboundPollReportV1, RelayOutboundStepV1, RelayWorkerConfigV1,
-    RelayWorkerInboundErrorV1, RelayWorkerOpenErrorV1, RelayWorkerOutboundErrorV1,
-    RelayWorkerPathsV1,
+    PreparedContractsIngressV1, RelayF6MessageKindV1, RelayInboundPollReportV1,
+    RelayOutboundStepV1, RelayWorkerConfigV1, RelayWorkerInboundErrorV1, RelayWorkerOpenErrorV1,
+    RelayWorkerOutboundErrorV1, RelayWorkerPathsV1,
 };
 use crate::supervisor::AuthorityRefusalV1;
 
@@ -231,6 +231,27 @@ pub(crate) enum ProductionContractsF6RecoveryErrorV2 {
     OwnerBusy,
     #[error("production F6 applied history failed authentication")]
     Replay(#[source] F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>),
+}
+
+/// Outcome of one initiator-side F6 RFQ drive step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductionF6InitiatorRfqStepV25 {
+    /// The local F6 port durably accepted (or had already accepted) the RFQ.
+    Accepted,
+    /// The port still awaits another authenticated input, typically the
+    /// paired leg's RFQ. The caller drives the other leg and retries.
+    Awaiting,
+}
+
+/// Redacted refusal from the initiator-side F6 RFQ drive boundary.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProductionContractsF6InitiatorErrorV25 {
+    #[error("Contracts Relay owner is already executing another operation")]
+    OwnerBusy,
+    #[error("Relay sender refused the initiator RFQ envelope")]
+    Outbound(#[source] RelayWorkerOutboundErrorV1),
+    #[error("production F6 port refused the initiator RFQ")]
+    Lifecycle(#[source] ProductionF6LifecycleErrorV2),
 }
 
 /// Redacted refusal from the productive F7/M.8 Contracts boundary.
@@ -2075,6 +2096,18 @@ where
             reason = "retained surface not yet wired by the stage-7 composition root"
         )
     )]
+
+    pub(crate) fn outbound_dsc1_route_pending_v24(
+        &mut self,
+        outbound: &CommittedOutboundDsc1V1,
+    ) -> Result<bool, ProductionContractsOutboundErrorV1> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsOutboundErrorV1::OwnerBusy)?
+            .store_outbound_dsc1_pending_v24(outbound)
+            .map_err(ProductionContractsOutboundErrorV1::from)
+    }
+
     pub(crate) fn resume_and_stage(
         &mut self,
         expiry: TimelockSpec,
@@ -2324,6 +2357,39 @@ impl ProductionContractsV1<ProductionF6LifecyclePortV2> {
             .map_err(|_| ProductionContractsF6RecoveryErrorV2::OwnerBusy)?
             .recover_production_f6_applied_history()
             .map_err(ProductionContractsF6RecoveryErrorV2::from)
+    }
+
+    /// Drives the initiator's own deterministic RFQ for this leg: the same
+    /// object is persisted once for Relay submission to the solver and then
+    /// delivered to the local F6 port, which re-authenticates it against its
+    /// pinned bindings. Both effects are idempotent — the durable sender
+    /// refuses a second RFQ preparation and the pair activation registers an
+    /// identical RFQ without consuming anything — so the caller loops this
+    /// step until the port stops answering `Awaiting`.
+    pub(crate) fn drive_f6_initiator_rfq_v25(
+        &self,
+        payload: &[u8],
+        expiry: TimelockSpec,
+    ) -> Result<ProductionF6InitiatorRfqStepV25, ProductionContractsF6InitiatorErrorV25> {
+        let mut relay = self
+            .relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsF6InitiatorErrorV25::OwnerBusy)?;
+        if !relay
+            .f6_rfq_already_prepared_v25()
+            .map_err(ProductionContractsF6InitiatorErrorV25::Outbound)?
+        {
+            relay
+                .prepare_f6(RelayF6MessageKindV1::Rfq, payload, expiry)
+                .map_err(ProductionContractsF6InitiatorErrorV25::Outbound)?;
+        }
+        match relay.accept_local_initiator_rfq_v25(payload) {
+            Ok(_) => Ok(ProductionF6InitiatorRfqStepV25::Accepted),
+            Err(ProductionF6LifecycleErrorV2::Awaiting(_)) => {
+                Ok(ProductionF6InitiatorRfqStepV25::Awaiting)
+            }
+            Err(error) => Err(ProductionContractsF6InitiatorErrorV25::Lifecycle(error)),
+        }
     }
 }
 

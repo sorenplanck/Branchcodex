@@ -330,11 +330,10 @@ impl ProductionRelayStage12OwnerV1 {
             .ok_or(Error::Binding)?
             .needs_refund_binding_v23()
         {
-            if let Some(authority) = owner
+            let polled = owner
                 .contracts
-                .poll_xmr_refund_template_binding_v23(owner.trusted_chain_id)
-                .map_err(|_| Error::Binding)?
-            {
+                .poll_xmr_refund_template_binding_v23(owner.trusted_chain_id);
+            if let Some(authority) = polled.map_err(|_| Error::Binding)? {
                 owner
                     .contracts
                     .revalidate_xmr_refund_template_binding_v23(&authority)

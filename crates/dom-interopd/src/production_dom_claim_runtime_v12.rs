@@ -3,7 +3,7 @@
 //! A driver owns one wallet share and one purpose-separated nonce vault across
 //! ticks. Both participant messages and the aggregate pre-signature use the
 //! exact Store-issued DSC1 identity signing and durable Relay staging path.
-//! Every tick consumes fresh native F7 observations for the selected profile.
+//! Ticks consume native F7 observations when the selected profile needs a fresh recency window.
 
 use super::{
     ProductionContractsConsumedPostAnchorV2, ProductionContractsOutboundErrorV1,
@@ -51,6 +51,7 @@ pub(crate) struct ProductionDomClaimTemplateV12 {
 pub(crate) enum ProductionDomClaimAnchorsV12 {
     BitcoinV2(VerifiedF7AnchorAuthorizationV2),
     Universal(VerifiedF7AnchorAuthorizationV12),
+    UniversalRecent,
 }
 
 enum ConsumedAuthorityV12 {
@@ -364,6 +365,13 @@ where
             .map_err(|_| ProductionDomClaimRuntimeErrorV12::Scope)
     }
 
+    pub(crate) fn universal_authority_recent_v12(&self) -> bool {
+        matches!(
+            &self.authorization,
+            ConsumedAuthorityV12::Universal(authority) if authority.can_reuse_observation_v12()
+        )
+    }
+
     fn refresh(
         &self,
         anchors: ProductionDomClaimAnchorsV12,
@@ -382,6 +390,10 @@ where
                 .store
                 .revalidate_consumed_f7_claim_authorization_v12(authority, anchors)
                 .map_err(Into::into),
+            (
+                ConsumedAuthorityV12::Universal(authority),
+                ProductionDomClaimAnchorsV12::UniversalRecent,
+            ) if authority.can_reuse_observation_v12() => Ok(()),
             _ => Err(ProductionDomClaimRuntimeErrorV12::Scope),
         }
     }

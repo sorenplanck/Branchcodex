@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dom_scriptless_identity_store::ContractsTransportIdentityStoreV1;
+use dom_scriptless_identity_store::{ContractsTransportIdentityStoreV1, IdentityStoreError};
 use dom_scriptless_store::SessionTransportIdentityReferenceV1;
 use dom_scriptless_transport::{EncryptedTransportV1, NoiseRoleV1, MAX_MESSAGE_LEN_V1};
 use relay::{
@@ -297,10 +297,23 @@ impl ProductionNoiseRelaySessionV1 {
                 &self.local_reference,
                 &self.remote_reference,
             )
-            .map_err(|_| ProductionNoiseRelayErrorV1::IdentityAuthenticationFailed)?;
+            // A handshake that died on the socket is a channel failure and is
+            // retried like any other; only an actual Noise refusal, such as an
+            // unexpected peer static key, is an identity verdict.
+            .map_err(|error| match error {
+                IdentityStoreError::TransportUnavailable => {
+                    ProductionNoiseRelayErrorV1::ChannelUnavailable
+                }
+                _ => ProductionNoiseRelayErrorV1::IdentityAuthenticationFailed,
+            })?;
 
         let mut report = self.exchange_pages(&mut transport, relay)?;
         if let Some(cancelled) = self.cancelled_v22.as_ref() {
+            // Each authenticated scope gets its own full bound. One shared
+            // budget meant the recovery children doubled the work under the
+            // original two-scope ceiling, so a loaded exchange always died at
+            // the deadline before reaching them and restarted from the hello.
+            transport.stream_mut().begin_scope_v25()?;
             let extra = cancelled.exchange_pages(&mut transport, relay)?;
             report.pages_sent += extra.pages_sent;
             report.envelopes_sent += extra.envelopes_sent;
@@ -309,12 +322,23 @@ impl ProductionNoiseRelaySessionV1 {
             report.envelopes_received += extra.envelopes_received;
             report.inbound_backlog_remains |= extra.inbound_backlog_remains;
         }
-        if self.graph_v22.is_some() && self.exchange_recovery_scopes_v23(&mut transport)? {
+        // The readiness frame is symmetric on the wire. Both peers reach this
+        // point together because `exchange_hello` already refused any mismatch
+        // in cancelled ownership, and `with_xmr_recovery_v23` only accepts
+        // children under a cancelled parent. A peer that has not yet opened its
+        // auxiliary owners advertises the absent pair and negotiation answers
+        // `false`; gating the frame on local readiness instead would leave the
+        // ready peer blocked on a reply the unready peer never writes.
+        if self.cancelled_v22.is_some() && {
+            transport.stream_mut().begin_scope_v25()?;
+            self.exchange_recovery_scopes_v23(&mut transport)?
+        } {
             let children = self
                 .recovery_v23
                 .as_ref()
                 .ok_or(ProductionNoiseRelayErrorV1::InvalidConfiguration)?;
             for child in children.iter() {
+                transport.stream_mut().begin_scope_v25()?;
                 let extra = child.exchange_pages(&mut transport, relay)?;
                 report.pages_sent += extra.pages_sent;
                 report.envelopes_sent += extra.envelopes_sent;
@@ -884,6 +908,7 @@ fn take_u32(bytes: &[u8], offset: usize) -> Result<u32, ProductionNoiseRelayErro
 struct DeadlineTcpStreamV1 {
     stream: TcpStream,
     deadline: Instant,
+    timeout: Duration,
 }
 
 impl DeadlineTcpStreamV1 {
@@ -900,7 +925,24 @@ impl DeadlineTcpStreamV1 {
         stream
             .set_write_timeout(Some(timeout))
             .map_err(|_| ProductionNoiseRelayErrorV1::ChannelUnavailable)?;
-        Ok(Self { stream, deadline })
+        Ok(Self {
+            stream,
+            deadline,
+            timeout,
+        })
+    }
+
+    /// Restarts the deadline for the next authenticated scope on this
+    /// connection. The bound per scope is exactly the configured exchange
+    /// timeout; one connection carries a fixed number of scopes (the parent,
+    /// the cancelled scope, the readiness negotiation and two recovery
+    /// children), so the connection total stays deterministically bounded. A
+    /// stalled peer still fails within one scope's bound.
+    fn begin_scope_v25(&mut self) -> Result<(), ProductionNoiseRelayErrorV1> {
+        self.deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or(ProductionNoiseRelayErrorV1::InvalidConfiguration)?;
+        Ok(())
     }
 
     fn remaining(&self) -> io::Result<Duration> {

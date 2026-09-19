@@ -32,7 +32,11 @@ const JOURNAL_KIND_V2: u16 = 1;
 const TRUSTED_CLOCK_ENTITY_V2: &[u8] = b"DOM-INTEROP/PRE-F6-TIME/TRUSTED-CLOCK/V2";
 const MAX_AUTHORITIES_V2: usize = 16;
 const MAX_HISTORY_ROWS_V2: usize = 4_096;
-const MAX_EVIDENCE_LIFETIME_SECONDS_V2: u64 = 300;
+/// Upper bound on one pre-F6 evidence statement's lifetime and accepted age.
+/// Every signed pre-F6 policy is refused above it; producers of F6 authority
+/// bundles must derive their pre-F6 limits within it.
+pub const MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2: u64 = 300;
+const MAX_EVIDENCE_LIFETIME_SECONDS_V2: u64 = MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2;
 const POLICY_BYTES_V2: usize = 403;
 const EVIDENCE_BYTES_V2: usize = 379;
 const SIGNATURE_BYTES_V2: usize = 66;

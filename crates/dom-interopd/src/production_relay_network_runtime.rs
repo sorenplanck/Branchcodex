@@ -48,6 +48,15 @@ pub(crate) enum ProductionRelayNetworkRuntimeErrorV1 {
     /// Noise authentication or the bounded application exchange failed.
     #[error("production Relay authenticated exchange failed")]
     AuthenticatedExchangeFailed,
+    /// The peer's static identity failed Noise verification.
+    #[error("production Relay peer identity authentication was refused")]
+    IdentityAuthenticationRefused,
+    /// The authenticated peer sent a non-canonical or divergent frame.
+    #[error("production Relay authenticated protocol was refused")]
+    ProtocolRefused,
+    /// The authenticated peer refused the transfer without details.
+    #[error("production Relay authenticated peer refused the transfer")]
+    PeerRefused,
     /// The authenticated channel could not complete within its deadline.
     #[error("production Relay authenticated channel is temporarily unavailable")]
     ChannelUnavailable,
@@ -104,18 +113,81 @@ impl ProductionRelayNetworkRuntimeV1 {
         identity: &ContractsTransportIdentityStoreV1,
         relay: &mut ProductionRelayV1,
     ) -> Result<ProductionNoiseRelayExchangeReportV1, ProductionRelayNetworkRuntimeErrorV1> {
+        self.exchange_configured_link_retained_v25(link, session, identity, relay, &mut None, None)
+    }
+
+    /// Same exchange, reusing a listening socket the caller keeps across
+    /// rounds.
+    ///
+    /// A listener bound and dropped inside one accept attempt only exists for
+    /// that attempt's window. The peer then has to call `connect` inside that
+    /// exact window or be refused, which makes the link a rendezvous between
+    /// two independently paced loops. Both sides walk their legs on the same
+    /// period, so once an asymmetric delay drifts their phases apart the
+    /// windows stop overlapping and neither side ever sees the other again;
+    /// both only observe a swallowed "peer unavailable" and retry forever.
+    ///
+    /// Keeping the listener bound removes the rendezvous: the kernel backlog
+    /// holds the peer's connection until this side reaches its next accept,
+    /// whenever that happens. Nothing about authentication changes, because
+    /// the Noise handshake and the exact-identity checks still run on the
+    /// accepted stream exactly as before.
+    pub(crate) fn exchange_configured_link_retained_v25(
+        &self,
+        link: &ProductionRelayNetworkLinkV1,
+        session: &ProductionNoiseRelaySessionV1,
+        identity: &ContractsTransportIdentityStoreV1,
+        relay: &mut ProductionRelayV1,
+        retained_listener: &mut Option<TcpListener>,
+        sibling_listener: Option<&TcpListener>,
+    ) -> Result<ProductionNoiseRelayExchangeReportV1, ProductionRelayNetworkRuntimeErrorV1> {
         if !session.matches_network_binding(link.noise_role(), link.remote_relay_database_id()) {
             return Err(ProductionRelayNetworkRuntimeErrorV1::InvalidConfiguration);
         }
 
-        let stream = match link.mode() {
-            ProductionRelayEndpointModeV1::Connect => self.connect_with_deadline(link.address())?,
-            ProductionRelayEndpointModeV1::Listen => self.accept_exactly_one(link.address())?,
-        };
+        if link.mode() == ProductionRelayEndpointModeV1::Connect {
+            let stream = self.connect_with_deadline(link.address())?;
+            return session
+                .exchange(identity, relay, stream)
+                .map_err(map_authenticated_exchange_error);
+        }
 
-        session
-            .exchange(identity, relay, stream)
-            .map_err(map_authenticated_exchange_error)
+        // The listening side drains backlog corpses inside one unchanged
+        // accept window. A retained listener lets the kernel complete a
+        // connection while this side is still busy elsewhere; the peer then
+        // writes its opening handshake, waits out its own exchange bound and
+        // leaves. What stays queued is a socket that already carries bytes,
+        // so no test applied *before* the handshake can tell it apart from a
+        // live peer. After the handshake the difference is observable: a
+        // departed peer leaves the connection at EOF or reset, while an
+        // impostor is still there. Only the first is drained; the second
+        // keeps its original fatal identity verdict.
+        let deadline = Instant::now()
+            .checked_add(self.bounds.accept_timeout)
+            .ok_or(ProductionRelayNetworkRuntimeErrorV1::InvalidConfiguration)?;
+        loop {
+            let stream = self.accept_one_until_v25(
+                link.address(),
+                retained_listener,
+                sibling_listener,
+                deadline,
+            )?;
+            let probe = stream.try_clone().ok();
+            match session.exchange(identity, relay, stream) {
+                Ok(report) => return Ok(report),
+                Err(error) => {
+                    let departed = matches!(
+                        error,
+                        ProductionNoiseRelayErrorV1::IdentityAuthenticationFailed
+                            | ProductionNoiseRelayErrorV1::ChannelUnavailable
+                    ) && probe.as_ref().is_some_and(peer_has_departed_v25);
+                    if departed && Instant::now() < deadline {
+                        continue;
+                    }
+                    return Err(map_authenticated_exchange_error(error));
+                }
+            }
+        }
     }
 
     fn connect_with_deadline(
@@ -147,30 +219,109 @@ impl ProductionRelayNetworkRuntimeV1 {
         &self,
         address: std::net::SocketAddr,
     ) -> Result<TcpStream, ProductionRelayNetworkRuntimeErrorV1> {
-        let listener = TcpListener::bind(address)
-            .map_err(|_| ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|_| ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable)?;
+        self.accept_exactly_one_retained_v25(address, &mut None)
+    }
+
+    /// Accepts exactly one peer, binding the listener only when the caller
+    /// holds none yet and leaving it bound afterwards. A caller that passes
+    /// `&mut None` gets the original bind-per-attempt behaviour.
+    fn accept_exactly_one_retained_v25(
+        &self,
+        address: std::net::SocketAddr,
+        retained: &mut Option<TcpListener>,
+    ) -> Result<TcpStream, ProductionRelayNetworkRuntimeErrorV1> {
         let deadline = Instant::now()
             .checked_add(self.bounds.accept_timeout)
             .ok_or(ProductionRelayNetworkRuntimeErrorV1::InvalidConfiguration)?;
+        self.accept_one_until_v25(address, retained, None, deadline)
+    }
 
-        loop {
+    /// The accept step of `accept_exactly_one_retained_v25`, against a caller
+    /// deadline so that draining several backlog corpses still consumes one
+    /// single accept window.
+    fn accept_one_until_v25(
+        &self,
+        address: std::net::SocketAddr,
+        retained: &mut Option<TcpListener>,
+        sibling: Option<&TcpListener>,
+        deadline: Instant,
+    ) -> Result<TcpStream, ProductionRelayNetworkRuntimeErrorV1> {
+        let listener = match retained.as_ref() {
+            Some(listener) => listener,
+            None => {
+                let listener = TcpListener::bind(address)
+                    .map_err(|_| ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable)?;
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|_| ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable)?;
+                retained.insert(listener)
+            }
+        };
+
+        let outcome = loop {
             match listener.accept() {
-                Ok((stream, _peer)) => return Ok(stream),
+                Ok((stream, _peer)) => break Ok(stream),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
-                        return Err(ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed);
+                        break Err(ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed);
+                    }
+                    // Two daemons walk their legs in the same fixed order but
+                    // on independent clocks. When the peer is already queued
+                    // on the other leg's listener it is not coming to this
+                    // one within this window: yield now with the ordinary
+                    // "peer has not arrived" outcome instead of letting both
+                    // exchange windows expire on mismatched legs (measured).
+                    if sibling.is_some_and(listener_has_pending_peer_v25) {
+                        break Err(ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed);
                     }
                     thread::sleep(remaining.min(ACCEPT_POLL_INTERVAL_V1));
                 }
-                Err(_) => {
-                    return Err(ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable);
-                }
+                Err(_) => break Err(ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable),
             }
+        };
+        // A listener that failed for anything other than "no peer yet" is not
+        // reusable: drop it so the next round rebinds instead of polling a
+        // socket the kernel has already broken. An elapsed deadline keeps the
+        // listener, because that is the ordinary "peer has not arrived" case
+        // and rebinding it is exactly what reopened the rendezvous window.
+        if matches!(
+            outcome,
+            Err(ProductionRelayNetworkRuntimeErrorV1::ListenUnavailable)
+        ) {
+            *retained = None;
         }
+        outcome
+    }
+}
+
+/// Whether the peer behind an already-failed exchange has left the
+/// connection.
+///
+/// This runs only after a failed handshake, purely to decide whether the
+/// failure was a departed peer rather than a refused identity. It never
+/// admits anyone: an answer of `true` only drains that socket and waits for
+/// the next one inside the same accept window, and an answer of `false`
+/// keeps the original refusal. A socket that is still open, or whose state
+/// cannot be read, counts as present, so the fatal verdict is what survives
+/// every ambiguity.
+fn peer_has_departed_v25(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut discard = [0_u8; 1];
+    match stream.peek(&mut discard) {
+        // Orderly close: the peer wrote what it had and went away.
+        Ok(0) => true,
+        // Bytes still queued, or the socket would block: someone is there.
+        Ok(_) => false,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::NotConnected
+        ),
     }
 }
 
@@ -184,10 +335,19 @@ fn map_authenticated_exchange_error(
         ProductionNoiseRelayErrorV1::DurableRelayUnavailable => {
             ProductionRelayNetworkRuntimeErrorV1::DurableRelayUnavailable
         }
-        ProductionNoiseRelayErrorV1::InvalidConfiguration
-        | ProductionNoiseRelayErrorV1::IdentityAuthenticationFailed
-        | ProductionNoiseRelayErrorV1::ProtocolRefused
-        | ProductionNoiseRelayErrorV1::PeerRefused => {
+        // Each refusal keeps its own name. A single collapsed tag already hid
+        // one real defect behind another in this loop; the classification is
+        // diagnostic only and every one of these remains equally fatal.
+        ProductionNoiseRelayErrorV1::IdentityAuthenticationFailed => {
+            ProductionRelayNetworkRuntimeErrorV1::IdentityAuthenticationRefused
+        }
+        ProductionNoiseRelayErrorV1::ProtocolRefused => {
+            ProductionRelayNetworkRuntimeErrorV1::ProtocolRefused
+        }
+        ProductionNoiseRelayErrorV1::PeerRefused => {
+            ProductionRelayNetworkRuntimeErrorV1::PeerRefused
+        }
+        ProductionNoiseRelayErrorV1::InvalidConfiguration => {
             ProductionRelayNetworkRuntimeErrorV1::AuthenticatedExchangeFailed
         }
     }
@@ -589,4 +749,17 @@ mod tests {
             .map_err(|_| io::Error::other("wrong-peer responder panicked"))??;
         Ok(())
     }
+}
+
+/// Whether a connection already waits in `listener`'s accept backlog. It
+/// never accepts, so the queued peer keeps its place for the owning leg's
+/// own accept, handshake and identity checks.
+pub(crate) fn listener_has_pending_peer_v25(listener: &TcpListener) -> bool {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+    let mut fds = [PollFd::new(listener, PollFlags::IN)];
+    let immediate = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    matches!(poll(&mut fds, Some(&immediate)), Ok(ready) if ready > 0)
 }

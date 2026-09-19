@@ -546,6 +546,7 @@ pub struct RealDomRpcRuntimeV1 {
     cache: Mutex<RuntimeCacheV1>,
     deadline_scan_v23: Mutex<CursorStateV1>,
     f7_claim_scan_v24: Mutex<BTreeMap<[u8; 32], f7_claim_receiver_v15::F7ClaimScanProgressV24>>,
+    f7_xmr_funding_scan_v24: Mutex<f7_anchor_authority::DomFundingScanProgressV24>,
     funding_finality_scan_v23: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
     xmr_refund_reorg_scan_v23: Mutex<
         std::collections::BTreeMap<[u8; 32], xmr_recovery_finality::NativeGraphScanProgressV23>,
@@ -573,6 +574,9 @@ impl RealDomRpcRuntimeV1 {
             cache: Mutex::new(RuntimeCacheV1::default()),
             deadline_scan_v23: Mutex::new(CursorStateV1::genesis()),
             f7_claim_scan_v24: Mutex::new(BTreeMap::new()),
+            f7_xmr_funding_scan_v24: Mutex::new(
+                f7_anchor_authority::DomFundingScanProgressV24::new(),
+            ),
             funding_finality_scan_v23: Mutex::new(BTreeMap::new()),
             xmr_refund_reorg_scan_v23: Mutex::new(std::collections::BTreeMap::new()),
             history_limit,
@@ -644,10 +648,14 @@ impl RealDomRpcRuntimeV1 {
         f7_anchor_authority::families_v11::VerifiedF7AnchorAuthorizationV12,
         f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11,
     > {
-        f7_anchor_authority::families_v11::verify_f7_xmr_bounded_anchor_authorization_v23(
+        let mut progress = self.f7_xmr_funding_scan_v24.try_lock().map_err(|_| {
+            f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::Unavailable
+        })?;
+        f7_anchor_authority::families_v11::verify_f7_xmr_bounded_anchor_authorization_with_progress_v24(
             &self.adapter,
             request,
             funding,
+            &mut progress,
         )
     }
 

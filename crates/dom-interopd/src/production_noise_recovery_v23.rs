@@ -12,10 +12,7 @@ impl ProductionNoiseRelaySessionV1 {
             .cancelled_v22
             .as_ref()
             .ok_or(ProductionNoiseRelayErrorV1::InvalidConfiguration)?;
-        if self.graph_v22.is_none()
-            || self.recovery_v23.is_some()
-            || children[0].session_id == children[1].session_id
-        {
+        if self.recovery_v23.is_some() || children[0].session_id == children[1].session_id {
             return Err(ProductionNoiseRelayErrorV1::InvalidConfiguration);
         }
         for child in &children {

@@ -145,7 +145,7 @@ rand = { workspace = true, optional = true }
 f6-engine = { path = "../f6-engine", optional = true }
 f7-anchor-authority = { path = "../f7-anchor-authority", optional = true }
 rusqlite = { workspace = true, optional = true }
-rustix = { version = "=1.1.4", default-features = false, features = ["process", "std", "fs"], optional = true }
+rustix = { version = "=1.1.4", default-features = false, features = ["process", "std", "fs", "event"], optional = true }
 adapter-btc = { path = "../adapters/btc", optional = true }
 
 # Directory capabilities for the composition root. This edge rose from

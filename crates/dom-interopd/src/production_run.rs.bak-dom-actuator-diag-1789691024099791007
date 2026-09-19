@@ -1685,18 +1685,8 @@ fn authenticate_dom_f6_payouts(
     };
     let mut native_owners: [Option<ProductionF6DomTermsOwnerV25>; 2] = [None, None];
     let participant = chain_signers.participant_id();
-    let lease = store
-        .acquire_lease(participant.0, owner_id, now_unix_ms, lease_duration_ms)
-        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
-    // A reopened process with the same owner id gets its previous, still-live
-    // lease back unchanged: AlreadyOwned keeps the old expiry. Startup then
-    // binds both sessions and builds the F6 authorities before its next
-    // renewal, which can outlast whatever was left of that inherited lease.
-    // Renew the exact fenced ownership to a full duration now. For a lease
-    // acquired just above this changes nothing; an expired or stale one is
-    // still refused.
     let mut lease = store
-        .renew_lease(lease, now_unix_ms, lease_duration_ms)
+        .acquire_lease(participant.0, owner_id, now_unix_ms, lease_duration_ms)
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
     let upstream_binding = chain_signers.dom_binding(LegIdV1::Upstream);
     let downstream_binding = chain_signers.dom_binding(LegIdV1::Downstream);
@@ -2654,75 +2644,31 @@ fn open_dom_actuator_store(
     match (mode, stage) {
         (ProductionRunModeV1::Create, ProductionProvisioningStageStateV1::Started) => {
             if stage_before_begin == ProductionProvisioningStageStateV1::Absent {
-                return DomActuatorStoreV1::create(path).map_err(|error| {
-                    eprintln!(
-                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=create_fresh error={:?}",
-                        error
-                    );
-                    ProductionRunErrorV1::DomActuatorStore
-                });
+                return DomActuatorStoreV1::create(path)
+                    .map_err(|_| ProductionRunErrorV1::DomActuatorStore);
             }
-
             if stage_before_begin != ProductionProvisioningStageStateV1::Started {
                 return Err(ProductionRunErrorV1::Provisioning);
             }
-
-            let lock_present =
-                path_entry_present(&dom_actuator_process_lock_path(path)).map_err(|error| {
-                    eprintln!(
-                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=inspect_process_lock error={:?}",
-                        error
-                    );
-                    ProductionRunErrorV1::DomActuatorStore
-                })?;
-
-            if lock_present {
-                DomActuatorStoreV1::resume_create_production(path).map_err(|error| {
-                    eprintln!(
-                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=resume_create error={:?}",
-                        error
-                    );
-                    ProductionRunErrorV1::DomActuatorStore
-                })
+            if path_entry_present(&dom_actuator_process_lock_path(path))
+                .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?
+            {
+                DomActuatorStoreV1::resume_create_production(path)
+            } else if path_entry_present(path)
+                .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?
+            {
+                return Err(ProductionRunErrorV1::DomActuatorStore);
             } else {
-                let database_present = path_entry_present(path).map_err(|error| {
-                    eprintln!(
-                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=inspect_database error={:?}",
-                        error
-                    );
-                    ProductionRunErrorV1::DomActuatorStore
-                })?;
-
-                if database_present {
-                    eprintln!(
-                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=create_resume database_without_process_lock"
-                    );
-                    return Err(ProductionRunErrorV1::DomActuatorStore);
-                }
-
-                DomActuatorStoreV1::create(path).map_err(|error| {
-                    eprintln!(
-                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=create_after_started error={:?}",
-                        error
-                    );
-                    ProductionRunErrorV1::DomActuatorStore
-                })
+                DomActuatorStoreV1::create(path)
             }
         }
-
         (
             ProductionRunModeV1::Create | ProductionRunModeV1::ReopenExisting,
             ProductionProvisioningStageStateV1::Complete,
-        ) => DomActuatorStoreV1::open_existing(path).map_err(|error| {
-            eprintln!(
-                "DOM_ACTUATOR_OPEN_DIAG_V25 operation=open_existing mode={:?} error={:?}",
-                mode, error
-            );
-            ProductionRunErrorV1::DomActuatorStore
-        }),
-
-        _ => Err(ProductionRunErrorV1::Provisioning),
+        ) => DomActuatorStoreV1::open_existing(path),
+        _ => return Err(ProductionRunErrorV1::Provisioning),
     }
+    .map_err(|_| ProductionRunErrorV1::DomActuatorStore)
 }
 
 fn require_dom_actuator_create_prefix_absent(path: &Path) -> Result<(), ProductionRunErrorV1> {

@@ -259,6 +259,19 @@ impl ProductionXmrRecoveryDriverV12 {
                             | route_executor::RouteStoreErrorV1::LeaseExpired
                             | route_executor::RouteStoreErrorV1::RevisionConflict,
                         ) => Refusal::Unavailable,
+                        // The Store repeats the two freshness checks made just
+                        // above and reports a failure as InvalidMaterial. If
+                        // either proof has aged past its bound in between, the
+                        // refusal is that race and is retried with a new
+                        // observation, exactly like the checks above. Any other
+                        // InvalidMaterial is still a conflict.
+                        crate::supervisor::RouteSupervisorErrorV1::Store(
+                            route_executor::RouteStoreErrorV1::InvalidMaterial,
+                        ) if fresh.require_recent_v12().is_err()
+                            || authority.require_xmr_funding_observed_v12().is_err() =>
+                        {
+                            Refusal::Unavailable
+                        }
                         _ => Refusal::Conflict,
                     })
             },

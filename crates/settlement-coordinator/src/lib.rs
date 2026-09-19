@@ -102,9 +102,15 @@ pub enum CoordinatorErrorV1 {
     /// A child call remains ambiguous and requires exact reconciliation.
     #[error("settlement child externalization remains ambiguous")]
     ReconciliationRequired,
-    /// External child authority refused or became unavailable.
+    /// External child authority is temporarily unavailable; the same exact
+    /// child call is retried.
     #[error("settlement child authority refused")]
     ChildAuthorityRefused,
+    /// External child authority refused the exact child, found its retained
+    /// state in conflict, or answered for a different authority. No retry of
+    /// the same call can change that.
+    #[error("settlement child authority rejected the exact child")]
+    ChildAuthorityRejected,
     /// Chain observation authority refused or became unavailable.
     #[error("settlement child observer refused")]
     ChildObserverRefused,

@@ -1976,6 +1976,20 @@ impl ConsumedF7ClaimAuthorizationV12 {
         Ok(())
     }
 
+    /// True while the last concrete external-chain observation can still back
+    /// Store operations guarded by the native F7 recency window.
+    pub fn has_recent_observation_v12(&self) -> bool {
+        self.require_recent_observation().is_ok()
+    }
+
+    /// True when callers can skip an RPC refresh and still have enough recency
+    /// headroom for the next local Store operation to complete its checks.
+    pub fn can_reuse_observation_v12(&self) -> bool {
+        const MIN_HEADROOM: std::time::Duration = std::time::Duration::from_secs(15);
+        self.observed_at.get().elapsed() + MIN_HEADROOM
+            <= f7_anchor_authority::families_v11::MAX_V11_EXTERNAL_ANCHOR_AGE
+    }
+
     /// Called only after the fresh opaque F7 token has passed scope and ancestry
     /// validation. Retain its scan origin, not the completion time of this audit.
     fn retain_observation_at(&self, observed_at: std::time::Instant) {

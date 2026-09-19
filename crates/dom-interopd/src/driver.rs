@@ -590,6 +590,35 @@ where
         }
     }
 
+    // A funding that was already externalized before the route entered
+    // recovery still has to be observed final: nothing else in this lane
+    // records funding finality, so it would stay Externalized forever. For an
+    // Externalized action `drive_action_once` only records a chain finality
+    // observation; it never dispatches, commits or re-broadcasts, so this adds
+    // no economic action to the exit-only lane. It runs only when no claim or
+    // refund above had work, so it can never delay or displace one of them.
+    for (leg, stage) in [
+        (LegIdV1::Upstream, RouteDriveStageV1::UpstreamFunding),
+        (LegIdV1::Downstream, RouteDriveStageV1::DownstreamFunding),
+    ] {
+        if snapshot.leg(leg).funding.progress() == ActionProgressV1::Externalized {
+            return drive_action_once(
+                supervisor,
+                ActionDriveContextV1 {
+                    before_revision,
+                    stage,
+                    leg,
+                    action: ActionKindV1::Funding,
+                },
+                action_authority,
+                observer,
+                runner,
+                external_custody,
+                timers,
+            );
+        }
+    }
+
     report_after(
         supervisor,
         before_revision,

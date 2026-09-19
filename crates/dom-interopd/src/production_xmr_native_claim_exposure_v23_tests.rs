@@ -42,9 +42,7 @@ impl NativeXmrCustodyFixtureV23 {
             owner.role,
         )?;
         // Refuse stale or wrong-sender authority before decrypting local T.
-        eprintln!("DIAG expose: passed scope checks, calling revalidate_f7_final_claim_authority_v14 (recency)");
         store.revalidate_f7_final_claim_authority_v14(authority, chain, local)?;
-        eprintln!("DIAG expose: authority recency OK, loading secret + prepare_and_expose");
         let material = owner
             .secrets
             .load(&self.setup.settlement_id(), &self.setup.terms_hash())?;
@@ -60,7 +58,6 @@ impl NativeXmrCustodyFixtureV23 {
             let bytes = Zeroizing::new(scalar.dom_secret_big_endian());
             let secret = dom_adaptor::AdaptorSecret::from_be_bytes(*bytes)?;
             let height = store.load_session(binding.session_id())?.chain().tip_height;
-            eprintln!("DIAG expose: validation_height (session tip_height) = {height}");
             Ok(dom_actuator::DomContractsActuatorV1::bind(store, binding)?
                 .prepare_and_expose_f7_final_claim_v14(
                     control,

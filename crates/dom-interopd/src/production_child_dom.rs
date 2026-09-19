@@ -436,7 +436,9 @@ impl ConcreteProductionDomActionAuthorityV1 {
                         now_unix_ms,
                     };
                     let admitted = match progress {
-                        Progress::NeedsAdaptation => return Err(ChildAuthorityRefusalV1::Conflict),
+                        Progress::NeedsAdaptation => {
+                            return Err(ChildAuthorityRefusalV1::Unavailable)
+                        }
                         Progress::Exposed => {
                             let submission = contracts
                                 .resume_f7_final_claim_submission_v14(
@@ -555,7 +557,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
                         }
                     }
                     DomClaimCustodyClassificationV1::Unattempted => {
-                        Err(ChildAuthorityRefusalV1::Conflict)
+                        Err(ChildAuthorityRefusalV1::Unavailable)
                     }
                 }
             }
@@ -2026,6 +2028,19 @@ where
         } else {
             pre_context_now
         };
+        if request.action == SettlementActionV1::Claim {
+            // Full top-up right before the native claim exposure, which runs
+            // a bounded XMR funding check and a DOM RPC and then re-checks
+            // `now <= lease_until`. The entry renewal only tops up once half
+            // the lease is gone, so entering with half a lease is not enough.
+            let now = self.clock.now_unix_ms()?;
+            self.lease = top_up_dom_lease_v25(
+                &mut self.control,
+                self.lease,
+                now,
+                self.lease_renewal_ms_v12,
+            )?;
+        }
         let native_claim = request.action == SettlementActionV1::Claim
             && session
                 .contracts
@@ -2163,6 +2178,7 @@ where
             returned,
         )?;
         let outcome = Self::dispatch_authority_outcome(request, returned)?;
+        self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
         let committed = self
             .control
@@ -2238,6 +2254,7 @@ where
             returned,
         )?;
         let outcome = Self::dispatch_authority_outcome(&request.dispatch, returned)?;
+        self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
         let committed = self
             .control
@@ -2270,6 +2287,7 @@ where
             return Self::observation_outcome(request, outcome);
         }
         let outcome = self.observe_result(request, &validated, now)?;
+        self.renew_actuator_lease_v12()?;
         let post_observation_now = fresh_dom_time(&mut self.clock, now)?;
         let committed = self
             .control
@@ -2594,7 +2612,8 @@ fn map_contracts_outbound_error(
             | IdentityStoreError::RandomFailure
             | IdentityStoreError::KeyDerivation
             | IdentityStoreError::StoreBusy
-            | IdentityStoreError::SigningFailed,
+            | IdentityStoreError::SigningFailed
+            | IdentityStoreError::TransportUnavailable,
         ) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Identity(
             IdentityStoreError::InvalidInput
@@ -2877,6 +2896,24 @@ fn map_runtime_binding_error(error: RealDomError) -> ChildAuthorityRefusalV1 {
 // A process heartbeat may extend a live storage lease; it never changes the
 // operation, signed scope, nonce transcript or fencing generation. The native
 // store also revalidates its retained physical owner and exact lease row.
+/// Renews a still-live DOM actuator lease to its full duration. An expired
+/// lease is never revived, and a child without a renewal duration keeps its
+/// lease unchanged.
+fn top_up_dom_lease_v25(
+    actuator: &mut DomActuatorStoreV1,
+    lease: DomLeaseV1,
+    now: u64,
+    duration: Option<u64>,
+) -> Result<DomLeaseV1, ChildAuthorityRefusalV1> {
+    let Some(duration) = duration else {
+        return Ok(lease);
+    };
+    if now >= lease.lease_until_unix_ms() {
+        return Err(ChildAuthorityRefusalV1::Unavailable);
+    }
+    renew_dom_lease_v12(actuator, lease, now, duration)
+}
+
 fn renew_dom_lease_v12(
     actuator: &mut DomActuatorStoreV1,
     lease: DomLeaseV1,

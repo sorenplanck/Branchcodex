@@ -1846,6 +1846,9 @@ pub(crate) fn map_coordinator_error(error: CoordinatorErrorV1) -> AuthorityRefus
         | CoordinatorErrorV1::ChildAuthorityRefused
         | CoordinatorErrorV1::ChildObserverRefused
         | CoordinatorErrorV1::PlanAuthorityRefused => AuthorityRefusalV1::Unavailable,
+        // A child that refused the exact call, or whose state conflicts with
+        // it, will refuse it again; only unavailability is retried.
+        CoordinatorErrorV1::ChildAuthorityRejected => AuthorityRefusalV1::Refused,
         CoordinatorErrorV1::CorruptState
         | CoordinatorErrorV1::CreationIncomplete
         | CoordinatorErrorV1::IdempotencyConflict

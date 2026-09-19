@@ -96,11 +96,20 @@ impl NativeF6ProvisionV23 {
         let secp = SecpContext::new(&[0x56; 32]);
         let limits =
             route_time_anchor::RouteTimePolicyV2::decode(time.policy.policy_bytes())?.limits();
+        // The route time policy may accept hours-old evidence; pre-F6
+        // negotiation evidence and solver status are independently capped by
+        // their protocols. Derive both within their own caps instead of
+        // copying the route bound, or every production activation refuses.
         let pre_f6_limits = route_time_anchor::PreF6TimePolicyLimitsV2 {
             valid_from_seconds: limits.valid_from_seconds,
             expires_at_seconds: limits.expires_at_seconds,
-            max_evidence_age_seconds: limits.max_evidence_age_seconds,
+            max_evidence_age_seconds: limits
+                .max_evidence_age_seconds
+                .min(route_time_anchor::MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2),
         };
+        let status_max_lifetime_seconds = limits
+            .max_evidence_age_seconds
+            .min(solver_status::MAX_STATUS_LIFETIME_SECONDS_V1);
         if plans[0].composition().binding_digest() != plans[1].composition().binding_digest()
             || plans[0].roster_bundle().bundle_digest()?
                 != plans[1].roster_bundle().bundle_digest()?
@@ -273,7 +282,7 @@ impl NativeF6ProvisionV23 {
                 bond_policy_hash: policy_hash,
                 bond_asset_binding_digest: bond_asset,
                 required_collateral,
-                status_max_lifetime_seconds: limits.max_evidence_age_seconds,
+                status_max_lifetime_seconds,
                 pre_f6_limits,
                 bond_authorities: bond_authorities.clone(),
                 status_authorities: status_authorities.clone(),

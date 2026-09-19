@@ -261,8 +261,11 @@ fn validate_public_input(input: &PublicF6ArtifactInputsV23, secp: &SecpContext) 
         || route.registry_epoch == 0
         || input.required_collateral == 0
         || input.status_max_lifetime_seconds == 0
+        || input.status_max_lifetime_seconds > solver_status::MAX_STATUS_LIFETIME_SECONDS_V1
         || input.pre_f6_limits.valid_from_seconds >= input.pre_f6_limits.expires_at_seconds
         || input.pre_f6_limits.max_evidence_age_seconds == 0
+        || input.pre_f6_limits.max_evidence_age_seconds
+            > route_time_anchor::MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2
         || input.bond_authorities.threshold() < 2
         || input.status_authorities.threshold() < 2
         || input.supplied_registry_roots.xonly_keys().len() > MAX_SIGNERS_V7

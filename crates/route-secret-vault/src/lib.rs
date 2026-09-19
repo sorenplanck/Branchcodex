@@ -37,7 +37,7 @@ use rand_core::{OsRng, RngCore};
 use route_executor::{ExposureSourceV1, RouteSecretRetirementCapabilityV1};
 use rustix::{
     fs::{
-        fchmod, flock, fstat, fsync, mkdirat, openat2, renameat_with, unlinkat, AtFlags, FileType,
+        fchmod, flock, fstat, mkdirat, openat2, renameat_with, unlinkat, AtFlags, FileType,
         FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags,
     },
     process::geteuid,
@@ -1297,23 +1297,46 @@ fn authenticate_tombstone(
         .map_err(|_| RouteSecretVaultError::AuthenticationFailed)
 }
 
+/// Whether an authenticated tombstone records the retirement this capability
+/// asks for.
+///
+/// The route, composition, first exposure and admission checkpoint identify
+/// the retired secret and must always match exactly. The revision, snapshot,
+/// last event and journal head describe the route *at* retirement. A
+/// terminal route can still record administrative events afterwards (a
+/// health change, a cancelled timer, a restart), so a later retirement
+/// request legitimately arrives at a newer revision: that is the same,
+/// already completed, idempotent retirement and is accepted. At the same
+/// revision the recorded state must still match exactly, and a capability
+/// older than the tombstone is refused.
 fn tombstone_matches_capability(
     tombstone: &[u8; TOMBSTONE_LEN],
     capability: &RouteSecretRetirementCapabilityV1,
 ) -> bool {
     let exposure = capability.first_exposure();
-    tombstone[46..78] == capability.route_id()
+    let same_secret = tombstone[46..78] == capability.route_id()
         && tombstone[78..110] == capability.composition_v2_digest()
         && tombstone[110..142] == exposure.chain_id
         && tombstone[142..174] == exposure.transaction_id
         && tombstone[174..206] == exposure.evidence_digest
         && tombstone[206] == exposure_source_tag(exposure.source)
         && tombstone[207..215] == exposure.observed_at_unix_ms.to_be_bytes()
-        && tombstone[248..256] == capability.revision().to_be_bytes()
-        && tombstone[256..288] == capability.snapshot_digest()
-        && tombstone[288..320] == capability.last_event_digest()
-        && tombstone[320..352] == capability.journal_head_digest()
-        && tombstone[352..384] == capability.admission_checkpoint_digest()
+        && tombstone[352..384] == capability.admission_checkpoint_digest();
+    if !same_secret {
+        return false;
+    }
+    let mut revision = [0u8; 8];
+    revision.copy_from_slice(&tombstone[248..256]);
+    let retired_at = u64::from_be_bytes(revision);
+    match capability.revision().cmp(&retired_at) {
+        core::cmp::Ordering::Less => false,
+        core::cmp::Ordering::Equal => {
+            tombstone[256..288] == capability.snapshot_digest()
+                && tombstone[288..320] == capability.last_event_digest()
+                && tombstone[320..352] == capability.journal_head_digest()
+        }
+        core::cmp::Ordering::Greater => true,
+    }
 }
 
 fn read_tombstone(root: &Dir, name: &str) -> Result<[u8; TOMBSTONE_LEN], RouteSecretVaultError> {
@@ -1560,8 +1583,8 @@ mod tests {
     use route_executor::{
         digest_bytes_v1, ActionIntentV1, ActionKindV1, ActionStateV1, DurableRouteStoreV1,
         EffectDispatchV1, FrozenBindingsV1, FrozenRouteAdmissionCheckpointV2,
-        FrozenRouteTimeFactsV2, LegIdV1, PublicExposureV1, RefundBindingsV1, RouteEventV1,
-        RouteLeaseV1,
+        FrozenRouteTimeFactsV2, HealthStateV1, LegIdV1, PublicExposureV1, RefundBindingsV1,
+        RouteEventV1, RouteLeaseV1,
     };
     use static_assertions::assert_not_impl_any;
     use std::{
@@ -1655,6 +1678,17 @@ mod tests {
         directory: &Path,
         exact: &RouteSecretBindingsV2,
     ) -> Result<RouteSecretRetirementCapabilityV1, Box<dyn Error>> {
+        Ok(retirement_capabilities(directory, exact, 0)?.remove(0))
+    }
+
+    /// Mints the terminal capability, then appends `later_admin_events`
+    /// health changes that a terminal route still accepts, minting a new
+    /// capability after each one. Index 0 is the capability at terminal.
+    fn retirement_capabilities(
+        directory: &Path,
+        exact: &RouteSecretBindingsV2,
+        later_admin_events: u8,
+    ) -> Result<Vec<RouteSecretRetirementCapabilityV1>, Box<dyn Error>> {
         let database = directory.join(format!("route-{}.sqlite3", hex::encode(exact.tx_id())));
         let mut store = DurableRouteStoreV1::create(&database)?;
         store.create_route(*exact.route_id(), 1)?;
@@ -1825,7 +1859,62 @@ mod tests {
                 },
             )?;
         }
-        Ok(store.mint_route_secret_retirement_capability_v1(*exact.route_id())?)
+        let mut capabilities =
+            vec![store.mint_route_secret_retirement_capability_v1(*exact.route_id())?];
+        for index in 0..later_admin_events {
+            apply_route_event(
+                &mut store,
+                lease,
+                &mut revision,
+                &mut event_id,
+                RouteEventV1::SetHealth {
+                    target: if index % 2 == 0 {
+                        HealthStateV1::RecoveryOnly
+                    } else {
+                        HealthStateV1::Running
+                    },
+                    reason_digest: [0xD0 + index; 32],
+                },
+            )?;
+            capabilities.push(store.mint_route_secret_retirement_capability_v1(*exact.route_id())?);
+        }
+        Ok(capabilities)
+    }
+
+    #[test]
+    fn retirement_stays_idempotent_after_later_terminal_admin_events() -> TestResult {
+        let fixture = Fixture::new()?;
+        let key = RouteSecretSealKeyV1::import([0xA5; 32])?;
+        let scalar = scalar_bytes(31);
+        let exact = bindings(33, &scalar)?;
+        let capabilities = retirement_capabilities(fixture.temporary.path(), &exact, 2)?;
+        let [at_terminal, after_one, after_two] = <[_; 3]>::try_from(capabilities)
+            .map_err(|_| "three capabilities")?;
+        assert!(after_one.revision() > at_terminal.revision());
+        assert!(after_two.revision() > after_one.revision());
+        let vault =
+            DurableRouteSecretVaultV1::create_production(Arc::clone(&fixture.parent), "vault")?;
+        vault.put(&key, &exact, RevealedSecretBytes::new(scalar))?;
+        assert_eq!(
+            vault.retire(&key, &after_one)?,
+            RouteSecretRetireOutcomeV1::Retired
+        );
+        // The route keeps recording administrative events after terminal;
+        // retiring again from a newer revision is the same retirement.
+        assert_eq!(
+            vault.retire(&key, &after_two)?,
+            RouteSecretRetireOutcomeV1::AlreadyRetired
+        );
+        assert_eq!(
+            vault.retire(&key, &after_one)?,
+            RouteSecretRetireOutcomeV1::AlreadyRetired
+        );
+        // A capability older than the recorded retirement is still refused.
+        assert_eq!(
+            vault.retire(&key, &at_terminal),
+            Err(RouteSecretVaultError::AuthenticationFailed)
+        );
+        Ok(())
     }
 
     #[test]

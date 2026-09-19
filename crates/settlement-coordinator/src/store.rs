@@ -39,6 +39,17 @@ use crate::model::{
 };
 use crate::{CoordinatorErrorV1, Result};
 
+/// Keeps the one retryable child refusal retryable and carries every
+/// permanent one as such, instead of folding both into a retry that can only
+/// end at an outer deadline.
+fn child_refusal_v25(refusal: crate::model::ChildAuthorityRefusalV1) -> CoordinatorErrorV1 {
+    use crate::model::ChildAuthorityRefusalV1 as Child;
+    match refusal {
+        Child::Unavailable => CoordinatorErrorV1::ChildAuthorityRefused,
+        Child::Refused | Child::Conflict => CoordinatorErrorV1::ChildAuthorityRejected,
+    }
+}
+
 mod migration_v19;
 
 const SCHEMA_VERSION: i64 = 4;
@@ -779,7 +790,7 @@ impl DurableSettlementCoordinatorV1 {
             return Err(CoordinatorErrorV1::InvalidState);
         };
         if preflight_deferred.materializer_authority_id != materializer_authority_id {
-            return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+            return Err(CoordinatorErrorV1::ChildAuthorityRejected);
         }
         let (capability, descriptor_digest, expected_plan_digest, expected_attempt_id) = {
             let transaction = self.immediate(now_unix_ms)?;
@@ -792,7 +803,7 @@ impl DurableSettlementCoordinatorV1 {
                 return Err(CoordinatorErrorV1::InvalidState);
             };
             if deferred.materializer_authority_id != materializer_authority_id {
-                return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+                return Err(CoordinatorErrorV1::ChildAuthorityRejected);
             }
             let children = load_child_rows(&transaction, row.plan_id)?;
             validate_child_prefix(&children, &plan)?;
@@ -919,12 +930,12 @@ impl DurableSettlementCoordinatorV1 {
 
         let materialized = authority
             .materialize_deferred_child(capability)
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
+            .map_err(child_refusal_v25)?;
         if authority.authority_id() != materializer_authority_id
             || materialized.authority_id() != materializer_authority_id
             || materialized.attempt_id() != expected_attempt_id
         {
-            return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+            return Err(CoordinatorErrorV1::ChildAuthorityRejected);
         }
         let exact = materialized.into_child();
         exact.validate()?;
@@ -3711,7 +3722,7 @@ impl DurableSettlementCoordinatorV1 {
         let pending = self.prepare_next_child_call(lease, now_unix_ms)?;
         let outcome = authority
             .externalize_child(pending.request())
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
+            .map_err(child_refusal_v25)?;
         self.complete_child_call(lease, pending, outcome, now_unix_ms)
     }
 
@@ -3806,7 +3817,7 @@ impl DurableSettlementCoordinatorV1 {
         let pending = self.prepare_current_reconciliation(lease, now_unix_ms)?;
         let outcome = authority
             .reconcile_child(pending.request())
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
+            .map_err(child_refusal_v25)?;
         self.complete_current_reconciliation(lease, pending, outcome, now_unix_ms)
     }
 
@@ -3846,7 +3857,7 @@ impl DurableSettlementCoordinatorV1 {
         let pending = self.prepare_takeover_reconciliation(lease, now_unix_ms)?;
         let outcome = authority
             .reconcile_child(pending.request())
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
+            .map_err(child_refusal_v25)?;
         self.complete_takeover_reconciliation(lease, pending, outcome, now_unix_ms)
     }
 
@@ -7510,5 +7521,26 @@ mod provisioning_tests {
             CoordinatorErrorV1::InvalidStorageAuthority
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod child_refusal_v25_tests {
+    use super::child_refusal_v25;
+    use crate::model::ChildAuthorityRefusalV1;
+    use crate::CoordinatorErrorV1;
+
+    #[test]
+    fn only_unavailable_child_refusal_stays_retryable() {
+        assert_eq!(
+            child_refusal_v25(ChildAuthorityRefusalV1::Unavailable),
+            CoordinatorErrorV1::ChildAuthorityRefused
+        );
+        for permanent in [ChildAuthorityRefusalV1::Refused, ChildAuthorityRefusalV1::Conflict] {
+            assert_eq!(
+                child_refusal_v25(permanent),
+                CoordinatorErrorV1::ChildAuthorityRejected
+            );
+        }
     }
 }

@@ -99,6 +99,20 @@ pub(crate) enum ProductionRelayStage12ErrorV1 {
 /// The relay signing secrets remain zeroizing owners until the exact
 /// `ProductionContractsV1` constructors consume their unavoidable fixed-size
 /// copies. No secret is retained in the returned owner.
+thread_local! {
+    static LEASE_PHASE_V25: std::cell::Cell<&'static str> = const { std::cell::Cell::new("start") };
+}
+
+/// Diagnostic marker of the phase currently holding the DOM actuator lease.
+/// Static names only; read by the renewal hook to name an oversized gap.
+pub(crate) fn mark_lease_phase_v25(phase: &'static str) {
+    LEASE_PHASE_V25.with(|cell| cell.set(phase));
+}
+
+pub(crate) fn lease_phase_v25() -> &'static str {
+    LEASE_PHASE_V25.with(std::cell::Cell::get)
+}
+
 pub(crate) struct ProductionRelayStage12RequestV1<'authority> {
     pub(crate) xmr_graph_vault_provisioner_v23:
         crate::production_dom_vaults_v12::ProductionXmrGraphVaultProvisionerV23,
@@ -172,6 +186,7 @@ pub(crate) struct ProductionRelayStage12OwnerV1 {
         crate::production_dom_vaults_v12::ProductionXmrGraphVaultProvisionerV23,
     xmr_recovery_signing_v23:
         [Option<crate::production_contracts::ProductionXmrRecoverySigningOwnerV23>; 2],
+    xmr_graph_signing_admission_deferred_v23: [bool; 2],
     cancelled_v22: [Option<cancelled_v22::CancelledRelayOwnerV22>; 2],
     bootstrap_v16: [Option<crate::production_contracts::ProductionBootstrapLegV16>; 2],
     xmr_graph_templates_v23: [graph_v23::GraphLifecycleV23; 2],
@@ -192,13 +207,106 @@ pub(crate) struct ProductionRelayStage12OwnerV1 {
     upstream: ProductionRelayStage12LegOwnerV1,
     downstream: ProductionRelayStage12LegOwnerV1,
     initial_relay_time_floor_seconds: u64,
+    /// Legs whose applied F6 history replay is waiting on the paired leg.
+    /// F6 activation is a pair: an applied upstream RFQ cannot re-activate
+    /// until the downstream RFQ has been re-registered, so a sequential
+    /// per-leg replay would refuse a correct history. A deferred leg keeps
+    /// refusing new F6 (`RecoveryRequired`) and the route cannot become ready
+    /// until its exact-duplicate replay completes.
+    f6_recovery_deferred_v25: [bool; 2],
 }
 
 impl ProductionRelayStage12OwnerV1 {
+    /// Replays every still-deferred leg's applied F6 history. Pair
+    /// activation makes the replay order-dependent, so passes repeat while
+    /// they make progress: the downstream replay completes the pair and the
+    /// upstream replay then re-activates as an exact duplicate. Only the
+    /// pair's `Awaiting` refusal defers a leg; every other refusal — a
+    /// non-duplicate, a different receipt, a poisoned or corrupt authority —
+    /// stays fatal exactly as before.
+    pub(crate) fn retry_deferred_f6_recovery_v25(
+        &mut self,
+    ) -> Result<(), ProductionRelayStage12ErrorV1> {
+        use crate::production_contracts::ProductionContractsF6RecoveryErrorV2 as RecoveryError;
+        use crate::production_f6_lifecycle::ProductionF6LifecycleErrorV2 as LifecycleError;
+        use route_transport::F6AppliedReplayErrorV1 as ReplayError;
+
+        loop {
+            let mut progressed = false;
+            for (index, leg) in [LegIdV1::Upstream, LegIdV1::Downstream]
+                .into_iter()
+                .enumerate()
+            {
+                if !self.f6_recovery_deferred_v25[index] {
+                    continue;
+                }
+                match self
+                    .leg_mut(leg)
+                    .contracts
+                    .recover_production_f6_applied_history()
+                {
+                    Ok(_) => {
+                        self.f6_recovery_deferred_v25[index] = false;
+                        progressed = true;
+                    }
+                    Err(RecoveryError::Replay(ReplayError::F6(LifecycleError::Awaiting(_)))) => {}
+                    Err(_) => return Err(ProductionRelayStage12ErrorV1::F6Refused),
+                }
+            }
+            if !progressed || self.f6_recovery_deferred_v25 == [false; 2] {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Whether any leg's applied F6 history still awaits its paired replay.
+    pub(crate) const fn f6_recovery_deferred_v25(&self) -> bool {
+        self.f6_recovery_deferred_v25[0] || self.f6_recovery_deferred_v25[1]
+    }
+    fn pending_xmr_graph_commit_relay_envelope_v23(
+        &self,
+        session_id: [u8; 32],
+    ) -> Result<bool, crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
+        use crate::production_contracts::ProductionBootstrapRuntimeErrorV16 as Error;
+        for bytes in self
+            .relay
+            .pending_canonical_envelopes_for_session(&session_id)
+            .map_err(|_| Error::Binding)?
+        {
+            let envelope = relay::RelayEnvelopeV1::decode(&bytes).map_err(|_| Error::Binding)?;
+            if envelope.session_id != session_id {
+                return Err(Error::Binding);
+            }
+            let message =
+                dom_scriptless_transport::SignedMessageV1::decode_exact(&envelope.payload)
+                    .map_err(|_| Error::Binding)?;
+            if message.unsigned().kind() as u8 == 0x18 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn step_xmr_recovery_signing_v23(
         &mut self,
         leg: LegIdV1,
         now: u64,
+    ) -> Result<(), crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
+        self.step_xmr_recovery_signing_with_renewal_v25(leg, now, &mut || Ok(()))
+    }
+
+    /// Same recovery signing step, renewing the retained DOM actuator lease
+    /// around each auxiliary edge.
+    ///
+    /// Opening one auxiliary Relay creates three durable stores and then runs
+    /// that edge's ceremony. Doing both edges under a single renewal window is
+    /// what let the lease die exactly in the round where the Cancel and
+    /// Compensation owners first appear.
+    fn step_xmr_recovery_signing_with_renewal_v25(
+        &mut self,
+        leg: LegIdV1,
+        now: u64,
+        renew_actuator_lease: &mut dyn FnMut() -> Result<(), ()>,
     ) -> Result<(), crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
         use crate::production_contracts::ProductionBootstrapRuntimeErrorV16 as Error;
         let index = match leg {
@@ -211,6 +319,27 @@ impl ProductionRelayStage12OwnerV1 {
         let setup = self.xmr_graph_setup_v22[index]
             .as_ref()
             .ok_or(Error::Binding)?;
+        let binding = setup.binding();
+        if self.xmr_recovery_signing_v23[index].is_none() {
+            let head = match leg {
+                LegIdV1::Upstream => self.upstream.contracts.contracts_session_status()?,
+                LegIdV1::Downstream => self.downstream.contracts.contracts_session_status()?,
+            };
+            if head.revision >= 19
+                && head.phase == dom_scriptless_store::SessionPhaseV1::TemplatesCommitted
+            {
+                if self.pending_xmr_graph_commit_relay_envelope_v23(binding.session_id())? {
+                    // A local Relay ACK only proves the final graph commit was
+                    // enqueued. Recovery signing may emit 0x0c only after the
+                    // central queue no longer retains this session's 0x18.
+                    return Ok(());
+                }
+                if !self.xmr_graph_signing_admission_deferred_v23[index] {
+                    self.xmr_graph_signing_admission_deferred_v23[index] = true;
+                    return Ok(());
+                }
+            }
+        }
         let material = &mut self
             ._private_bootstrap_v13
             .as_mut()
@@ -221,11 +350,12 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Upstream => &mut self.upstream,
             LegIdV1::Downstream => &mut self.downstream,
         };
+        mark_lease_phase_v25("recovery_contracts_step");
         owner.contracts.step_xmr_recovery_signing_v23(
             &mut self.xmr_recovery_signing_v23[index],
             &self.xmr_graph_vault_provisioner_v23,
             material,
-            setup.binding(),
+            binding,
             owner.trusted_chain_id,
             &graph.templates,
             &graph.keys,
@@ -234,12 +364,16 @@ impl ProductionRelayStage12OwnerV1 {
         let Some(signing) = self.xmr_recovery_signing_v23[index].as_mut() else {
             return Ok(());
         };
+        self.xmr_graph_signing_admission_deferred_v23[index] = true;
         use dom_scriptless_store::XmrGraphRecoverySigningEdgeV23 as Edge;
         for (slot, edge) in [Edge::Cancel, Edge::Compensation].into_iter().enumerate() {
+            renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
+            mark_lease_phase_v25(if slot == 0 { "recovery_edge_cancel" } else { "recovery_edge_compensation" });
             if self.xmr_auxiliary_relays_v23[index][slot].is_none() {
                 let binding = signing.auxiliary_binding_v23(edge).ok_or(Error::Binding)?;
                 self.xmr_auxiliary_relays_v23[index][slot] =
                     Some(self.xmr_auxiliary_provisioners_v23[index].open(owner, binding, edge)?);
+                renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
             }
             self.xmr_auxiliary_relays_v23[index][slot]
                 .as_mut()
@@ -248,12 +382,13 @@ impl ProductionRelayStage12OwnerV1 {
                 .step_xmr_auxiliary_signing_v23(
                     signing,
                     edge,
-                    setup.binding(),
+                    binding,
                     owner.trusted_chain_id,
                     &graph.templates,
                     &graph.keys,
                     expiry,
                 )?;
+            renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
         }
         if setup.claim_context_v23().is_none() {
             // Composition is installed after F6 admission; do not fabricate a role.
@@ -266,6 +401,10 @@ impl ProductionRelayStage12OwnerV1 {
             &graph.templates,
             &graph.keys,
         )?;
+        // Renew between reauditing the three journals and consuming the
+        // templates, and never after the lifecycle has left Signing: a failed
+        // renewal must not strand the graph in Completing.
+        renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
         if let Some(completed) = completed {
             let role = owner.contracts.bind_xmr_graph_custody_role_v23(
                 setup,
@@ -293,6 +432,8 @@ impl ProductionRelayStage12OwnerV1 {
             // Keep the signer vaults and auxiliary Relays alive for final ACK
             // recovery. Produced is not durable custody or funding readiness.
         }
+        // Mounting custody may write the encrypted archive for the first time.
+        renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
         self.step_xmr_graph_custody_v23(leg)
     }
 
@@ -581,6 +722,17 @@ impl ProductionRelayStage12OwnerV1 {
         if self.xmr_graph_setup_v22[index].is_none() {
             return Ok(());
         }
+        let graph_session_id = self.xmr_graph_setup_v22[index]
+            .as_ref()
+            .ok_or(Error::Scope)?
+            .binding()
+            .session_id();
+        if self
+            .pending_xmr_graph_commit_relay_envelope_v23(graph_session_id)
+            .map_err(|_| Error::Scope)?
+        {
+            return Ok(());
+        }
         if !self.observe_upstream_dom_revelation_v23(leg, scanner.as_ref())? {
             return Ok(());
         }
@@ -631,6 +783,12 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Downstream => 1,
         };
         if let Some(setup) = self.xmr_graph_setup_v22[index].as_ref() {
+            if self
+                .pending_xmr_graph_commit_relay_envelope_v23(setup.binding().session_id())
+                .map_err(|_| crate::production_contracts::ProductionFundingErrorV20::Binding)?
+            {
+                return Ok(());
+            }
             match &mut self.xmr_graph_templates_v23[index] {
                 graph_v23::GraphLifecycleV23::Custodied { custody, recovery } => {
                     let chain = match leg {
@@ -662,7 +820,7 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Upstream => &mut self.upstream,
             LegIdV1::Downstream => &mut self.downstream,
         };
-        let _step = selected.contracts.step_f7_funding_v20(
+        let step = selected.contracts.step_f7_funding_v20(
             material,
             binding,
             selected.trusted_chain_id,
@@ -671,6 +829,10 @@ impl ProductionRelayStage12OwnerV1 {
             &self.xmr_graph_vault_provisioner_v23,
             now,
         )?;
+        eprintln!(
+            "DOM_NATIVE_F7_FUNDING_V24 leg={leg:?} session={} step={step:?}",
+            hex::encode(binding.session_id()),
+        );
         Ok(())
     }
 
@@ -683,12 +845,12 @@ impl ProductionRelayStage12OwnerV1 {
                 // before Stage 13 can build refund faces and private owners.
                 // This is not custody readiness: the run loop mounts it later.
                 !setup.needs_refund_binding_v23()
-                    && matches!(
-                        self.xmr_graph_templates_v23[index],
-                        graph_v23::GraphLifecycleV23::Signing(_)
-                            | graph_v23::GraphLifecycleV23::Produced(_)
-                            | graph_v23::GraphLifecycleV23::Custodied { .. }
-                    )
+                    && match &self.xmr_graph_templates_v23[index] {
+                        graph_v23::GraphLifecycleV23::Signing(_) => false,
+                        graph_v23::GraphLifecycleV23::Produced(_)
+                        | graph_v23::GraphLifecycleV23::Custodied { .. } => true,
+                        _ => false,
+                    }
             } else {
                 self.bootstrap_v16[index]
                     .as_ref()
@@ -697,21 +859,123 @@ impl ProductionRelayStage12OwnerV1 {
         })
     }
 
+    /// One line of closed tokens describing why activation has not become
+    /// ready, printed only by the activation liveness watchdog on its fatal
+    /// exit. No secret, digest, free text or foreign error string is emitted:
+    /// every token below is a fixed enum name or boolean.
+    pub(crate) fn activation_stall_report_v25(&self) -> String {
+        use graph_v23::GraphLifecycleV23 as L;
+        let mut out = String::new();
+        for (index, name) in [(0_usize, "up"), (1, "down")] {
+            let lifecycle = match &self.xmr_graph_templates_v23[index] {
+                L::Awaiting => "awaiting",
+                L::Signing(_) => "signing",
+                L::Completing => "completing",
+                L::Produced(_) => "produced",
+                L::Custodied { .. } => "custodied",
+                L::Failed => "failed",
+            };
+            let (refund, aux) = self.xmr_recovery_signing_v23[index]
+                .as_ref()
+                .map(|owner| owner.stall_tokens_v25())
+                .unwrap_or((false, [false, false]));
+            let contracts = match index {
+                0 => &self.upstream.contracts,
+                _ => &self.downstream.contracts,
+            };
+            let revisions = self.xmr_recovery_signing_v23[index]
+                .as_ref()
+                .map(|owner| contracts.stall_revisions_v25(owner.signing_session_ids_v25()))
+                .unwrap_or([0; 4]);
+            let (setup, bound, context) = match &self.xmr_graph_setup_v22[index] {
+                Some(setup) => (
+                    true,
+                    !setup.needs_refund_binding_v23(),
+                    setup.claim_context_v23().is_some(),
+                ),
+                None => (false, false, false),
+            };
+            // Parent transcript plus every retained auxiliary and cancelled
+            // relay of this leg: bootstrap runs on those before the parent
+            // flow carries any DSC1, and each advance is durable progress.
+            let mut transcript = contracts.stall_transcript_v25();
+            let auxiliary = self.xmr_auxiliary_relays_v23[index]
+                .iter()
+                .flatten()
+                .map(|owner| owner.contracts.stall_transcript_v25());
+            let cancelled = self.cancelled_v22[index]
+                .iter()
+                .map(|owner| owner.contracts.stall_transcript_v25());
+            for extra in auxiliary.chain(cancelled) {
+                for (total, value) in transcript.iter_mut().zip(extra) {
+                    *total = total.saturating_add(value);
+                }
+            }
+            out.push_str(&format!(
+                "{name}:lifecycle={lifecycle},setup={setup},refund_bound={bound},claim_context={context},refund_complete={refund},aux_complete={}/{},rev={}/{}/{}/{},parent={},sent={},delivered={} ",
+                aux[0], aux[1], revisions[0], revisions[1], revisions[2], revisions[3],
+                transcript[0], transcript[1], transcript[2]
+            ));
+        }
+        out
+    }
+
     pub(crate) fn step_bootstrap_v16(
         &mut self,
         leg: LegIdV1,
         now: u64,
     ) -> Result<(), crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
+        self.step_bootstrap_with_renewal_v25(leg, now, &mut || Ok(()))
+    }
+
+    /// Same bootstrap step, renewing the retained DOM actuator lease between
+    /// its phases.
+    ///
+    /// The composite loop can only renew around this call, but the recovery
+    /// signing phase inside it opens the auxiliary Cancel/Compensation Relays
+    /// and runs their ceremony, which is bounded by no socket deadline. A
+    /// lease whose renewal cadence is coarser than the work it protects will
+    /// expire mid-phase no matter how long the lease is, so the hook has to
+    /// reach the phase boundaries themselves.
+    pub(crate) fn step_bootstrap_with_renewal_v25(
+        &mut self,
+        leg: LegIdV1,
+        now: u64,
+        renew_actuator_lease: &mut dyn FnMut() -> Result<(), ()>,
+    ) -> Result<(), crate::production_contracts::ProductionBootstrapRuntimeErrorV16> {
+        use crate::production_contracts::ProductionBootstrapRuntimeErrorV16 as StepError;
         let index = match leg {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
         };
+        // Diagnostic only: names any phase that held the actuator lease for
+        // more than 30 s without renewal. It prints static phase names and a
+        // duration; no identifiers, amounts or key material.
+        let mut last_renewal = std::time::Instant::now();
+        let mut keep = |renew: &mut dyn FnMut() -> Result<(), ()>, phase: &'static str| {
+            let held = last_renewal.elapsed();
+            if held > std::time::Duration::from_secs(30) {
+                eprintln!(
+                    "DOM_PHASE_SLOW_V25 leg={index} phase={phase} held_ms={}",
+                    held.as_millis()
+                );
+            }
+            mark_lease_phase_v25(phase);
+            let renewed = renew().map_err(|()| StepError::ActuatorLeaseRenewalV25);
+            last_renewal = std::time::Instant::now();
+            renewed
+        };
         self.resume_ready_graph_for_activation_v23(leg)?;
+        keep(renew_actuator_lease, "resume_ready_graph")?;
         // After native C/D formation the graph owner, not the ordinary
         // bootstrap signer, owns the outgoing 0x18 requests and their replay.
         if self.xmr_graph_templates_v23[index].has_handoff() {
             self.step_xmr_graph_agreement_v23(leg, now)?;
-            return self.step_xmr_recovery_signing_v23(leg, now);
+            keep(renew_actuator_lease, "handoff_graph_agreement")?;
+            let signed =
+                self.step_xmr_recovery_signing_with_renewal_v25(leg, now, renew_actuator_lease);
+            keep(renew_actuator_lease, "handoff_recovery_signing")?;
+            return signed;
         }
         if let Some(cancelled) = self.cancelled_v22[index].as_mut() {
             let material = self
@@ -737,18 +1001,24 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Downstream => &mut self.downstream.contracts,
         };
         let step = driver.step(contracts, material, now);
+        keep(renew_actuator_lease, "bootstrap_driver")?;
         // Form only unsigned V23 templates when the bilateral material and
         // native C/D proofs exist. Recovery readiness remains a separate gate.
         self.prepare_xmr_graph_templates_v23(leg)?;
+        keep(renew_actuator_lease, "graph_templates")?;
         self.step_xmr_graph_agreement_v23(leg, now)?;
-        self.step_xmr_recovery_signing_v23(leg, now)?;
+        keep(renew_actuator_lease, "graph_agreement")?;
+        self.step_xmr_recovery_signing_with_renewal_v25(leg, now, renew_actuator_lease)?;
+        keep(renew_actuator_lease, "recovery_signing")?;
         match step {
             Err(crate::production_contracts::ProductionBootstrapRuntimeErrorV16::XmrRecoveryGraphRequired)
                 if self.xmr_graph_setup_v22[index].is_some() => {
                     // Explicit handoff, not bootstrap completion. Readiness
                     // remains false until the recovery graph signer completes.
                 }
-            other => { other?; }
+            other => {
+                other?;
+            }
         }
         Ok(())
     }
@@ -900,18 +1170,10 @@ impl ProductionRelayStage12ConstructedV1 {
     /// reopen/resume the same physical authorities through the journaled
     /// Stage-12 path.
     pub(crate) fn recover_production_f6_applied_history(
-        self,
+        mut self,
     ) -> Result<ProductionRelayStage12RecoveredV1, ProductionRelayStage12ErrorV1> {
-        self.owner
-            .upstream
-            .contracts
-            .recover_production_f6_applied_history()
-            .map_err(|_| ProductionRelayStage12ErrorV1::F6Refused)?;
-        self.owner
-            .downstream
-            .contracts
-            .recover_production_f6_applied_history()
-            .map_err(|_| ProductionRelayStage12ErrorV1::F6Refused)?;
+        self.owner.f6_recovery_deferred_v25 = [true; 2];
+        self.owner.retry_deferred_f6_recovery_v25()?;
         Ok(ProductionRelayStage12RecoveredV1 { owner: self.owner })
     }
 }
@@ -1259,6 +1521,7 @@ pub(crate) fn construct_production_relay_stage12_v1(
             xmr_auxiliary_relays_v23: [[None, None], [None, None]],
             xmr_graph_vault_provisioner_v23,
             xmr_recovery_signing_v23: [None, None],
+            xmr_graph_signing_admission_deferred_v23: [false, false],
             cancelled_v22: cancelled,
             bootstrap_v16,
             xmr_graph_templates_v23: [
@@ -1280,6 +1543,7 @@ pub(crate) fn construct_production_relay_stage12_v1(
             initial_relay_time_floor_seconds: inputs
                 .composition()
                 .time_proof_validated_at_seconds(),
+            f6_recovery_deferred_v25: [false; 2],
         },
     })
 }
