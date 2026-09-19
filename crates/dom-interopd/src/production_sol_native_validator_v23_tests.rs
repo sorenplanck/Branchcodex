@@ -290,8 +290,17 @@ impl SolanaTestValidatorOwnerV23 {
             return Err("ProgramData account has no code".into());
         }
         let hash = code_hash(&data.data[PROGRAM_DATA_METADATA_LEN..]);
-        attest_immutable_program(&self.pool()?, self.program_id, hash)
-            .map_err(|_| "deployed escrow program fails production attestation")?;
+        // The refusal carries its variant and the loader metadata it judged,
+        // so a validator-version layout difference is diagnosable from logs.
+        attest_immutable_program(&self.pool()?, self.program_id, hash).map_err(|error| {
+            format!(
+                "deployed escrow program fails production attestation: {error:?}; \
+                 program[0..36]={} programdata[0..{}]={}",
+                hex::encode(&program.data[..PROGRAM_METADATA_LEN.min(program.data.len())]),
+                PROGRAM_DATA_METADATA_LEN,
+                hex::encode(&data.data[..PROGRAM_DATA_METADATA_LEN]),
+            )
+        })?;
         Ok(hash)
     }
 }
