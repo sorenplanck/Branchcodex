@@ -10,7 +10,7 @@ name: f5-e2e
 # `push` alone covers every branch of this single-owner private repo; a
 # `pull_request` trigger would re-run the identical commit a second time
 # (metered minutes, no additional signal).
-on: [push, workflow_dispatch]
+on: [workflow_dispatch]
 
 concurrency:
   group: f5-e2e-${{ github.ref }}
