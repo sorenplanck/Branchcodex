@@ -33,9 +33,13 @@ pub(crate) struct SolanaTestValidatorOwnerV23 {
 }
 
 impl SolanaTestValidatorOwnerV23 {
-    /// Do not call until the implementation-writing phase is complete: this
-    /// spawns the real validator from `DOM_SOL_TEST_VALIDATOR_V23` and deploys
-    /// `DOM_SOL_ESCROW_PROGRAM_V23` immutably (upgrade authority `none`).
+    /// Spawns the real validator from `DOM_SOL_TEST_VALIDATOR_V23` and makes
+    /// `DOM_SOL_ESCROW_PROGRAM_V23` immutable the way a real deployment does:
+    /// the program is loaded under an upgrade authority this fixture holds,
+    /// then finalized with `solana program set-upgrade-authority --final`.
+    /// Loading it with authority `none` is not enough: validator 4.2.2 records
+    /// that as `Some(default pubkey)`, which the production attestation rightly
+    /// refuses as an authority that is still present.
     pub(crate) fn from_environment(program_id: SolanaPubkey) -> Result<Self> {
         let validator = explicit_dependency("DOM_SOL_TEST_VALIDATOR_V23", true)?;
         let program = explicit_dependency("DOM_SOL_ESCROW_PROGRAM_V23", false)?;
@@ -47,6 +51,16 @@ impl SolanaTestValidatorOwnerV23 {
             .prefix("sol-ledger-")
             .tempdir()?;
         std::fs::set_permissions(ledger.path(), std::fs::Permissions::from_mode(0o700))?;
+        let cli = validator
+            .parent()
+            .ok_or("validator has no parent directory")?
+            .join("solana");
+        if !std::fs::metadata(&cli).is_ok_and(|meta| meta.is_file() && meta.mode() & 0o111 != 0) {
+            return Err("the solana CLI must sit beside solana-test-validator".into());
+        }
+        let home = ledger.path().to_path_buf();
+        let authority_path = ledger.path().join("upgrade-authority.json");
+        let authority = write_upgrade_authority_v25(&authority_path)?;
         let rpc = reserve_loopback_port()?;
         let faucet = reserve_loopback_port()?;
         // The validator's websocket listens on rpc+1. A taken port is a
@@ -90,7 +104,7 @@ impl SolanaTestValidatorOwnerV23 {
                 .arg("--upgradeable-program")
                 .arg(program_id.to_base58())
                 .arg(&program)
-                .arg("none")
+                .arg(authority.to_base58())
                 .arg("--quiet");
         }
         let child = command
@@ -105,6 +119,15 @@ impl SolanaTestValidatorOwnerV23 {
             _ledger: ledger,
         };
         owner.genesis_hash = owner.wait_genesis()?;
+        // The authority pays the finalization fee from a faucet grant.
+        owner.airdrop(authority, 1_000_000_000)?;
+        finalize_upgrade_authority_v25(
+            &cli,
+            &home,
+            &authority_path,
+            &owner.endpoint(),
+            program_id,
+        )?;
         owner.program_data_hash = owner.wait_immutable_program()?;
         eprintln!(
             "native SOL validator: genesis and immutable escrow program attested at {}",
@@ -415,6 +438,66 @@ fn reserve_loopback_port() -> Result<SocketAddr> {
 
 /// Absolute, canonical (no symlink), owner-controlled regular file. The
 /// validator must be executable; the `.so` is data and needs no X bit.
+/// A fresh upgrade authority as a Solana CLI keypair file (the 64-byte
+/// secret-then-public array), created owner-only inside the private ledger.
+fn write_upgrade_authority_v25(path: &Path) -> Result<SolanaPubkey> {
+    use rand::RngCore;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut secret = zeroize::Zeroizing::new([0_u8; 32]);
+    rand::thread_rng().fill_bytes(secret.as_mut());
+    let authority = SolanaPubkey(
+        ed25519_dalek::SigningKey::from_bytes(&secret)
+            .verifying_key()
+            .to_bytes(),
+    );
+    let mut keypair = zeroize::Zeroizing::new(secret.to_vec());
+    keypair.extend_from_slice(&authority.0);
+    let encoded = zeroize::Zeroizing::new(serde_json::to_vec(keypair.as_slice())?);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    Ok(authority)
+}
+
+/// Removes the upgrade authority for good, confirmed at finalized commitment.
+fn finalize_upgrade_authority_v25(
+    cli: &Path,
+    home: &Path,
+    authority: &Path,
+    endpoint: &str,
+    program_id: SolanaPubkey,
+) -> Result<()> {
+    let status = Command::new(cli)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .arg("program")
+        .arg("set-upgrade-authority")
+        .arg(program_id.to_base58())
+        .arg("--final")
+        .arg("--upgrade-authority")
+        .arg(authority)
+        .arg("--keypair")
+        .arg(authority)
+        .arg("--url")
+        .arg(endpoint)
+        .arg("--commitment")
+        .arg("finalized")
+        .status()
+        .map_err(|_| "the solana CLI could not start")?;
+    if !status.success() {
+        return Err("solana program set-upgrade-authority --final failed".into());
+    }
+    Ok(())
+}
+
 fn explicit_dependency(name: &str, executable: bool) -> Result<PathBuf> {
     let path = PathBuf::from(
         std::env::var_os(name).ok_or_else(|| format!("{name} is required"))?,
