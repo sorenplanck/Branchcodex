@@ -247,7 +247,7 @@ pub fn sign_digest(
         .collect()
 }
 
-fn authority_set(secp: &SecpContext, secrets: &[[u8; 32]]) -> AuthoritySetV1 {
+pub(crate) fn authority_set(secp: &SecpContext, secrets: &[[u8; 32]]) -> AuthoritySetV1 {
     let keys = secrets
         .iter()
         .enumerate()
