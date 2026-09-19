@@ -117,9 +117,12 @@ jobs:
             bash scripts/build-solana-program-v8.sh
       - name: Refresh Cargo.lock for the new dependencies
         run: cargo metadata --format-version 1 > /dev/null
-      - name: Build the daemon binary
+      # The harness admits only an operational artifact: the release profile
+      # without debug assertions, built from the same commit and lockfile as
+      # the test binary that drives it.
+      - name: Build the release daemon binary
         run: >
-          cargo build --profile crypto-test -p dom-interopd
+          cargo build --release -p dom-interopd
           --no-default-features --features production --bin dom-interopd
       - name: Run the two-daemon scenario
         # The runner binds its evidence to the exact daemon bytes, so the
@@ -127,7 +130,7 @@ jobs:
         # The runner requires canonical absolute paths; the Agave installer's
         # active_release is a symlink, so every path is resolved first.
         run: |
-          DOM_INTEROP_REAL_BINARY_V23="$(readlink -f "$GITHUB_WORKSPACE/target/crypto-test/dom-interopd")"
+          DOM_INTEROP_REAL_BINARY_V23="$(readlink -f "$GITHUB_WORKSPACE/target/release/dom-interopd")"
           DOM_SOL_TEST_VALIDATOR_V23="$(readlink -f "$(command -v solana-test-validator)")"
           DOM_SOL_ESCROW_PROGRAM_V23="$(readlink -f "$GITHUB_WORKSPACE/programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so")"
           export DOM_INTEROP_REAL_BINARY_V23 DOM_SOL_TEST_VALIDATOR_V23 DOM_SOL_ESCROW_PROGRAM_V23
