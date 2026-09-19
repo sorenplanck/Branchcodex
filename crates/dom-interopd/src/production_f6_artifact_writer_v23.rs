@@ -776,8 +776,8 @@ mod tests {
         // test proves.
         assert_eq!(expected.bytes(), xmr.as_slice());
         supplied.claim_profile = PublicF6ClaimProfileV23::SolanaEnrollment {
-            upstream,
-            downstream,
+            upstream: upstream.clone(),
+            downstream: downstream.clone(),
         };
         let mut prepared = PreparedUntrustedF6ArtifactV23::prepare(supplied, &secp).unwrap();
         assert_eq!(
@@ -798,6 +798,23 @@ mod tests {
         assert_eq!(reader.u16().unwrap(), 0);
         assert!(prefix.ends_with(expected.bytes()));
         let signatures = signatures(&secp, prepared.signing_digest());
+        // The same signatures must authorize the untampered artifact: the
+        // verifier has to know this profile's domain, as the daemon does.
+        let signed = PreparedUntrustedF6ArtifactV23::prepare(
+            {
+                let mut again = input(&secp);
+                again.claim_profile = PublicF6ClaimProfileV23::SolanaEnrollment {
+                    upstream: upstream.clone(),
+                    downstream: downstream.clone(),
+                };
+                again
+            },
+            &secp,
+        )
+        .unwrap()
+        .finalize(&signatures, &secp)
+        .expect("A25 signatures authorize the A25 artifact");
+        assert_eq!(&signed[..8], claim_enrollment_v23::MAGIC_SOL_V25);
         // An A25 signature never authorizes the XMR A23 enrollment, nor A07.
         prepared.prefix[..8].copy_from_slice(claim_enrollment_v23::MAGIC_V23);
         prepared.prefix[8..10].copy_from_slice(&claim_enrollment_v23::VERSION_V23.to_be_bytes());

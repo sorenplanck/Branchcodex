@@ -2030,6 +2030,9 @@ fn verify_bundle_signatures(
     }
     let domain: &[u8] = match signed_prefix.get(..8) {
         Some(magic) if magic == claim_enrollment_v23::MAGIC_V23 => claim_enrollment_v23::DOMAIN_V23,
+        Some(magic) if magic == claim_enrollment_v23::MAGIC_SOL_V25 => {
+            claim_enrollment_v23::DOMAIN_SOL_V25
+        }
         // The legacy low-level signature helper also verifies isolated test
         // prefixes; production decoding has already required its exact magic.
         _ => BUNDLE_DOMAIN_V7,
