@@ -122,13 +122,16 @@ jobs:
           cargo build --profile crypto-test -p dom-interopd
           --no-default-features --features production --bin dom-interopd
       - name: Run the two-daemon scenario
-        env:
-          DOM_INTEROP_REAL_BINARY_V23: ${{ github.workspace }}/target/crypto-test/dom-interopd
-          DOM_SOL_TEST_VALIDATOR_V23: /home/runner/.local/share/solana/install/active_release/bin/solana-test-validator
-          DOM_SOL_ESCROW_PROGRAM_V23: ${{ github.workspace }}/programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so
         # The runner binds its evidence to the exact daemon bytes, so the
         # fingerprint is taken from the binary this job just built.
+        # The runner requires canonical absolute paths; the Agave installer's
+        # active_release is a symlink, so every path is resolved first.
         run: |
+          DOM_INTEROP_REAL_BINARY_V23="$(readlink -f "$GITHUB_WORKSPACE/target/crypto-test/dom-interopd")"
+          DOM_SOL_TEST_VALIDATOR_V23="$(readlink -f "$(command -v solana-test-validator)")"
+          DOM_SOL_ESCROW_PROGRAM_V23="$(readlink -f "$GITHUB_WORKSPACE/programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so")"
+          export DOM_INTEROP_REAL_BINARY_V23 DOM_SOL_TEST_VALIDATOR_V23 DOM_SOL_ESCROW_PROGRAM_V23
+          echo "validator $DOM_SOL_TEST_VALIDATOR_V23"
           DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23="$(python3 -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read(), digest_size=32).hexdigest())' "$DOM_INTEROP_REAL_BINARY_V23")"
           export DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23
           echo "daemon blake2b256 $DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23"
