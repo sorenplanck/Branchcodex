@@ -1,0 +1,122 @@
+# Compile-and-test campaign for the DOM<->SOL leg. This workflow exists only
+# on the throwaway feat/test branch and triggers only for it: pushes run the
+# build and the unit suites; the two-daemon scenario runs only when dispatched
+# by hand with its input enabled, so no minutes are spent on it before the
+# build is green. Everything the scenario touches is loopback and synthetic.
+name: feat-test
+
+on:
+  push:
+    branches: ["feat/test"]
+  workflow_dispatch:
+    inputs:
+      e2e:
+        description: "Also run the two-daemon DOM<->SOL scenario"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feat-test
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libsqlite3-dev
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: feat-test
+      # The branch adds workspace dependencies; the scenario runner later
+      # demands --locked, so the lockfile gains the new entries here, in one
+      # conservative resolution, never a wholesale upgrade.
+      - name: Refresh Cargo.lock for the new dependencies
+        run: cargo metadata --format-version 1 > /dev/null
+      - name: Check the leg crates
+        run: >
+          cargo check --profile crypto-test
+          -p participant-binding -p solana-profile -p route-time-anchor
+          -p f7-anchor-authority
+      - name: Test the leg crates
+        run: >
+          cargo test --profile crypto-test
+          -p participant-binding -p solana-profile -p route-time-anchor
+      - name: Build the daemon test suite
+        run: >
+          cargo test --no-run --profile crypto-test -p dom-interopd
+          --no-default-features --features production --lib
+      - name: Run the daemon unit suite
+        run: >
+          cargo test --profile crypto-test -p dom-interopd
+          --no-default-features --features production --lib
+          -- --test-threads=2
+
+  e2e-scenario:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libsqlite3-dev bzip2
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: feat-test
+      # The exact validator version of the reference machine.
+      - name: Install the Agave test validator
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v4.2.2/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      # Same platform-tools pin as the reference machine; the repository's own
+      # build script produces the immutable escrow the registry attests.
+      - name: Build the escrow program with platform-tools v1.48
+        run: |
+          curl -sSfL -o /tmp/platform-tools.tar.bz2 \
+            https://github.com/anza-xyz/platform-tools/releases/download/v1.48/platform-tools-linux-x86_64.tar.bz2
+          mkdir -p "$HOME/platform-tools"
+          tar -xjf /tmp/platform-tools.tar.bz2 -C "$HOME/platform-tools"
+          PT="$HOME/platform-tools" \
+          PATH="$HOME/platform-tools/rust/bin:$HOME/platform-tools/llvm/bin:$PATH" \
+          RUSTC="$HOME/platform-tools/rust/bin/rustc" \
+          PLATFORM_TOOLS="$HOME/platform-tools" \
+            bash scripts/build-solana-program-v8.sh
+      - name: Refresh Cargo.lock for the new dependencies
+        run: cargo metadata --format-version 1 > /dev/null
+      - name: Build the daemon binary
+        run: >
+          cargo build --profile crypto-test -p dom-interopd
+          --no-default-features --features production --bin dom-interopd
+      - name: Run the two-daemon scenario
+        env:
+          DOM_INTEROP_REAL_BINARY_V23: ${{ github.workspace }}/target/crypto-test/dom-interopd
+          DOM_SOL_TEST_VALIDATOR_V23: /home/runner/.local/share/solana/install/active_release/bin/solana-test-validator
+          DOM_SOL_ESCROW_PROGRAM_V23: ${{ github.workspace }}/programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so
+        run: >
+          python3 scripts/run_native_sol_daemon_scenario_v23.py
+          --evidence-dir "$RUNNER_TEMP/evidence"
+          --scenario native_real_daemon_two_sol_claims_survive_original_store_reopen_v23
+          --timeout-seconds 9000
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sol-e2e-evidence
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
