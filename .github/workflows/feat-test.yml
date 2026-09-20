@@ -149,12 +149,23 @@ jobs:
         if: failure()
         run: |
           marker="$RUNNER_TEMP/evidence/native_real_daemon_two_sol_claims_survive_original_store_reopen_v23/failed-fixture-path.txt"
-          if [ -f "$marker" ]; then
-            retained="$(cat "$marker")"
-            tar -czf "$RUNNER_TEMP/evidence/failed-fixture.tgz" \
-              --exclude='sol-ledger-*' --exclude='*.sqlite3*' \
-              -C "$(dirname "$retained")" "$(basename "$retained")" || true
+          if [ ! -f "$marker" ]; then
+            echo "no retained-fixture marker"
+            exit 0
           fi
+          retained="$(cat "$marker")"
+          echo "retained fixture: $retained"
+          if [ ! -d "$retained" ]; then
+            echo "the retained fixture directory is gone; listing its parent"
+            ls -la "$(dirname "$retained")" || true
+            ls -la "$HOME/.dx-v23" || true
+            exit 0
+          fi
+          du -sh "$retained" || true
+          tar -czf "$RUNNER_TEMP/evidence/failed-fixture.tgz" \
+            --exclude='sol-ledger-*' \
+            -C "$(dirname "$retained")" "$(basename "$retained")"
+          ls -l "$RUNNER_TEMP/evidence/failed-fixture.tgz"
       - name: Evidence
         if: always()
         uses: actions/upload-artifact@v4
