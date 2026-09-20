@@ -17,7 +17,13 @@ pub enum ProductionF6StageFailureV25 {
     Prefix,
     /// An activation path set could not be derived from the layout.
     ActivationPaths,
-    /// The DOM payout faces or their actuator lease were refused.
+    /// The DOM actuator lease was refused.
+    DomLease,
+    /// A DOM session could not be bound to that lease.
+    DomSession,
+    /// The DOM funding inputs could not be prepared from the local wallet.
+    DomFunding,
+    /// A DOM payout face selection or its authority was refused.
     DomPayouts,
     /// A counterparty face refused its authenticated session.
     CounterpartyFace,
@@ -41,6 +47,9 @@ impl ProductionF6StageFailureV25 {
             Self::HistoricalRecovery => "historical_recovery",
             Self::Prefix => "stage11_prefix",
             Self::ActivationPaths => "activation_paths",
+            Self::DomLease => "dom_lease",
+            Self::DomSession => "dom_session",
+            Self::DomFunding => "dom_funding",
             Self::DomPayouts => "dom_payouts",
             Self::CounterpartyFace => "counterparty_face",
             Self::Factory => "pair_factory",
@@ -70,6 +79,9 @@ mod tests {
             ProductionF6StageFailureV25::HistoricalRecovery,
             ProductionF6StageFailureV25::Prefix,
             ProductionF6StageFailureV25::ActivationPaths,
+            ProductionF6StageFailureV25::DomLease,
+            ProductionF6StageFailureV25::DomSession,
+            ProductionF6StageFailureV25::DomFunding,
             ProductionF6StageFailureV25::DomPayouts,
             ProductionF6StageFailureV25::CounterpartyFace,
             ProductionF6StageFailureV25::Factory,
