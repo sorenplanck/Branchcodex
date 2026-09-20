@@ -366,18 +366,30 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::Quarantined);
         }
         *step = "retain_keys/offer_binding";
+        // The offers follow the terms roster, which is the order the BP
+        // statement and the assembled templates use. The transport roster is
+        // frozen initiator-first. Those two orders are independent and agree
+        // only by coincidence, so each offer is matched to its own roster
+        // entry by participant and never by position: comparing them
+        // positionally refused a correct bootstrap whenever the initiator was
+        // not the first participant of the terms roster.
         for (index, offer) in record.offers.iter().enumerate() {
             if offer.offer().terms_hash != terms_hash
                 || offer.offer().session_id != record.session
-                || offer.offer().participant_id != roster.participants[index].participant_id
+                || offer.offer().participant_id != bp.statement.participant_ids()[index]
             {
                 return Err(SessionStoreError::Quarantined);
             }
+            let member = roster
+                .participants
+                .iter()
+                .find(|participant| participant.participant_id == offer.offer().participant_id)
+                .ok_or(SessionStoreError::Quarantined)?;
             offer
                 .verify_against_frozen_chain_v18(
                     chain,
                     bp.statement.participant_ids(),
-                    roster.participants[index].direction,
+                    member.direction,
                     index as u16,
                 )
                 .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
