@@ -184,13 +184,15 @@ impl ContractsSessionStoreV1 {
             Err(SessionStoreError::SessionNotFound) => {}
             Err(error) => return Err(error),
         }
-        *step = "retain_keys/session_phase";
+        *step = "retain_keys/session_load";
         let current = self.load_session_locked(session)?;
+        *step = "retain_keys/session_phase";
         if current.phase() != SessionPhaseV1::TemplatesCommitted
             || current.irreversible().funding_authorized
         {
             return Err(SessionStoreError::InvalidTransition);
         }
+        *step = "retain_keys/signing_bindings";
         for purpose in [
             PurposeV1::Funding,
             PurposeV1::ClaimAdaptor,
