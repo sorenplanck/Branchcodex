@@ -1635,7 +1635,15 @@ fn operational_signing_binding_component(value: &str, staging: bool) -> bool {
         && value.ends_with(suffix)
         && is_lower_hex(&value[offset..offset + 64], 64)
         && value.as_bytes()[offset + 64] == b'-'
-        && matches!(&value[offset + 65..offset + 67], "01" | "02" | "03")
+        // Every strict Phase 1 signing purpose: plain refund, claim adaptor,
+        // funding and the refund adaptor. Sponsor (04) is a codec value with
+        // no authorized signing flow, so its name stays unregistered. This
+        // list is the filesystem half of the rule `parse_signing_binding_name`
+        // applies to the same names; omitting the refund adaptor made every
+        // read of one an invalid component, which the Store reports as
+        // corruption, and no ordinary native bootstrap could retain its
+        // wallet keys.
+        && matches!(&value[offset + 65..offset + 67], "01" | "02" | "03" | "05")
 }
 
 fn transport_message_component(value: &str, staging: bool, equivocation: bool) -> bool {
@@ -1853,6 +1861,36 @@ mod tests {
     };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    /// Every signing purpose the Store will authorize must have a name the
+    /// capability layer recognizes; a purpose it refuses here can never be
+    /// written or read, and the refusal is reported as corruption.
+    #[test]
+    fn every_authorized_signing_purpose_has_a_registered_component_name() {
+        let session = "a".repeat(64);
+        for purpose in ["01", "02", "03", "05"] {
+            let name = format!("{session}-{purpose}.operational-signing-binding");
+            assert_eq!(
+                classify_registered_component(&name),
+                Some(ExpectedNodeType::RegularFile),
+                "{name}"
+            );
+            let staging = format!(".{name}.staging");
+            assert_eq!(
+                classify_registered_component(&staging),
+                Some(ExpectedNodeType::RegularFile),
+                "{staging}"
+            );
+        }
+        // Sponsor is a codec value with no authorized signing flow. Naming it
+        // must stay impossible.
+        assert_eq!(
+            classify_registered_component(&format!(
+                "{session}-04.operational-signing-binding"
+            )),
+            None
+        );
+    }
 
     struct TestDirectory {
         path: PathBuf,
