@@ -59,7 +59,8 @@ jobs:
         run: >
           cargo test --profile crypto-test
           -p participant-binding -p solana-profile -p route-time-anchor
-          -- --skip native_clock_is_role_scoped_but_one_chain_observation
+          -- --test-threads=1
+          --skip native_clock_is_role_scoped_but_one_chain_observation
       - name: Build the daemon test suite
         run: >
           cargo test --no-run --profile crypto-test -p dom-interopd
