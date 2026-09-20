@@ -8,7 +8,9 @@ use route_executor::{
     SecretVisibilityV1,
 };
 use std::{
+    io::Write,
     net::TcpListener,
+    os::unix::fs::OpenOptionsExt,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -111,6 +113,62 @@ fn require_claimed(snapshot: &RouteSnapshotV1) -> Result<()> {
     Ok(())
 }
 
+/// Hands each root the offer its peer published, and nothing else.
+///
+/// The policy-17 bootstrap publishes the wallet key-proof offer as a public
+/// file in the root's own state directory instead of putting it on the
+/// authenticated DSC1 relay: it is wallet-owned material and the relay never
+/// carries it. In production the operator moves that published file between
+/// the two machines running the swap. This scenario owns both roots, so it
+/// performs that one out-of-band move itself.
+///
+/// It copies only bytes a daemon already published as public, byte for byte,
+/// and never generates, edits, reorders or re-delivers them: an offer already
+/// handed over is frozen by the peer on first read and is left untouched.
+fn deliver_published_wallet_offers_v25(running: &NativeSolRunningColdStartV23) -> Result<()> {
+    const PUBLISHED_PREFIX: &str = "dom-wallet-offer-v18-";
+    const PUBLISHED_SUFFIX: &str = ".local";
+    const DELIVERED_SUFFIX: &str = ".peer";
+    for (from, to) in [(0_usize, 1_usize), (1, 0)] {
+        let published_dir = running.state_dir(from)?.to_owned();
+        let delivery_dir = running.state_dir(to)?.to_owned();
+        for entry in std::fs::read_dir(&published_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(stem) = name
+                .strip_prefix(PUBLISHED_PREFIX)
+                .and_then(|rest| rest.strip_suffix(PUBLISHED_SUFFIX))
+            else {
+                continue;
+            };
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let delivered =
+                delivery_dir.join(format!("{PUBLISHED_PREFIX}{stem}{DELIVERED_SUFFIX}"));
+            if delivered.symlink_metadata().is_ok() {
+                continue;
+            }
+            // The rename publishes complete bytes only; a half-written file is
+            // never visible under the name the peer reads.
+            let bytes = std::fs::read(entry.path())?;
+            let pending = delivery_dir.join(format!("{PUBLISHED_PREFIX}{stem}.delivering"));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&pending)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&pending, &delivered)?;
+        }
+    }
+    Ok(())
+}
+
 /// No ledger pump: the validator produces and finalizes its own slots. Each
 /// round only proves the validator is still alive.
 fn wait_claims(
@@ -121,6 +179,7 @@ fn wait_claims(
     let mut announced = Duration::ZERO;
     loop {
         running.require_validator_alive_v25()?;
+        deliver_published_wallet_offers_v25(running)?;
         let mut complete = true;
         for actor in 0..2 {
             let exited = running.poll_actor_v23(actor)?;
