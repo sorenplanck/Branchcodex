@@ -23,8 +23,8 @@ pub enum ProductionF6StageFailureV25 {
     DomSession,
     /// The DOM funding inputs could not be prepared from the local wallet.
     DomFunding,
-    /// A DOM payout face selection or its authority was refused.
-    DomPayouts,
+    /// A DOM payout face selection or its authority was refused, by class.
+    DomPayouts(DomActuatorCauseV25),
     /// A counterparty face refused its authenticated session.
     CounterpartyFace,
     /// The pair factory refused its bundle, inventory, terms or credentials.
@@ -50,7 +50,7 @@ impl ProductionF6StageFailureV25 {
             Self::DomLease => "dom_lease",
             Self::DomSession => "dom_session",
             Self::DomFunding => "dom_funding",
-            Self::DomPayouts => "dom_payouts",
+            Self::DomPayouts(_) => "dom_payouts",
             Self::CounterpartyFace => "counterparty_face",
             Self::Factory => "pair_factory",
             Self::ClaimPlan => "claim_plan",
@@ -62,7 +62,46 @@ impl ProductionF6StageFailureV25 {
 
 impl core::fmt::Display for ProductionF6StageFailureV25 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "step={}", self.step_code())
+        write!(formatter, "step={}", self.step_code())?;
+        if let Self::DomPayouts(cause) = self {
+            write!(formatter, " cause={}", cause.cause_code())?;
+        }
+        Ok(())
+    }
+}
+
+/// Closed class of a DOM actuator refusal. Never its text, a commitment, a
+/// value, a path or a credential: the operator learns the class, not the data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DomActuatorCauseV25 {
+    /// The store, its format, its process lock or its creation was refused.
+    Storage,
+    /// The participant lease was missing, held, stale or expired.
+    Lease,
+    /// A session, capability or request binding disagreed.
+    Binding,
+    /// A retained output reservation contradicted the requested selection.
+    Reservation,
+    /// The wallet could not cover the requested value.
+    Funds,
+    /// The encrypted wallet itself was unavailable or bound to another chain.
+    Wallet,
+    /// Any other closed refusal of that actuator.
+    Other,
+}
+
+impl DomActuatorCauseV25 {
+    /// Frozen class tag.
+    pub const fn cause_code(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Lease => "lease",
+            Self::Binding => "binding",
+            Self::Reservation => "output_reservation",
+            Self::Funds => "insufficient_funds",
+            Self::Wallet => "wallet",
+            Self::Other => "other",
+        }
     }
 }
 
@@ -82,7 +121,7 @@ mod tests {
             ProductionF6StageFailureV25::DomLease,
             ProductionF6StageFailureV25::DomSession,
             ProductionF6StageFailureV25::DomFunding,
-            ProductionF6StageFailureV25::DomPayouts,
+            ProductionF6StageFailureV25::DomPayouts(DomActuatorCauseV25::Other),
             ProductionF6StageFailureV25::CounterpartyFace,
             ProductionF6StageFailureV25::Factory,
             ProductionF6StageFailureV25::ClaimPlan,
@@ -103,6 +142,10 @@ mod tests {
         assert_eq!(
             ProductionF6StageFailureV25::Factory.to_string(),
             "step=pair_factory"
+        );
+        assert_eq!(
+            ProductionF6StageFailureV25::DomPayouts(DomActuatorCauseV25::Funds).to_string(),
+            "step=dom_payouts cause=insufficient_funds"
         );
     }
 }
