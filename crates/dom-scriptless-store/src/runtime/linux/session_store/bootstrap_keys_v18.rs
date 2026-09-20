@@ -192,13 +192,13 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::InvalidTransition);
         }
-        *step = "retain_keys/signing_bindings";
-        for purpose in [
-            PurposeV1::Funding,
-            PurposeV1::ClaimAdaptor,
-            PurposeV1::Refund,
-            PurposeV1::RefundAdaptor,
+        for (purpose, tag) in [
+            (PurposeV1::Funding, "retain_keys/signing_binding_funding"),
+            (PurposeV1::ClaimAdaptor, "retain_keys/signing_binding_claim_adaptor"),
+            (PurposeV1::Refund, "retain_keys/signing_binding_refund"),
+            (PurposeV1::RefundAdaptor, "retain_keys/signing_binding_refund_adaptor"),
         ] {
+            *step = tag;
             match self.load_signing_binding(session, purpose) {
                 Ok(_) => return Err(SessionStoreError::Conflict),
                 Err(SessionStoreError::SessionNotFound) => {}
