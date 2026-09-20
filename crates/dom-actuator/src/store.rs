@@ -2065,7 +2065,7 @@ impl DomActuatorStoreV1 {
             transaction.commit().map_err(storage)?;
             return Ok(prepared);
         }
-        require_payout_face_stage_v25(&transaction, binding)?;
+        let _stage = require_payout_face_stage_v25(&transaction, binding)?;
         let prepare_digest = payout_face_prepare_digest(
             binding,
             payout_commitment,
@@ -2230,7 +2230,7 @@ impl DomActuatorStoreV1 {
             transaction.commit().map_err(storage)?;
             return Ok(retained);
         }
-        require_payout_face_stage_v25(&transaction, binding)?;
+        let stage = require_payout_face_stage_v25(&transaction, binding)?;
         let event_effect_id = hash_parts(&[
             PAYOUT_FACE_EFFECT_DOMAIN,
             prepared.prepare_digest.as_slice(),
@@ -2260,7 +2260,7 @@ impl DomActuatorStoreV1 {
             binding.session_id(),
             event_effect_id,
             event_digest,
-            STAGE_BOUND,
+            stage,
             lease.fencing_epoch,
             now_unix_ms,
         )?;
@@ -6355,12 +6355,15 @@ fn load_payout_face_evidence(
 /// native bootstrap reserves those inputs first, and the payout opening is
 /// independent of them. Every later stage is bilateral, and pinning a payout
 /// face there would contradict a round the peer already saw, so it is refused.
+/// The accepted stage is returned so that pinning the face keeps it: the payout
+/// opening is not a round of the protocol and must never move the session back.
 fn require_payout_face_stage_v25(
     transaction: &Transaction<'_>,
     binding: DomSessionBindingV1,
-) -> DomActuatorResult<()> {
-    match load_stage(transaction, binding.session_id())? {
-        STAGE_BOUND | STAGE_OUTPUTS_RESERVED => Ok(()),
+) -> DomActuatorResult<i64> {
+    let stage = load_stage(transaction, binding.session_id())?;
+    match stage {
+        STAGE_BOUND | STAGE_OUTPUTS_RESERVED => Ok(stage),
         _ => Err(DomActuatorError::InvalidStage),
     }
 }
@@ -11701,6 +11704,55 @@ pub(crate) mod tests {
         assert_eq!(recovered.evidence_revision, first.evidence_revision);
         assert_eq!(recovered.record_digest, first.record_digest);
         assert_eq!(payout_face_progress(&reopened, bound)?, (1, 1, 1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_is_pinned_after_local_outputs_and_refused_once_bilateral() -> TestResult {
+        let (_directory, _path, mut store, lease) = setup()?;
+
+        // The policy-17 native bootstrap reserves this participant's own
+        // funding outputs before it pins the DOM payout face. Both stages are
+        // still local and the payout opening is independent of the
+        // reservation, so the face is accepted and the session keeps the stage
+        // it had: pinning a face is not a round and never rewinds the journal.
+        let reserved = binding(1, 2)?;
+        store.bind_session(lease, reserved, 1_000)?;
+        reserve_stage(&mut store, lease, reserved, 21, 1)?;
+        let commitment = payout_commitment(2)?;
+        let prepared =
+            store.prepare_payout_face(lease, reserved, commitment, 50, digest(61), 1_400)?;
+        let evidence = store.activate_payout_face(lease, &prepared, digest(70), 1_401)?;
+        store.validate_payout_face(lease, &evidence, 1_402)?;
+        let (_revision, preparations, faces, _events) = payout_face_progress(&store, reserved)?;
+        assert_eq!((preparations, faces), (1, 1));
+        let stage: i64 = store
+            .connection
+            .query_row(
+                "SELECT stage_tag FROM dom_sessions WHERE session_id=?1",
+                params![reserved.session_id().as_slice()],
+                |row| row.get(0),
+            )
+            .test_context("stage after the payout face")?;
+        assert_eq!(stage, STAGE_OUTPUTS_RESERVED);
+
+        // From the first bilateral stage on, a payout face would contradict a
+        // round the peer already saw, so preparation stays refused.
+        let shared = binding(1, 3)?;
+        store.bind_session(lease, shared, 1_000)?;
+        reserve_stage(&mut store, lease, shared, 31, 2)?;
+        complete_stage(
+            &mut store,
+            lease,
+            shared,
+            32,
+            DomActionV1::ContributeSharedOutput,
+        )?;
+        let other = payout_commitment(3)?;
+        require_dom_error(
+            store.prepare_payout_face(lease, shared, other, 50, digest(62), 1_403),
+            DomActuatorError::InvalidStage,
+        )?;
         Ok(())
     }
 

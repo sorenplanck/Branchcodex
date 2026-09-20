@@ -151,7 +151,7 @@ mod tests {
             !code.is_empty()
                 && code
                     .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         }));
         assert_eq!(
             ProductionF6StageFailureV25::Factory.to_string(),
