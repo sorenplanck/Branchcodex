@@ -566,11 +566,25 @@ impl ProductionCompositeRelayLoopV1 {
         let TimelockSpec::TimestampSeconds { value: now } = self.fresh_relay_time()? else {
             return Err(ProductionCompositeLoopErrorV1::ClockUnavailable);
         };
-        self.owner.step_bootstrap_v16(leg, now).map_err(|error| {
-            ProductionCompositeLoopErrorV1::BootstrapAtV25 {
-                context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
-                error,
-            }
+        // A refusal here ends the run, so the progress line for this tick is
+        // never printed and the operator would see only the stage. Name the
+        // closed step the bootstrap was in. Fixed tags only: no path, value or
+        // credential, and nothing the periodic progress line does not print.
+        let outcome = self.owner.step_bootstrap_v16(leg, now);
+        if outcome.is_err() {
+            let progress = self.owner.bootstrap_progress_v25(leg);
+            let index = match leg {
+                LegIdV1::Upstream => 0,
+                LegIdV1::Downstream => 1,
+            };
+            eprintln!(
+                "DOM_NATIVE_BOOTSTRAP_REFUSAL_V25 leg={index} c_bp={} d_bp={}",
+                progress[8], progress[9]
+            );
+        }
+        outcome.map_err(|error| ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+            context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
+            error,
         })?;
         if self
             .owner

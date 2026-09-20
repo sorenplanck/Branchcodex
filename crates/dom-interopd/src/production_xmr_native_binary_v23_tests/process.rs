@@ -32,6 +32,7 @@ fn retain_stderr_once_v24(
 /// or credential, so echoing them cannot leak what the capture bound protects.
 const ECHOED_PROGRESS_PREFIXES_V25: &[&[u8]] = &[
     b"DOM_NATIVE_BOOTSTRAP_PROGRESS_V25",
+    b"DOM_NATIVE_BOOTSTRAP_REFUSAL_V25",
     b"DOM_NATIVE_TOLERATED_REFUSAL_V25",
     b"DOM_NATIVE_ACTIVATION_READY_V25",
 ];

@@ -530,9 +530,12 @@ impl ProductionBootstrapLegV16 {
         // ingress before retransmitting a pending BP or template message.
         if proof_complete {
             if let Some(driver) = self.templates_v17.as_mut() {
-                let step = driver.step(owner, material, self.chain, &self.statement, now)?;
+                // Record where the driver stopped before propagating: a
+                // refusal in this phase must name its own step, not the phase.
+                let outcome = driver.step(owner, material, self.chain, &self.statement, now);
+                self.last_bp_step_v25 = driver.step_tag_v25();
+                let step = outcome?;
                 self.complete = step == Step::Complete;
-                self.last_bp_step_v25 = "templates_v17";
                 return Ok(step);
             }
         }

@@ -41,9 +41,18 @@ pub(super) struct TemplateDriverV17 {
     peer_path: PathBuf,
     // Public templates only. Rebuilt and reauthenticated after each restart.
     templates: Option<DomBootstrapTemplatesV17>,
+    // Closed tag of the last fallible region this driver entered. It names a
+    // step, never a value, a path or a credential, and exists so a refusal in
+    // this phase reports where it fell instead of one opaque phase name.
+    step_tag_v25: &'static str,
 }
 
 impl TemplateDriverV17 {
+    /// The last fallible region entered by [`Self::step`].
+    pub(super) const fn step_tag_v25(&self) -> &'static str {
+        self.step_tag_v25
+    }
+
     pub(super) fn publish_local(
         &self,
         material: &ProductionBoundDomSharedOutputV12,
@@ -102,6 +111,7 @@ impl TemplateDriverV17 {
             local_path: directory.join(format!("{stem}.local")),
             peer_path: directory.join(format!("{stem}.peer")),
             templates: None,
+            step_tag_v25: "templates_v17/entered",
         })
     }
 
@@ -113,6 +123,7 @@ impl TemplateDriverV17 {
         statement: &BpStatementV1,
         now: u64,
     ) -> Result<Step, Error> {
+        self.step_tag_v25 = "templates_v17/local_publish";
         owner
             .validate_dom_binding(self.binding)
             .map_err(|_| Error::Binding)?;
@@ -124,6 +135,7 @@ impl TemplateDriverV17 {
             DomBootstrapProvenOfferV18::from_bytes(&local_bytes).map_err(|_| Error::Binding)?;
         self.require_offer(local.offer(), self.binding.participant().participant_id())?;
         publish_exact(&self.directory, &self.local_path, &local_bytes)?;
+        self.step_tag_v25 = "templates_v17/peer_wait";
         let candidate = read_optional(&self.peer_path)?;
         let retained = material.runtime_public_record_v16(b"peer-wallet-key-proofs-v18")?;
         let peer_bytes = match (retained, candidate) {
@@ -132,6 +144,7 @@ impl TemplateDriverV17 {
             (None, Some(new)) => new,
             (None, None) => return replay_bp_while_waiting(owner, material, now),
         };
+        self.step_tag_v25 = "templates_v17/peer_verify";
         let peer =
             DomBootstrapProvenOfferV18::from_bytes(&peer_bytes).map_err(|_| Error::Binding)?;
         let local_index = usize::from(self.binding.participant().protocol_index());
@@ -160,6 +173,7 @@ impl TemplateDriverV17 {
         } else {
             [peer, local]
         };
+        self.step_tag_v25 = "templates_v17/assemble";
         if self.templates.is_none() {
             let proof = owner
                 .store
@@ -201,6 +215,7 @@ impl TemplateDriverV17 {
             material.retain_runtime_public_v16(b"peer-wallet-key-proofs-v18", &peer_bytes)?;
             self.templates = Some(templates);
         }
+        self.step_tag_v25 = "templates_v17/authority";
         let templates = self.templates.as_ref().ok_or(Error::Binding)?;
         let authority = owner
             .store
@@ -214,9 +229,11 @@ impl TemplateDriverV17 {
                 statement,
                 &material.capsule,
             )?;
+        self.step_tag_v25 = "templates_v17/complete";
         let complete = owner.store.operational_templates_complete_v17(&authority)?;
         // Inspect the outbox before completing: the last locally accepted
         // commitment may still need its exact signed bytes retransmitted.
+        self.step_tag_v25 = "templates_v17/outbox";
         let recovery = owner.store.resume_outbound_dsc1(owner.session_id)?;
         let bootstrap_pending = match &recovery {
             OutboundDsc1RecoveryV1::SigningRequest(request) => {
@@ -231,6 +248,7 @@ impl TemplateDriverV17 {
             OutboundDsc1RecoveryV1::None => false,
         };
         if complete {
+            self.step_tag_v25 = "templates_v17/retain_keys";
             owner.store.retain_bootstrap_wallet_keys_v18(
                 chain,
                 owner.session_id,
@@ -238,6 +256,7 @@ impl TemplateDriverV17 {
                 &proven_offers,
                 self.negotiated_tip,
             )?;
+            self.step_tag_v25 = "templates_v17/refund";
             if !bootstrap_pending {
                 return refund_v18::step(
                     owner,
@@ -255,6 +274,7 @@ impl TemplateDriverV17 {
                 PreparedContractsIngressV1::operational_template(authority),
             )?;
         }
+        self.step_tag_v25 = "templates_v17/stage";
         let expiry = ProductionBootstrapLegV16::expiry(material, now)?;
         match recovery {
             OutboundDsc1RecoveryV1::SigningRequest(request) => {
