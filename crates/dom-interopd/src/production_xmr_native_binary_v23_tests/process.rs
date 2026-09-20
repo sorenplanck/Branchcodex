@@ -35,6 +35,7 @@ const ECHOED_PROGRESS_PREFIXES_V25: &[&[u8]] = &[
     b"DOM_NATIVE_BOOTSTRAP_REFUSAL_V25",
     b"DOM_NATIVE_TOLERATED_REFUSAL_V25",
     b"DOM_NATIVE_ACTIVATION_READY_V25",
+    b"DOM_NATIVE_ACTIVATION_AWAITING_V25",
 ];
 
 /// Echoes complete progress lines from the freshly read bytes.

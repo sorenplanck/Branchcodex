@@ -888,24 +888,100 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
     }
 }
 
+/// What one activation poll found: the released route Store, or the closed
+/// tag of the authority the pair is still waiting for. The tag names a step,
+/// never a participant, a value or a credential.
+enum CompositeActivationPollV1<Ready> {
+    Ready(Ready),
+    Awaiting(&'static str),
+}
+
 trait CompositeActivationReceiverV1 {
     type Ready;
     type Error;
 
-    fn take_activation_ready(&mut self) -> Result<Option<Self::Ready>, Self::Error>;
+    fn take_activation_ready(
+        &mut self,
+    ) -> Result<CompositeActivationPollV1<Self::Ready>, Self::Error>;
+}
+
+/// Polls once and reports a change of what the pair is waiting for. Without
+/// this the activation loop is silent for its whole budget whenever one input
+/// never arrives, and every such stall looks identical from outside.
+fn poll_activation_v25<Receiver: CompositeActivationReceiverV1>(
+    receiver: &mut Receiver,
+    last: &mut Option<&'static str>,
+) -> Result<Option<Receiver::Ready>, Receiver::Error> {
+    match receiver.take_activation_ready()? {
+        CompositeActivationPollV1::Ready(ready) => Ok(Some(ready)),
+        CompositeActivationPollV1::Awaiting(tag) => {
+            if *last != Some(tag) {
+                *last = Some(tag);
+                eprintln!("DOM_NATIVE_ACTIVATION_AWAITING_V25 pending={tag}");
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Frozen tag of one pending activation input.
+const fn pending_authority_tag_v25(
+    pending: crate::production_f6_lifecycle::ProductionPendingAuthorityV1,
+) -> &'static str {
+    use crate::production_f6_lifecycle::ProductionPendingAuthorityV1 as Pending;
+    use rfq::v2::SettlementPositionV2 as Position;
+    match pending {
+        Pending::F6Activation {
+            position: Position::Upstream,
+        } => "f6_activation_upstream",
+        Pending::F6Activation {
+            position: Position::Downstream,
+        } => "f6_activation_downstream",
+        Pending::AuthenticatedRfq {
+            position: Position::Upstream,
+        } => "authenticated_rfq_upstream",
+        Pending::AuthenticatedRfq {
+            position: Position::Downstream,
+        } => "authenticated_rfq_downstream",
+        Pending::SolverStatusEvidence => "solver_status_evidence",
+        Pending::PreF6TimeEvidence {
+            position: Position::Upstream,
+        } => "pre_f6_time_evidence_upstream",
+        Pending::PreF6TimeEvidence {
+            position: Position::Downstream,
+        } => "pre_f6_time_evidence_downstream",
+        Pending::BondAttestationSigners {
+            position: Position::Upstream,
+        } => "bond_attestation_signers_upstream",
+        Pending::BondAttestationSigners {
+            position: Position::Downstream,
+        } => "bond_attestation_signers_downstream",
+        Pending::AdapterTerms {
+            position: Position::Upstream,
+        } => "adapter_terms_upstream",
+        Pending::AdapterTerms {
+            position: Position::Downstream,
+        } => "adapter_terms_downstream",
+        Pending::ComposedFinalClaimRolePlan => "composed_final_claim_role_plan",
+        Pending::RemoteEvmAccount => "remote_evm_account",
+    }
 }
 
 impl CompositeActivationReceiverV1 for ProductionF6PairRuntimeReceiverV2 {
     type Ready = ProductionRouteStoreRuntimeAuthorityV2;
     type Error = ProductionF6ActivationRefusalV2;
 
-    fn take_activation_ready(&mut self) -> Result<Option<Self::Ready>, Self::Error> {
+    fn take_activation_ready(
+        &mut self,
+    ) -> Result<CompositeActivationPollV1<Self::Ready>, Self::Error> {
         match self.take_ready() {
-            Ok(ready) => Ok(Some(ready)),
-            Err(
-                ProductionF6ActivationRefusalV2::Awaiting(_)
-                | ProductionF6ActivationRefusalV2::Unavailable,
-            ) => Ok(None),
+            Ok(ready) => Ok(CompositeActivationPollV1::Ready(ready)),
+            Err(ProductionF6ActivationRefusalV2::Awaiting(pending)) => Ok(
+                CompositeActivationPollV1::Awaiting(pending_authority_tag_v25(pending)),
+            ),
+            Err(ProductionF6ActivationRefusalV2::Unavailable) => {
+                Ok(CompositeActivationPollV1::Awaiting("authority_unavailable"))
+            }
             Err(error) => Err(error),
         }
     }
@@ -947,6 +1023,7 @@ where
     if round_budget == 0 || round_budget > MAX_ACTIVATION_ROUNDS_V1 {
         return Err(CompositeActivationCoreErrorV1::InvalidConfiguration);
     }
+    let mut last_pending: Option<&'static str> = None;
     for _ in 0..round_budget {
         if control
             .shutdown_requested()
@@ -958,8 +1035,7 @@ where
         // hand off the exact authenticated pair. Missing readiness still
         // enters the normal resume path below, with all original checks.
         if relay.bootstrap_ready_v16() {
-            if let Some(ready) = receiver
-                .take_activation_ready()
+            if let Some(ready) = poll_activation_v25(receiver, &mut last_pending)
                 .map_err(CompositeActivationCoreErrorV1::Receiver)?
             {
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
@@ -969,8 +1045,7 @@ where
             .resume_local_activation_v23()
             .map_err(CompositeActivationCoreErrorV1::Relay)?;
         if relay.bootstrap_ready_v16() {
-            if let Some(ready) = receiver
-                .take_activation_ready()
+            if let Some(ready) = poll_activation_v25(receiver, &mut last_pending)
                 .map_err(CompositeActivationCoreErrorV1::Receiver)?
             {
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
@@ -984,8 +1059,7 @@ where
             .step_activation_leg(LegIdV1::Downstream)
             .map_err(CompositeActivationCoreErrorV1::Relay)?;
         if relay.bootstrap_ready_v16() {
-            if let Some(ready) = receiver
-                .take_activation_ready()
+            if let Some(ready) = poll_activation_v25(receiver, &mut last_pending)
                 .map_err(CompositeActivationCoreErrorV1::Receiver)?
             {
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
@@ -1643,9 +1717,15 @@ mod tests {
         type Ready = u8;
         type Error = ();
 
-        fn take_activation_ready(&mut self) -> Result<Option<Self::Ready>, Self::Error> {
+        fn take_activation_ready(
+            &mut self,
+        ) -> Result<CompositeActivationPollV1<Self::Ready>, Self::Error> {
             self.calls += 1;
-            Ok((self.calls == self.ready_on_call).then_some(7))
+            Ok(if self.calls == self.ready_on_call {
+                CompositeActivationPollV1::Ready(7)
+            } else {
+                CompositeActivationPollV1::Awaiting("test_pending")
+            })
         }
     }
 
