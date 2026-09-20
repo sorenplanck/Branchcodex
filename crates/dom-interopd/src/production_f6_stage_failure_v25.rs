@@ -25,6 +25,10 @@ pub enum ProductionF6StageFailureV25 {
     DomFunding,
     /// A DOM payout face selection or its authority was refused, by class.
     DomPayouts(DomActuatorCauseV25),
+    /// The per-leg DOM wallet authority itself was refused.
+    DomAuthority,
+    /// The payout value or its selection request was refused.
+    DomRequest,
     /// A counterparty face refused its authenticated session.
     CounterpartyFace,
     /// The pair factory refused its bundle, inventory, terms or credentials.
@@ -51,6 +55,8 @@ impl ProductionF6StageFailureV25 {
             Self::DomSession => "dom_session",
             Self::DomFunding => "dom_funding",
             Self::DomPayouts(_) => "dom_payouts",
+            Self::DomAuthority => "dom_authority",
+            Self::DomRequest => "dom_request",
             Self::CounterpartyFace => "counterparty_face",
             Self::Factory => "pair_factory",
             Self::ClaimPlan => "claim_plan",
@@ -78,8 +84,12 @@ pub enum DomActuatorCauseV25 {
     Storage,
     /// The participant lease was missing, held, stale or expired.
     Lease,
-    /// A session, capability or request binding disagreed.
+    /// A session or request binding disagreed.
     Binding,
+    /// A capability did not match the retained one.
+    Capability,
+    /// The store stage contradicted the request.
+    Stage,
     /// A retained output reservation contradicted the requested selection.
     Reservation,
     /// The wallet could not cover the requested value.
@@ -97,6 +107,8 @@ impl DomActuatorCauseV25 {
             Self::Storage => "storage",
             Self::Lease => "lease",
             Self::Binding => "binding",
+            Self::Capability => "capability",
+            Self::Stage => "stage",
             Self::Reservation => "output_reservation",
             Self::Funds => "insufficient_funds",
             Self::Wallet => "wallet",
@@ -122,6 +134,8 @@ mod tests {
             ProductionF6StageFailureV25::DomSession,
             ProductionF6StageFailureV25::DomFunding,
             ProductionF6StageFailureV25::DomPayouts(DomActuatorCauseV25::Other),
+            ProductionF6StageFailureV25::DomAuthority,
+            ProductionF6StageFailureV25::DomRequest,
             ProductionF6StageFailureV25::CounterpartyFace,
             ProductionF6StageFailureV25::Factory,
             ProductionF6StageFailureV25::ClaimPlan,
