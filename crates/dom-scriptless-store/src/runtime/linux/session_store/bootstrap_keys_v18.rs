@@ -11,6 +11,8 @@ use kaystra_core::{types::TimelockSpec, SettlementTermsV1};
 pub(super) const KEY_AUTH_SUFFIX_V18: &str = ".bootstrap-wallet-keys-v18";
 const MAX: usize = 65536;
 const MAGIC: &[u8; 8] = b"DOMBKA18";
+/// The tag a caller that does not read one passes in.
+const UNTAGGED_STEP_V25: &str = "retain_keys/untagged";
 const DOMAIN: &str = "DOM:bootstrap-wallet-key-authority:v18";
 
 #[path = "bootstrap_gate_v20.rs"]
@@ -137,6 +139,29 @@ impl ContractsSessionStoreV1 {
         offers: &[DomBootstrapProvenOfferV18; 2],
         negotiated_tip: u64,
     ) -> Result<(), SessionStoreError> {
+        let mut step = UNTAGGED_STEP_V25;
+        self.retain_bootstrap_wallet_keys_tagged_v25(
+            chain,
+            session,
+            terms,
+            offers,
+            negotiated_tip,
+            &mut step,
+        )
+    }
+
+    /// Exactly [`Self::retain_bootstrap_wallet_keys_v18`], reporting which
+    /// closed region of the authority refused. The tag names a step, never a
+    /// value, a key, a path or a participant, and grants nothing.
+    pub fn retain_bootstrap_wallet_keys_tagged_v25(
+        &self,
+        chain: TrustedChainIdV1,
+        session: [u8; 32],
+        terms: &SettlementTermsV1,
+        offers: &[DomBootstrapProvenOfferV18; 2],
+        negotiated_tip: u64,
+        step: &mut &'static str,
+    ) -> Result<(), SessionStoreError> {
         let _guard = self.operation_lock()?;
         let template = self.load_template_transport_authority(session)?;
         let record = BootstrapKeyAuthorityV18 {
@@ -147,7 +172,7 @@ impl ContractsSessionStoreV1 {
             template_payload: template.template_commit_payload,
             offers: (*offers).clone(),
         };
-        self.validate_bootstrap_wallet_keys_v18(&record, chain.as_bytes())?;
+        self.validate_bootstrap_wallet_keys_tagged_v25(&record, chain.as_bytes(), step)?;
         let bytes = record.bytes()?;
         match self.read_bootstrap_wallet_keys_v18(session) {
             Ok(old) => {
@@ -159,6 +184,7 @@ impl ContractsSessionStoreV1 {
             Err(SessionStoreError::SessionNotFound) => {}
             Err(error) => return Err(error),
         }
+        *step = "retain_keys/session_phase";
         let current = self.load_session_locked(session)?;
         if current.phase() != SessionPhaseV1::TemplatesCommitted
             || current.irreversible().funding_authorized
@@ -177,6 +203,7 @@ impl ContractsSessionStoreV1 {
                 Err(error) => return Err(error),
             }
         }
+        *step = "retain_keys/publish";
         let name = format!("{}{KEY_AUTH_SUFFIX_V18}", hex_lower(&session));
         publish_immutable(
             &self.rosters,
@@ -189,7 +216,7 @@ impl ContractsSessionStoreV1 {
         if reread.bytes()? != bytes {
             return Err(SessionStoreError::Quarantined);
         }
-        self.validate_bootstrap_wallet_keys_v18(&reread, chain.as_bytes())
+        self.validate_bootstrap_wallet_keys_tagged_v25(&reread, chain.as_bytes(), step)
     }
 
     /// Rebuild the purpose-specific roster solely from the retained proof
@@ -271,7 +298,17 @@ impl ContractsSessionStoreV1 {
         record: &BootstrapKeyAuthorityV18,
         chain: &[u8; 32],
     ) -> Result<(), SessionStoreError> {
-        self.reconstruct_bootstrap_wallet_templates_v20(record, chain)
+        let mut step = UNTAGGED_STEP_V25;
+        self.validate_bootstrap_wallet_keys_tagged_v25(record, chain, &mut step)
+    }
+
+    fn validate_bootstrap_wallet_keys_tagged_v25(
+        &self,
+        record: &BootstrapKeyAuthorityV18,
+        chain: &[u8; 32],
+        step: &mut &'static str,
+    ) -> Result<(), SessionStoreError> {
+        self.reconstruct_bootstrap_wallet_templates_v20(record, chain, step)
             .map(|_| ())
     }
 
@@ -279,7 +316,9 @@ impl ContractsSessionStoreV1 {
         &self,
         record: &BootstrapKeyAuthorityV18,
         chain: &[u8; 32],
+        step: &mut &'static str,
     ) -> Result<DomBootstrapTemplatesV17, SessionStoreError> {
+        *step = "retain_keys/terms";
         let current = self.load_session_locked(record.session)?;
         let terms = &record.terms;
         let terms_hash = terms
@@ -294,19 +333,24 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::Quarantined);
         }
+        *step = "retain_keys/transport_identity";
         let roster = self.load_transport_roster(record.session)?;
         let identities = self.load_transport_identity_binding(record.session)?;
         require_transport_identity_binding(&roster, &identities)?;
+        *step = "retain_keys/early_authority";
         let early = self.load_early_transport_authority(record.session)?;
         let initial = self.load_session_revision(record.session, 0)?;
         self.require_live_early_transport_authority(&early, &initial, &roster)?;
+        *step = "retain_keys/bp_authority";
         let bp = self.load_bp_transport_authority(record.session)?;
         let bp_start = self.load_session_revision(record.session, bp.round_start_revision)?;
         self.require_live_bp_transport_authority(&bp, &early, &bp_start, &roster)?;
+        *step = "retain_keys/template_authority";
         let template = self.load_template_transport_authority(record.session)?;
         let template_start =
             self.load_session_revision(record.session, template.round_start_revision)?;
         self.require_live_template_transport_authority(&template, &bp, &template_start, &roster)?;
+        *step = "retain_keys/template_prefix";
         if record.template_payload != template.template_commit_payload
             || self.audit_operational_template_transport_prefix(
                 record.session,
@@ -319,6 +363,7 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::Quarantined);
         }
+        *step = "retain_keys/offer_binding";
         for (index, offer) in record.offers.iter().enumerate() {
             if offer.offer().terms_hash != terms_hash
                 || offer.offer().session_id != record.session
@@ -335,6 +380,7 @@ impl ContractsSessionStoreV1 {
                 )
                 .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
         }
+        *step = "retain_keys/bp_continuation";
         let verifier = DomCollaborativeRangeProofV1::new(
             &bp.statement,
             bp.recovery_capsule.as_bytes().to_vec(),
@@ -360,6 +406,7 @@ impl ContractsSessionStoreV1 {
         .map_err(|_| SessionStoreError::Canonical)?;
         let shared = VerifiedSharedOutputV1::from_retained_output_v14(&output, &commitment)
             .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
+        *step = "retain_keys/budget";
         let budget = DomBootstrapBudgetV17::new(terms.dom_leg.amount, terms.fee_limit.dom_max)
             .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
         let funder = terms
@@ -374,6 +421,7 @@ impl ContractsSessionStoreV1 {
             TimelockSpec::BlockHeight { value } => value,
             _ => return Err(SessionStoreError::Canonical),
         };
+        *step = "retain_keys/assemble";
         let templates = DomBootstrapTemplatesV17::assemble(
             budget,
             &bp.statement,
@@ -388,6 +436,7 @@ impl ContractsSessionStoreV1 {
             record.tip,
         )
         .map_err(|_| SessionStoreError::InvalidDomTransaction)?;
+        *step = "retain_keys/payload";
         if operational_template_commit_payload_v1(
             templates.funding.transaction_template(),
             templates.claim.transaction_template(),

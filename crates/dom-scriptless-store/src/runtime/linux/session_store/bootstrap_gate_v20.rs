@@ -33,7 +33,8 @@ impl ContractsSessionStoreV1 {
             ) {
                 return Err(SessionStoreError::InvalidTransition);
             }
-            self.reconstruct_bootstrap_wallet_templates_v20(&record, chain.as_bytes())?
+            let mut step = "";
+            self.reconstruct_bootstrap_wallet_templates_v20(&record, chain.as_bytes(), &mut step)?
         };
         canonical_template_v1(templates.claim.transaction_template())
             .map(|(_, hash)| hash)
@@ -69,8 +70,9 @@ impl ContractsSessionStoreV1 {
             ) {
                 return Err(SessionStoreError::InvalidTransition);
             }
+            let mut step = "";
             let templates =
-                self.reconstruct_bootstrap_wallet_templates_v20(&record, chain.as_bytes())?;
+                self.reconstruct_bootstrap_wallet_templates_v20(&record, chain.as_bytes(), &mut step)?;
             let current = self.load_session_locked(session)?;
             let bp = self.load_bp_transport_authority(session)?;
             let early = self.load_early_transport_authority(session)?;

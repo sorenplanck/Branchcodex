@@ -248,14 +248,17 @@ impl TemplateDriverV17 {
             OutboundDsc1RecoveryV1::None => false,
         };
         if complete {
-            self.step_tag_v25 = "templates_v17/retain_keys";
-            owner.store.retain_bootstrap_wallet_keys_v18(
+            let mut keys_step = "templates_v17/retain_keys";
+            let retained = owner.store.retain_bootstrap_wallet_keys_tagged_v25(
                 chain,
                 owner.session_id,
                 &self.terms,
                 &proven_offers,
                 self.negotiated_tip,
-            )?;
+                &mut keys_step,
+            );
+            self.step_tag_v25 = keys_step;
+            retained?;
             self.step_tag_v25 = "templates_v17/refund";
             if !bootstrap_pending {
                 return refund_v18::step(
