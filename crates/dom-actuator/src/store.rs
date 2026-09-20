@@ -2065,9 +2065,7 @@ impl DomActuatorStoreV1 {
             transaction.commit().map_err(storage)?;
             return Ok(prepared);
         }
-        if load_stage(&transaction, binding.session_id())? != STAGE_BOUND {
-            return Err(DomActuatorError::InvalidStage);
-        }
+        require_payout_face_stage_v25(&transaction, binding)?;
         let prepare_digest = payout_face_prepare_digest(
             binding,
             payout_commitment,
@@ -2232,9 +2230,7 @@ impl DomActuatorStoreV1 {
             transaction.commit().map_err(storage)?;
             return Ok(retained);
         }
-        if load_stage(&transaction, binding.session_id())? != STAGE_BOUND {
-            return Err(DomActuatorError::InvalidStage);
-        }
+        require_payout_face_stage_v25(&transaction, binding)?;
         let event_effect_id = hash_parts(&[
             PAYOUT_FACE_EFFECT_DOMAIN,
             prepared.prepare_digest.as_slice(),
@@ -6352,6 +6348,21 @@ fn load_payout_face_evidence(
         record_digest,
         created_at_unix_ms,
     }))
+}
+
+/// A payout face may be pinned while the session is still local: bound, or
+/// with this participant's own funding outputs already reserved. The policy-17
+/// native bootstrap reserves those inputs first, and the payout opening is
+/// independent of them. Every later stage is bilateral, and pinning a payout
+/// face there would contradict a round the peer already saw, so it is refused.
+fn require_payout_face_stage_v25(
+    transaction: &Transaction<'_>,
+    binding: DomSessionBindingV1,
+) -> DomActuatorResult<()> {
+    match load_stage(transaction, binding.session_id())? {
+        STAGE_BOUND | STAGE_OUTPUTS_RESERVED => Ok(()),
+        _ => Err(DomActuatorError::InvalidStage),
+    }
 }
 
 fn load_stage(transaction: &Transaction<'_>, session_id: Digest32) -> DomActuatorResult<i64> {
