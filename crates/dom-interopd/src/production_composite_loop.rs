@@ -256,6 +256,7 @@ pub(crate) struct ProductionCompositeRelayLoopV1 {
     exchanged_envelopes_v25: [(u64, u64); 2],
     last_tolerated_v25: [Option<Option<&'static str>>; 2],
     last_activation_ready_v25: std::cell::Cell<Option<bool>>,
+    last_activation_pending_v25: std::cell::Cell<Option<&'static str>>,
 }
 
 impl core::fmt::Debug for ProductionCompositeRelayLoopV1 {
@@ -335,6 +336,7 @@ impl ProductionCompositeRelayLoopV1 {
             exchanged_envelopes_v25: [(0, 0); 2],
             last_tolerated_v25: [None, None],
             last_activation_ready_v25: std::cell::Cell::new(None),
+            last_activation_pending_v25: std::cell::Cell::new(None),
         })
     }
 
@@ -839,6 +841,11 @@ trait CompositeActivationRelayV1 {
     fn bootstrap_ready_v16(&self) -> bool {
         true
     }
+    /// Reports what the pair activation is still waiting for. The default
+    /// keeps the core silent; the production relay prints one line per change
+    /// so a run that never activates says which input never arrived without
+    /// repeating itself once per round.
+    fn report_activation_pending_v25(&self, _pending: &'static str) {}
 }
 
 impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
@@ -878,6 +885,13 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
     fn activation_backoff(&self) -> Duration {
         self.backoff
     }
+    fn report_activation_pending_v25(&self, pending: &'static str) {
+        if self.last_activation_pending_v25.get() != Some(pending) {
+            self.last_activation_pending_v25.set(Some(pending));
+            eprintln!("DOM_NATIVE_ACTIVATION_AWAITING_V25 pending={pending}");
+        }
+    }
+
     fn bootstrap_ready_v16(&self) -> bool {
         let ready = self.owner.bootstrap_ready_v16();
         if self.last_activation_ready_v25.get() != Some(ready) {
@@ -908,17 +922,14 @@ trait CompositeActivationReceiverV1 {
 /// Polls once and reports a change of what the pair is waiting for. Without
 /// this the activation loop is silent for its whole budget whenever one input
 /// never arrives, and every such stall looks identical from outside.
-fn poll_activation_v25<Receiver: CompositeActivationReceiverV1>(
+fn poll_activation_v25<Relay: CompositeActivationRelayV1, Receiver: CompositeActivationReceiverV1>(
+    relay: &Relay,
     receiver: &mut Receiver,
-    last: &mut Option<&'static str>,
 ) -> Result<Option<Receiver::Ready>, Receiver::Error> {
     match receiver.take_activation_ready()? {
         CompositeActivationPollV1::Ready(ready) => Ok(Some(ready)),
         CompositeActivationPollV1::Awaiting(tag) => {
-            if *last != Some(tag) {
-                *last = Some(tag);
-                eprintln!("DOM_NATIVE_ACTIVATION_AWAITING_V25 pending={tag}");
-            }
+            relay.report_activation_pending_v25(tag);
             Ok(None)
         }
     }
@@ -1023,7 +1034,6 @@ where
     if round_budget == 0 || round_budget > MAX_ACTIVATION_ROUNDS_V1 {
         return Err(CompositeActivationCoreErrorV1::InvalidConfiguration);
     }
-    let mut last_pending: Option<&'static str> = None;
     for _ in 0..round_budget {
         if control
             .shutdown_requested()
@@ -1035,7 +1045,7 @@ where
         // hand off the exact authenticated pair. Missing readiness still
         // enters the normal resume path below, with all original checks.
         if relay.bootstrap_ready_v16() {
-            if let Some(ready) = poll_activation_v25(receiver, &mut last_pending)
+            if let Some(ready) = poll_activation_v25(relay, receiver)
                 .map_err(CompositeActivationCoreErrorV1::Receiver)?
             {
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
@@ -1045,7 +1055,7 @@ where
             .resume_local_activation_v23()
             .map_err(CompositeActivationCoreErrorV1::Relay)?;
         if relay.bootstrap_ready_v16() {
-            if let Some(ready) = poll_activation_v25(receiver, &mut last_pending)
+            if let Some(ready) = poll_activation_v25(relay, receiver)
                 .map_err(CompositeActivationCoreErrorV1::Receiver)?
             {
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
@@ -1059,7 +1069,7 @@ where
             .step_activation_leg(LegIdV1::Downstream)
             .map_err(CompositeActivationCoreErrorV1::Relay)?;
         if relay.bootstrap_ready_v16() {
-            if let Some(ready) = poll_activation_v25(receiver, &mut last_pending)
+            if let Some(ready) = poll_activation_v25(relay, receiver)
                 .map_err(CompositeActivationCoreErrorV1::Receiver)?
             {
                 return Ok(CompositeActivationCoreExitV1::Ready(ready));
