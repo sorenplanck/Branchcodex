@@ -27,6 +27,45 @@ pub(crate) mod graph_v23;
 #[path = "production_relay_xmr_auxiliary_v23.rs"]
 mod xmr_auxiliary_v23;
 
+/// Closed token naming one XMR graph lifecycle state. Never a digest, a
+/// secret or a foreign error string: every arm is a fixed enum name.
+pub(crate) fn graph_lifecycle_token_v25(lifecycle: &graph_v23::GraphLifecycleV23) -> &'static str {
+    use graph_v23::GraphLifecycleV23 as L;
+    match lifecycle {
+        L::Awaiting => "awaiting",
+        L::Signing(_) => "signing",
+        L::Completing => "completing",
+        L::Produced(_) => "produced",
+        L::Custodied { .. } => "custodied",
+        L::Failed => "failed",
+    }
+}
+
+/// DIAG(temporary): name the funding gate that held this leg back. Every one
+/// of the early exits of `step_f7_funding_v20` used to be a bare `Ok(())`,
+/// so a leg could hold at the same gate for two hours without a single line
+/// of output. Printed only when the gate token changes, so a stable gate
+/// costs one line per leg for the whole run.
+fn diag_f7_funding_gate_v25(leg: LegIdV1, gate: &str) {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST_GATE_V25: RefCell<[String; 2]> =
+            const { RefCell::new([String::new(), String::new()]) };
+    }
+    let index = match leg {
+        LegIdV1::Upstream => 0,
+        LegIdV1::Downstream => 1,
+    };
+    LAST_GATE_V25.with(|last| {
+        let mut last = last.borrow_mut();
+        if last[index] != gate {
+            last[index].clear();
+            last[index].push_str(gate);
+            eprintln!("DOM_F7_FUNDING_GATE_V25 leg={leg:?} gate={gate}");
+        }
+    });
+}
+
 use dom_adaptor::{SharedBlindingBindingV1, TrustedChainIdV1};
 use dom_scriptless_chain_adapter::DomHttpChainAdapterV1;
 use dom_scriptless_identity_store::ContractsTransportIdentityStoreV1;
@@ -94,11 +133,6 @@ pub(crate) enum ProductionRelayStage12ErrorV1 {
     F6Refused,
 }
 
-/// Move-only Stage-12 construction request.
-///
-/// The relay signing secrets remain zeroizing owners until the exact
-/// `ProductionContractsV1` constructors consume their unavoidable fixed-size
-/// copies. No secret is retained in the returned owner.
 thread_local! {
     static LEASE_PHASE_V25: std::cell::Cell<&'static str> = const { std::cell::Cell::new("start") };
 }
@@ -113,6 +147,11 @@ pub(crate) fn lease_phase_v25() -> &'static str {
     LEASE_PHASE_V25.with(std::cell::Cell::get)
 }
 
+/// Move-only Stage-12 construction request.
+///
+/// The relay signing secrets remain zeroizing owners until the exact
+/// `ProductionContractsV1` constructors consume their unavoidable fixed-size
+/// copies. No secret is retained in the returned owner.
 pub(crate) struct ProductionRelayStage12RequestV1<'authority> {
     pub(crate) xmr_graph_vault_provisioner_v23:
         crate::production_dom_vaults_v12::ProductionXmrGraphVaultProvisionerV23,
@@ -360,6 +399,7 @@ impl ProductionRelayStage12OwnerV1 {
             &graph.templates,
             &graph.keys,
             expiry,
+            renew_actuator_lease,
         )?;
         let Some(signing) = self.xmr_recovery_signing_v23[index].as_mut() else {
             return Ok(());
@@ -368,7 +408,11 @@ impl ProductionRelayStage12OwnerV1 {
         use dom_scriptless_store::XmrGraphRecoverySigningEdgeV23 as Edge;
         for (slot, edge) in [Edge::Cancel, Edge::Compensation].into_iter().enumerate() {
             renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
-            mark_lease_phase_v25(if slot == 0 { "recovery_edge_cancel" } else { "recovery_edge_compensation" });
+            mark_lease_phase_v25(if slot == 0 {
+                "recovery_edge_cancel"
+            } else {
+                "recovery_edge_compensation"
+            });
             if self.xmr_auxiliary_relays_v23[index][slot].is_none() {
                 let binding = signing.auxiliary_binding_v23(edge).ok_or(Error::Binding)?;
                 self.xmr_auxiliary_relays_v23[index][slot] =
@@ -782,11 +826,23 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
         };
+        // DIAG(temporary): prove the pump is entered at all on this peer.
+        // Reasoning from the absence of the later tokens once led to the wrong
+        // conclusion; this one fires on entry, before any branch can skip it.
+        diag_f7_funding_gate_v25(
+            leg,
+            if self.xmr_graph_setup_v22[index].is_some() {
+                "enter_with_setup"
+            } else {
+                "enter_no_setup"
+            },
+        );
         if let Some(setup) = self.xmr_graph_setup_v22[index].as_ref() {
             if self
                 .pending_xmr_graph_commit_relay_envelope_v23(setup.binding().session_id())
                 .map_err(|_| crate::production_contracts::ProductionFundingErrorV20::Binding)?
             {
+                diag_f7_funding_gate_v25(leg, "pending_0x18");
                 return Ok(());
             }
             match &mut self.xmr_graph_templates_v23[index] {
@@ -795,18 +851,31 @@ impl ProductionRelayStage12OwnerV1 {
                         LegIdV1::Upstream => self.upstream.trusted_chain_id,
                         LegIdV1::Downstream => self.downstream.trusted_chain_id,
                     };
-                    custody.activate_recovery_v23(chain, setup.setup(), scanner, recovery)?;
+                    custody
+                        .activate_recovery_v23(chain, setup.setup(), scanner, recovery)
+                        .inspect_err(|error| {
+                            eprintln!(
+                                "DOM_F7_ACTIVATE_RECOVERY_V25 leg={leg:?} retryable={} error={error}",
+                                error.retryable(),
+                            );
+                        })?;
+                    diag_f7_funding_gate_v25(leg, "custodied");
                 }
                 graph_v23::GraphLifecycleV23::Failed | graph_v23::GraphLifecycleV23::Completing => {
                     return Err(crate::production_contracts::ProductionFundingErrorV20::Binding);
                 }
-                _ => return Ok(()),
+                other => {
+                    diag_f7_funding_gate_v25(leg, graph_lifecycle_token_v25(other));
+                    return Ok(());
+                }
             }
         } else {
             let Some(driver) = self.bootstrap_v16[index].as_ref() else {
+                diag_f7_funding_gate_v25(leg, "no_bootstrap_driver");
                 return Ok(());
             };
             if !driver.complete() {
+                diag_f7_funding_gate_v25(leg, "bootstrap_incomplete");
                 return Ok(());
             }
         }
@@ -864,17 +933,9 @@ impl ProductionRelayStage12OwnerV1 {
     /// exit. No secret, digest, free text or foreign error string is emitted:
     /// every token below is a fixed enum name or boolean.
     pub(crate) fn activation_stall_report_v25(&self) -> String {
-        use graph_v23::GraphLifecycleV23 as L;
         let mut out = String::new();
         for (index, name) in [(0_usize, "up"), (1, "down")] {
-            let lifecycle = match &self.xmr_graph_templates_v23[index] {
-                L::Awaiting => "awaiting",
-                L::Signing(_) => "signing",
-                L::Completing => "completing",
-                L::Produced(_) => "produced",
-                L::Custodied { .. } => "custodied",
-                L::Failed => "failed",
-            };
+            let lifecycle = graph_lifecycle_token_v25(&self.xmr_graph_templates_v23[index]);
             let (refund, aux) = self.xmr_recovery_signing_v23[index]
                 .as_ref()
                 .map(|owner| owner.stall_tokens_v25())
@@ -911,10 +972,13 @@ impl ProductionRelayStage12OwnerV1 {
                     *total = total.saturating_add(value);
                 }
             }
+            // DIAG(temporary): rendezvous outcome counters for this leg.
+            let rv = crate::production_relay_network_runtime::exchange_diag_v25(index);
             out.push_str(&format!(
-                "{name}:lifecycle={lifecycle},setup={setup},refund_bound={bound},claim_context={context},refund_complete={refund},aux_complete={}/{},rev={}/{}/{}/{},parent={},sent={},delivered={} ",
+                "{name}:lifecycle={lifecycle},setup={setup},refund_bound={bound},claim_context={context},refund_complete={refund},aux_complete={}/{},rev={}/{}/{}/{},parent={},sent={},delivered={},rv=call{}/cok{}/cfail{}/aok{}/adl{}/sib{}/serr{} ",
                 aux[0], aux[1], revisions[0], revisions[1], revisions[2], revisions[3],
-                transcript[0], transcript[1], transcript[2]
+                transcript[0], transcript[1], transcript[2],
+                rv[0], rv[1], rv[2], rv[3], rv[4], rv[5], rv[6]
             ));
         }
         out
@@ -1480,8 +1544,13 @@ pub(crate) fn construct_production_relay_stage12_v1(
 
     let graph_setup = |leg| {
         let Some(session) = inputs.monero_session(leg) else {
+            // DIAG(temporary): a leg without a Monero session gets no XMR graph
+            // setup, and every downstream consequence of that is silent. Print
+            // it once per leg at construction, on both peers.
+            eprintln!("DOM_GRAPH_SETUP_V25 leg={leg:?} monero_session=absent");
             return Ok(None);
         };
+        eprintln!("DOM_GRAPH_SETUP_V25 leg={leg:?} monero_session=present");
         let terms = match leg {
             LegIdV1::Upstream => inputs.composition().upstream(),
             LegIdV1::Downstream => inputs.composition().downstream(),

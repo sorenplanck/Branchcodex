@@ -75,7 +75,6 @@ use crate::production_f6_activation::{pair_factory_seal, ProductionF6PairAuthori
 use crate::production_f6_lifecycle::ProductionF6ActivationRefusalV2;
 use crate::production_inputs::{AuthenticatedProductionInputsV1, ProductionRosterLegV1};
 
-
 /// Diagnostic constructor for every InvalidBinding refusal site in this
 /// module. It prints only the static source line — no identifiers, amounts
 /// or key material — so a refused production activation names its exact
@@ -2011,8 +2010,7 @@ fn decode_authorities(
     reader: &mut BundleReaderV7<'_>,
 ) -> Result<AuthoritySetV1, ProductionF6ActivationRefusalV2> {
     let bytes = reader.length_prefixed(MAX_AUTHORITY_BYTES_V7)?;
-    AuthoritySetV1::decode_canonical(bytes)
-        .map_err(|_| invalid_binding_diag_v25(line!()))
+    AuthoritySetV1::decode_canonical(bytes).map_err(|_| invalid_binding_diag_v25(line!()))
 }
 
 fn decode_keys(
@@ -2047,8 +2045,8 @@ fn decode_signers(
         let signer_public_key = reader.take::<32>()?;
         let endpoint_uid = reader.u32()?;
         let endpoint_bytes = reader.length_prefixed(MAX_ENDPOINT_BYTES_V7)?;
-        let endpoint_text = std::str::from_utf8(endpoint_bytes)
-            .map_err(|_| invalid_binding_diag_v25(line!()))?;
+        let endpoint_text =
+            std::str::from_utf8(endpoint_bytes).map_err(|_| invalid_binding_diag_v25(line!()))?;
         if endpoint_text
             .bytes()
             .any(|byte| byte == 0 || byte.is_ascii_control())
@@ -2108,8 +2106,7 @@ fn lexically_normal(path: &Path) -> bool {
 }
 
 fn digest_parts(parts: &[&[u8]]) -> Result<Digest32, ProductionF6ActivationRefusalV2> {
-    let mut hasher =
-        Blake2bVar::new(32).map_err(|_| invalid_binding_diag_v25(line!()))?;
+    let mut hasher = Blake2bVar::new(32).map_err(|_| invalid_binding_diag_v25(line!()))?;
     for part in parts {
         hasher.update(part);
     }

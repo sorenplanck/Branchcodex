@@ -689,6 +689,57 @@ impl ContractsSessionStoreV1 {
         let _guard = self.operation_lock()?;
         self.prepare_next_f7_ready_vote_locked_v12(gate)
     }
+    /// DIAG(temporary): who the local signer is versus whose vote is expected.
+    fn diag_ready_signer_v25(signer: &[u8; 32], expected: &[u8; 32]) {
+        use std::cell::RefCell;
+        thread_local! {
+            static LAST_SIGNER_V25: RefCell<String> = const { RefCell::new(String::new()) };
+        }
+        let line = format!(
+            "signer={} expected={} match={}",
+            Self::hex_prefix_v25(signer),
+            Self::hex_prefix_v25(expected),
+            signer == expected,
+        );
+        LAST_SIGNER_V25.with(|last| {
+            let mut last = last.borrow_mut();
+            if *last != line {
+                eprintln!("DOM_READY_SIGNER_V25 {line}");
+                *last = line;
+            }
+        });
+    }
+
+    /// DIAG(temporary): one line per change of the ready-to-fund quorum shape.
+    fn diag_ready_quorum_v25(
+        local: &str,
+        accepted: usize,
+        bound_revision: u64,
+        current_revision: u64,
+        next_voter: Option<[u8; 32]>,
+    ) {
+        use std::cell::RefCell;
+        thread_local! {
+            static LAST_QUORUM_V25: RefCell<String> = const { RefCell::new(String::new()) };
+        }
+        let line = format!(
+            "local={local} accepted={accepted} bound_rev={bound_revision} cur_rev={current_revision} next={}",
+            next_voter
+                .map(|id| Self::hex_prefix_v25(&id))
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        LAST_QUORUM_V25.with(|last| {
+            let mut last = last.borrow_mut();
+            if *last != line {
+                eprintln!("DOM_READY_QUORUM_V25 {line}");
+                *last = line;
+            }
+        });
+    }
+
+    fn hex_prefix_v25(id: &[u8; 32]) -> String {
+        id[..3].iter().map(|b| format!("{b:02x}")).collect()
+    }
     fn prepare_next_f7_ready_vote_locked_v12(
         &self,
         handle: &PreparedF7FundingGateV12,
@@ -707,6 +758,24 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::FundingAuthorityUnavailable);
         }
         let roster = self.load_transport_roster(gate.session_id)?;
+        // DIAG(temporary): name the LOCAL peer on every quorum line. Without it
+        // two daemons' lines are indistinguishable in one log, which is exactly
+        // how absence of a token was repeatedly misread as absence of state.
+        let local_v25 = self
+            .authenticate_local_transport_signer_binding(gate.session_id)
+            .map(|signer| Self::hex_prefix_v25(&signer.participant_id))
+            .unwrap_or_else(|_| "unknown".to_string());
+        // DIAG(temporary): `AwaitingPeer` is the only thing the caller sees when
+        // this returns `Some`, and it cannot say whose vote is still missing.
+        // Print the quorum shape once per change: how many votes are accepted,
+        // where the gate was bound, and which roster index owes the next one.
+        Self::diag_ready_quorum_v25(
+            &local_v25,
+            accepted,
+            gate.bound_revision,
+            current.revision(),
+            roster.participants.get(accepted).map(|p| p.participant_id),
+        );
         let participant = roster
             .participants
             .get(accepted)
@@ -818,11 +887,28 @@ impl ContractsSessionStoreV1 {
         vote: &PreparedOperationalXmrReadyToFundVoteV12,
     ) -> Result<Option<PreparedDsc1SigningRequestV1>, SessionStoreError> {
         let _guard = self.operation_lock()?;
+        // DIAG(temporary): prove entry before any `?` can abort silently. The
+        // signer line below sits behind three fallible steps, so its absence
+        // never distinguished "not called" from "aborted on the way".
+        eprintln!(
+            "DOM_READY_ENTRY_V25 vote_for={}",
+            Self::hex_prefix_v25(&vote.participant_id)
+        );
         let expected = self
             .prepare_next_f7_ready_vote_locked_v12(handle)?
             .ok_or(SessionStoreError::FundingAuthorityUnavailable)?;
-        require_same_vote_v12(vote, &expected)?;
+        if let Err(error) = require_same_vote_v12(vote, &expected) {
+            eprintln!(
+                "DOM_READY_ENTRY_V25 same_vote=refused have={} expected={}",
+                Self::hex_prefix_v25(&vote.participant_id),
+                Self::hex_prefix_v25(&expected.participant_id),
+            );
+            return Err(error);
+        }
         let signer = self.authenticate_local_transport_signer_binding(vote.session_id)?;
+        // DIAG(temporary): the only silent exit on the readiness path. If both
+        // peers take it, the quorum can never reach two and nothing reports why.
+        Self::diag_ready_signer_v25(&signer.participant_id, &vote.participant_id);
         if signer.participant_id != vote.participant_id {
             return Ok(None);
         }

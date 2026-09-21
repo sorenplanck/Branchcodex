@@ -36,6 +36,27 @@ pub(crate) enum ProductionF7ReadinessStepV19 {
 }
 
 impl<F: F6TransportPortV1> ProductionContractsV1<F> {
+    /// Reports whether the retained gate has accepted both operational
+    /// readiness votes. This is deliberately read-only: the composite root
+    /// uses it to keep slow native height observation out of the Relay
+    /// readiness handshake, while `step_f7_readiness_v19` remains the sole
+    /// producer and ingress owner for those votes.
+    pub(crate) fn f7_readiness_complete_v25(
+        &self,
+        chain: TrustedChainIdV1,
+    ) -> Result<bool, ProductionF7ReadinessErrorV19> {
+        let Some(gate) = self
+            .store
+            .retained_f7_funding_gate_v19(chain, self.session_id)?
+        else {
+            return Ok(false);
+        };
+        Ok(self
+            .store
+            .prepare_next_operational_xmr_ready_to_fund_vote_v12(&gate)?
+            .is_none())
+    }
+
     /// Called by the concrete roots only after F6 and ordinary refund
     /// bootstrap completed. All transaction/proof inputs come from this Store.
     pub(crate) fn prepare_bootstrap_gate_v20(

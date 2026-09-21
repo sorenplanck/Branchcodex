@@ -103,6 +103,25 @@ impl NativeXmrRunningColdStartV23 {
             .poll()
     }
 
+    /// Stop every live actor and echo its allowlisted diagnostics. Called only
+    /// once the caller has already failed the run on its own phase deadline.
+    pub(crate) fn report_stall_v25(&mut self) {
+        for process in self.processes.iter_mut().flatten() {
+            let _ = process.report_stall_v25();
+        }
+    }
+
+    /// Echo both actors' diagnostics on any failure path. One actor failing is
+    /// normally noticed while the other is still alive, and a live actor's
+    /// stderr pipe has not reached EOF, so its capture returns nothing: half
+    /// the evidence for the failure silently disappears. Stop whatever is
+    /// still running first, exactly as the stall path does.
+    pub(crate) fn report_diagnostics_v25(&mut self) {
+        for process in self.processes.iter_mut().flatten() {
+            let _ = process.report_stall_v25();
+        }
+    }
+
     /// Reap a successful natural terminal exit, never substitute SIGTERM or
     /// SIGKILL for proof that the real daemon completed its own run function.
     pub(crate) fn reap_successful_actor_v23(&mut self, actor: usize) -> ColdStartResult<()> {

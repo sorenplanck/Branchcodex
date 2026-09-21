@@ -24,7 +24,7 @@ O usuário pediu explicitamente para **não mandar para GitHub antes de rodar no
 
 ## Regras globais do ambiente
 
-Arquivo `/home/leonardov/AGENTS.md` diz:
+Arquivo `$HOME/AGENTS.md` diz:
 
 - Não parar missão multi sessão até completar, salvo blocker real.
 - Editar só arquivos relacionados ao pedido.
@@ -38,7 +38,7 @@ Arquivo `/home/leonardov/AGENTS.md` diz:
 Repositório local:
 
 ```bash
-/home/leonardov/Branchcodex-two-workflows
+$REPO
 ```
 
 Antes de qualquer push/commit, verificar:
@@ -175,7 +175,7 @@ Sempre usar BLAKE2b-256, não SHA-256.
 
 ```bash
 source /tmp/branchcodex-local-xmr-env.vars
-export DOM_INTEROP_REAL_BINARY_V23=/home/leonardov/Branchcodex-two-workflows/target/release/dom-interopd
+export DOM_INTEROP_REAL_BINARY_V23=$REPO/target/release/dom-interopd
 export DOM_INTEROP_REAL_BINARY_BLAKE2B256_V23=<hash_blake2b_256>
 export CARGO_BUILD_JOBS=2
 export RUST_TEST_THREADS=1
@@ -236,7 +236,7 @@ Session id do comando no Codex no momento da escrita: `88265`.
 Fixture ativo provável:
 
 ```text
-/home/leonardov/.dx-v23/dx-38sp644z/.tmpXToTCS
+$HOME/.dx-v23/dx-38sp644z/.tmpXToTCS
 ```
 
 Estado lido aos ~240s:
@@ -264,7 +264,7 @@ Localizar fixture ativo:
 python3 - <<'PY'
 from pathlib import Path
 import time
-base=Path('/home/leonardov/.dx-v23')
+base=Path('$HOME/.dx-v23')
 cands=sorted([p for p in base.iterdir() if p.is_dir()], key=lambda p:p.stat().st_mtime, reverse=True)[:5]
 for p in cands:
     print(p, time.strftime('%H:%M:%S', time.localtime(p.stat().st_mtime)))
@@ -280,7 +280,7 @@ Ler revisões e filas:
 python3 - <<'PY'
 import sqlite3
 from pathlib import Path
-root=Path('/home/leonardov/.dx-v23/<dx-dir>/<tmp-dir>')
+root=Path('$HOME/.dx-v23/<dx-dir>/<tmp-dir>')
 for who in ['alice','bob']:
     print('\n',who)
     actor=root/who
@@ -362,7 +362,7 @@ Arquivos-chave para leitura:
 Fixture ativo lido naquele run:
 
 ```text
-/home/leonardov/.dx-v23/dx-8wkcb0jp/.tmpZu72S7
+$HOME/.dx-v23/dx-8wkcb0jp/.tmpZu72S7
 ```
 
 Ele mostrou progresso até rev32 nos principais, com 4 `kind13` pendentes em Alice.
@@ -411,7 +411,7 @@ git commit ...
 O sandbox comum frequentemente falha com:
 
 ```text
-bwrap: Can't mkdir /home/leonardov/.codex/visualizations/.../.git: Read-only file system
+bwrap: Can't mkdir $HOME/.codex/visualizations/.../.git: Read-only file system
 ```
 
 Quando isso acontecer em comandos necessários, rodar com escalated. Isso tem sido necessário até para leituras simples.
@@ -437,7 +437,7 @@ native real daemon: awaiting two final economic claims after 570s
 Fixture ativo lido sem modificar estado:
 
 ```text
-/home/leonardov/.dx-v23/dx-38sp644z/.tmpXToTCS
+$HOME/.dx-v23/dx-38sp644z/.tmpXToTCS
 ```
 
 Estado por ator:
@@ -589,7 +589,7 @@ Correção aplicada em `crates/dom-interopd/src/production_run_universal.rs`: o 
 
 Na execução com hash `6c0c23fe9102fe05031c699cd33bc7a1100fe6ca0d55225bf8109345e6d6443c`, o teste entrou em `wait_claims` e foi interrompido manualmente após ~360s porque `daemon-route_store` permanecia em `revision=1`. Leitura posterior mostrou que esse dado isolado não prova regressão: enquanto a route snapshot pode ficar inicial, os stores de contrato continuam a cerimônia DSC1.
 
-Fixture vivo dessa execução: `/home/leonardov/.dx-v23/dx-cjp3jxm0/.tmpwG1ciz`. O pending observado era em `bob/daemon-relay_queue`, sessão `FEA323AB...`, sequência `4`, `DSC1 kind 0x06`. Essa sessão mapeou para `cancelled-contracts-2/3`, ou seja, o caminho original/cancelled, não os stores principais.
+Fixture vivo dessa execução: `$HOME/.dx-v23/dx-cjp3jxm0/.tmpwG1ciz`. O pending observado era em `bob/daemon-relay_queue`, sessão `FEA323AB...`, sequência `4`, `DSC1 kind 0x06`. Essa sessão mapeou para `cancelled-contracts-2/3`, ou seja, o caminho original/cancelled, não os stores principais.
 
 Leitura do Store: `0x06` é `OperationalBpCommonReveal`, fase `BpCommonEstablished`. A sequência operacional esperada é `0x05`, `0x06`, `0x07`, `0x08`, `0x09`, `0x0a`, depois template/signing/final. Portanto, para acompanhar progresso use:
 
@@ -983,7 +983,7 @@ nenhuma antes de o lease morrer.
 
 ## Hipótese ambiental TESTADA E DESCARTADA
 
-O usuário autorizou encerrar o `dom-node` (PID 1817, de `/home/leonardov/dom-release/`,
+O usuário autorizou encerrar o `dom-node` (PID 1817, de `$HOME/dom-release/`,
 91% de CPU por 3d14h, minerando; **não** é usado por este cenário — o teste não o
 referencia em lugar nenhum). Encerrado e não religado.
 
@@ -1195,3 +1195,383 @@ legitimamente pertencem aquela rota.
 - F11 (publicação do dono no cenário 3, orçamento finito de 180s por projeto): observar na execução.
 - Otimização de CPU por rodada (~75–90s dominados por re-verificação local): depois do verde.
 - Caminho legado V3 (BTC/EVM) não verificado quanto ao lease.
+
+## Atualização — forense da rodada 40 (stores retidos, sem rodada nova)
+
+A rodada 40 foi a primeira em que os dois daemons sobreviveram as 2 h inteiras sem
+nenhuma recusa, nenhum crash e nenhum diagnóstico. Ela ainda falhou, por deadline.
+Toda a análise abaixo veio do tarball retido em
+`<evidence>/native_real_daemon_two_claims_survive_original_store_reopen_v23/synthetic-fixtures.tar.gz`,
+não de uma execução nova.
+
+Medições:
+
+- `daemon-route_store` → `route_journal` tem **exatamente 2 eventos**: `FreezeTermsV2`
+  (tag `0x0E`, 05:05:59) e **`ArmRefunds`** (tag `0x01`, 05:28:21). Nenhum evento depois,
+  por 1h40. O `route_leases` continuou sendo renovado até 07:06 — daemon vivo.
+- `daemon-relay_queue/relay-v1.sqlite3` → `relay_delivery_flows`: nas sessões `A1A1…`
+  e `D1D1…`, alice→bob em `0x0F` e bob→alice em `0x0E`, com os dois lados idênticos.
+  Alice retém 2 `relay_envelopes` de seq `0x10`, relay `message_type=0x0005`
+  (ROUTE_TRANSPORT), payload DSC1 `0x0D` = `SigNonceReveal`.
+- `daemon-dom_actuator_store`: nenhuma escrita depois do setup, nos dois lados.
+
+Conclusões que isso fixa:
+
+1. O `ArmRefunds` gravado **prova** que os dois lados chegaram a
+   `GraphLifecycleV23::Custodied` e instalaram o driver de recuperação: a face DOM do
+   arming exige `xmr_refund_readiness_v23`, instalado só em
+   `production_xmr_graph_custody_v23.rs::activate_recovery_v23`.
+2. Nenhum deadline de altura venceu: um deadline devido chamaria
+   `record_height_deadline_recovery_v23` (`runtime.rs:395`), que grava `set_health`
+   → seria um terceiro evento no journal.
+3. Sobra uma parede só: **a janela de funding nunca abre**, `FundingGuardV23` recusa
+   `Funding` com `Unavailable` e o driver espera para sempre. Nenhum diagnóstico
+   existente cobre `Unavailable`.
+
+Dois defeitos reais do harness, corrigidos:
+
+- O caminho de deadline de `wait_claims` deixava os daemons vivos, então o stderr
+  nunca chegava a EOF e **nenhuma** linha era drenada. Agora `report_stall_v25`
+  termina os daemons antes de falhar.
+- `process.rs::drain` devolvia `Err` ao passar de 256 KiB, descartando **toda** a
+  captura. Agora retém os primeiros bytes e segue lendo, sem bloquear o daemon.
+
+Tempo: os 22 min entre `FreezeTermsV2` e `ArmRefunds` são a cerimônia bilateral do
+grafo XMR, com um envelope por escopo por rodada e janelas de socket de 10 s por
+perna/escopo (`production_composite_loop.rs:601-629`, `production_run_universal.rs:767-795`).
+Isso é um problema de velocidade por si só e continua aberto.
+
+## Atualização — rodada 41: o harness estrangulava o daemon
+
+Causa real do silêncio de 2 h da rodada 40: `production_xmr_native_binary_v23_tests/process.rs::drain`
+devolvia `Err("daemon output exceeded bound")` ao passar de 256 KiB e **encerrava a thread
+leitora**. O daemon imprime `DOM_NATIVE_F7_FUNDING_V24` a cada rodada e por perna; o pipe
+de stderr enchia e o daemon ficava preso no `write`. Resultado: nenhum progresso durável,
+nenhuma linha de log, CPU alta — exatamente a assinatura que parecia ser do protocolo.
+
+Corrigido: o `drain` retém os primeiros `MAX_CAPTURE` bytes e **continua lendo** o excedente
+para um buffer fixo que é descartado, de modo que o daemon nunca bloqueia no pipe.
+
+Com isso a rodada 41 avançou muito além da parede, em 41 min em vez de 2 h:
+
+```
+DOM_FUNDING_WINDOW_V25 open=true observers= open open open
+DOM_F7_FUNDING_GATE_V25 leg=Upstream gate=produced → custodied
+DOM_NATIVE_F7_FUNDING_V24 leg=Upstream step=AwaitingPeer → Staged → Committed
+DOM_NATIVE_F7_FUNDING_V24 leg=Downstream step=Staged
+DOM_CHILD_CONFLICT_V25 file=production_child_dom.rs line=2428
+```
+
+Defeito seguinte, confirmado por leitura: `ExpectedDomBindingsV1::validate_static` comparava
+`binding.profile_digest()` (digest **bruto** de regras de consenso, `dom-actuator/src/model.rs:388`)
+com `self.profile_digest` (hash de perfil do adaptador, que **contém** aquele digest). Comparação
+estruturalmente impossível — a mesma classe de defeito já corrigida em `materialize`. Corrigido
+fixando o binding contra `dom_consensus_rules_digest`, sua própria fonte.
+
+## Atualização — rodadas 44/45: a parede agora é UM envelope
+
+Com o `drain` corrigido e o digest de perfil fixado contra a própria fonte, a cerimônia
+vai muito mais longe. Rodada 45 (idêntica à 44), medida na fixture retida:
+
+- `route_journal` = 4 eventos nos dois lados: `FreezeTermsV2`, `ArmRefunds`,
+  `CommitAction`, `CustodyProgressRecorded`.
+- Sessão DOM **upstream**: `stage_tag=6` (`STAGE_FUNDING_BROADCAST`) nos dois lados,
+  `dom_operations` com `action_tag=6` (`BroadcastFunding`). A cadeia DOM local subiu de
+  1004 para 1006 blocos — funding incluído e confirmado.
+- Sessão DOM **downstream**: Alice em `STAGE_OUTPUTS_RESERVED`, Bob em `STAGE_BOUND`.
+- `DOM_NATIVE_F7_FUNDING_V24 leg=Downstream step=AwaitingPeer`, repetido para sempre.
+
+`AwaitingPeer` vem de `production_funding_runtime_v20.rs:88-94`: faltam votos `0x17`
+(`f7_ready_count_v12` < 2). Rastreando até o transporte:
+
+- Registros de sessão downstream: Alice na revisão **33**, Bob na **32**.
+- Inbox durável do Bob (downstream): 16 entradas, sequências `0x00..0x0F`, todas
+  `delivery_state=1`. A última que ele recebeu da Alice é `0x0D` (`SigNonceReveal`).
+- Fila do relay da Alice: **exatamente um** envelope pendente, ordinal 125, sessão
+  `D1D1`, sequência `0x10`, payload DSC1 **`0x0E` (`PartialSignature`)**.
+
+Ou seja: **a perna downstream inteira está bloqueada por um único envelope que não é
+entregue.** Não é perda de mensagem (revisei essa leitura: nada foi descartado) nem
+quarentena (`relay_conflicts` e `inbox_quarantine` vazios nos dois lados).
+
+Cursores de entrega da Alice (`relay_delivery_scopes_v3` × `relay_delivery_state`):
+
+```
+D1D1D1D1 -> 6FAD6E (Bob)  cursor=121
+A1A1A1A1 -> 6FAD6E (Bob)  cursor=122
+envelope pendente: ordinal 125, sessao D1D1
+```
+
+A consulta de entrega é `ordinal > cursor` (`crates/relay/src/production.rs:2702`), não
+exige contiguidade, então o cursor atrasado **não** explica sozinho. O ramo de página
+pendente (`delivery_page_from_pending_v3`, `production.rs:2539`) também não explica: se
+os envelopes de uma página pendente tivessem sido apagados ele devolveria
+`CorruptState`, um erro duro, e o daemon teria falhado — não falhou.
+
+Conclusão honesta do estado: a parede está **acima** da consulta do relay. O envelope 125
+é candidato válido para o escopo `D1D1 -> Bob` e mesmo assim nunca é oferecido, o que
+aponta para o exchange da perna downstream não estar sendo exercitado para esse escopo
+(ou para o lado do Bob não o buscar). O próximo ponto a instrumentar é
+`step_exchange_and_poll_renewing_v25` (`production_composite_loop.rs:595`) e
+`exchange_configured_link_retained_v25`, contando ofertas e aceites por escopo — os
+contadores `EXCHANGE_DIAG_V25` já existem em `production_relay_network_runtime.rs` e só
+precisam ser impressos e postos no allowlist.
+
+Descartado por medição, para não ser reinvestigado: não há mensagem perdida, não há
+quarentena (`relay_conflicts` e `inbox_quarantine` vazios), não há divergência de
+transcript entre os dois lados, e o cursor por escopo não bloqueia a seleção.
+
+## Atualização — rodada 46: relay inocentado, e um defeito novo nomeado
+
+A rodada 46 não travou em silêncio: o daemon saiu com código 1 e
+`DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code=composite_loop stage=post_exchange_bootstrap cause=expired`
+(`production composite relay loop failed: post_exchange_bootstrap/expired`). O lease do
+atuador expirou na costura entre o exchange e o passo de bootstrap seguinte, com
+`DOM_PHASE_SLOW_V25 leg=1 phase=handoff_recovery_signing held_ms=53757`.
+
+Dois fatos que a instrumentação `DOM_EXCHANGE_SHAPE_V25` fixou, em 80 observações:
+
+1. **`out_backlog=false` em todas as 80.** O relay nunca termina um exchange com
+   backlog de saída. Isso **inocenta a camada de relay** na parede das rodadas 44/45: o
+   envelope 125 não ficou parado porque o relay se recusasse a ofertá-lo; ele ficou
+   porque nenhum exchange daquele escopo voltou a rodar depois de ele ser estagiado.
+   Não é preciso reinvestigar `delivery_page_v3`, cursores por escopo nem quarentena.
+
+2. **A cerimônia anda estritamente um envelope por rodada por perna** — as formas
+   observadas alternam `sent=1 recv=0` e `sent=0 recv=1` (33 e 32 ocorrências), com
+   picos raros de 2 ou 3. Com ~35 mensagens DSC1 por perna e janelas de socket de 10 s,
+   isso é a razão estrutural de uma cerimônia levar ~50 minutos. É exatamente o
+   problema de velocidade ("um protocolo de swap não deve demorar horas e sim alguns
+   minutos") e agora está medido, não suposto.
+
+Próximo ponto: `post_exchange_bootstrap/expired` em
+`production_composite_loop.rs::poll_retained_inbound_renewing_v25`. O lease é renovado
+imediatamente antes de `mark_lease_phase_v25("post_exchange_bootstrap")`, e mesmo assim
+o passo seguinte o encontra expirado — ou seja, `step_bootstrap_with_renewal_v25` não
+está renovando dentro de si como o nome promete. **Aumentar a duração do lease não é
+correção** e está proibido; a correção é o passo renovar durante o próprio trabalho.
+
+## Atualização — o teto real: a cerimônia tem um orçamento fixo de 1 hora
+
+`ProductionBootstrapLegV16::expiry` (`production_bootstrap_runtime_v16.rs:825-845`):
+
+```rust
+let value = if let Some(bytes) = material.runtime_public_record_v16(b"relay-expiry-v16")? {
+    u64::from_le_bytes(...)          // valor gravado UMA vez
+} else {
+    let value = now + ENVELOPE_LIFETIME_SECONDS;   // 3600 s
+    material.retain_runtime_public_v16(b"relay-expiry-v16", &value.to_le_bytes())?;
+    value
+};
+if now > value {
+    return Err(Error::Expired);      // fatal, para sempre
+}
+```
+
+O valor é cunhado na **primeira** chamada e reusado em todas as seguintes. A partir daí
+ele deixa de ser o tempo de vida de *um envelope* e passa a ser o **prazo de validade da
+cerimônia inteira**: passou de 3600 s desde o primeiro envelope, o daemon morre com
+`Expired`, sem recuperação.
+
+Confirmação pela rodada 46: daemons no ar às 10:46:17, teste encerrado em 4002 s com
+startup de ~190 s, ou seja **~63 min de daemon**, e a saída foi exatamente
+`code=composite_loop stage=post_exchange_bootstrap cause=expired`. 63 min > 60 min.
+
+Isso se combina com o custo de transporte medido (`DOM_EXCHANGE_SHAPE_V25`, 80
+observações): a cerimônia anda **um envelope por rodada por perna**, e cada rodada gasta
+até 60 s por perna em janelas de socket (`composite_call_bound` = `min(30 s, 15 s,
+lease/6)` = 10 s, × `EXCHANGE_SCOPES_PER_CONNECTION_V25` = 5, mais o próprio bound).
+Com ~35 mensagens DSC1 por perna, a cerimônia precisa de 50–70 min de relógio.
+
+**Conclusão: o swap não pode terminar. Ele precisa de mais tempo de parede do que o seu
+próprio orçamento permite.** As duas metades do problema são:
+
+1. Um tempo de vida por envelope sendo usado como prazo da cerimônia
+   (`relay-expiry-v16` gravado uma vez e nunca renovado).
+2. Rodadas caras demais: janelas de socket queimadas quando os dois lados não estão
+   alinhados na mesma fase do laço.
+
+Aumentar `ENVELOPE_LIFETIME_SECONDS` **não** é correção e está proibido — é um constante
+de protocolo e esconderia (2). A correção de (1) é cada envelope novo receber seu próprio
+tempo de vida, mantendo o valor gravado apenas para replay byte-idêntico de um envelope
+já assinado. A correção de (2) é não queimar a janela inteira de accept/connect quando
+não há nada a trocar.
+
+## Atualização — rodada 47: onde o tempo vai, medido
+
+Contadores por perna (`DOM_EXCHANGE_SHAPE_V25`, 87 observações, ~31 min de daemon):
+
+```
+leg=Upstream   calls=55 conn_ok=0 conn_fail=0 acc_ok=50 acc_deadline=5 yield=8 sess_err=0
+leg=Downstream calls=53 conn_ok=0 conn_fail=0 acc_ok=48 acc_deadline=4 yield=4 sess_err=0
+```
+
+O que isso fixa:
+
+- **Não há patologia de rede.** `sess_err=0`, `conn_fail=0`, e os accepts sucedem em
+  50 de 55 tentativas. As 5 janelas estouradas não explicam nada.
+- **Este daemon nunca disca** (`conn_ok=0`): ele é sempre o lado que escuta, nas duas
+  pernas. O par disca praticamente toda rodada.
+- **~34 s por exchange** (55 exchanges em ~1860 s), e **uma fração grande deles carrega
+  zero envelopes** — `sent=0 recv=0` aparece repetidamente, inclusive três vezes
+  seguidas na perna downstream enquanto a upstream movia 3.
+
+Ou seja: o laço faz um exchange autenticado completo por perna por rodada mesmo quando
+nenhum dos dois lados tem o que enviar. Com ~35 idas e voltas DSC1 sequenciais por
+perna a cerimônia custa 30–60 min de relógio, e é por isso que ela estoura o orçamento
+de 3600 s de `ENVELOPE_LIFETIME_SECONDS`.
+
+**Correção pendente (não improvisar):** o custo tem de cair, não o orçamento subir. As
+duas direções possíveis são (a) o lado que disca não abrir conexão para uma perna sem
+nada estagiado, usando o hello para anunciar "tenho N envelopes para você" e encerrar
+cedo um par vazio-vazio, ou (b) trocar o polling por rodada por um exchange dirigido a
+evento. Ambas mexem no laço de protocolo e precisam de desenho, não de remendo.
+
+## Resultado negativo — não fechar a janela de funding antes do arming (revertido)
+
+Tentativa: pular o refresh da janela de funding enquanto `snapshot.refunds.is_none()`,
+com o raciocínio de que o driver não alcança nenhuma ação de funding antes do arming
+(`driver.rs:369-378`) e portanto a observação de altura — que custa 60 s por observador
+XMR, `production_height_timer_v23.rs:384-392` — seria desperdício puro nessa fase.
+
+**Medição (rodada 48): não funcionou e piorou.**
+
+- `ArmRefunds` chegou aos 30 min, exatamente como nas rodadas 44/45. A observação XMR
+  **não** domina a fase de bootstrap: a janela dura 60 s e a macro só reobserva quando
+  ela caduca, então o custo real era ~12 observações, não uma por rodada.
+- Aos 62 min a rota continuava em `rev=2`, enquanto a rodada 45 já estava em `rev=4`
+  com o upstream em `FUNDING_BROADCAST`.
+- Diagnóstico final: **as duas pernas** presas em `step=AwaitingPeer`, não só a
+  downstream.
+
+Causa do dano: `step_f7_funding_v20` é um *pump* do laço composto, independente do
+driver. Fechar a janela antes do arming faz o `contracts.step_f7_funding_v20` interno
+devolver `WindowClosed` e o aperto de mão de readiness (`0x17`) nunca progride. O
+raciocínio "o driver não chega no funding" era verdadeiro para o driver e falso para o
+pump.
+
+**Revertido.** Não repetir. A lição: a janela de funding não é só um portão do driver,
+ela também governa o pump de readiness.
+
+## Rodada 50 — a parede downstream é inanição da janela de funding
+
+Primeira rodada com os **dois** daemons relatando (correção: `report_diagnostics_v25`
+agora termina o que ainda estiver vivo antes de ler o stderr — um daemon vivo nunca
+chega a EOF e metade da evidência sumia a cada rodada).
+
+Estado alcançado, o melhor até aqui e mais cedo (41 min): rota em `rev=4`
+(`FreezeTermsV2, ArmRefunds, CommitAction, CustodyProgressRecorded`) e **upstream em
+`stage_tag=6` (`FUNDING_BROADCAST`) nos dois lados**.
+
+Quórum de readiness (`DOM_READY_QUORUM_V25`):
+
+```
+3x accepted=0 bound_rev=25 cur_rev=25 next=76d02f
+3x accepted=1 bound_rev=25 cur_rev=26 next=08d044
+```
+
+O quórum **avança**: o primeiro voto `0x17` entra (`cur_rev` 25 -> 26) e o segundo não.
+Ou seja, não é um lado mudo — é o segundo voto que não fecha.
+
+Passos de funding (`DOM_NATIVE_F7_FUNDING_V24`):
+
+```
+Upstream    12 AwaitingPeer | 12 Staged | 16 Committed |  0 WindowClosed
+Downstream  10 AwaitingPeer | 10 Staged |  0 Committed | 15 WindowClosed
+```
+
+**A assimetria é o achado.** O upstream nunca vê `WindowClosed` e compromete 16 vezes.
+O downstream chega a `Staged` mas **nunca** a `Committed`, e bate em `WindowClosed` 15
+vezes — o maior resultado isolado dessa perna.
+
+Mecanismo: `refresh_funding_window_v23!` é chamado no início da iteração de cada perna,
+mas `retry_height_observation_v23` é **uma única bandeira compartilhada pelas duas**.
+Ela é posta em `true` no topo da rodada e, ao fim do refresh, recebe
+`funding_window_v23.available()`. Quando a observação da primeira perna falha, a
+bandeira vira `false` e a **segunda perna não tem direito a tentar** — roda a rodada
+inteira com a janela fechada. O upstream não sofre porque, quando não tem o quórum, ele
+retorna `AwaitingPeer` **antes** de qualquer checagem de janela
+(`production_funding_runtime_v20.rs:88-94`); só a perna que chega a `Staged` precisa da
+janela e é justamente a que a encontra fechada.
+
+Isto é inanição, não uma recusa de segurança: a janela existe para garantir observação
+de altura fresca antes de autorizar funding, e negá-la à segunda perna por causa da
+primeira não serve a essa garantia. A correção tem de dar a cada perna seu próprio
+direito de observação na rodada, sem afrouxar o que a janela verifica.
+
+## Rodada 51 — a inanição da janela não era o bloqueio (revertido)
+
+Tentativa: dar a cada perna sua própria tentativa de observação por rodada
+(`retry_height_observation_v23 = true` antes do refresh de cada perna), para acabar com
+a inanição medida na rodada 50.
+
+**Resultado: a correção fez o que prometia e ainda assim a rodada piorou.**
+
+- `WindowClosed` **desapareceu por completo** — o objetivo declarado foi atingido.
+- Mas as duas pernas ficaram só em `AwaitingPeer` (29 cada), nenhuma chegou a `Staged`,
+  e o Bob nem armou os refunds em 52 min (a rodada 50 estava em `rev=4` aos 41 min).
+- Custo causal plausível: a segunda perna passa a pagar mais uma observação de até 60 s
+  por rodada, desacelerando a cerimônia inteira.
+
+**Revertido.**
+
+### O invariante que sobrou, e é o alvo real
+
+Em **três rodadas seguidas** (49, 50, 51) o quórum de readiness tem exatamente a mesma
+forma:
+
+```
+accepted=0 bound_rev=25 cur_rev=25 next=<par A>
+accepted=1 bound_rev=25 cur_rev=26 next=<par B>
+```
+
+O **primeiro** voto `0x17` entra e move a sessão de 25 para 26. O **segundo nunca
+chega**. Isso é independente da janela de funding, independente do relay (inocentado na
+rodada 47) e independente do ciclo de vida do grafo (`custodied` nas duas pernas, zero
+`GateAbsent` em ~250 observações).
+
+Próximo alvo, sem ambiguidade: por que o participante `next=<par B>` não produz seu
+`0x17` depois que o primeiro voto foi aceito. O caminho é
+`step_f7_readiness_v19` -> `recovery_mounted_for_readiness_v23` ->
+`prepare_xmr_ready_to_fund_dsc1_signing_request_v12`, que devolve `Ok(None)` em silêncio
+quando `signer.participant_id != vote.participant_id`. Instrumentar esse `Ok(None)` é o
+que falta.
+
+## Rodada 52 — a causa: um dos pares nunca recebe o setup do grafo XMR
+
+Instrumentado o último ponto mudo do caminho de readiness
+(`prepare_xmr_ready_to_fund_dsc1_signing_request_v12`, o `Ok(None)` de
+`signer.participant_id != vote.participant_id`).
+
+```
+SIGNER:  1x signer=d6050f expected=d6050f match=true
+QUORUM:  2x accepted=0 bound_rev=25 cur_rev=25 next=d6050f
+         2x accepted=1 bound_rev=25 cur_rev=26 next=d5f889
+STEPS:   20x leg=Upstream step=AwaitingPeer | 20x leg=Downstream step=AwaitingPeer
+GATE:    1x Upstream produced | 1x Upstream custodied
+         1x Downstream produced | 1x Downstream custodied     <- so 4 linhas, de UM daemon
+```
+
+Leitura:
+
+1. O primeiro par (`d6050f`) **se reconhece** (`match=true`), assina, e o quórum vai de
+   `accepted=0` para `accepted=1`. Esse lado está correto.
+2. O segundo par (`d5f889`) **nunca imprime uma linha de assinante**. Não é que ele tome
+   a saída muda — ele nunca chega a `prepare_xmr_ready_to_fund_dsc1_signing_request_v12`.
+3. Os dois daemons relataram, mas os tokens de portão aparecem só **4 vezes** (um
+   daemon, duas pernas, dois estados). O segundo daemon não emite **nenhum** token de
+   portão e ainda assim alcança o fim de `step_f7_funding_v20` (20 `AwaitingPeer` por
+   perna). O único caminho da função que não emite token é o ramo **`else`**, alcançado
+   quando `self.xmr_graph_setup_v22[index]` é `None` e o `bootstrap_v16[index]` está
+   completo (`production_relay_stage12.rs:810-820`).
+
+**Conclusão: um dos dois pares nunca recebe o setup do grafo XMR.** Sem ele
+`activate_recovery_v23` nunca roda desse lado, `xmr_refund_readiness_v23` nunca é
+instalado, `step_f7_readiness_v19` nunca produz o `0x17` — e por isso o quórum trava
+eternamente em `accepted=1`. Também explica por que esse mesmo lado nunca arma os
+refunds (`rev=1` enquanto o par está em `rev=2`): o arming exige a mesma prontidão
+nativa.
+
+Alvo seguinte, sem ambiguidade: por que `xmr_graph_setup_v22[leg]` fica `None` em um dos
+pares. Ver `production_relay_xmr_graph_v23.rs` (`xmr_custody_setup_v23`,
+`mount_xmr_custody_resources_v23`) e o caminho de enrollment nativo que o popula.

@@ -145,11 +145,22 @@ impl ProductionRelayNetworkRuntimeV1 {
             return Err(ProductionRelayNetworkRuntimeErrorV1::InvalidConfiguration);
         }
 
+        bump_exchange_diag_v25(EXCHANGE_DIAG_CALL_V25);
         if link.mode() == ProductionRelayEndpointModeV1::Connect {
-            let stream = self.connect_with_deadline(link.address())?;
-            return session
-                .exchange(identity, relay, stream)
-                .map_err(map_authenticated_exchange_error);
+            let stream = match self.connect_with_deadline(link.address()) {
+                Ok(stream) => {
+                    bump_exchange_diag_v25(EXCHANGE_DIAG_CONNECT_OK_V25);
+                    stream
+                }
+                Err(error) => {
+                    bump_exchange_diag_v25(EXCHANGE_DIAG_CONNECT_FAIL_V25);
+                    return Err(error);
+                }
+            };
+            return session.exchange(identity, relay, stream).map_err(|error| {
+                bump_exchange_diag_v25(EXCHANGE_DIAG_SESSION_ERROR_V25);
+                map_authenticated_exchange_error(error)
+            });
         }
 
         // The listening side drains backlog corpses inside one unchanged
@@ -184,6 +195,7 @@ impl ProductionRelayNetworkRuntimeV1 {
                     if departed && Instant::now() < deadline {
                         continue;
                     }
+                    bump_exchange_diag_v25(EXCHANGE_DIAG_SESSION_ERROR_V25);
                     return Err(map_authenticated_exchange_error(error));
                 }
             }
@@ -260,10 +272,14 @@ impl ProductionRelayNetworkRuntimeV1 {
 
         let outcome = loop {
             match listener.accept() {
-                Ok((stream, _peer)) => break Ok(stream),
+                Ok((stream, _peer)) => {
+                    bump_exchange_diag_v25(EXCHANGE_DIAG_ACCEPT_OK_V25);
+                    break Ok(stream);
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
+                        bump_exchange_diag_v25(EXCHANGE_DIAG_ACCEPT_DEADLINE_V25);
                         break Err(ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed);
                     }
                     // Two daemons walk their legs in the same fixed order but
@@ -273,6 +289,7 @@ impl ProductionRelayNetworkRuntimeV1 {
                     // "peer has not arrived" outcome instead of letting both
                     // exchange windows expire on mismatched legs (measured).
                     if sibling.is_some_and(listener_has_pending_peer_v25) {
+                        bump_exchange_diag_v25(EXCHANGE_DIAG_SIBLING_YIELD_V25);
                         break Err(ProductionRelayNetworkRuntimeErrorV1::AcceptDeadlineElapsed);
                     }
                     thread::sleep(remaining.min(ACCEPT_POLL_INTERVAL_V1));
@@ -719,7 +736,10 @@ mod tests {
                 ProductionRelayNetworkRuntimeV1::new(bounds)
                     .exchange_configured_link(&wrong_listener, &session, &identity, &mut relay)
                     .expect_err("unexpected initiator identity must fail Noise authentication"),
-                ProductionRelayNetworkRuntimeErrorV1::AuthenticatedExchangeFailed
+                // Each refusal keeps its own name (see the mapping above); a
+                // wrong initiator identity is refused as exactly that, not as
+                // the collapsed exchange tag this once asserted.
+                ProductionRelayNetworkRuntimeErrorV1::IdentityAuthenticationRefused
             );
             Ok(())
         });
@@ -762,4 +782,39 @@ pub(crate) fn listener_has_pending_peer_v25(listener: &TcpListener) -> bool {
         tv_nsec: 0,
     };
     matches!(poll(&mut fds, Some(&immediate)), Ok(ready) if ready > 0)
+}
+
+// DIAG(temporary): per-leg rendezvous outcome counters. Closed integers only,
+// printed exclusively by the activation liveness watchdog so a stalled leg
+// names which half of the rendezvous never completed. No address, identity or
+// payload is observable through them.
+thread_local! {
+    static EXCHANGE_DIAG_V25: std::cell::Cell<[[u32; 7]; 2]> =
+        const { std::cell::Cell::new([[0; 7]; 2]) };
+    static EXCHANGE_DIAG_LEG_V25: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) const EXCHANGE_DIAG_CALL_V25: usize = 0;
+pub(crate) const EXCHANGE_DIAG_CONNECT_OK_V25: usize = 1;
+pub(crate) const EXCHANGE_DIAG_CONNECT_FAIL_V25: usize = 2;
+pub(crate) const EXCHANGE_DIAG_ACCEPT_OK_V25: usize = 3;
+pub(crate) const EXCHANGE_DIAG_ACCEPT_DEADLINE_V25: usize = 4;
+pub(crate) const EXCHANGE_DIAG_SIBLING_YIELD_V25: usize = 5;
+pub(crate) const EXCHANGE_DIAG_SESSION_ERROR_V25: usize = 6;
+
+pub(crate) fn set_exchange_diag_leg_v25(index: usize) {
+    EXCHANGE_DIAG_LEG_V25.with(|cell| cell.set(usize::min(index, 1)));
+}
+
+fn bump_exchange_diag_v25(slot: usize) {
+    let leg = EXCHANGE_DIAG_LEG_V25.with(std::cell::Cell::get);
+    EXCHANGE_DIAG_V25.with(|cell| {
+        let mut counters = cell.get();
+        counters[leg][slot] = counters[leg][slot].saturating_add(1);
+        cell.set(counters);
+    });
+}
+
+pub(crate) fn exchange_diag_v25(index: usize) -> [u32; 7] {
+    EXCHANGE_DIAG_V25.with(std::cell::Cell::get)[usize::min(index, 1)]
 }

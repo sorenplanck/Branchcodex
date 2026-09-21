@@ -1888,8 +1888,8 @@ mod tests {
         let scalar = scalar_bytes(31);
         let exact = bindings(33, &scalar)?;
         let capabilities = retirement_capabilities(fixture.temporary.path(), &exact, 2)?;
-        let [at_terminal, after_one, after_two] = <[_; 3]>::try_from(capabilities)
-            .map_err(|_| "three capabilities")?;
+        let [at_terminal, after_one, after_two] =
+            <[_; 3]>::try_from(capabilities).map_err(|_| "three capabilities")?;
         assert!(after_one.revision() > at_terminal.revision());
         assert!(after_two.revision() > after_one.revision());
         let vault =

@@ -64,7 +64,6 @@ impl ProductionXmrRecoverySigningOwnerV23 {
         ]
     }
 
-
     pub(crate) fn auxiliary_binding_v23(
         &self,
         edge: XmrGraphRecoverySigningEdgeV23,
@@ -282,8 +281,15 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         templates: &XmrRecoveryGraphTemplatesV12,
         keys: &XmrGraphSigningKeysV22,
         expiry: relay::TimelockSpec,
+        renew_actuator_lease: &mut dyn FnMut() -> Result<(), ()>,
     ) -> Result<(), ProductionBootstrapRuntimeErrorV16> {
         use ProductionBootstrapRuntimeErrorV16 as Error;
+        // Building the signing owner persists three sessions, three private
+        // vaults and three shares, each with its own durable commits; measured
+        // at up to 124 s in one uninterrupted block on a slow disk, longer
+        // than the DOM actuator lease. Renew after every durable sub-step so
+        // the retained authority is kept exactly as long as the work runs.
+        let mut keep = || renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25);
         if self.session_id != parent_binding.session_id()
             || templates.binding().session_id != self.session_id
             || templates.binding().chain_id != *chain.as_bytes()
@@ -381,6 +387,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                         *self.identity.reference().key_reference(),
                     )
                     .map_err(|_| Error::Binding)?;
+                keep()?;
             }
             // Open all private vaults before taking any wallet share. These are
             // distinct roots, never the bootstrap BP or parent Funding vault.
@@ -396,6 +403,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                         .provision(&self.store, bindings[index], purposes[index])
                         .map_err(|_| Error::Binding)?,
                 );
+                keep()?;
             }
             let shares = material
                 .xmr_graph_shares_v22
@@ -409,12 +417,15 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                     cancel_hash,
                 )
                 .map_err(|_| Error::Binding)?;
+            keep()?;
             let refund = shares
                 .take_refund_adaptor_share_v23(&self.store, templates)
                 .map_err(|_| Error::Binding)?;
+            keep()?;
             let compensation = shares
                 .take_compensation_share_v23(&self.store, templates)
                 .map_err(|_| Error::Binding)?;
+            keep()?;
             let mut signers = Vec::with_capacity(3);
             for (index, (vault, share)) in vaults
                 .into_iter()
@@ -431,6 +442,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
                     )
                     .map_err(|_| Error::Binding)?,
                 );
+                keep()?;
             }
             *retained = Some(ProductionXmrRecoverySigningOwnerV23 {
                 bindings,
@@ -471,6 +483,7 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         if owner.refund_complete {
             return Ok(());
         }
+        keep()?;
         // The auxiliary signers at indices 0 and 2 remain held. Sending them
         // through this parent's session-scoped Relay is forbidden.
         let mut relay = self.relay.try_borrow_mut().map_err(|_| Error::Binding)?;

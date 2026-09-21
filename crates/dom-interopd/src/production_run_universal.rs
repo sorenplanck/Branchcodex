@@ -768,7 +768,19 @@ pub(super) fn run(
     let relay_backoff = Duration::from_millis(runtime_bounds.relay_poll_backoff_ms);
     // The live services' RPC ceiling may be 30 seconds. The composite loop
     // separately caps connect/accept plus exchange at 30 seconds combined.
-    let composite_call_bound = external_call_bound.min(Duration::from_secs(15));
+    // The route supervisor refuses any external block longer than its lease
+    // renewal window, and one authenticated connection carries a socket wait
+    // plus every scope's exchange. Derive the per-call bound from that
+    // authenticated window so the worst case fits it exactly.
+    let route_block_ceiling = Duration::from_millis(
+        runtime_bounds
+            .lease_duration_ms
+            .checked_sub(runtime_bounds.renew_before_ms)
+            .ok_or(ProductionRunErrorV1::RouteRuntime)?,
+    );
+    let composite_call_bound = external_call_bound.min(Duration::from_secs(15)).min(
+        crate::production_composite_loop::call_bound_for_blocking_ceiling_v25(route_block_ceiling),
+    );
     let composite_config = ProductionCompositeLoopConfigV1::new(
         composite_call_bound,
         composite_call_bound,
@@ -1221,6 +1233,7 @@ pub(super) fn run(
                 .trusted_chain_id(),
             runtime: dom_runtime,
             route_terms_digest: inputs.admission().frozen_bindings().terms_digest,
+            dom_consensus_rules_digest: dom_deployment.deployment().consensus_rules_digest,
             materialization_scope: dom_materialization_scope,
         },
         runtime_bounds.actuator_lease_ms,
@@ -1287,9 +1300,10 @@ pub(super) fn run(
     // duplicate EVM RPC is opened: its source shares the retained refund
     // adapter and verifies the exact finalized lock event against exposure.
     // ------------------------------------------------------------------
-    let first_exposure =
-        ProductionCustodiedFirstExposureClaimAuthorityV1::bind(&inputs, &role_plan)
-            .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+    let first_exposure = ProductionCustodiedFirstExposureClaimAuthorityV1::bind(
+        &inputs, &role_plan,
+    )
+    .map_err(|_| plan_source_diag_v25("L1292_ProductionCustodiedFirstExposureClaimAuthorityV1"))?;
     let [upstream_dom_consumer, downstream_dom_consumer] = dom_public_secret_consumers;
     drop(upstream_dom_consumer);
     let dom_trusted_chain_id = relay_stage12_owner
@@ -1302,12 +1316,12 @@ pub(super) fn run(
         downstream_dom_binding,
         dom_trusted_chain_id,
     )
-    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+    .map_err(|_| plan_source_diag_v25("L1305_downstream"))?;
     let (dom_secret_source, dom_secret_installer) = relay_stage12_owner
         .leg_mut(LegIdV1::Downstream)
         .contracts_mut()
         .dom_public_secret_source(dom_source_scope, downstream_dom_consumer)
-        .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+        .map_err(|_| plan_source_diag_v25("L1310_dom_public_secret_source"))?;
     let (upstream_public_source, bitcoin_secret_installer) = match upstream_public_source {
         UpstreamPublicSourceV11::Bitcoin { chain_id } => {
             let (source, installer) = ProductionLateBitcoinPublicSecretSourceV1::new_installable(
@@ -1315,7 +1329,7 @@ pub(super) fn run(
                 composition_digest,
                 chain_id,
             )
-            .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+            .map_err(|_| plan_source_diag_v25("L1318_new_installable"))?;
             (
                 Some(Box::new(source) as Box<dyn ProductionChainPublicSecretSourceV1>),
                 Some(installer),
@@ -1347,7 +1361,7 @@ pub(super) fn run(
         dom_secret_installer,
         bitcoin_secret_installer,
     )
-    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+    .map_err(|_| plan_source_diag_v25("L1350_authenticate"))?;
     let mut bitcoin_pump = materialization_owner.bitcoin_post_anchor_pump_v11();
     let mut funding_identities_v20 = materialization_owner.funding_identity_reader_v20();
     let mut actuator_heartbeat = materialization_owner.actuator_heartbeat_v12();
@@ -1374,16 +1388,16 @@ pub(super) fn run(
         route_secret_retention,
         draft_materializer,
     )
-    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+    .map_err(|_| plan_source_diag_v25("L1377_composition_owner"))?;
     let (runtime_admission, time_guard) = inputs
         .into_runtime_admission_and_time_guard()
-        .map_err(|_| ProductionRunErrorV1::PlanSource)?;
+        .map_err(|_| plan_source_diag_v25("L1380_into_runtime_admission_and_time_guard"))?;
     let plan_persistence = ProductionSettlementPlanPersistenceOwnerV1::new(
         time_guard,
         plan_authority,
         trusted_now_millis_v1()?,
     )
-    .map_err(|_| ProductionRunErrorV1::PlanSource)?
+    .map_err(|_| plan_source_diag_v25("L1386_trusted_now_millis_v1"))?
     .with_evidence_inbox_v5(
         crate::production_time_inbox::ProductionTimeEvidenceInboxV5::new(Arc::clone(
             &state_capability,
@@ -1463,10 +1477,10 @@ pub(super) fn run(
         runtime_bounds.recovery_backoff_ms,
         supervisor_config,
     )
-    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+    .map_err(|error| route_runtime_diag_v25("L1467_RouteRuntimeConfigV1", &error))?;
     let mut route_runtime =
         ProductionRouteRuntimeV1::new(supervisor, runtime_admission, authorities, runtime_config)
-            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+            .map_err(|error| route_runtime_diag_v25("L1470_ProductionRouteRuntimeV1", &error))?;
 
     // ------------------------------------------------------------------
     // Stages 30-31 — interleaved Relay/route execution until terminal or safe
@@ -1493,7 +1507,7 @@ pub(super) fn run(
                 || {
                     route_runtime
                         .prepare_bounded_external_block(Duration::from_millis(1))
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        .map_err(|error| route_runtime_diag_v25("L1497_from_millis", &error))?;
                     actuator_heartbeat
                         .renew()
                         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1515,6 +1529,7 @@ pub(super) fn run(
                 funding_window_v23.close();
                 let observation_started = std::time::Instant::now();
                 let mut all_before_deadline = true;
+                let mut observation_tokens_v25 = String::new();
                 let observation_bound = if xmr_deadline_sources_v23.is_empty() {
                     external_call_bound
                 } else {
@@ -1522,7 +1537,9 @@ pub(super) fn run(
                 };
                 route_runtime
                     .prepare_bounded_external_block(observation_bound)
-                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    .map_err(|error| {
+                        route_runtime_diag_v25("L1526_prepare_bounded_external_block", &error)
+                    })?;
                 actuator_heartbeat
                     .renew()
                     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1531,6 +1548,14 @@ pub(super) fn run(
                     external_call_bound,
                     &xmr_deadline_sources_v23,
                 ) {
+                    observation_tokens_v25.push(' ');
+                    observation_tokens_v25.push_str(match &observed {
+                        Ok(deadlines) if deadlines.is_empty() => "open",
+                        Ok(_) => "due",
+                        Err(crate::supervisor::AuthorityRefusalV1::Unavailable) => "unavailable",
+                        Err(crate::supervisor::AuthorityRefusalV1::Refused) => "refused",
+                        Err(crate::supervisor::AuthorityRefusalV1::Inconsistent) => "inconsistent",
+                    });
                     match observed {
                         Ok(deadlines) => {
                             all_before_deadline &= deadlines.is_empty();
@@ -1549,6 +1574,11 @@ pub(super) fn run(
                 if all_before_deadline {
                     funding_window_v23.observed_all_before_deadline(observation_started);
                 }
+                // DIAG(temporary): the height observation is the sole gate of
+                // fresh funding and every one of its refusals is silent, so a
+                // permanently closed window looks exactly like a healthy idle
+                // loop. One line per change of outcome, closed tokens only.
+                diag_funding_window_v25(funding_window_v23.available(), &observation_tokens_v25);
                 // A failed/too-slow observation closes fresh funding for this
                 // round. Do not spend another full RPC budget at each signing
                 // seam and delay recovery. The next round retries naturally.
@@ -1563,14 +1593,16 @@ pub(super) fn run(
             for _ in 0..16 {
                 let mut moved = false;
                 for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
-                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
-                    {
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control).map_err(
+                        |error| route_runtime_diag_v25("L1568_shutdown_requested", &error),
+                    )? {
                         break;
                     }
                     route_runtime
                         .prepare_bounded_external_block(relay_bound)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        .map_err(|error| {
+                            route_runtime_diag_v25("L1574_prepare_bounded_external_block", &error)
+                        })?;
                     actuator_heartbeat
                         .renew()
                         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1590,7 +1622,7 @@ pub(super) fn run(
                 }
                 let backoff = relay_backoff.min(Duration::from_millis(10));
                 crate::RouteRunControlV1::wait(&mut _run_control, backoff)
-                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    .map_err(|error| route_runtime_diag_v25("L1594_RouteRunControlV1", &error))?;
             }
         }};
     }
@@ -1623,15 +1655,17 @@ pub(super) fn run(
                         continue;
                     }
                     outstanding = true;
-                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
-                        || !budget.permits(std::time::Instant::now(), relay_bound)
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control).map_err(
+                        |error| route_runtime_diag_v25("L1628_shutdown_requested", &error),
+                    )? || !budget.permits(std::time::Instant::now(), relay_bound)
                     {
                         break 'drain;
                     }
                     route_runtime
                         .prepare_bounded_external_block(relay_bound)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        .map_err(|error| {
+                            route_runtime_diag_v25("L1635_prepare_bounded_external_block", &error)
+                        })?;
                     actuator_heartbeat
                         .renew()
                         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1644,15 +1678,15 @@ pub(super) fn run(
                     if progress[index].complete() {
                         route_runtime
                             .prepare_bounded_external_block(Duration::from_millis(1))
-                            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                            .map_err(|error| route_runtime_diag_v25("L1648_from_millis", &error))?;
                         actuator_heartbeat
                             .renew()
                             .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
                         continue;
                     }
-                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
-                        || !budget.permits(std::time::Instant::now(), Duration::from_millis(1))
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control).map_err(
+                        |error| route_runtime_diag_v25("L1655_shutdown_requested", &error),
+                    )? || !budget.permits(std::time::Instant::now(), Duration::from_millis(1))
                     {
                         break 'drain;
                     }
@@ -1660,7 +1694,12 @@ pub(super) fn run(
                         let call_bound = Duration::from_secs(60);
                         route_runtime
                             .prepare_bounded_external_block(call_bound)
-                            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                            .map_err(|error| {
+                                route_runtime_diag_v25(
+                                    "L1664_prepare_bounded_external_block",
+                                    &error,
+                                )
+                            })?;
                         actuator_heartbeat
                             .renew()
                             .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1690,13 +1729,15 @@ pub(super) fn run(
                     // a stale writer must not send a newly staged response.
                     route_runtime
                         .prepare_bounded_external_block(relay_bound)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        .map_err(|error| {
+                            route_runtime_diag_v25("L1694_prepare_bounded_external_block", &error)
+                        })?;
                     actuator_heartbeat
                         .renew()
                         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
-                        || !budget.permits(std::time::Instant::now(), relay_bound)
+                    if crate::RouteRunControlV1::shutdown_requested(&mut _run_control).map_err(
+                        |error| route_runtime_diag_v25("L1699_shutdown_requested", &error),
+                    )? || !budget.permits(std::time::Instant::now(), relay_bound)
                     {
                         break 'drain;
                     }
@@ -1705,7 +1746,7 @@ pub(super) fn run(
                         .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
                     route_runtime
                         .prepare_bounded_external_block(Duration::from_millis(1))
-                        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                        .map_err(|error| route_runtime_diag_v25("L1709_from_millis", &error))?;
                     actuator_heartbeat
                         .renew()
                         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
@@ -1721,7 +1762,7 @@ pub(super) fn run(
                     break;
                 }
                 crate::RouteRunControlV1::wait(&mut _run_control, backoff)
-                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    .map_err(|error| route_runtime_diag_v25("L1725_RouteRunControlV1", &error))?;
             }
         }};
     }
@@ -1729,7 +1770,7 @@ pub(super) fn run(
     loop {
         let before_round = route_runtime
             .snapshot()
-            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+            .map_err(|error| route_runtime_diag_v25("L1733_snapshot", &error))?;
         if xmr_recovery_pumps_v22
             .iter()
             .any(|pump| pump.terminal_refund_leg_v24(&before_round).is_some())
@@ -1739,97 +1780,137 @@ pub(super) fn run(
             drain_terminal_refund_v24!(before_round);
             break;
         }
+        // Service Relay first. In particular, the bilateral 0x17 readiness
+        // exchange must complete before any XMR height RPC can hold this
+        // process for its 60-second observation bound. Running the RPC first
+        // allowed the two peers to become phase-shifted: one process waited in
+        // observation while the other spent its short authenticated exchange
+        // window, leaving a durable readiness envelope permanently queued.
+        let relay_half = crate::production_composite_loop::run_production_composite_relay_half_v25(
+            &mut relay_loop,
+            &mut route_runtime,
+            &mut _run_control,
+            &mut || actuator_heartbeat.renew().map_err(|_| ()),
+        )
+        .map_err(|error| route_runtime_diag_v25("relay_half", &error))?;
+        let mut f7_readiness_complete_v25 = true;
+        for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
+            let selected = relay_loop.stage12_owner_mut_v11().leg_mut(leg);
+            let chain = selected.trusted_chain_id();
+            f7_readiness_complete_v25 &= selected
+                .contracts_mut()
+                .f7_readiness_complete_v25(chain)
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+        }
+
         retry_height_observation_v23 = true;
-        refresh_funding_window_v23!();
-        for pump in &mut xmr_recovery_pumps_v22 {
-            // The responder reads original refund effects and existing local
-            // bytes even after route dispatch has moved past materialization.
-            // No peer response is a prerequisite for the funder's own refund.
-            let snapshot = route_runtime
-                .snapshot()
-                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
-            route_runtime
-                .prepare_bounded_external_block(std::time::Duration::from_secs(60))
-                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
-            actuator_heartbeat
-                .renew()
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-            match pump.tick_remote_refund_v24(&snapshot) {
-                Ok(()) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
-            }
-            // Separate funding observation and execution ticks preserve the
-            // one-minute freshness bound without a second sidecar owner.
-            route_runtime
-                .prepare_bounded_external_block(std::time::Duration::from_secs(60))
-                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
-            actuator_heartbeat
-                .renew()
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-            match pump.tick() {
-                Ok(Some(report)) => match route_runtime.record_xmr_compensation_v22(report) {
+        if f7_readiness_complete_v25 {
+            refresh_funding_window_v23!();
+        } else {
+            // Route/refund bootstrap may still advance below, but fresh native
+            // funding and all slow observers remain closed until both legs
+            // have actually ingested both readiness votes.
+            funding_window_v23.close();
+        }
+        if f7_readiness_complete_v25 {
+            for pump in &mut xmr_recovery_pumps_v22 {
+                // The responder reads original refund effects and existing local
+                // bytes even after route dispatch has moved past materialization.
+                // No peer response is a prerequisite for the funder's own refund.
+                let snapshot = route_runtime
+                    .snapshot()
+                    .map_err(|error| route_runtime_diag_v25("L1751_snapshot", &error))?;
+                route_runtime
+                    .prepare_bounded_external_block(std::time::Duration::from_secs(60))
+                    .map_err(|error| route_runtime_diag_v25("L1754_from_secs", &error))?;
+                actuator_heartbeat
+                    .renew()
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                match pump.tick_remote_refund_v24(&snapshot) {
                     Ok(()) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
                     Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
-                },
-                Ok(None) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                }
+                // Separate funding observation and execution ticks preserve the
+                // one-minute freshness bound without a second sidecar owner.
+                route_runtime
+                    .prepare_bounded_external_block(std::time::Duration::from_secs(60))
+                    .map_err(|error| route_runtime_diag_v25("L1766_from_secs", &error))?;
+                actuator_heartbeat
+                    .renew()
+                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                match pump.tick() {
+                    Ok(Some(report)) => match route_runtime.record_xmr_compensation_v22(report) {
+                        Ok(())
+                        | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
+                        Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                    },
+                    Ok(None)
+                    | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
+                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                }
             }
-        }
-        actuator_heartbeat
-            .renew()
-            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
-        // Observe/install receiver authority before Relay drains the next
-        // candidate. Each native profile decides readiness; absent F7 on a
-        // Bitcoin leg is not treated as a universal claim authorization.
-        for (leg, binding) in [
-            (LegIdV1::Upstream, upstream_dom_binding),
-            (LegIdV1::Downstream, downstream_dom_binding),
-        ] {
-            refresh_funding_window_v23!();
-            match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_funding_v20(
-                leg,
-                binding,
-                &dom_f7_scanner,
-                &funding_window_v23,
-                trusted_now_millis_v1()? / 1_000,
-            )) {
-                Ok(()) => {}
-                Err(error) if error.retryable() => {}
-                Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
-            }
-            let index = match leg {
-                LegIdV1::Upstream => 0,
-                LegIdV1::Downstream => 1,
-            };
-            match owned_native_phase_v24!(relay_loop
-                .stage12_owner_mut_v11()
-                .step_native_xmr_f7_claim_v23(
-                    leg,
-                    binding,
-                    Rc::clone(&dom_f7_scanner),
-                    trusted_now_millis_v1()? / 1_000,
-                )) {
-                Ok(()) => {}
-                Err(error) if error.retryable_v20() => {}
-                // Closed Claim windows must leave noncooperative recovery running.
-                Err(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
-                    f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed,
-                )) => {}
-                Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
-            }
-            if let Some(face) = claim_faces_v20[index] {
-                let child_leg = match leg {
-                    LegIdV1::Upstream => settlement_coordinator::SettlementLegV1::Upstream,
-                    LegIdV1::Downstream => settlement_coordinator::SettlementLegV1::Downstream,
+            actuator_heartbeat
+                .renew()
+                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            // Observe/install receiver authority after the readiness Relay
+            // exchange. Each native profile decides readiness; absent F7 on a
+            // Bitcoin leg is not treated as a universal claim authorization.
+            for (leg, binding) in [
+                (LegIdV1::Upstream, upstream_dom_binding),
+                (LegIdV1::Downstream, downstream_dom_binding),
+            ] {
+                refresh_funding_window_v23!();
+                match owned_native_phase_v24!(relay_loop
+                    .stage12_owner_mut_v11()
+                    .step_f7_funding_v20(
+                        leg,
+                        binding,
+                        &dom_f7_scanner,
+                        &funding_window_v23,
+                        trusted_now_millis_v1()? / 1_000,
+                    )) {
+                    Ok(()) => {}
+                    // DIAG(temporary): a retryable funding refusal is indistinguishable
+                    // from success here, so the same refusal can repeat every round of a
+                    // two-hour run without a single line of output.
+                    Err(error) if error.retryable() => {
+                        diag_funding_retryable_v25(leg, &error);
+                    }
+                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                }
+                let index = match leg {
+                    LegIdV1::Upstream => 0,
+                    LegIdV1::Downstream => 1,
                 };
-                match funding_identities_v20.read(
-                    face,
-                    child_leg,
-                    route_id,
-                    bitcoin_calls[index].settlement_id,
-                ) {
-                    Ok(Some(id)) => {
-                        match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_claim_v20(leg, binding,
+                match owned_native_phase_v24!(relay_loop
+                    .stage12_owner_mut_v11()
+                    .step_native_xmr_f7_claim_v23(
+                        leg,
+                        binding,
+                        Rc::clone(&dom_f7_scanner),
+                        trusted_now_millis_v1()? / 1_000,
+                    )) {
+                    Ok(()) => {}
+                    Err(error) if error.retryable_v20() => {}
+                    // Closed Claim windows must leave noncooperative recovery running.
+                    Err(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
+                        f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed,
+                    )) => {}
+                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                }
+                if let Some(face) = claim_faces_v20[index] {
+                    let child_leg = match leg {
+                        LegIdV1::Upstream => settlement_coordinator::SettlementLegV1::Upstream,
+                        LegIdV1::Downstream => settlement_coordinator::SettlementLegV1::Downstream,
+                    };
+                    match funding_identities_v20.read(
+                        face,
+                        child_leg,
+                        route_id,
+                        bitcoin_calls[index].settlement_id,
+                    ) {
+                        Ok(Some(id)) => {
+                            match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_claim_v20(leg, binding,
                             Rc::clone(&dom_f7_scanner), &mut claim_observers_v20[index], id,
                             trusted_now_millis_v1()? / 1_000)) {
                             Ok(()) => {}
@@ -1840,21 +1921,22 @@ pub(super) fn run(
                                 f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed)) => {}
                             Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
                         }
+                        }
+                        Ok(None)
+                        | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
+                        Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
                     }
-                    Ok(None)
-                    | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
+                }
+                match owned_native_phase_v24!(relay_loop
+                    .stage12_owner_mut_v11()
+                    .leg_mut(leg)
+                    .contracts_mut()
+                    .step_f7_claim_receiver_v15(binding, dom_trusted_chain_id, &dom_f7_scanner))
+                {
+                    Ok(_) => {}
+                    Err(error) if error.retryable() => {}
                     Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
                 }
-            }
-            match owned_native_phase_v24!(relay_loop
-                .stage12_owner_mut_v11()
-                .leg_mut(leg)
-                .contracts_mut()
-                .step_f7_claim_receiver_v15(binding, dom_trusted_chain_id, &dom_f7_scanner))
-            {
-                Ok(_) => {}
-                Err(error) if error.retryable() => {}
-                Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
             }
         }
         // One interleaved round (M.8 must be interleaved with each real route
@@ -1867,19 +1949,20 @@ pub(super) fn run(
         // The DOM actuator lease now lives in the DOM child; its heartbeat is
         // the only renewal. It is carried through the relay legs, their
         // bootstraps and the route step, where the wall clock is spent.
-        let relay_half = crate::production_composite_loop::run_production_composite_relay_half_v25(
-            &mut relay_loop,
-            &mut route_runtime,
-            &mut _run_control,
-            &mut || actuator_heartbeat.renew().map_err(|_| ()),
-        )
-        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
         let round_exit = match relay_half {
             crate::production_composite_loop::CompositeRelayHalfV25::Shutdown => {
                 ProductionCompositeRuntimeExitV1::Shutdown { rounds: 0 }
             }
             crate::production_composite_loop::CompositeRelayHalfV25::Stepped { moved } => {
-                refresh_funding_window_v23!();
+                if f7_readiness_complete_v25 {
+                    refresh_funding_window_v23!();
+                    // The route consumes this last observation in the current
+                    // round; retain the fail-closed result explicitly instead
+                    // of leaving the macro's retry state unread.
+                    if !retry_height_observation_v23 {
+                        funding_window_v23.close();
+                    }
+                }
                 crate::production_composite_loop::run_production_composite_route_half_v25(
                     &mut relay_loop,
                     &mut route_runtime,
@@ -1887,14 +1970,14 @@ pub(super) fn run(
                     &mut || actuator_heartbeat.renew().map_err(|_| ()),
                     moved,
                 )
-                .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+                .map_err(|error| route_runtime_diag_v25("route_half", &error))?
             }
         };
         match round_exit {
             ProductionCompositeRuntimeExitV1::Terminal { .. } => {
                 let terminal = route_runtime
                     .snapshot()
-                    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
+                    .map_err(|error| route_runtime_diag_v25("terminal_snapshot", &error))?;
                 drain_terminal_refund_v24!(terminal);
                 drain_terminal_relay_v24!();
                 if terminal_continuation_rounds_v24 < 16 {
@@ -1910,7 +1993,7 @@ pub(super) fn run(
             }
         }
         if crate::RouteRunControlV1::shutdown_requested(&mut _run_control)
-            .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
+            .map_err(|error| route_runtime_diag_v25("shutdown_requested", &error))?
         {
             break;
         }
@@ -1990,6 +2073,86 @@ pub(super) fn run(
     drop(route_runtime);
     drop(relay_loop);
     Ok(())
+}
+
+/// Same diagnostic for a refusal that carries no error value: the authority
+/// or handle was simply absent at that exact site.
+fn absent_route_runtime_diag_v25(site: &'static str) -> ProductionRunErrorV1 {
+    eprintln!("DOM_ROUTE_RUNTIME_DIAG_V25 site={site} depth=0 cause=absent");
+    ProductionRunErrorV1::RouteRuntime
+}
+
+/// DIAG(temporary): one line per change of the funding window's outcome.
+/// `open` is the window's own availability; the tokens that follow are one
+/// closed name per selected height observer, in observation order.
+fn diag_funding_window_v25(open: bool, tokens: &str) {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST_WINDOW_V25: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    LAST_WINDOW_V25.with(|last| {
+        let mut last = last.borrow_mut();
+        let line = format!("open={open} observers={tokens}");
+        if *last != line {
+            eprintln!("DOM_FUNDING_WINDOW_V25 {line}");
+            *last = line;
+        }
+    });
+}
+
+/// DIAG(temporary): one line per change of the retryable funding refusal.
+/// The same refusal repeating every round is the signature of a permanent
+/// stall wearing the costume of a transient one, so the token is printed on
+/// its first occurrence and never again until it changes.
+fn diag_funding_retryable_v25(
+    leg: LegIdV1,
+    error: &crate::production_contracts::ProductionFundingErrorV20,
+) {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST_RETRYABLE_V25: RefCell<[String; 2]> =
+            const { RefCell::new([String::new(), String::new()]) };
+    }
+    let index = match leg {
+        LegIdV1::Upstream => 0,
+        LegIdV1::Downstream => 1,
+    };
+    let text = error.to_string();
+    LAST_RETRYABLE_V25.with(|last| {
+        let mut last = last.borrow_mut();
+        if last[index] != text {
+            eprintln!("DOM_F7_FUNDING_RETRYABLE_V25 leg={leg:?} error={text}");
+            last[index] = text;
+        }
+    });
+}
+
+/// Emits the already-redacted error chain for the long-running composite
+/// route loop. Every error in this chain deliberately exposes only static
+/// refusal classes; no route identifiers, amounts, paths or key material.
+fn route_runtime_diag_v25(
+    site: &'static str,
+    error: &dyn std::error::Error,
+) -> ProductionRunErrorV1 {
+    eprintln!("DOM_ROUTE_RUNTIME_DIAG_V25 site={site} depth=0 cause={error}");
+    let mut depth = 1usize;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if depth > 8 {
+            break;
+        }
+        eprintln!("DOM_ROUTE_RUNTIME_DIAG_V25 site={site} depth={depth} cause={cause}");
+        depth = depth.saturating_add(1);
+        source = cause.source();
+    }
+    ProductionRunErrorV1::RouteRuntime
+}
+
+/// Diagnostic constructor for the settlement plan-source refusals. It prints
+/// only a static site label, never identifiers, amounts or key material.
+fn plan_source_diag_v25(site: &'static str) -> ProductionRunErrorV1 {
+    eprintln!("DOM_PLAN_SOURCE_DIAG_V25 site={site}");
+    ProductionRunErrorV1::PlanSource
 }
 
 /// Deterministic initiator-side F6 RFQ payloads, one per settlement leg
@@ -2144,12 +2307,15 @@ fn drive_f6_initiator_rfq_round_v25(
         let Some(payload) = payloads[index].as_deref() else {
             continue;
         };
-        let step = owner.leg_mut(leg).contracts_mut().drive_f6_initiator_rfq_v25(
-            payload,
-            relay::TimelockSpec::TimestampSeconds {
-                value: expiry_seconds,
-            },
-        );
+        let step = owner
+            .leg_mut(leg)
+            .contracts_mut()
+            .drive_f6_initiator_rfq_v25(
+                payload,
+                relay::TimelockSpec::TimestampSeconds {
+                    value: expiry_seconds,
+                },
+            );
         match step {
             Ok(ProductionF6InitiatorRfqStepV25::Accepted) => {
                 eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=drive leg={index} accepted");
@@ -2165,9 +2331,7 @@ fn drive_f6_initiator_rfq_round_v25(
                 ),
             )) => {}
             Err(error) => {
-                eprintln!(
-                    "DOM_F6_INITIATOR_DIAG_V25 phase=drive leg={index} error={error:?}"
-                );
+                eprintln!("DOM_F6_INITIATOR_DIAG_V25 phase=drive leg={index} error={error:?}");
                 return Err(ProductionRunErrorV1::F6Authorities);
             }
         }
@@ -2763,15 +2927,15 @@ impl SelectedLegV11 {
             Self::Evm { refund, .. } => Ok(UpstreamPublicSourceV11::Ready(Box::new(
                 refund
                     .as_ref()
-                    .ok_or(ProductionRunErrorV1::PlanSource)?
+                    .ok_or_else(|| plan_source_diag_v25("L2766_as_ref"))?
                     .public_secret_source_v4(inputs, leg)
-                    .map_err(|_| ProductionRunErrorV1::PlanSource)?,
+                    .map_err(|_| plan_source_diag_v25("L2768_public_secret_source_v4"))?,
             ))),
             Self::Bitcoin { .. } => Ok(UpstreamPublicSourceV11::Bitcoin {
                 chain_id: inputs
                     .admission()
                     .bitcoin_deployment_capability(leg)
-                    .map_err(|_| ProductionRunErrorV1::PlanSource)?
+                    .map_err(|_| plan_source_diag_v25("L2774_bitcoin_deployment_capability"))?
                     .profile()
                     .chain_id
                     .0,
@@ -2781,7 +2945,7 @@ impl SelectedLegV11 {
             } => {
                 let setup = inputs
                     .solana_session(leg)
-                    .ok_or(ProductionRunErrorV1::PlanSource)?
+                    .ok_or_else(|| plan_source_diag_v25("L2784_solana_session"))?
                     .setup()
                     .clone();
                 Ok(UpstreamPublicSourceV11::Ready(Box::new(

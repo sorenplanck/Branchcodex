@@ -561,6 +561,7 @@ fn run_production(arguments: &[OsString]) -> ExitCode {
     for limit in PRODUCTION_KNOWN_LIMITS_V1 {
         eprintln!("  known limit: {limit}");
     }
+    sigbus_diagnostic_v25::install();
     match run_production_v1(&ProductionRunOptionsV1 { state_dir, mode }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -641,6 +642,103 @@ fn run_simulation(arguments: &[OsString]) -> ExitCode {
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Temporary diagnostic: on SIGBUS, name the mapped file that faulted, then
+/// die exactly as before. Uses only async-signal-safe syscalls.
+#[cfg(feature = "production")]
+mod sigbus_diagnostic_v25 {
+    use nix::libc;
+
+    fn write_all(bytes: &[u8]) {
+        let mut off = 0;
+        while off < bytes.len() {
+            // SAFETY: plain write(2) to stderr from a bounded stack buffer.
+            let n = unsafe { libc::write(2, bytes[off..].as_ptr().cast(), bytes.len() - off) };
+            if n <= 0 {
+                return;
+            }
+            off += n as usize;
+        }
+    }
+
+    fn hex(value: usize, out: &mut [u8; 16]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            let nibble = (value >> ((15 - i) * 4)) & 0xf;
+            *slot = b"0123456789abcdef"[nibble];
+        }
+    }
+
+    fn parse_hex(bytes: &[u8]) -> usize {
+        let mut v = 0usize;
+        for &b in bytes {
+            let d = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => break,
+            };
+            v = (v << 4) | d as usize;
+        }
+        v
+    }
+
+    extern "C" fn handler(_: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+        // SAFETY: the kernel supplies a valid siginfo for SA_SIGINFO.
+        let addr = unsafe { (*info).si_addr() } as usize;
+        let mut h = [0u8; 16];
+        hex(addr, &mut h);
+        write_all(b"DOM_SIGBUS_DIAG_V25 addr=0x");
+        write_all(&h);
+        write_all(b"\n");
+        // SAFETY: open/read/close are async-signal-safe.
+        let fd = unsafe { libc::open(b"/proc/self/maps\0".as_ptr().cast(), libc::O_RDONLY) };
+        if fd >= 0 {
+            let mut buf = [0u8; 8192];
+            let mut line = [0u8; 512];
+            let mut len = 0usize;
+            loop {
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                for &b in &buf[..n as usize] {
+                    if b == b'\n' {
+                        let l = &line[..len];
+                        if let Some(dash) = l.iter().position(|&c| c == b'-') {
+                            let start = parse_hex(&l[..dash]);
+                            let end = parse_hex(&l[dash + 1..]);
+                            if addr >= start && addr < end {
+                                write_all(b"DOM_SIGBUS_DIAG_V25 map=");
+                                write_all(l);
+                                write_all(b"\n");
+                            }
+                        }
+                        len = 0;
+                    } else if len < line.len() {
+                        line[len] = b;
+                        len += 1;
+                    }
+                }
+            }
+            unsafe { libc::close(fd) };
+        }
+        // SAFETY: restore the default action and re-raise to keep the exit.
+        unsafe {
+            libc::signal(libc::SIGBUS, libc::SIG_DFL);
+            libc::raise(libc::SIGBUS);
+        }
+    }
+
+    pub(super) fn install() {
+        // SAFETY: installs a process-wide SIGBUS handler before any work.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handler as usize;
+            action.sa_flags = libc::SA_SIGINFO;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGBUS, &action, std::ptr::null_mut());
         }
     }
 }

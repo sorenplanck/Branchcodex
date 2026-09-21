@@ -7,7 +7,6 @@ mod native_f7_funding_v20;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::os::fd::AsFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -1704,6 +1703,9 @@ pub struct DomActuatorStoreV1 {
     store_instance_id: Digest32,
     database_authority: File,
     _process_lock: File,
+    /// Descriptors of the validated sidecars, held while the connection lives.
+    #[cfg(target_os = "linux")]
+    retained_sidecars: RetainedSidecarsV25,
 }
 
 impl core::fmt::Debug for DomActuatorStoreV1 {
@@ -1753,6 +1755,8 @@ impl DomActuatorStoreV1 {
             store_instance_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage_authority()?;
         sync_directory(parent)?;
@@ -1806,6 +1810,8 @@ impl DomActuatorStoreV1 {
             store_instance_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage_authority()?;
         sync_directory(parent)?;
@@ -1855,6 +1861,8 @@ impl DomActuatorStoreV1 {
             store_instance_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage_authority()?;
         Ok(store)
@@ -4621,7 +4629,10 @@ impl DomActuatorStoreV1 {
         {
             return Err(DomActuatorError::InvalidStorageAuthority);
         }
-        validate_resumable_sidecars(&self.path)
+        #[cfg(target_os = "linux")]
+        return self.retained_sidecars.validate_all(&self.path);
+        #[cfg(not(target_os = "linux"))]
+        return Err(DomActuatorError::LinuxRequired);
     }
 }
 
@@ -7813,44 +7824,95 @@ enum SqliteSidecarKindV1 {
     RollbackJournal,
 }
 
+/// Pre-open validation: no connection exists yet in this process, so the
+/// descriptors may be released as soon as the shapes are checked.
+#[cfg(target_os = "linux")]
 fn validate_resumable_sidecars(path: &Path) -> DomActuatorResult<()> {
-    #[cfg(target_os = "linux")]
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV1::Wal),
-        ("-shm", SqliteSidecarKindV1::SharedMemory),
-        ("-journal", SqliteSidecarKindV1::RollbackJournal),
-    ] {
-        let sidecar = sidecar_path(path, suffix);
-        match fs::symlink_metadata(&sidecar) {
-            Ok(_) => validate_sqlite_sidecar_shape(&sidecar, kind)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(DomActuatorError::StorageUnavailable),
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    return Err(DomActuatorError::LinuxRequired);
-    Ok(())
+    RetainedSidecarsV25::default().validate_all(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_resumable_sidecars(_path: &Path) -> DomActuatorResult<()> {
+    Err(DomActuatorError::LinuxRequired)
 }
 
 #[cfg(target_os = "linux")]
-fn validate_sqlite_sidecar_shape(path: &Path, kind: SqliteSidecarKindV1) -> DomActuatorResult<()> {
-    validate_owner_file(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| DomActuatorError::StorageUnavailable)?;
+/// Descriptors of every validated SQLite sidecar of one store.
+///
+/// Closing any descriptor for a file drops every POSIX (fcntl) lock the
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. Validating a sidecar by opening and closing it while the
+/// connection is live therefore unlocks the WAL index, and a concurrent
+/// reader in another process then reinitializes `-shm` under this process's
+/// mapping (measured: SIGBUS on the route store of a real daemon). The
+/// checks are unchanged; only the descriptors are now retained.
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(u64, u64, File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(&self, path: &Path) -> DomActuatorResult<()> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV1::Wal),
+            ("-shm", SqliteSidecarKindV1::SharedMemory),
+            ("-journal", SqliteSidecarKindV1::RollbackJournal),
+        ] {
+            let sidecar = sidecar_path(path, suffix);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(_) => self.validate(&sidecar, kind)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(DomActuatorError::StorageUnavailable),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self, path: &Path, kind: SqliteSidecarKindV1) -> DomActuatorResult<()> {
+        validate_owner_file(path)?;
+        let named = fs::symlink_metadata(path).map_err(|_| DomActuatorError::StorageUnavailable)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| DomActuatorError::StorageUnavailable)?;
+        if let Some((_, _, retained)) = handles
+            .iter()
+            .find(|(dev, ino, _)| *dev == named.dev() && *ino == named.ino())
+        {
+            return validate_sqlite_sidecar_contents(retained, kind);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| DomActuatorError::StorageUnavailable)?;
+        let opened = file
+            .metadata()
+            .map_err(|_| DomActuatorError::StorageUnavailable)?;
+        if opened.dev() != named.dev() || opened.ino() != named.ino() {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
+        validate_sqlite_sidecar_contents(&file, kind)?;
+        handles.push((named.dev(), named.ino(), file));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_sqlite_sidecar_contents(
+    file: &File,
+    kind: SqliteSidecarKindV1,
+) -> DomActuatorResult<()> {
+    use std::os::unix::fs::FileExt;
+
     let retained = file
         .metadata()
         .map_err(|_| DomActuatorError::StorageUnavailable)?;
-    let named = fs::symlink_metadata(path).map_err(|_| DomActuatorError::StorageUnavailable)?;
-    if retained.dev() != named.dev() || retained.ino() != named.ino() {
-        return Err(DomActuatorError::InvalidStorageAuthority);
-    }
     if retained.len() == 0 {
         return Ok(());
     }
     let mut header = [0u8; 8];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| DomActuatorError::InvalidStorageAuthority)?;
     let valid = match kind {
         SqliteSidecarKindV1::Wal => {

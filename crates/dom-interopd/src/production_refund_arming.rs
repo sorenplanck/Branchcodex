@@ -622,6 +622,8 @@ pub struct ProductionRefundArmingAuthorityV1 {
     connection: Connection,
     database: File,
     lock: File,
+    /// Descriptors of the validated sidecars, held while the connection lives.
+    retained_sidecars: RetainedSidecarsV25,
     database_path: PathBuf,
     lock_path: PathBuf,
     database_identity: RetainedFileIdentityV1,
@@ -1625,6 +1627,7 @@ impl ProductionRefundArmingAuthorityV1 {
             connection,
             database,
             lock,
+            retained_sidecars: RetainedSidecarsV25::default(),
             database_path: path.to_path_buf(),
             lock_path,
             database_identity,
@@ -1680,6 +1683,7 @@ impl ProductionRefundArmingAuthorityV1 {
             connection,
             database,
             lock,
+            retained_sidecars: RetainedSidecarsV25::default(),
             database_path: path.to_path_buf(),
             lock_path,
             database_identity,
@@ -1750,6 +1754,7 @@ impl ProductionRefundArmingAuthorityV1 {
             connection,
             database,
             lock,
+            retained_sidecars: RetainedSidecarsV25::default(),
             database_path: path.to_path_buf(),
             lock_path,
             database_identity,
@@ -1880,7 +1885,8 @@ impl ProductionRefundArmingAuthorityV1 {
             return Err(ProductionRefundArmingOpenErrorV1::Inconsistent);
         }
         validate_lock_file(&self.lock, &self.lock_path)?;
-        validate_sqlite_sidecars(&self.database_path, false)
+        self.retained_sidecars
+            .validate_all(&self.database_path, false)
     }
 
     fn audit_authority(&self) -> Result<(), ProductionRefundArmingOpenErrorV1> {
@@ -2717,27 +2723,13 @@ fn effective_uid() -> Result<u32, ProductionRefundArmingOpenErrorV1> {
         .map_err(|_| ProductionRefundArmingOpenErrorV1::Unavailable)
 }
 
+/// Pre-open validation: no connection exists yet, so releasing the
+/// descriptors here cannot unlock a live WAL index.
 fn validate_sqlite_sidecars(
     path: &Path,
     permit_pristine_rollback_journal: bool,
 ) -> Result<(), ProductionRefundArmingOpenErrorV1> {
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV1::Wal),
-        ("-shm", SqliteSidecarKindV1::SharedMemory),
-        ("-journal", SqliteSidecarKindV1::RollbackJournal),
-    ] {
-        let mut name = path.as_os_str().to_os_string();
-        name.push(suffix);
-        let sidecar = PathBuf::from(name);
-        match std::fs::symlink_metadata(&sidecar) {
-            Ok(_) => {
-                validate_sqlite_sidecar(&sidecar, kind, permit_pristine_rollback_journal)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(ProductionRefundArmingOpenErrorV1::Unavailable),
-        }
-    }
-    Ok(())
+    RetainedSidecarsV25::default().validate_all(path, permit_pristine_rollback_journal)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2747,20 +2739,82 @@ enum SqliteSidecarKindV1 {
     RollbackJournal,
 }
 
-fn validate_sqlite_sidecar(
-    path: &Path,
+/// Descriptors of every validated SQLite sidecar of this authority.
+///
+/// Closing any descriptor for a file drops every POSIX (fcntl) lock this
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. Opening and closing a sidecar while the connection is live
+/// therefore unlocks the WAL index and lets a reader in another process
+/// reinitialize it under this process's mapping (measured: SIGBUS). The
+/// checks are unchanged; only the descriptors are now retained.
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(RetainedFileIdentityV1, File)>>,
+}
+
+impl RetainedSidecarsV25 {
+    fn validate_all(
+        &self,
+        path: &Path,
+        permit_pristine_rollback_journal: bool,
+    ) -> Result<(), ProductionRefundArmingOpenErrorV1> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV1::Wal),
+            ("-shm", SqliteSidecarKindV1::SharedMemory),
+            ("-journal", SqliteSidecarKindV1::RollbackJournal),
+        ] {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            let sidecar = PathBuf::from(name);
+            match std::fs::symlink_metadata(&sidecar) {
+                Ok(_) => {
+                    self.validate(&sidecar, kind, permit_pristine_rollback_journal)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(ProductionRefundArmingOpenErrorV1::Unavailable),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(
+        &self,
+        path: &Path,
+        kind: SqliteSidecarKindV1,
+        permit_pristine_rollback_journal: bool,
+    ) -> Result<(), ProductionRefundArmingOpenErrorV1> {
+        let named = named_file_identity(path)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| ProductionRefundArmingOpenErrorV1::Unavailable)?;
+        if let Some((_, retained)) = handles.iter().find(|(identity, _)| *identity == named) {
+            return validate_sqlite_sidecar_contents(
+                retained,
+                kind,
+                permit_pristine_rollback_journal,
+            );
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| ProductionRefundArmingOpenErrorV1::Unavailable)?;
+        if retained_identity(&file)? != named {
+            return Err(ProductionRefundArmingOpenErrorV1::Inconsistent);
+        }
+        validate_sqlite_sidecar_contents(&file, kind, permit_pristine_rollback_journal)?;
+        handles.push((named, file));
+        Ok(())
+    }
+}
+
+fn validate_sqlite_sidecar_contents(
+    file: &File,
     kind: SqliteSidecarKindV1,
     permit_pristine_rollback_journal: bool,
 ) -> Result<(), ProductionRefundArmingOpenErrorV1> {
-    use std::io::Read;
-    let named = named_file_identity(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| ProductionRefundArmingOpenErrorV1::Unavailable)?;
-    if retained_identity(&file)? != named {
-        return Err(ProductionRefundArmingOpenErrorV1::Inconsistent);
-    }
+    use std::os::unix::fs::FileExt;
+
     let length = file
         .metadata()
         .map_err(|_| ProductionRefundArmingOpenErrorV1::Unavailable)?
@@ -2769,7 +2823,7 @@ fn validate_sqlite_sidecar(
         return Ok(());
     }
     let mut header = [0u8; 28];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| ProductionRefundArmingOpenErrorV1::Inconsistent)?;
     let valid = match kind {
         SqliteSidecarKindV1::Wal => {
@@ -2796,7 +2850,7 @@ fn validate_sqlite_sidecar(
             let hot_magic = header[..8] == [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
             hot_magic
                 || (permit_pristine_rollback_journal
-                    && pristine_rollback_journal(&mut file, length, &header)?)
+                    && pristine_rollback_journal(file, length, &header)?)
         }
     };
     if !valid {
@@ -2806,11 +2860,11 @@ fn validate_sqlite_sidecar(
 }
 
 fn pristine_rollback_journal(
-    file: &mut File,
+    file: &File,
     length: u64,
     header: &[u8; 28],
 ) -> Result<bool, ProductionRefundArmingOpenErrorV1> {
-    use std::io::Read;
+    use std::os::unix::fs::FileExt;
     if length != 512
         || header[..12] != [0; 12]
         || header[12..16] == [0; 4]
@@ -2821,7 +2875,7 @@ fn pristine_rollback_journal(
         return Ok(false);
     }
     let mut tail = [0u8; 512 - 28];
-    file.read_exact(&mut tail)
+    file.read_exact_at(&mut tail, 28)
         .map_err(|_| ProductionRefundArmingOpenErrorV1::Inconsistent)?;
     Ok(tail == [0; 512 - 28])
 }
@@ -3563,6 +3617,7 @@ mod tests {
                 connection,
                 database,
                 lock,
+                retained_sidecars: RetainedSidecarsV25::default(),
                 database_path: path.to_path_buf(),
                 lock_path,
                 database_identity,
@@ -3617,6 +3672,7 @@ mod tests {
             connection,
             database,
             lock,
+            retained_sidecars: RetainedSidecarsV25::default(),
             database_path: path.to_path_buf(),
             lock_path,
             database_identity,
@@ -3879,12 +3935,13 @@ mod tests {
         let valid_path = directory.path().join("valid-journal");
         let valid = pristine_journal_bytes([1, 2, 3, 4]);
         write_owner_file(&valid_path, &valid);
+        let retained = RetainedSidecarsV25::default();
         assert_eq!(
-            validate_sqlite_sidecar(&valid_path, SqliteSidecarKindV1::RollbackJournal, true),
+            retained.validate(&valid_path, SqliteSidecarKindV1::RollbackJournal, true),
             Ok(())
         );
         assert_eq!(
-            validate_sqlite_sidecar(&valid_path, SqliteSidecarKindV1::RollbackJournal, false),
+            retained.validate(&valid_path, SqliteSidecarKindV1::RollbackJournal, false),
             Err(ProductionRefundArmingOpenErrorV1::Inconsistent)
         );
 
@@ -3912,7 +3969,11 @@ mod tests {
             let path = directory.path().join(format!("near-miss-{index}"));
             write_owner_file(&path, bytes);
             assert_eq!(
-                validate_sqlite_sidecar(&path, SqliteSidecarKindV1::RollbackJournal, true),
+                RetainedSidecarsV25::default().validate(
+                    &path,
+                    SqliteSidecarKindV1::RollbackJournal,
+                    true,
+                ),
                 Err(ProductionRefundArmingOpenErrorV1::Inconsistent),
                 "near-miss {index}"
             );

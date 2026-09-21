@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 #[cfg(target_os = "linux")]
-use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 #[cfg(target_os = "linux")]
@@ -196,6 +195,9 @@ pub struct DurableRouteTimeAnchorStoreV2 {
     opening_epoch: u64,
     #[cfg(target_os = "linux")]
     _process_lock: File,
+    /// Descriptors of the validated sidecars, held while the connection lives.
+    #[cfg(target_os = "linux")]
+    _retained_sidecars: RetainedSidecarsV25,
 }
 
 impl core::fmt::Debug for DurableRouteTimeAnchorStoreV2 {
@@ -254,8 +256,11 @@ impl DurableRouteTimeAnchorStoreV2 {
         validate_backend_and_schema(&connection)?;
         validate_meta(&connection, config)?;
         #[cfg(target_os = "linux")]
+        let retained_sidecars = RetainedSidecarsV25::default();
+        #[cfg(target_os = "linux")]
         {
             validate_sqlite_sidecars(path)?;
+            retained_sidecars.validate_all(path)?;
             sync_owner_directory(
                 path.parent()
                     .ok_or(RouteTimeAnchorErrorV2::InvalidStorageAuthority)?,
@@ -267,6 +272,8 @@ impl DurableRouteTimeAnchorStoreV2 {
             opening_epoch: 1,
             #[cfg(target_os = "linux")]
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            _retained_sidecars: retained_sidecars,
         })
     }
 
@@ -325,8 +332,10 @@ impl DurableRouteTimeAnchorStoreV2 {
         }
         validate_pristine_initialized_store(&connection, config)?;
         #[cfg(target_os = "linux")]
+        let retained_sidecars = RetainedSidecarsV25::default();
+        #[cfg(target_os = "linux")]
         {
-            validate_resumable_sqlite_sidecars(path)?;
+            retained_sidecars.validate_all(path)?;
             sync_owner_directory(
                 path.parent()
                     .ok_or(RouteTimeAnchorErrorV2::InvalidStorageAuthority)?,
@@ -338,6 +347,8 @@ impl DurableRouteTimeAnchorStoreV2 {
             opening_epoch: 1,
             #[cfg(target_os = "linux")]
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            _retained_sidecars: retained_sidecars,
         })
     }
 
@@ -394,13 +405,15 @@ impl DurableRouteTimeAnchorStoreV2 {
             .commit()
             .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
         #[cfg(target_os = "linux")]
+        let retained_sidecars = RetainedSidecarsV25::default();
+        #[cfg(target_os = "linux")]
         {
             validate_owner_directory(
                 path.parent()
                     .ok_or(RouteTimeAnchorErrorV2::InvalidStorageAuthority)?,
             )?;
             validate_owner_file(path)?;
-            validate_resumable_sqlite_sidecars(path)?;
+            retained_sidecars.validate_all(path)?;
         }
         Ok(Self {
             connection,
@@ -408,6 +421,8 @@ impl DurableRouteTimeAnchorStoreV2 {
             opening_epoch,
             #[cfg(target_os = "linux")]
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            _retained_sidecars: retained_sidecars,
         })
     }
 
@@ -2036,22 +2051,10 @@ fn validate_sqlite_sidecars(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+/// Pre-open validation: no connection exists yet, so releasing the
+/// descriptors here cannot unlock a live WAL index.
 fn validate_resumable_sqlite_sidecars(path: &Path) -> Result<()> {
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV2::Wal),
-        ("-shm", SqliteSidecarKindV2::SharedMemory),
-        ("-journal", SqliteSidecarKindV2::RollbackJournal),
-    ] {
-        let mut sidecar = path.as_os_str().to_os_string();
-        sidecar.push(suffix);
-        let sidecar = std::path::PathBuf::from(sidecar);
-        match fs::symlink_metadata(&sidecar) {
-            Ok(_) => validate_sqlite_sidecar_shape(&sidecar, kind)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(RouteTimeAnchorErrorV2::StorageUnavailable),
-        }
-    }
-    Ok(())
+    RetainedSidecarsV25::default().validate_all(path)
 }
 
 #[cfg(target_os = "linux")]
@@ -2062,26 +2065,82 @@ enum SqliteSidecarKindV2 {
     RollbackJournal,
 }
 
+/// Descriptors of every validated SQLite sidecar of one store.
+///
+/// Closing any descriptor for a file drops every POSIX (fcntl) lock this
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. Opening and closing a sidecar while the connection is live
+/// therefore unlocks the WAL index and lets a reader in another process
+/// reinitialize it under this process's mapping (measured: SIGBUS). The
+/// checks are unchanged; only the descriptors are now retained.
 #[cfg(target_os = "linux")]
-fn validate_sqlite_sidecar_shape(path: &Path, kind: SqliteSidecarKindV2) -> Result<()> {
-    validate_owner_file(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(u64, u64, File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(&self, path: &Path) -> Result<()> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV2::Wal),
+            ("-shm", SqliteSidecarKindV2::SharedMemory),
+            ("-journal", SqliteSidecarKindV2::RollbackJournal),
+        ] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(_) => self.validate(&sidecar, kind)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(RouteTimeAnchorErrorV2::StorageUnavailable),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self, path: &Path, kind: SqliteSidecarKindV2) -> Result<()> {
+        validate_owner_file(path)?;
+        let named =
+            fs::symlink_metadata(path).map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
+        if let Some((_, _, retained)) = handles
+            .iter()
+            .find(|(dev, ino, _)| *dev == named.dev() && *ino == named.ino())
+        {
+            return validate_sqlite_sidecar_contents(retained, kind);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
+        let opened = file
+            .metadata()
+            .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
+        if opened.dev() != named.dev() || opened.ino() != named.ino() {
+            return Err(RouteTimeAnchorErrorV2::InvalidStorageAuthority);
+        }
+        validate_sqlite_sidecar_contents(&file, kind)?;
+        handles.push((named.dev(), named.ino(), file));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_sqlite_sidecar_contents(file: &File, kind: SqliteSidecarKindV2) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
     let retained = file
         .metadata()
         .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
-    let named =
-        fs::symlink_metadata(path).map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
-    if retained.dev() != named.dev() || retained.ino() != named.ino() {
-        return Err(RouteTimeAnchorErrorV2::InvalidStorageAuthority);
-    }
     if retained.len() == 0 {
         return Ok(());
     }
     let mut header = [0u8; 8];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| RouteTimeAnchorErrorV2::InvalidStorageAuthority)?;
     let valid = match kind {
         SqliteSidecarKindV2::Wal => {

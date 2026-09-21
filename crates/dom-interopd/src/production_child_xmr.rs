@@ -239,7 +239,7 @@ impl ProductionXmrMaterializationScopeV1 {
                 upstream_scope.clone(),
                 downstream_scope.clone(),
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+            .map_err(|_| child_conflict_at_v25(242))?;
         let (settlement, plan_leg, coordinator_leg) = match leg {
             LegIdV1::Upstream => (
                 composition.upstream(),
@@ -261,24 +261,24 @@ impl ProductionXmrMaterializationScopeV1 {
             || entry.session_id().0 != settlement.session_id.0
             || entry.secret_source_scope_digest() == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(264));
         }
         let max_fee_piconero_v23 = u64::try_from(settlement.fee_limit.counterparty_max)
             .ok()
             .filter(|fee| *fee != 0)
-            .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+            .ok_or_else(|| child_conflict_at_v25(269))?;
         Ok(Self {
             max_fee_piconero_v23,
             route_terms_digest: inputs.admission().frozen_bindings().terms_digest,
             setup_binding_hash: inputs
                 .monero_session(leg)
-                .ok_or(ChildAuthorityRefusalV1::Conflict)?
+                .ok_or_else(|| child_conflict_at_v25(275))?
                 .setup()
                 .binding_hash(),
             deployment_digest: resolved_monero_deployment_digest_v1(
                 inputs
                     .monero_session(leg)
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?
+                    .ok_or_else(|| child_conflict_at_v25(281))?
                     .deployment(),
             )?,
             route_id: role_plan.route_id(),
@@ -323,7 +323,7 @@ impl ProductionXmrRetainedRefundReaderV24 {
             || max_raw_bytes == 0
             || max_raw_bytes > xmr_actuator::MAX_RAW_TX_BYTES_V1
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(326));
         }
         Ok(Self {
             actuator,
@@ -354,7 +354,7 @@ impl ProductionXmrRetainedRefundReaderV24 {
             || xmr_actuator::custody_digest_v1(&raw).map_err(map_actuator_error)?
                 != view.custody_digest
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(357));
         }
         let verified = xmr_raw_tx_verify::verify_exact_raw_sweep_bounded_v23(
             &raw,
@@ -362,9 +362,9 @@ impl ProductionXmrRetainedRefundReaderV24 {
             self.setup.expected_amount_piconero(),
             self.max_fee,
         )
-        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        .map_err(|_| child_conflict_at_v25(365))?;
         if verified.sweep().key_images.as_slice() != [view.key_image] {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(367));
         }
         // This proves only local byte custody. Fresh chain/payout/ring proof
         // verification is still required before a remote response is signed.
@@ -420,7 +420,7 @@ const fn operation_for_action(action: SettlementActionV1) -> Option<XmrOperation
 // A clock regression cannot revive an operation authorized before a long RPC.
 fn fresh_materialization_time_v23(before: u64, after: u64) -> Result<u64, ChildAuthorityRefusalV1> {
     if before == 0 || after == 0 || after < before {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(423));
     }
     Ok(after)
 }
@@ -432,7 +432,7 @@ fn fresh_live_materialization_time_v24(
 ) -> Result<u64, ChildAuthorityRefusalV1> {
     let now = fresh_materialization_time_v23(before, after)?;
     if now >= original_deadline {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(435));
     }
     Ok(now)
 }
@@ -450,7 +450,7 @@ fn digest_parts(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, ChildAuthori
         .finalize_variable(&mut output)
         .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
     if output == ZERO_DIGEST {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(453));
     }
     Ok(output)
 }
@@ -535,7 +535,7 @@ where
             || lease.network_id() != deployment.deployment().genesis_hash
             || lease.fencing_epoch() == 0
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(538));
         }
         Ok(Self {
             actuator: actuator.into(),
@@ -564,7 +564,7 @@ where
         owner: crate::production_universal_actuator::ProductionUniversalActuatorLeaseOwnerV11,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
         if self.lease_owner_v11.is_some() {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(567));
         }
         owner.require_scope(
             crate::production_config::ProductionChainFamilyV11::Xmr,
@@ -581,7 +581,7 @@ where
         window: crate::production_timer::ProductionFundingWindowV23,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
         if self.funding_window_v23.is_some() {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(584));
         }
         self.funding_window_v23 = Some(window);
         Ok(self)
@@ -604,7 +604,7 @@ where
         >,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
         if self.recovery_driver_v12.is_some() || self.recovery_deferred_v23.is_some() {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(607));
         }
         driver.require_attachment(self.setup.terms_hash())?;
         self.recovery_driver_v12 = Some(driver);
@@ -616,7 +616,7 @@ where
         slot: std::rc::Rc<crate::production_xmr_sweep::ProductionXmrDeferredRecoveryV23>,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
         if self.recovery_driver_v12.is_some() || self.recovery_deferred_v23.is_some() {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(619));
         }
         slot.require_terms(self.setup.terms_hash())?;
         self.recovery_deferred_v23 = Some(slot);
@@ -632,7 +632,7 @@ where
         ChildAuthorityRefusalV1,
     > {
         match (&self.recovery_driver_v12, &self.recovery_deferred_v23) {
-            (Some(_), Some(_)) => Err(ChildAuthorityRefusalV1::Conflict),
+            (Some(_), Some(_)) => Err(child_conflict_at_v25(635)),
             (Some(driver), None) => {
                 driver.require_attachment(self.setup.terms_hash())?;
                 Ok(Some(std::rc::Rc::clone(driver)))
@@ -651,14 +651,14 @@ where
     ) -> Result<Self, ChildAuthorityRefusalV1> {
         let session = inputs
             .monero_session(leg)
-            .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+            .ok_or_else(|| child_conflict_at_v25(654))?;
         let terms = inputs.admission().frozen_bindings().terms_digest;
         if terms == ZERO_DIGEST
             || session.setup().binding_hash() != self.setup.binding_hash()
             || session.deployment() != &self.deployment
             || session.setup().settlement_id() != self.settlement_id
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(661));
         }
         let settlement = match leg {
             LegIdV1::Upstream => inputs.composition().upstream(),
@@ -667,12 +667,12 @@ where
         let maximum = u64::try_from(settlement.fee_limit.counterparty_max)
             .ok()
             .filter(|fee| *fee != 0)
-            .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+            .ok_or_else(|| child_conflict_at_v25(670))?;
         if self
             .max_fee_piconero_v23
             .is_some_and(|existing| existing != maximum)
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(675));
         }
         self.max_fee_piconero_v23 = Some(maximum);
         self.route_terms_digest = Some(terms);
@@ -697,7 +697,7 @@ where
             || scope.deployment_digest != resolved_monero_deployment_digest_v1(&deployment)?
             || scope.route_terms_digest == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(700));
         }
         let mut port = Self::new(
             actuator,
@@ -778,7 +778,7 @@ where
             || chain_id != self.deployment.profile().chain_id.0
             || Some(terms_digest) != self.route_terms_digest
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(781));
         }
         Ok(())
     }
@@ -796,16 +796,16 @@ where
                 self.setup.expected_amount_piconero(),
                 maximum,
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+            .map_err(|_| child_conflict_at_v25(799))?;
             if verified.sweep().key_images.as_slice() != &[image] {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(801));
             }
             Ok(())
         } else {
             // A route-bound port must never lose its authenticated economics.
             // Only unbound component callers retain the historical raw profile.
             if self.route_terms_digest.is_some() {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(808));
             }
             verify_single_sweep_image_v10(raw, hash, image)
         }
@@ -830,7 +830,7 @@ where
             || intent_digest_v1(self.settlement_id, action, view.custody_digest)?
                 != expected_intent_digest
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(833));
         }
         let retained_bytes = self
             .actuator
@@ -839,7 +839,7 @@ where
         if xmr_actuator::custody_digest_v1(&retained_bytes).map_err(map_actuator_error)?
             != view.custody_digest
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(842));
         }
         self.verify_retained_sweep_v23(&retained_bytes, view.tx_hash, view.key_image)?;
         Ok(view)
@@ -858,9 +858,9 @@ where
             intent_digest: request.intent_digest(),
             custody_digest: request.custody_digest(),
             externalization_evidence_digest: externalization_evidence_v1(&binding)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(861))?,
             first_exposure_evidence_digest: first_exposure_evidence_v1(&binding)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(863))?,
         })
     }
 
@@ -906,7 +906,7 @@ where
             || request.role_plan_digest != authority.role_plan_digest
             || request.source_scope_digest != authority.source_scope_digest
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(909));
         }
         self.validate_common_bindings(
             SettlementFaceV1::Monero,
@@ -976,7 +976,7 @@ where
                     (XmrOperationKindV1::Refund, None) => {
                         authority.sweep_authority.build_refund_sweep_v23(request)?
                     }
-                    _ => return Err(ChildAuthorityRefusalV1::Conflict),
+                    _ => return Err(child_conflict_at_v25(979)),
                 };
                 // Independent consensus-hash verification before anything is
                 // retained: the sidecar's answer is never trusted bare.
@@ -1023,7 +1023,7 @@ where
                         &built.raw_transaction,
                         persist_now,
                     ),
-                    Some(_) | None => return Err(ChildAuthorityRefusalV1::Conflict),
+                    Some(_) | None => return Err(child_conflict_at_v25(1026)),
                 }
                 .map_err(map_actuator_error)?;
                 (view, retained_sweep)
@@ -1031,7 +1031,7 @@ where
             Err(error) => return Err(map_actuator_error(error)),
         };
         if view.stage == XmrTxStageV1::FinalityInvalidated {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1034));
         }
         if let (XmrOperationKindV1::Claim, Some(scalar)) = (kind, public_scalar) {
             // F7/quorum/sidecar work may have consumed the original window.
@@ -1055,7 +1055,7 @@ where
                     .checked_view_v23(&self.lease, locator, completion_now)
                     .map_err(map_actuator_error)?;
                 if checked != view {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1058));
                 }
                 // checked_view can wait for its SQLite lock. Its input time
                 // alone cannot prove that this same lease is still live once
@@ -1112,7 +1112,7 @@ where
             || expected_intent_digest
                 != intent_digest_v1(self.settlement_id, SettlementActionV1::Funding, custody)?
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1115));
         }
         Ok(())
     }
@@ -1202,7 +1202,7 @@ where
                     .saturating_duration_since(std::time::Instant::now());
                 let collateral = driver.verify_funding_prerequisite_bounded_v23(remaining)?;
                 if collateral.collateral().finality().terms_hash() != self.setup.terms_hash() {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1205));
                 }
             }
             let mut authority = self
@@ -1244,7 +1244,7 @@ where
             let binding = ChildEvidenceBindingV1::from_dispatch(request);
             return Ok(ChildExecutionOutcomeV1::Unknown {
                 evidence_digest: unknown_evidence_v1(&binding)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1247))?,
             });
         };
         let view = self.validated_view(
@@ -1258,7 +1258,7 @@ where
             view.stage,
             XmrTxStageV1::Signed | XmrTxStageV1::SendAttempted
         ) {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1261));
         }
         let now = self.clock.now_unix_ms()?;
         self.refresh_lease_v11(now)?;
@@ -1289,7 +1289,7 @@ where
             let binding = ChildEvidenceBindingV1::from_dispatch(request);
             Ok(ChildExecutionOutcomeV1::Unknown {
                 evidence_digest: unknown_evidence_v1(&binding)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1292))?,
             })
         }
     }
@@ -1302,7 +1302,7 @@ where
         if request.current_route_fencing_epoch < dispatch.route_fencing_epoch()
             || request.current_coordinator_fencing_epoch < dispatch.coordinator_fencing_epoch()
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1305));
         }
         self.validate_common_bindings(
             dispatch.face(),
@@ -1334,7 +1334,7 @@ where
                 }
                 _ => Ok(ChildReconciliationOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&binding)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1337))?,
                 }),
             };
         };
@@ -1350,7 +1350,7 @@ where
         if view.stage == XmrTxStageV1::Signed {
             return Ok(ChildReconciliationOutcomeV1::ProvenNotExternalized {
                 evidence_digest: proven_not_externalized_evidence_v1(&binding)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1353))?,
             });
         }
         let now = self.clock.now_unix_ms()?;
@@ -1382,7 +1382,7 @@ where
             XmrReconciliationKindV1::KeyImageUnspentAbsent => {
                 Ok(ChildReconciliationOutcomeV1::ProvenNotExternalized {
                     evidence_digest: proven_not_externalized_evidence_v1(&binding)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1385))?,
                 })
             }
             XmrReconciliationKindV1::Observed | XmrReconciliationKindV1::Final => Ok(
@@ -1390,7 +1390,7 @@ where
             ),
             XmrReconciliationKindV1::Unknown => Ok(ChildReconciliationOutcomeV1::Unknown {
                 evidence_digest: unknown_evidence_v1(&binding)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1393))?,
             }),
         }
     }
@@ -1437,7 +1437,7 @@ where
                     };
                     Ok(ChildObservationOutcomeV1::Final {
                         evidence_digest: observation_final_evidence_v1(&binding, &facts)
-                            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                            .map_err(|_| child_conflict_at_v25(1440))?,
                     })
                 }
                 observed => funding_loss_v23::pending_or_invalidated(
@@ -1463,7 +1463,7 @@ where
                 | XmrTxStageV1::Final
                 | XmrTxStageV1::FinalityInvalidated
         ) {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1466));
         }
         let now = self.clock.now_unix_ms()?;
         self.refresh_lease_v11(now)?;
@@ -1490,11 +1490,11 @@ where
             XmrTxStageV1::SendAttempted | XmrTxStageV1::Observed => {
                 Ok(ChildObservationOutcomeV1::Pending {
                     evidence_digest: observation_pending_evidence_v1(&binding)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1493))?,
                 })
             }
             XmrTxStageV1::Final => {
-                let finality = view.finality.ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                let finality = view.finality.ok_or_else(|| child_conflict_at_v25(1497))?;
                 let facts = ChildFinalityFactsV1 {
                     final_evidence_digest: finality.final_evidence_digest,
                     final_block_hash: finality.final_block_hash,
@@ -1502,14 +1502,14 @@ where
                 };
                 Ok(ChildObservationOutcomeV1::Final {
                     evidence_digest: observation_final_evidence_v1(&binding, &facts)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1505))?,
                 })
             }
             XmrTxStageV1::FinalityInvalidated => {
                 let Some(prior) = request.prior_finality_evidence_digest else {
                     return Ok(ChildObservationOutcomeV1::Pending {
                         evidence_digest: observation_pending_evidence_v1(&binding)
-                            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                            .map_err(|_| child_conflict_at_v25(1512))?,
                     });
                 };
                 let invalidation = digest_parts(
@@ -1523,10 +1523,10 @@ where
                         prior,
                         invalidation,
                     )
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1526))?,
                 })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1529)),
         }
     }
 }
@@ -1670,9 +1670,15 @@ fn verify_single_sweep_image_v10(
     image: Digest32,
 ) -> Result<(), ChildAuthorityRefusalV1> {
     let verified =
-        verify_exact_raw_sweep_v10(raw, hash).map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        verify_exact_raw_sweep_v10(raw, hash).map_err(|_| child_conflict_at_v25(1673))?;
     if verified.key_images.as_slice() != &[image] {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(1675));
     }
     Ok(())
+}
+
+// DIAG(temporary): names the source line of the child refusal that fired.
+fn child_conflict_at_v25(line: u32) -> ChildAuthorityRefusalV1 {
+    eprintln!("DOM_CHILD_CONFLICT_V25 file=production_child_xmr.rs line={line}");
+    ChildAuthorityRefusalV1::Conflict
 }

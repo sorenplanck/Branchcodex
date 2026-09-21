@@ -57,7 +57,18 @@ const MAX_COMPOSITE_BLOCKING_BOUND_V1: Duration = Duration::from_secs(30);
 /// Authenticated scopes carried by one Noise connection: the parent session,
 /// the cancelled session, the recovery readiness negotiation and the two
 /// recovery children. Each holds one full exchange bound.
-const EXCHANGE_SCOPES_PER_CONNECTION_V25: u32 = 5;
+pub(crate) const EXCHANGE_SCOPES_PER_CONNECTION_V25: u32 = 5;
+
+/// Largest per-call socket/exchange bound whose worst case (one socket wait
+/// plus every scope of one authenticated connection) still fits inside the
+/// caller's own blocking ceiling. The route supervisor refuses an external
+/// block that could outlive its lease renewal window, so the network bounds
+/// are derived from that authenticated window instead of being invented.
+pub(crate) const fn call_bound_for_blocking_ceiling_v25(ceiling: Duration) -> Duration {
+    Duration::from_millis(
+        (ceiling.as_millis() as u64) / (EXCHANGE_SCOPES_PER_CONNECTION_V25 as u64 + 1),
+    )
+}
 const MIN_BACKOFF_V1: Duration = Duration::from_millis(1);
 const MAX_ACTIVATION_ROUNDS_V1: u64 = 1_000_000;
 const MAX_INTERLEAVED_ROUNDS_V1: u64 = 1_000_000;
@@ -432,7 +443,9 @@ impl ProductionCompositeRelayLoopV1 {
         let exchange = {
             let link = self.network_config.link(position);
             let session = &self.sessions[index];
-            let (retained, sibling) = split_retained_listeners_v25(&mut self.retained_listeners_v25, index);
+            let (retained, sibling) =
+                split_retained_listeners_v25(&mut self.retained_listeners_v25, index);
+            crate::production_relay_network_runtime::set_exchange_diag_leg_v25(index);
             let (identity, relay) = self.owner.identity_and_relay_mut();
             self.network
                 .exchange_configured_link_retained_v25(
@@ -630,6 +643,7 @@ impl ProductionCompositeRelayLoopV1 {
             let session = &self.sessions[session_index];
             let (retained, sibling) =
                 split_retained_listeners_v25(&mut self.retained_listeners_v25, session_index);
+            crate::production_relay_network_runtime::set_exchange_diag_leg_v25(session_index);
             let (identity, relay) = self.owner.identity_and_relay_mut();
             self.network
                 .exchange_configured_link_retained_v25(
@@ -649,6 +663,11 @@ impl ProductionCompositeRelayLoopV1 {
             }
             self.poll_retained_inbound_renewing_v25(leg, terminal_relay_drain, renew_actuator_lease)
         })?;
+        // DIAG(temporary): a leg whose outbound backlog never drains looks
+        // exactly like an idle leg from outside. Print one line per change of
+        // the leg's exchange shape, so a scope that stops being offered is
+        // visible without one line per round.
+        diag_exchange_shape_v25(leg, &exchange);
         Ok(ProductionCompositeRelayStepReportV1 {
             leg,
             outbound,
@@ -676,7 +695,8 @@ impl ProductionCompositeRelayLoopV1 {
         else {
             return Err(ProductionCompositeLoopErrorV1::ClockUnavailable);
         };
-        renew_actuator_lease().map_err(|()| ProductionCompositeLoopErrorV1::ActuatorLeaseRenewal)?;
+        renew_actuator_lease()
+            .map_err(|()| ProductionCompositeLoopErrorV1::ActuatorLeaseRenewal)?;
         crate::production_relay_stage12::mark_lease_phase_v25("post_exchange_bootstrap");
         let post_exchange_bootstrap =
             self.owner
@@ -820,6 +840,46 @@ impl core::fmt::Debug for ProductionCompositeActivationExitV1 {
 /// Process previously authenticated durable ingress even if this exchange could
 /// not obtain a peer. Never invent a successful exchange, accept unauthenticated
 /// bytes, or hide a local validation/storage failure behind a socket timeout.
+/// DIAG(temporary): one line per change of a leg's exchange shape. Counts are
+/// cumulative totals for this round only; `out_backlog` is what matters — a leg
+/// that keeps reporting a remaining outbound backlog is one whose envelopes are
+/// staged but never leave.
+fn diag_exchange_shape_v25(leg: LegIdV1, report: &ProductionNoiseRelayExchangeReportV1) {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST_SHAPE_V25: RefCell<[String; 2]> =
+            const { RefCell::new([String::new(), String::new()]) };
+    }
+    let index = match leg {
+        LegIdV1::Upstream => 0,
+        LegIdV1::Downstream => 1,
+    };
+    // call/connect_ok/connect_fail/accept_ok/accept_deadline/sibling_yield/session_error
+    let counters = crate::production_relay_network_runtime::exchange_diag_v25(index);
+    let line = format!(
+        "leg={leg:?} sent={} recv={} out_backlog={} in_backlog={} \
+         calls={} conn_ok={} conn_fail={} acc_ok={} acc_deadline={} yield={} sess_err={}",
+        report.envelopes_sent,
+        report.envelopes_received,
+        report.outbound_backlog_remains,
+        report.inbound_backlog_remains,
+        counters[0],
+        counters[1],
+        counters[2],
+        counters[3],
+        counters[4],
+        counters[5],
+        counters[6],
+    );
+    LAST_SHAPE_V25.with(|last| {
+        let mut last = last.borrow_mut();
+        if last[index] != line {
+            eprintln!("DOM_EXCHANGE_SHAPE_V25 {line}");
+            last[index] = line;
+        }
+    });
+}
+
 fn complete_exchange_poll_v23<T, U>(
     mut exchange: Result<T, ProductionCompositeLoopErrorV1>,
     poll: impl FnOnce(Option<&mut T>) -> Result<U, ProductionCompositeLoopErrorV1>,
@@ -1255,7 +1315,10 @@ trait CompositeRelayCycleV1 {
 fn split_retained_listeners_v25(
     listeners: &mut [Option<std::net::TcpListener>; 2],
     index: usize,
-) -> (&mut Option<std::net::TcpListener>, Option<&std::net::TcpListener>) {
+) -> (
+    &mut Option<std::net::TcpListener>,
+    Option<&std::net::TcpListener>,
+) {
     let (first, second) = listeners.split_at_mut(1);
     if index == 0 {
         (&mut first[0], second[0].as_ref())
@@ -1582,13 +1645,9 @@ where
     Y: RouteSecretRetirementAuthority,
     Ctl: RouteRunControlV1,
 {
-    run_production_composite_runtime_renewing_v25(
-        relay,
-        route,
-        control,
-        round_budget,
-        &mut || Ok(()),
-    )
+    run_production_composite_runtime_renewing_v25(relay, route, control, round_budget, &mut || {
+        Ok(())
+    })
 }
 
 /// Same interleaved runtime, renewing the retained DOM actuator lease around
@@ -1680,8 +1739,14 @@ where
     Y: RouteSecretRetirementAuthority,
     Ctl: RouteRunControlV1,
 {
-    match run_route_half_v25(relay, route, control, renew_actuator_lease, relay_moved_traffic)
-        .map_err(map_composite_core_error_v25)?
+    match run_route_half_v25(
+        relay,
+        route,
+        control,
+        renew_actuator_lease,
+        relay_moved_traffic,
+    )
+    .map_err(map_composite_core_error_v25)?
     {
         CompositeRouteHalfV25::Terminal(report) => {
             Ok(ProductionCompositeRuntimeExitV1::Terminal { rounds: 1, report })
@@ -2102,8 +2167,13 @@ mod tests {
                 preparations: 0,
                 refuse_on,
             };
-            let result =
-                run_interleaved_core_v1(&mut relay, &mut route, &mut TestControlV1::default(), 1, &mut || Ok(()));
+            let result = run_interleaved_core_v1(
+                &mut relay,
+                &mut route,
+                &mut TestControlV1::default(),
+                1,
+                &mut || Ok(()),
+            );
             if refuse_on == 0 {
                 assert!(result.is_ok());
                 assert_eq!(
@@ -2634,7 +2704,8 @@ mod tests {
             };
             let mut relay = UnavailableCycleV23 { error, polls: 0 };
             let mut control = TestControlV1::default();
-            let result = run_interleaved_core_v1(&mut relay, &mut route, &mut control, 1, &mut || Ok(()));
+            let result =
+                run_interleaved_core_v1(&mut relay, &mut route, &mut control, 1, &mut || Ok(()));
             assert_eq!(relay.polls, expected_polls);
             if expected_polls == 0 {
                 assert!(matches!(result, Err(CompositeCoreErrorV1::Relay(_))));
@@ -2701,7 +2772,8 @@ mod tests {
             ..TestControlV1::default()
         };
         assert_eq!(
-            run_interleaved_core_v1(&mut relay, &mut route, &mut control, 1, &mut || Ok(())).expect("shutdown"),
+            run_interleaved_core_v1(&mut relay, &mut route, &mut control, 1, &mut || Ok(()))
+                .expect("shutdown"),
             ProductionCompositeRuntimeExitV1::Shutdown { rounds: 0 }
         );
         assert!(log.borrow().is_empty());

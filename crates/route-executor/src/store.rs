@@ -6,7 +6,6 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 #[cfg(target_os = "linux")]
-use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 #[cfg(target_os = "linux")]
@@ -351,6 +350,10 @@ pub struct DurableRouteStoreV1 {
     connection: Connection,
     #[cfg(target_os = "linux")]
     _process_lock: Option<File>,
+    /// Descriptors of the validated SQLite sidecars, held for as long as the
+    /// connection lives. See [`RetainedSidecarsV25`].
+    #[cfg(target_os = "linux")]
+    retained_sidecars: RetainedSidecarsV25,
 }
 
 impl core::fmt::Debug for DurableRouteStoreV1 {
@@ -371,6 +374,8 @@ impl DurableRouteStoreV1 {
             connection,
             #[cfg(target_os = "linux")]
             _process_lock: None,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.migrate()?;
         Ok(store)
@@ -411,6 +416,8 @@ impl DurableRouteStoreV1 {
             connection,
             #[cfg(target_os = "linux")]
             _process_lock: Some(process_lock),
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         boundary(CreationBoundaryV1::BeforeSchemaTransaction)?;
         store.migrate_with_boundary_hook(|| boundary(CreationBoundaryV1::BeforeSchemaCommit))?;
@@ -420,7 +427,7 @@ impl DurableRouteStoreV1 {
         {
             validate_owner_directory(parent)?;
             validate_owner_file(path)?;
-            validate_resumable_sqlite_sidecars(path)?;
+            store.retained_sidecars.validate_all(path)?;
             sync_owner_directory(parent)?;
         }
         Ok(store)
@@ -470,6 +477,8 @@ impl DurableRouteStoreV1 {
             connection,
             #[cfg(target_os = "linux")]
             _process_lock: Some(process_lock),
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         match resumable_creation_state(&store.connection)? {
             ResumableCreationStateV1::PristineSqlite => store.migrate()?,
@@ -480,7 +489,7 @@ impl DurableRouteStoreV1 {
         {
             validate_owner_directory(parent)?;
             validate_owner_file(path)?;
-            validate_resumable_sqlite_sidecars(path)?;
+            store.retained_sidecars.validate_all(path)?;
             sync_owner_directory(parent)?;
         }
         Ok(store)
@@ -517,17 +526,19 @@ impl DurableRouteStoreV1 {
             return Err(RouteStoreErrorV1::CreationIncomplete);
         }
         validate_backend_and_schema(&connection)?;
-        #[cfg(target_os = "linux")]
-        {
-            validate_owner_directory(parent)?;
-            validate_owner_file(path)?;
-            validate_resumable_sqlite_sidecars(path)?;
-        }
         let store = Self {
             connection,
             #[cfg(target_os = "linux")]
             _process_lock: Some(process_lock),
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
+        #[cfg(target_os = "linux")]
+        {
+            validate_owner_directory(parent)?;
+            validate_owner_file(path)?;
+            store.retained_sidecars.validate_all(path)?;
+        }
         validate_retained_state_on_open(&store)?;
         Ok(store)
     }
@@ -2088,6 +2099,8 @@ fn validate_backend_and_schema(connection: &Connection) -> Result<(), RouteStore
         connection: reference,
         #[cfg(target_os = "linux")]
         _process_lock: None,
+        #[cfg(target_os = "linux")]
+        retained_sidecars: RetainedSidecarsV25::default(),
     };
     reference_store.migrate()?;
     let expected = schema_objects(&reference_store.connection)?;
@@ -2507,23 +2520,81 @@ fn validate_owner_file(path: &Path) -> Result<(), RouteStoreErrorV1> {
     Ok(())
 }
 
+/// Descriptors of every SQLite sidecar this owner has validated.
+///
+/// Closing *any* descriptor for a file drops every POSIX (fcntl) lock the
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. A validation that opened and closed the sidecar while the
+/// connection was live therefore silently unlocked the WAL index: another
+/// process then opened the database, believed it was the first connection,
+/// reinitialized `-shm`, and this process died with SIGBUS on the mapping it
+/// still held (measured on the real two-daemon route). The checks below are
+/// unchanged; their descriptors are retained until the store itself drops.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(u64, u64, File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    /// Validates one sidecar, reusing the retained descriptor whenever the
+    /// path still names the exact same file. A newly opened descriptor is
+    /// never closed while this owner lives.
+    fn validate(&self, path: &Path, kind: SqliteSidecarKindV1) -> Result<(), RouteStoreErrorV1> {
+        validate_owner_file(path)?;
+        let named =
+            fs::symlink_metadata(path).map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
+        if let Some((_, _, retained)) = handles
+            .iter()
+            .find(|(dev, ino, _)| *dev == named.dev() && *ino == named.ino())
+        {
+            return validate_sqlite_sidecar_contents(retained, kind);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
+        let retained = file
+            .metadata()
+            .map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
+        if retained.dev() != named.dev() || retained.ino() != named.ino() {
+            return Err(RouteStoreErrorV1::InvalidStorageAuthority);
+        }
+        validate_sqlite_sidecar_contents(&file, kind)?;
+        handles.push((named.dev(), named.ino(), file));
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn validate_resumable_sqlite_sidecars(path: &Path) -> Result<(), RouteStoreErrorV1> {
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV1::Wal),
-        ("-shm", SqliteSidecarKindV1::SharedMemory),
-        ("-journal", SqliteSidecarKindV1::RollbackJournal),
-    ] {
-        let mut sidecar = path.as_os_str().to_os_string();
-        sidecar.push(suffix);
-        let sidecar = std::path::PathBuf::from(sidecar);
-        match fs::symlink_metadata(&sidecar) {
-            Ok(_) => validate_sqlite_sidecar_shape(&sidecar, kind)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(RouteStoreErrorV1::StorageUnavailable),
+    RetainedSidecarsV25::default().validate_all(path)
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(&self, path: &Path) -> Result<(), RouteStoreErrorV1> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV1::Wal),
+            ("-shm", SqliteSidecarKindV1::SharedMemory),
+            ("-journal", SqliteSidecarKindV1::RollbackJournal),
+        ] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(_) => self.validate(&sidecar, kind)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(RouteStoreErrorV1::StorageUnavailable),
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2534,28 +2605,23 @@ enum SqliteSidecarKindV1 {
     RollbackJournal,
 }
 
+/// Same shape checks as before, read through an already-open descriptor so
+/// no sidecar descriptor is ever closed while the connection is live.
 #[cfg(target_os = "linux")]
-fn validate_sqlite_sidecar_shape(
-    path: &Path,
+fn validate_sqlite_sidecar_contents(
+    file: &File,
     kind: SqliteSidecarKindV1,
 ) -> Result<(), RouteStoreErrorV1> {
-    validate_owner_file(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
+    use std::os::unix::fs::FileExt;
+
     let retained = file
         .metadata()
         .map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
-    let named = fs::symlink_metadata(path).map_err(|_| RouteStoreErrorV1::StorageUnavailable)?;
-    if retained.dev() != named.dev() || retained.ino() != named.ino() {
-        return Err(RouteStoreErrorV1::InvalidStorageAuthority);
-    }
     if retained.len() == 0 {
         return Ok(());
     }
     let mut header = [0u8; 8];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| RouteStoreErrorV1::InvalidStorageAuthority)?;
     let valid = match kind {
         SqliteSidecarKindV1::Wal => {

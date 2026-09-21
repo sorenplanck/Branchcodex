@@ -274,11 +274,11 @@ impl ProductionSettlementChildRouterV1 {
     ) -> Result<Self, ChildAuthorityRefusalV1> {
         topology.validate()?;
         if dom.face() != SettlementFaceV1::Dom {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(277));
         }
         for (port, binding) in ports.iter().zip(topology.legs) {
             if port.face() != binding.face || port.settlement_id() != Some(binding.settlement_id) {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(281));
             }
         }
         Ok(Self {
@@ -460,7 +460,7 @@ impl ProductionSettlementChildRouterV1 {
         }
         let port = self.port(face, leg, route_id, settlement_id)?;
         if port.face() != face || port.settlement_id() != Some(settlement_id) {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(463));
         }
         port.retained_funding_id_v20()
     }
@@ -474,7 +474,7 @@ impl ProductionSettlementChildRouterV1 {
                 .topology
                 .require_admission_scope(request.terms_digest, request.registry_digest)?;
             if request.composition_digest != scoped.topology.composition_digest {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(477));
             }
         }
         let port = self.port(
@@ -486,7 +486,7 @@ impl ProductionSettlementChildRouterV1 {
         if port.face() != SettlementFaceV1::Bitcoin
             || port.settlement_id() != Some(request.settlement_id)
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(489));
         }
         port.prepare_bitcoin_claim_v11(request)
     }
@@ -539,7 +539,7 @@ impl ProductionSettlementChildRouterV1 {
                 .topology
                 .require_admission_scope(request.terms_digest, request.registry_digest)?;
             if request.composition_digest != scoped.topology.composition_digest {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(542));
             }
             let chain_id = if face == SettlementFaceV1::Dom {
                 scoped.topology.dom_chain_id
@@ -556,7 +556,7 @@ impl ProductionSettlementChildRouterV1 {
         }
         let port = self.port(face, request.leg, request.route_id, request.settlement_id)?;
         if port.face() != face {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(559));
         }
         port.materialize(request, public_scalar)
     }
@@ -570,7 +570,7 @@ impl ProductionSettlementChildRouterV1 {
             if expected.chain_id != binding.chain_id
                 || expected.composition_digest != scoped.topology.composition_digest
             {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(573));
             }
         }
         let port = self.port(
@@ -580,7 +580,7 @@ impl ProductionSettlementChildRouterV1 {
             expected.settlement_id,
         )?;
         if port.face() != SettlementFaceV1::Bitcoin {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(583));
         }
         port.take_bitcoin_public_extraction_handoff(expected)
     }
@@ -596,7 +596,7 @@ impl ProductionSettlementChildRouterV1 {
             handoff.settlement_id(),
         )?;
         if port.face() != SettlementFaceV1::Bitcoin {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(599));
         }
         port.restore_bitcoin_public_extraction_handoff(handoff)
     }
@@ -627,7 +627,7 @@ impl SettlementChildAuthorityV1 for ProductionSettlementChildRouterV1 {
             request.settlement_id(),
         )?;
         if port.face() != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(630));
         }
         port.externalize(request)
     }
@@ -657,7 +657,7 @@ impl SettlementChildAuthorityV1 for ProductionSettlementChildRouterV1 {
             request.dispatch.settlement_id(),
         )?;
         if port.face() != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(660));
         }
         port.reconcile(request)
     }
@@ -688,7 +688,7 @@ impl SettlementChildObserverV1 for ProductionSettlementChildRouterV1 {
             request.settlement_id,
         )?;
         if port.face() != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(691));
         }
         port.observe(request)
     }
@@ -786,4 +786,10 @@ mod tests {
             "ProductionSettlementChildRouterV1([authorities redacted])"
         );
     }
+}
+
+// DIAG(temporary): names the source line of the child refusal that fired.
+fn child_conflict_at_v25(line: u32) -> ChildAuthorityRefusalV1 {
+    eprintln!("DOM_CHILD_CONFLICT_V25 file=production_child_router.rs line={line}");
+    ChildAuthorityRefusalV1::Conflict
 }

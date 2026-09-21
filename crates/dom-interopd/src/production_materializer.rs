@@ -185,7 +185,7 @@ impl ProductionCustodiedFirstExposureClaimAuthorityV1 {
             || downstream.reveal_mode() != FinalClaimRevealModeV1::DomRevealsFirst
             || downstream.secret_source_scope_digest() == ZERO_DIGEST
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(188));
         }
         Ok(Self {
             route_id: role_plan.route_id(),
@@ -420,7 +420,7 @@ impl ProductionSettlementMaterializationOwnerV1 {
             || role_plan.route_scope_digest() != composition.route_scope_digest()
             || role_plan.composition_binding_digest() != composition.binding_digest()
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(423));
         }
         role_plan
             .authenticate(
@@ -429,10 +429,10 @@ impl ProductionSettlementMaterializationOwnerV1 {
                 upstream_scope,
                 downstream_scope,
             )
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(432))?;
         let dom = admission
             .dom_deployment_capability()
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(435))?;
         let upstream = authenticate_leg(inputs, &role_plan, LegIdV1::Upstream)?;
         let downstream = authenticate_leg(inputs, &role_plan, LegIdV1::Downstream)?;
         if !matches!(
@@ -443,27 +443,73 @@ impl ProductionSettlementMaterializationOwnerV1 {
             || downstream.secret_source != FinalClaimSecretSourceV1::LocalOrigin
             || downstream.reveal_mode != FinalClaimRevealModeV1::DomRevealsFirst
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(446));
         }
         let route_id = admission.route_id();
         let route_scope_digest = composition.route_scope_digest();
         let composition_digest = composition.binding_digest();
         let role_plan_digest = role_plan.digest();
         let dom_binding = dom_secret_installer.binding();
-        if dom_secret_installer.route_id() != route_id
-            || dom_secret_installer.composition_digest() != composition_digest
-            || dom_secret_installer.leg() != SettlementLegV1::Downstream
-            || dom_secret_installer.settlement_id() != downstream.settlement_id
-            || dom_secret_installer.chain_id() != dom.deployment().chain_id.0
-            || dom_secret_installer.trusted_chain_id().as_bytes()
-                != &dom_secret_installer.chain_id()
-            || dom_binding.route_id() != route_id
-            || dom_binding.session_id() != composition.downstream().session_id.0
-            || dom_binding.chain_id() != dom_secret_installer.chain_id()
-            || dom_binding.profile_digest() != admission.dom_profile_digest()
-            || dom_binding.deployment_digest() != dom.registry_digest()
-        {
-            return Err(AuthorityRefusalV1::Inconsistent);
+        // DIAG(temporary): same pins, same short-circuit order, same refusal;
+        // the only addition is the closed name of the pin that refused.
+        for (pin, refused) in [
+            (
+                "installer_route",
+                dom_secret_installer.route_id() != route_id,
+            ),
+            (
+                "installer_composition",
+                dom_secret_installer.composition_digest() != composition_digest,
+            ),
+            (
+                "installer_leg",
+                dom_secret_installer.leg() != SettlementLegV1::Downstream,
+            ),
+            (
+                "installer_settlement",
+                dom_secret_installer.settlement_id() != downstream.settlement_id,
+            ),
+            (
+                "installer_chain",
+                dom_secret_installer.chain_id() != dom.deployment().chain_id.0,
+            ),
+            (
+                "installer_trusted_chain",
+                dom_secret_installer.trusted_chain_id().as_bytes()
+                    != &dom_secret_installer.chain_id(),
+            ),
+            ("binding_route", dom_binding.route_id() != route_id),
+            (
+                "binding_session",
+                dom_binding.session_id() != composition.downstream().session_id.0,
+            ),
+            (
+                "binding_chain",
+                dom_binding.chain_id() != dom_secret_installer.chain_id(),
+            ),
+            // The binding carries the raw consensus-rules digest it was built
+            // from; the admission carries the adapter-profile hash over the
+            // whole deployment (which includes that digest). Pin each value
+            // against its own source, exactly as refund arming does: they are
+            // two distinct commitments and can never be equal to each other.
+            (
+                "binding_profile",
+                dom_binding.profile_digest() != dom.deployment().consensus_rules_digest,
+            ),
+            (
+                "admission_profile",
+                route_time_anchor::resolved_dom_deployment_profile_digest_v25(dom)
+                    .map_or(true, |adapter| adapter != admission.dom_profile_digest()),
+            ),
+            (
+                "binding_deployment",
+                dom_binding.deployment_digest() != dom.registry_digest(),
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_MATERIALIZER_DIAG_V25 pin={pin}");
+                return Err(inconsistent_at_v25(508));
+            }
         }
         let expects_bitcoin_secret_installer =
             upstream.counterparty_face == SettlementFaceV1::Bitcoin;
@@ -476,7 +522,7 @@ impl ProductionSettlementMaterializationOwnerV1 {
                     && installer.composition_digest() == composition_digest
                     && installer.chain_id() == upstream.counterparty_chain_id => {}
             (false, None) => {}
-            _ => return Err(AuthorityRefusalV1::Inconsistent),
+            _ => return Err(inconsistent_at_v25(522)),
         }
         if let Some(installer) = bitcoin_secret_installer.as_mut() {
             let expected = ProductionBitcoinExtractionHandoffScopeV1 {
@@ -503,9 +549,7 @@ impl ProductionSettlementMaterializationOwnerV1 {
                 Err(ChildAuthorityRefusalV1::Unavailable) => {
                     return Err(AuthorityRefusalV1::Unavailable)
                 }
-                Err(ChildAuthorityRefusalV1::Conflict) => {
-                    return Err(AuthorityRefusalV1::Inconsistent)
-                }
+                Err(ChildAuthorityRefusalV1::Conflict) => return Err(inconsistent_at_v25(550)),
             }
         }
         let materializer_authority_id = digest_parts(
@@ -901,7 +945,7 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
                     || request.leg() != LegIdV1::Downstream
                     || leg.secret_source != FinalClaimSecretSourceV1::LocalOrigin
                 {
-                    return Err(AuthorityRefusalV1::Inconsistent);
+                    return Err(inconsistent_at_v25(947));
                 }
                 let staged = self.materialize_first_exposure(request, leg, semantic, effect)?;
                 (SecretRequirementV1::FirstExposureRequired, staged)
@@ -919,10 +963,10 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
         self.require_scope(composition, request)?;
         let SecretVisibilityV1::Public { first_exposure } = &request.snapshot().secret_visibility
         else {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(965));
         };
         if request.action() != ActionKindV1::Claim || request.leg() != LegIdV1::Upstream {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(968));
         }
         let leg = self.leg(request.leg());
         if !matches!(
@@ -930,7 +974,7 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
             FinalClaimSecretSourceV1::VerifiedCounterpartyClaim
                 | FinalClaimSecretSourceV1::VerifiedDownstreamDomClaimV23
         ) {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(976));
         }
         let semantic = self.semantic_digest(request.leg(), request.action(), leg)?;
         let effect = derive_effect_id_v1(
@@ -1018,11 +1062,11 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
             || composition.binding_digest() != self.composition_digest
             || composition.route_scope_digest() != self.route_scope_digest
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(1064));
         }
         let rebound = composition
             .verify_revealed_scalar(scalar.expose())
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(1068))?;
         let request = ProductionChildMaterializationRequestV1 {
             route_id: bindings.route_id,
             effect_id: bindings.effect_id,
@@ -1055,7 +1099,7 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
             || result.intent_digest == ZERO_DIGEST
             || result.custody_digest == ZERO_DIGEST
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(1101));
         }
         let leg = self.legs[1];
         self.install_bitcoin_secret_handoff_if_required(&request, &result, leg)?;
@@ -1078,7 +1122,7 @@ impl ProductionSettlementDraftMaterializerV2 {
         let installer = self
             .bitcoin_secret_installer
             .as_mut()
-            .ok_or(AuthorityRefusalV1::Inconsistent)?;
+            .ok_or_else(|| inconsistent_at_v25(1124))?;
         let expected = ProductionBitcoinExtractionHandoffScopeV1 {
             route_id: request.route_id,
             composition_digest: request.composition_digest,
@@ -1125,7 +1169,7 @@ impl ProductionSettlementDraftMaterializerV2 {
             || composition.binding_digest() != self.composition_digest
             || composition.route_scope_digest() != self.route_scope_digest
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(1171));
         }
         Ok(())
     }
@@ -1227,13 +1271,22 @@ impl ProductionSettlementDraftMaterializerV2 {
             .router
             .with_router(|router| {
                 if first_face == SettlementFaceV1::Dom {
-                    let first = router.materialize_child(SettlementFaceV1::Dom, dom, None)?;
-                    let second =
-                        router.materialize_child(leg.counterparty_face, counterparty, None)?;
+                    let first = router
+                        .materialize_child(SettlementFaceV1::Dom, dom, None)
+                        .inspect_err(|_| eprintln!("DOM_CHILD_FACE_DIAG_V25 face=dom_first"))?;
+                    let second = router
+                        .materialize_child(leg.counterparty_face, counterparty, None)
+                        .inspect_err(|_| {
+                            eprintln!("DOM_CHILD_FACE_DIAG_V25 face=counterparty_second")
+                        })?;
                     return Ok([first, second]);
                 }
-                let first = router.materialize_child(leg.counterparty_face, counterparty, None)?;
-                let second = router.materialize_child(SettlementFaceV1::Dom, dom, None)?;
+                let first = router
+                    .materialize_child(leg.counterparty_face, counterparty, None)
+                    .inspect_err(|_| eprintln!("DOM_CHILD_FACE_DIAG_V25 face=counterparty"))?;
+                let second = router
+                    .materialize_child(SettlementFaceV1::Dom, dom, None)
+                    .inspect_err(|_| eprintln!("DOM_CHILD_FACE_DIAG_V25 face=dom"))?;
                 Ok([first, second])
             })
             .map_err(map_child_refusal)?;
@@ -1302,7 +1355,7 @@ impl ProductionSettlementDraftMaterializerV2 {
             || first.intent_digest == ZERO_DIGEST
             || first.custody_digest == ZERO_DIGEST
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(1348));
         }
         self.dom_secret_installer
             .install_from_exact_child(&dom_request, &first)?;
@@ -1343,7 +1396,7 @@ impl ProductionSettlementDraftMaterializerV2 {
                     || child.custody_digest == ZERO_DIGEST
             })
         {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(1389));
         }
         Ok(())
     }
@@ -1357,7 +1410,7 @@ impl ProductionSettlementDraftMaterializerV2 {
         children: SettlementChildrenV1,
     ) -> Result<ProductionSettlementPlanDraftV1, AuthorityRefusalV1> {
         if preexisting_secret_evidence_digest.is_some_and(|digest| digest == ZERO_DIGEST) {
-            return Err(AuthorityRefusalV1::Inconsistent);
+            return Err(inconsistent_at_v25(1403));
         }
         Ok(ProductionSettlementPlanDraftV1 {
             settlement_id: leg.settlement_id,
@@ -1444,12 +1497,12 @@ fn authenticate_leg(
             )
         )
     {
-        return Err(AuthorityRefusalV1::Inconsistent);
+        return Err(inconsistent_at_v25(1490));
     }
     let (counterparty_face, profile, deployment) = if let Some(session) = inputs.evm_session(leg) {
         let resolved = admission
             .evm_deployment_capability(leg, session)
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(1495))?;
         (
             SettlementFaceV1::Evm,
             resolved.profile_digest(),
@@ -1458,52 +1511,52 @@ fn authenticate_leg(
     } else if inputs.bitcoin_session(leg).is_some() {
         let resolved = admission
             .bitcoin_deployment_capability(leg)
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(1504))?;
         (
             SettlementFaceV1::Bitcoin,
             resolved.profile_digest(),
             btc_actuator::resolved_bitcoin_deployment_digest_v1(&resolved)
-                .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
+                .map_err(|_| inconsistent_at_v25(1509))?,
         )
     } else if inputs.solana_session(leg).is_some() {
         let resolved = admission
             .solana_deployment_capability(leg)
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(1514))?;
         (
             SettlementFaceV1::Solana,
             resolved.profile_digest(),
             crate::production_child_solana::resolved_solana_deployment_digest_v1(&resolved)
-                .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
+                .map_err(|_| inconsistent_at_v25(1519))?,
         )
     } else if inputs.monero_session(leg).is_some() {
         let resolved = admission
             .monero_deployment_capability(leg)
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            .map_err(|_| inconsistent_at_v25(1524))?;
         (
             SettlementFaceV1::Monero,
             resolved.profile_digest(),
             crate::production_child_xmr::resolved_monero_deployment_digest_v1(&resolved)
-                .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
+                .map_err(|_| inconsistent_at_v25(1529))?,
         )
     } else {
-        return Err(AuthorityRefusalV1::Inconsistent);
+        return Err(inconsistent_at_v25(1532));
     };
     let admission_profile = match leg {
         LegIdV1::Upstream => admission.upstream_profile_digest(),
         LegIdV1::Downstream => admission.downstream_profile_digest(),
     };
     if profile != admission_profile || entry.secret_source_scope_digest() == ZERO_DIGEST {
-        return Err(AuthorityRefusalV1::Inconsistent);
+        return Err(inconsistent_at_v25(1539));
     }
     if entry.secret_source() == FinalClaimSecretSourceV1::VerifiedDownstreamDomClaimV23
         && (leg != LegIdV1::Upstream
             || counterparty_face != SettlementFaceV1::Monero
             || inputs.monero_session(LegIdV1::Downstream).is_none())
     {
-        return Err(AuthorityRefusalV1::Inconsistent);
+        return Err(inconsistent_at_v25(1546));
     }
     if !secret_source_is_extractable_v1(counterparty_face, entry.secret_source()) {
-        return Err(AuthorityRefusalV1::Inconsistent);
+        return Err(inconsistent_at_v25(1549));
     }
     Ok(ProductionLegMaterializationBindingsV1 {
         settlement_id: settlement.settlement_id.0,
@@ -1554,7 +1607,7 @@ fn digest_parts(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, AuthorityRef
         .finalize_variable(&mut output)
         .map_err(|_| AuthorityRefusalV1::Unavailable)?;
     if output == ZERO_DIGEST {
-        return Err(AuthorityRefusalV1::Inconsistent);
+        return Err(inconsistent_at_v25(1600));
     }
     Ok(output)
 }
@@ -2423,4 +2476,12 @@ mod tests {
             );
         }
     }
+}
+
+// DIAG(temporary): names the source line of the materializer refusal that
+// fired. The value returned is byte-identical to the one it replaces; only a
+// closed integer is printed, never a digest, address or payload.
+fn inconsistent_at_v25(line: u32) -> AuthorityRefusalV1 {
+    eprintln!("DOM_MATERIALIZER_DIAG_V25 line={line}");
+    AuthorityRefusalV1::Inconsistent
 }

@@ -31,7 +31,6 @@ struct RunningDependenciesV23 {
     _f6: NativeF6ProvisionV23,
     _baseline: NativeDomSnapshotV23,
     _funding: RouteFundingOwnerV23,
-    _inventory: NativeMainnetXmrInventorySourceV23,
     _credentials: NativeXmrDaemonCredentialsV23,
 }
 
@@ -348,11 +347,14 @@ impl NativeMainnetStartupV23 {
             eprintln!("native startup actor={actor}: authenticated export ready");
         }
         let exports = exports.try_into().map_err(|_| "startup two exports")?;
+        // The exported daemon resources now own every authenticated public
+        // input they need. Drop the parent's encrypted SQLite inventory
+        // handle before either child opens the same secret store.
+        drop(self.inventory.take().ok_or("startup inventory absent")?);
         let dependencies = RunningDependenciesV23 {
             _f6: self.f6.take().ok_or("startup F6 absent")?,
             _baseline: self.baseline.take().ok_or("startup baseline absent")?,
             _funding: self.funding.take().ok_or("startup funding absent")?,
-            _inventory: self.inventory.take().ok_or("startup inventory absent")?,
             _credentials: self
                 .credentials
                 .take()

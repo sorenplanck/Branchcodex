@@ -24,9 +24,9 @@ mod types;
 
 pub use pre_f6::{
     CurrentPreF6NegotiationTimeV2, DurablePreF6TimeStoreV2, PreF6CanonicalCheckpointV2,
-    MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2,
     PreF6TimeEvidenceV2, PreF6TimeInstallOutcomeV2, PreF6TimePolicyLimitsV2, PreF6TimePolicyV2,
     PreF6TimeScopeRequestV2, PreF6TimeScopeV2, PreF6TimeSignatureV2, SignedPreF6TimeEvidenceV2,
+    MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2,
 };
 pub use signed::{SignedRouteTimeEvidenceV2, SignedRouteTimePolicyV2, TimeAnchorSignatureV2};
 pub use store::{

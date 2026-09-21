@@ -102,15 +102,25 @@ mod tests {
     }
 
     #[test]
-    fn production_f7_phases_keep_the_checkpoints_and_no_recovery_only_veto() {
+    fn production_relay_precedes_slow_f7_phases_and_their_ownership_checkpoints() {
         let source = include_str!("production_run_universal.rs");
+        let round_start = source.find("// Service Relay first.").unwrap();
+        let relay = source[round_start..]
+            .find("run_production_composite_relay_half_v25(")
+            .unwrap()
+            + round_start;
+        let readiness = source[relay..]
+            .find("f7_readiness_complete_v25(chain)")
+            .unwrap()
+            + relay;
         let loop_start = source
-            .find("// Observe/install receiver authority before Relay")
+            .find("// Observe/install receiver authority after the readiness Relay")
             .unwrap();
         let loop_end = source[loop_start..]
-            .find("match run_production_composite_runtime_bounded_v1(")
-            .unwrap()
+            .find("// One interleaved round")
+            .expect("the owned native phase block must be bounded")
             + loop_start;
+        assert!(relay < readiness && readiness < loop_start);
         let phases = &source[loop_start..loop_end];
         assert_eq!(phases.matches("owned_native_phase_v24!(").count(), 4);
         for phase in [
@@ -128,6 +138,11 @@ mod tests {
         // RecoveryOnly intentionally permits authorized Claim/Refund exits;
         // ownership maintenance must not become a new economic veto.
         assert!(!phases.contains("HealthStateV1::"));
+        let route_half = source[loop_end..]
+            .find("run_production_composite_route_half_v25(")
+            .unwrap()
+            + loop_end;
+        assert!(loop_end < route_half);
         let macro_start = source.find("macro_rules! owned_native_phase_v24").unwrap();
         let macro_end = source[macro_start..]
             .find("// Refresh before work")

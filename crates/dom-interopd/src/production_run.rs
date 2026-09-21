@@ -1248,6 +1248,7 @@ fn run_legacy_production_v3(
                 .trusted_chain_id(),
             runtime: dom_runtime,
             route_terms_digest: inputs.admission().frozen_bindings().terms_digest,
+            dom_consensus_rules_digest: dom_deployment.deployment().consensus_rules_digest,
             materialization_scope: dom_materialization_scope,
         },
     )
@@ -1480,10 +1481,22 @@ fn run_legacy_production_v3(
     // ------------------------------------------------------------------
     let external_call_bound = Duration::from_millis(runtime_bounds.external_call_timeout_ms);
     let relay_backoff = Duration::from_millis(runtime_bounds.relay_poll_backoff_ms);
+    // Same authenticated ceiling as the universal entrypoint: one connection
+    // carries a socket wait plus every scope's exchange, and the route
+    // supervisor refuses an external block longer than its renewal window.
+    let route_block_ceiling = Duration::from_millis(
+        runtime_bounds
+            .lease_duration_ms
+            .checked_sub(runtime_bounds.renew_before_ms)
+            .ok_or(ProductionRunErrorV1::RouteRuntime)?,
+    );
+    let composite_call_bound = external_call_bound.min(
+        crate::production_composite_loop::call_bound_for_blocking_ceiling_v25(route_block_ceiling),
+    );
     let composite_config = ProductionCompositeLoopConfigV1::new(
-        external_call_bound,
-        external_call_bound,
-        external_call_bound,
+        composite_call_bound,
+        composite_call_bound,
+        composite_call_bound,
         relay_backoff,
         PRODUCTION_ACTIVATION_ROUND_BUDGET_V1,
     )

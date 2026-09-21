@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 #[cfg(target_os = "linux")]
@@ -299,6 +298,9 @@ pub struct DurableSettlementCoordinatorV1 {
     plan_authority_id: Digest32,
     database_authority: File,
     _process_lock: File,
+    /// Descriptors of the validated sidecars, held while the connection lives.
+    #[cfg(target_os = "linux")]
+    retained_sidecars: RetainedSidecarsV25,
 }
 
 impl core::fmt::Debug for DurableSettlementCoordinatorV1 {
@@ -381,6 +383,8 @@ impl DurableSettlementCoordinatorV1 {
             plan_authority_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage()?;
         sync_directory(parent)?;
@@ -448,9 +452,10 @@ impl DurableSettlementCoordinatorV1 {
             plan_authority_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage()?;
-        validate_resumable_sidecars(path)?;
         sync_directory(parent)?;
         Ok(store)
     }
@@ -501,6 +506,8 @@ impl DurableSettlementCoordinatorV1 {
             plan_authority_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage()?;
         let retained: (Vec<u8>, Vec<u8>) = store
@@ -1439,7 +1446,8 @@ impl DurableSettlementCoordinatorV1 {
         validate_database_path(&self.connection, &self.path)?;
         validate_backend_and_schema(&self.connection)?;
         validate_owner_file(&self.path)?;
-        validate_resumable_sidecars(&self.path)?;
+        #[cfg(target_os = "linux")]
+        self.retained_sidecars.validate_all(&self.path)?;
         let retained: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = self
             .connection
             .query_row(
@@ -6953,20 +6961,10 @@ enum SqliteSidecarKindV1 {
 }
 
 #[cfg(target_os = "linux")]
+/// Pre-open validation: no connection exists yet, so releasing the
+/// descriptors here cannot unlock a live WAL index.
 fn validate_resumable_sidecars(path: &Path) -> Result<()> {
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV1::Wal),
-        ("-shm", SqliteSidecarKindV1::SharedMemory),
-        ("-journal", SqliteSidecarKindV1::RollbackJournal),
-    ] {
-        let sidecar = sidecar_path(path, suffix);
-        match fs::symlink_metadata(&sidecar) {
-            Ok(_) => validate_sqlite_sidecar_shape(&sidecar, kind)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(CoordinatorErrorV1::StorageUnavailable),
-        }
-    }
-    Ok(())
+    RetainedSidecarsV25::default().validate_all(path)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -6975,24 +6973,80 @@ fn validate_resumable_sidecars(_path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_sqlite_sidecar_shape(path: &Path, kind: SqliteSidecarKindV1) -> Result<()> {
-    validate_owner_file(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+/// Descriptors of every validated SQLite sidecar of one store.
+///
+/// Closing any descriptor for a file drops every POSIX (fcntl) lock this
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. Opening and closing a sidecar while the connection is live
+/// therefore unlocks the WAL index and lets a reader in another process
+/// reinitialize it under this process's mapping (measured: SIGBUS). The
+/// checks are unchanged; only the descriptors are now retained.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(u64, u64, File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(&self, path: &Path) -> Result<()> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV1::Wal),
+            ("-shm", SqliteSidecarKindV1::SharedMemory),
+            ("-journal", SqliteSidecarKindV1::RollbackJournal),
+        ] {
+            let sidecar = sidecar_path(path, suffix);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(_) => self.validate(&sidecar, kind)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(CoordinatorErrorV1::StorageUnavailable),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self, path: &Path, kind: SqliteSidecarKindV1) -> Result<()> {
+        validate_owner_file(path)?;
+        let named =
+            fs::symlink_metadata(path).map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        if let Some((_, _, retained)) = handles
+            .iter()
+            .find(|(dev, ino, _)| *dev == named.dev() && *ino == named.ino())
+        {
+            return validate_sqlite_sidecar_contents(retained, kind);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        let opened = file
+            .metadata()
+            .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        if opened.dev() != named.dev() || opened.ino() != named.ino() {
+            return Err(CoordinatorErrorV1::InvalidStorageAuthority);
+        }
+        validate_sqlite_sidecar_contents(&file, kind)?;
+        handles.push((named.dev(), named.ino(), file));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_sqlite_sidecar_contents(file: &File, kind: SqliteSidecarKindV1) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
     let retained = file
         .metadata()
         .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
-    let named = fs::symlink_metadata(path).map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
-    if retained.dev() != named.dev() || retained.ino() != named.ino() {
-        return Err(CoordinatorErrorV1::InvalidStorageAuthority);
-    }
     if retained.len() == 0 {
         return Ok(());
     }
     let mut header = [0u8; 8];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| CoordinatorErrorV1::InvalidStorageAuthority)?;
     let valid = match kind {
         SqliteSidecarKindV1::Wal => {
@@ -7536,7 +7590,10 @@ mod child_refusal_v25_tests {
             child_refusal_v25(ChildAuthorityRefusalV1::Unavailable),
             CoordinatorErrorV1::ChildAuthorityRefused
         );
-        for permanent in [ChildAuthorityRefusalV1::Refused, ChildAuthorityRefusalV1::Conflict] {
+        for permanent in [
+            ChildAuthorityRefusalV1::Refused,
+            ChildAuthorityRefusalV1::Conflict,
+        ] {
             assert_eq!(
                 child_refusal_v25(permanent),
                 CoordinatorErrorV1::ChildAuthorityRejected

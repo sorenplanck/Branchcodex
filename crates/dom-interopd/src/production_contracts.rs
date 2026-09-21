@@ -2760,6 +2760,7 @@ mod tests {
             owner.step_f7_readiness_v19(chain, 1_000)?,
             super::f7_readiness_v19::ProductionF7ReadinessStepV19::GateAbsent
         );
+        assert!(!owner.f7_readiness_complete_v25(chain)?);
         let OutboundDsc1RecoveryV1::SigningRequest(retained) =
             owner.store.resume_outbound_dsc1(SESSION)?
         else {

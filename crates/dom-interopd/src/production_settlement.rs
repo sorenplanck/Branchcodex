@@ -551,10 +551,12 @@ impl RouteActionAuthority for ProductionSettlementActionAuthorityV1 {
         &mut self,
         request: RouteActionAuthorizationRequestV1<'_>,
     ) -> Result<ActionIntentV1, AuthorityRefusalV1> {
-        let mut core = self
-            .0
-            .try_borrow_mut()
-            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let mut core = diag_route_action_v25(
+            "borrow",
+            self.0
+                .try_borrow_mut()
+                .map_err(|_| AuthorityRefusalV1::Inconsistent),
+        )?;
         core.authorize_route_action(&request)
     }
 }
@@ -611,6 +613,25 @@ impl RouteSecretRetirementAuthority for ProductionSettlementRetirementAuthorityV
     }
 }
 
+// DIAG(temporary): names which sub-step of the route-action authority refused.
+// `AuthorityRefusalV1` is a closed three-variant enum and `site` is a fixed
+// literal, so nothing derived from a secret, digest or address is printed.
+pub(crate) fn diag_route_action_v25<T>(
+    site: &'static str,
+    result: Result<T, AuthorityRefusalV1>,
+) -> Result<T, AuthorityRefusalV1> {
+    match &result {
+        Err(AuthorityRefusalV1::Inconsistent) => {
+            eprintln!("DOM_ACTION_AUTH_DIAG_V25 site={site} refusal=inconsistent");
+        }
+        Err(AuthorityRefusalV1::Refused) => {
+            eprintln!("DOM_ACTION_AUTH_DIAG_V25 site={site} refusal=refused");
+        }
+        _ => {}
+    }
+    result
+}
+
 impl ProductionSettlementBridgeCoreV1 {
     fn now(&self) -> Result<u64, AuthorityRefusalV1> {
         self.clock.now_unix_ms()
@@ -620,9 +641,9 @@ impl ProductionSettlementBridgeCoreV1 {
         &mut self,
         request: &RouteActionAuthorizationRequestV1<'_>,
     ) -> Result<ActionIntentV1, AuthorityRefusalV1> {
-        let now = self.now()?;
-        let draft = self.plan_source.draft_for_action(request)?;
-        validate_plan_draft(request, &draft)?;
+        let now = diag_route_action_v25("clock", self.now())?;
+        let draft = diag_route_action_v25("draft", self.plan_source.draft_for_action(request))?;
+        diag_route_action_v25("validate_draft", validate_plan_draft(request, &draft))?;
         let effect_id = derive_effect_id_v1(
             request.route_id(),
             request.event_id(),
@@ -657,7 +678,10 @@ impl ProductionSettlementBridgeCoreV1 {
                 CompositeSettlementPlanV1::new_first_exposure_staged(bindings, first, deferred)
             }
         }
-        .map_err(map_coordinator_error)?;
+        .map_err(|error| {
+            diag_route_action_v25::<()>("compose_plan", Err(map_coordinator_error(error)))
+                .unwrap_err()
+        })?;
 
         let is_precommitted_funding = request.action() == ActionKindV1::Funding
             && request
@@ -670,14 +694,23 @@ impl ProductionSettlementBridgeCoreV1 {
         let stored = match self.coordinator.load_plan_for_effect(effect_id) {
             Ok(stored) => {
                 if stored.plan() != &plan {
-                    return Err(AuthorityRefusalV1::Inconsistent);
+                    return diag_route_action_v25(
+                        "stored_plan_mismatch",
+                        Err(AuthorityRefusalV1::Inconsistent),
+                    );
                 }
                 if is_precommitted_funding {
-                    validate_pristine_preinstalled_plan(&stored)?;
-                    self.plan_persistence.revalidate_preinstalled_new_plan(
-                        &stored,
-                        request.event_id(),
-                        now,
+                    diag_route_action_v25(
+                        "pristine_preinstalled",
+                        validate_pristine_preinstalled_plan(&stored),
+                    )?;
+                    diag_route_action_v25(
+                        "revalidate_preinstalled",
+                        self.plan_persistence.revalidate_preinstalled_new_plan(
+                            &stored,
+                            request.event_id(),
+                            now,
+                        ),
                     )?;
                 }
                 stored
@@ -685,9 +718,10 @@ impl ProductionSettlementBridgeCoreV1 {
             Err(CoordinatorErrorV1::PlanNotFound) => {
                 if is_precommitted_funding {
                     match self.coordinator.load_plan_for_stable_replacement(&plan) {
-                        Ok(preinstalled) => {
-                            self.refence_preinstalled_new_funding(request, preinstalled, plan, now)?
-                        }
+                        Ok(preinstalled) => diag_route_action_v25(
+                            "refence_preinstalled",
+                            self.refence_preinstalled_new_funding(request, preinstalled, plan, now),
+                        )?,
                         Err(CoordinatorErrorV1::PlanNotFound) => {
                             self.install_new_action_plan(plan, request.event_id(), effect_id, now)?
                         }
@@ -699,7 +733,10 @@ impl ProductionSettlementBridgeCoreV1 {
             }
             Err(error) => return Err(map_coordinator_error(error)),
         };
-        validate_stored_action_plan(request, &stored)?;
+        diag_route_action_v25(
+            "validate_stored",
+            validate_stored_action_plan(request, &stored),
+        )?;
         Ok(action_intent_from_stored(&stored))
     }
 

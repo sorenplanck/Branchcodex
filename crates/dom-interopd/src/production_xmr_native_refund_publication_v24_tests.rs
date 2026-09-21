@@ -446,7 +446,18 @@ pub(super) fn prove_after_restart(
                 && s.leg(boundary.leg).refund.progress() == ActionProgressV1::Final
                 && s.leg(boundary.leg).claim.progress() == ActionProgressV1::NotPrepared
         });
-        if complete && reaped.iter().all(|v| *v) {
+        if complete {
+            // This scenario intentionally funds only one leg. The idle leg
+            // cannot make the route globally terminal, so a successful
+            // publication does not imply natural daemon exit. Once the
+            // requester has durably observed the exact final refund, stop the
+            // remaining harness-owned children before opening their stores.
+            for actor in 0..2 {
+                if !reaped[actor] {
+                    running.crash_actor(actor)?;
+                    reaped[actor] = true;
+                }
+            }
             break;
         }
         if reaped[requester] && !complete {

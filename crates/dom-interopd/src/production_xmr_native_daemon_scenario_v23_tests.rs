@@ -136,23 +136,29 @@ fn wait_claims(
         for actor in 0..2 {
             let exited = running.poll_actor_v23(actor)?;
             if exited.is_some_and(|status| !status.success()) {
+                running.report_diagnostics_v25();
                 return Err("real daemon exited unsuccessfully before final claims".into());
             }
             match observers[actor].poll()? {
                 Some(snapshot) => {
                     if snapshot.aborted_unfunded {
+                        running.report_diagnostics_v25();
                         return Err(
                             "real daemon aborted unfunded; this is not a successful swap".into(),
                         );
                     }
                     if exited.is_some() && !claimed(&snapshot) {
+                        running.report_diagnostics_v25();
                         return Err("daemon exit 0 did not leave both economic claims final".into());
                     }
                     timing.observe(actor, &snapshot);
                     complete &= claimed(&snapshot) && exited.is_some();
                     scoped_snapshots.push(snapshot);
                 }
-                None if exited.is_some() => return Err("daemon exit has no durable route".into()),
+                None if exited.is_some() => {
+                    running.report_diagnostics_v25();
+                    return Err("daemon exit has no durable route".into());
+                }
                 None => complete = false,
             }
         }
@@ -161,6 +167,10 @@ fn wait_claims(
             return Ok(());
         }
         if start.elapsed() >= PHASE_TIMEOUT {
+            // Both daemons are still alive here, so nothing has drained their
+            // stderr. Stop them first: a stalled run is exactly the failure
+            // whose diagnostics decide where the stall is.
+            running.report_stall_v25();
             return Err("real daemon claim observation reached its explicit deadline".into());
         }
         if start.elapsed().saturating_sub(announced) >= Duration::from_secs(30) {

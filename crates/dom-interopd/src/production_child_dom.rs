@@ -291,7 +291,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
             Ok((capability, DomOperationDispositionV1::AlreadyCompleted)) => {
                 Ok(CompletedDomCapabilityV1::Current(Box::new(capability)))
             }
-            Ok(_) => Err(ChildAuthorityRefusalV1::Conflict),
+            Ok(_) => Err(child_conflict_at_v25(294)),
             Err(DomActuatorError::ReconciliationRequired) => {
                 Ok(CompletedDomCapabilityV1::NeedsRefence)
             }
@@ -330,7 +330,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
         match scope.action() {
             DomActionV1::BroadcastFunding => {
                 if refund_context.is_some() {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(333));
                 }
                 let native = match funding_limit_v23 {
                     ProductionDomFundingLimitV23::Legacy => contracts
@@ -394,7 +394,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
                 })
             }
             DomActionV1::BroadcastRefund => {
-                let current_context = refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                let current_context = refund_context.ok_or_else(|| child_conflict_at_v25(397))?;
                 let broadcast =
                     match Self::completed_capability(control, lease, binding, now_unix_ms)? {
                         CompletedDomCapabilityV1::Current(capability) => contracts
@@ -423,7 +423,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
             }
             DomActionV1::BroadcastClaim => {
                 if refund_context.is_some() {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(426));
                 }
                 if let Some(progress) = contracts
                     .f7_final_claim_progress_v21(trusted_chain_id)
@@ -561,7 +561,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
                     }
                 }
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(564)),
         }
     }
 }
@@ -604,7 +604,7 @@ impl ProductionDomActionAuthorityV1 for ConcreteProductionDomActionAuthorityV1 {
                     {
                         Ok(ProductionDomActionResultV1::Externalized)
                     }
-                    Ok(_) => Err(ChildAuthorityRefusalV1::Conflict),
+                    Ok(_) => Err(child_conflict_at_v25(607)),
                     Err(
                         DomActuatorError::FinalityPending
                         | DomActuatorError::RpcAuthorityUnavailable,
@@ -628,6 +628,7 @@ pub(crate) struct ProductionDomChildPortV1<C, A> {
     lease_renewal_ms_v12: Option<u64>,
     funding_window_v23: Option<crate::production_timer::ProductionFundingWindowV23>,
     route_terms_digest: Digest32,
+    dom_consensus_rules_digest: Digest32,
     materialization_scope: ProductionDomMaterializationScopeV1,
 }
 
@@ -656,7 +657,7 @@ impl ProductionDomMaterializationScopeV1 {
                 upstream_scope,
                 downstream_scope,
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+            .map_err(|_| child_conflict_at_v25(659))?;
         let upstream = role_plan.entry(ComposedSettlementLegV1::Upstream);
         let downstream = role_plan.entry(ComposedSettlementLegV1::Downstream);
         if role_plan.route_id() != inputs.admission().route_id()
@@ -665,7 +666,7 @@ impl ProductionDomMaterializationScopeV1 {
             || upstream.secret_source_scope_digest() == ZERO_DIGEST
             || downstream.secret_source_scope_digest() == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(668));
         }
         Ok(Self {
             route_id: role_plan.route_id(),
@@ -710,6 +711,12 @@ pub(crate) struct ProductionDomChildBindingsV1 {
     pub(crate) trusted_chain_id: TrustedChainIdV1,
     pub(crate) runtime: RealDomRpcRuntimeV1,
     pub(crate) route_terms_digest: Digest32,
+    /// Raw consensus-rules digest of the admitted DOM deployment. The F6
+    /// session binding commits to exactly this value, never to the
+    /// adapter-profile hash that the registry derives over the whole
+    /// deployment; the two are distinct commitments (the hash contains the
+    /// digest) and can never be equal to each other.
+    pub(crate) dom_consensus_rules_digest: Digest32,
     pub(crate) materialization_scope: ProductionDomMaterializationScopeV1,
 }
 
@@ -996,7 +1003,7 @@ pub(crate) fn compose_production_dom_child_port_v12(
     duration_ms: u64,
 ) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
     if duration_ms == 0 || duration_ms > 3_600_000 {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(999));
     }
     compose_production_dom_child_port_with_renewal_v12(control, bindings, Some(duration_ms))
 }
@@ -1010,7 +1017,7 @@ pub(crate) fn compose_production_dom_child_port_v23(
     funding_window: crate::production_timer::ProductionFundingWindowV23,
 ) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
     if duration_ms == 0 || duration_ms > 3_600_000 {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(1013));
     }
     compose_production_dom_child_port_bounded_v23(
         control,
@@ -1048,7 +1055,7 @@ fn compose_production_dom_child_port_bounded_v23(
     port.renew_actuator_lease_v12()?;
     let f7_scanner = ProductionDomF7ScannerAuthorityV1::from_child_runtime(&port.runtime);
     if !f7_scanner.shares_runtime(&port.runtime) {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(1051));
     }
     Ok(ProductionDomChildCompositionV1 {
         child: ProductionSettlementChildRouterV1::authenticate_dom(port),
@@ -1081,6 +1088,7 @@ where
             trusted_chain_id,
             runtime,
             route_terms_digest,
+            dom_consensus_rules_digest,
             materialization_scope,
         } = bindings;
         let [upstream, downstream] = sessions;
@@ -1091,6 +1099,9 @@ where
             || upstream.settlement_id == ZERO_DIGEST
             || downstream.settlement_id == ZERO_DIGEST
             || route_terms_digest == ZERO_DIGEST
+            || dom_consensus_rules_digest == ZERO_DIGEST
+            || upstream.binding.profile_digest() != dom_consensus_rules_digest
+            || downstream.binding.profile_digest() != dom_consensus_rules_digest
             || upstream.settlement_id == downstream.settlement_id
             || upstream.binding.session_id() == downstream.binding.session_id()
             || upstream.binding.route_id() != downstream.binding.route_id()
@@ -1109,7 +1120,7 @@ where
             || lease.fencing_epoch() == 0
             || lease.lease_until_unix_ms() == 0
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1112));
         }
         for session in [&upstream, &downstream] {
             let head = session
@@ -1126,7 +1137,7 @@ where
                 || head.session_id() != session.binding.session_id()
                 || head.terms_hash() != session.binding.terms_digest()
             {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(1129));
             }
         }
         // Startup binds the existing DOM client and native Store only. The
@@ -1139,19 +1150,21 @@ where
                 upstream.leg,
                 upstream.settlement_id,
                 upstream.binding,
+                dom_consensus_rules_digest,
                 trusted_chain_id,
                 Arc::clone(&runtime),
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+            .map_err(|_| child_conflict_at_v25(1145))?,
             ProductionDomPublicSecretConsumerAuthorityV1::authenticate(
                 composition_digest,
                 downstream.leg,
                 downstream.settlement_id,
                 downstream.binding,
+                dom_consensus_rules_digest,
                 trusted_chain_id,
                 Arc::clone(&runtime),
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+            .map_err(|_| child_conflict_at_v25(1154))?,
         ];
         let port = Self {
             control,
@@ -1178,6 +1191,7 @@ where
             lease_renewal_ms_v12: None,
             funding_window_v23: None,
             route_terms_digest,
+            dom_consensus_rules_digest,
             materialization_scope,
         };
         Ok((port, public_secret_consumers))
@@ -1254,6 +1268,7 @@ where
         expected.validate_static(
             session.settlement_id,
             self.route_terms_digest,
+            self.dom_consensus_rules_digest,
             session.binding,
             self.lease,
             &self.trusted_chain_id,
@@ -1321,7 +1336,7 @@ where
             SettlementActionV1::Refund if native_refund_observer.is_some() => {
                 let driver = native_refund_observer
                     .as_ref()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(1324))?;
                 contracts.retained_native_xmr_refund_settlement_child_binding_v23(
                     &mut self.control,
                     self.lease,
@@ -1333,7 +1348,7 @@ where
             SettlementActionV1::Refund if native_refund.is_some() => {
                 let native = native_refund
                     .as_ref()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(1336))?;
                 contracts.bind_native_xmr_refund_settlement_child_v23(
                     &mut self.control,
                     self.lease,
@@ -1347,7 +1362,7 @@ where
                 &mut self.control,
                 self.lease,
                 binding_request,
-                refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?,
+                refund_context.ok_or_else(|| child_conflict_at_v25(1350))?,
                 now_unix_ms,
             ),
         }
@@ -1387,9 +1402,9 @@ where
         let evidence = ChildEvidenceBindingV1::from_dispatch(request);
         Ok(DomSettlementChildPortCallOutcomeV1::Externalized {
             evidence_digest: externalization_evidence_v1(&evidence)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1390))?,
             first_exposure_evidence_digest: first_exposure_evidence_v1(&evidence)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1392))?,
         })
     }
 
@@ -1405,19 +1420,19 @@ where
             DomSettlementChildPortCallOutcomeV1::RetryableBeforeExternalization { .. } => {
                 DomSettlementChildPortCallOutcomeV1::RetryableBeforeExternalization {
                     evidence_digest: retryable_before_externalization_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1408))?,
                 }
             }
             DomSettlementChildPortCallOutcomeV1::Unknown { .. } => {
                 DomSettlementChildPortCallOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1414))?,
                 }
             }
-            _ => return Err(ChildAuthorityRefusalV1::Conflict),
+            _ => return Err(child_conflict_at_v25(1417)),
         };
         if outcome != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1420));
         }
         Ok(expected)
     }
@@ -1436,19 +1451,19 @@ where
             {
                 DomSettlementChildPortCallOutcomeV1::ProvenNotExternalized {
                     evidence_digest: proven_not_externalized_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1439))?,
                 }
             }
             DomSettlementChildPortCallOutcomeV1::Unknown { .. } => {
                 DomSettlementChildPortCallOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1445))?,
                 }
             }
-            _ => return Err(ChildAuthorityRefusalV1::Conflict),
+            _ => return Err(child_conflict_at_v25(1448)),
         };
         if outcome != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1451));
         }
         Ok(expected)
     }
@@ -1470,7 +1485,7 @@ where
                 let evidence = ChildEvidenceBindingV1::from_dispatch(request);
                 Ok(DomSettlementChildPortCallOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1473))?,
                 })
             }
         }
@@ -1497,7 +1512,7 @@ where
             DomSettlementChildPortCallOutcomeV1::Unknown { evidence_digest } => {
                 Ok(ChildExecutionOutcomeV1::Unknown { evidence_digest })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1500)),
         }
     }
 
@@ -1522,7 +1537,7 @@ where
             DomSettlementChildPortCallOutcomeV1::Unknown { evidence_digest } => {
                 Ok(ChildReconciliationOutcomeV1::Unknown { evidence_digest })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1525)),
         }
     }
 
@@ -1532,7 +1547,7 @@ where
         let binding = ChildObservationEvidenceBindingV1::from_observation(request);
         Ok(DomSettlementChildPortCallOutcomeV1::Pending {
             evidence_digest: observation_pending_evidence_v1(&binding)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1535))?,
         })
     }
 
@@ -1541,7 +1556,7 @@ where
         observation: DomFinalityObservationV1,
     ) -> Result<DomSettlementChildPortCallOutcomeV1, ChildAuthorityRefusalV1> {
         if observation.transaction_id() != request.transaction_id {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1544));
         }
         let binding = ChildObservationEvidenceBindingV1::from_observation(request);
         let facts = ChildFinalityFactsV1 {
@@ -1551,7 +1566,7 @@ where
         };
         Ok(DomSettlementChildPortCallOutcomeV1::Final {
             evidence_digest: observation_final_evidence_v1(&binding, &facts)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1554))?,
         })
     }
 
@@ -1568,7 +1583,7 @@ where
                             evidence_digest: prior,
                         })
                     {
-                        return Err(ChildAuthorityRefusalV1::Conflict);
+                        return Err(child_conflict_at_v25(1571));
                     }
                 }
                 Ok(outcome)
@@ -1581,7 +1596,7 @@ where
                 reorg_evidence_digest,
             } => {
                 if transaction_id != request.transaction_id {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1584));
                 }
                 let binding = ChildObservationEvidenceBindingV1::from_observation(request);
                 let prior_facts = ChildFinalityFactsV1 {
@@ -1590,9 +1605,9 @@ where
                     final_block_number: prior_block_height,
                 };
                 let prior = observation_final_evidence_v1(&binding, &prior_facts)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+                    .map_err(|_| child_conflict_at_v25(1593))?;
                 if request.prior_finality_evidence_digest != Some(prior) {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1595));
                 }
                 Ok(DomSettlementChildPortCallOutcomeV1::FinalityInvalidated {
                     prior_finality_evidence_digest: prior,
@@ -1601,7 +1616,7 @@ where
                         prior,
                         reorg_evidence_digest,
                     )
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1604))?,
                 })
             }
         }
@@ -1646,7 +1661,7 @@ where
             SettlementActionV1::Refund if validated.native_driver_v23().is_some() => {
                 let driver = validated
                     .native_driver_v23()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(1649))?;
                 let observation_now = fresh_dom_time(&mut self.clock, now_unix_ms)?;
                 let observed = driver.observe_refund_share_bounded_v23(
                     native_refund_budget_v23(self.lease, observation_now)?,
@@ -1836,7 +1851,7 @@ where
                     .map_err(map_actuator_error)?;
                 if prior.is_some() {
                     return recovered
-                        .ok_or(ChildAuthorityRefusalV1::Conflict)
+                        .ok_or_else(|| child_conflict_at_v25(1839))
                         .and_then(|value| Self::revalidation_observation(request, value));
                 }
             }
@@ -1852,7 +1867,7 @@ where
         match outcome {
             DomSettlementChildPortCallOutcomeV1::Pending { evidence_digest } => {
                 if outcome != Self::pending_observation(request)? {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1855));
                 }
                 Ok(ChildObservationOutcomeV1::Pending { evidence_digest })
             }
@@ -1861,7 +1876,7 @@ where
                     .prior_finality_evidence_digest
                     .is_some_and(|prior| prior != evidence_digest)
                 {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1864));
                 }
                 Ok(ChildObservationOutcomeV1::Final { evidence_digest })
             }
@@ -1870,14 +1885,14 @@ where
                 reorg_evidence_digest,
             } => {
                 if request.prior_finality_evidence_digest != Some(prior_finality_evidence_digest) {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1873));
                 }
                 Ok(ChildObservationOutcomeV1::FinalityInvalidated {
                     prior_finality_evidence_digest,
                     reorg_evidence_digest,
                 })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1880)),
         }
     }
 }
@@ -1945,24 +1960,79 @@ where
             || request.role_plan_digest == ZERO_DIGEST
             || request.source_scope_digest == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1948));
         }
         let session_index = self.session_index(request.settlement_id, request.leg)?;
         let session = &self.sessions[session_index];
-        if session.binding.route_id() != request.route_id
-            || session.settlement_id != request.settlement_id
-            || request.terms_digest != self.route_terms_digest
-            || session.binding.profile_digest() != request.profile_digest
-            || session.binding.deployment_digest() != request.deployment_digest
-            || session.binding.deployment_digest() != request.registry_digest
-            || self.lease.fencing_epoch() != request.fencing_epoch
-            || request.route_id != self.materialization_scope.route_id
-            || request.route_scope_digest != self.materialization_scope.route_scope_digest
-            || request.composition_digest != self.materialization_scope.composition_digest
-            || request.role_plan_digest != self.materialization_scope.role_plan_digest
-            || request.source_scope_digest != self.materialization_scope.source_scope(request.leg)
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+        // Every pin keeps its own name. One collapsed refusal over twelve
+        // distinct commitments hid a real defect behind another for three
+        // whole ceremony runs; the classification costs nothing and each pin
+        // below remains exactly as fatal as it was.
+        for (pin, refused) in [
+            (
+                "binding_route",
+                session.binding.route_id() != request.route_id,
+            ),
+            (
+                "session_settlement",
+                session.settlement_id != request.settlement_id,
+            ),
+            ("terms", request.terms_digest != self.route_terms_digest),
+            // The session binding carries the raw consensus-rules digest it
+            // was built from; `request.profile_digest` carries the adapter
+            // profile hash the registry derives over the whole deployment,
+            // which contains that digest. Pin the binding against its own
+            // source: the request side is already pinned to the admitted
+            // deployment by the router before this call.
+            (
+                "binding_consensus_rules",
+                session.binding.profile_digest() != self.dom_consensus_rules_digest,
+            ),
+            (
+                "binding_deployment",
+                session.binding.deployment_digest() != request.deployment_digest,
+            ),
+            (
+                "binding_registry",
+                session.binding.deployment_digest() != request.registry_digest,
+            ),
+            // Two independent fences, never one. `request.fencing_epoch` is
+            // the route fence: the route store owns it, keyed by route, and
+            // the supervisor authenticates it before this call. The actuator
+            // lease carries its own fence: the DOM actuator store owns it,
+            // keyed by participant, with its own duration. Neither
+            // `acquire_lease` accepts an epoch from the other, so the two
+            // counters cannot be aligned and coincide only while both are
+            // still their initial generation. Pin each against its own
+            // source, exactly as the profile digest above and as the XMR
+            // child already does.
+            ("route_fence", request.fencing_epoch == 0),
+            ("lease_fence", self.lease.fencing_epoch() == 0),
+            (
+                "scope_route",
+                request.route_id != self.materialization_scope.route_id,
+            ),
+            (
+                "scope_route_scope",
+                request.route_scope_digest != self.materialization_scope.route_scope_digest,
+            ),
+            (
+                "scope_composition",
+                request.composition_digest != self.materialization_scope.composition_digest,
+            ),
+            (
+                "scope_role_plan",
+                request.role_plan_digest != self.materialization_scope.role_plan_digest,
+            ),
+            (
+                "scope_source",
+                request.source_scope_digest != self.materialization_scope.source_scope(request.leg),
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_CHILD_MATERIALIZE_PIN_V25 pin={pin}");
+                return Err(ChildAuthorityRefusalV1::Conflict);
+            }
         }
         let leg = [leg_tag(request.leg)];
         let action = [action_tag(request.action)];
@@ -2076,7 +2146,7 @@ where
             SettlementActionV1::Refund if native_refund.is_some() => {
                 let native = native_refund
                     .as_ref()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(2079))?;
                 contracts.bind_native_xmr_refund_settlement_child_v23(
                     &mut self.control,
                     self.lease,
@@ -2090,7 +2160,7 @@ where
                 &mut self.control,
                 self.lease,
                 binding_request,
-                refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?,
+                refund_context.ok_or_else(|| child_conflict_at_v25(2093))?,
                 now,
             ),
         }
@@ -2100,7 +2170,7 @@ where
             || retained.locator().custody_digest() != custody_digest
             || retained.transaction_id() == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(2103));
         }
         Ok(SettlementChildPlanV1 {
             face: SettlementFaceV1::Dom,
@@ -2201,7 +2271,7 @@ where
                 < request.dispatch.coordinator_fencing_epoch()
             || request.reconciliation_attempt_id == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(2204));
         }
         let validated = self.validate_dispatch(&request.dispatch, now)?;
         let now = fresh_dom_time(&mut self.clock, now)?;
@@ -2375,6 +2445,7 @@ impl ExpectedDomBindingsV1 {
         &self,
         settlement_id: Digest32,
         route_terms_digest: Digest32,
+        dom_consensus_rules_digest: Digest32,
         binding: DomSessionBindingV1,
         lease: DomLeaseV1,
         trusted_chain_id: &TrustedChainIdV1,
@@ -2392,40 +2463,80 @@ impl ExpectedDomBindingsV1 {
         let expected_identity = binding
             .expected_dom_identity()
             .map_err(map_actuator_error)?;
-        if self.face != SettlementFaceV1::Dom
-            || !exposure_valid
-            || [
-                self.route_id,
-                self.effect_id,
-                self.settlement_id,
-                self.semantic_digest,
-                self.intent_digest,
-                self.custody_digest,
-                self.transaction_id,
-                self.terms_digest,
-                self.registry_digest,
-                self.profile_digest,
-                self.deployment_digest,
-                self.chain_id,
-            ]
-            .contains(&ZERO_DIGEST)
-            || self.route_fencing_epoch == 0
-            || self.route_fencing_epoch != lease.fencing_epoch()
-            || self
-                .coordinator_fencing_epoch
-                .is_some_and(|epoch| epoch == 0)
-            || lease.participant_id() != binding.participant().participant_id()
-            || binding.route_id() != self.route_id
-            || settlement_id != self.settlement_id
-            || route_terms_digest != self.terms_digest
-            || binding.profile_digest() != self.profile_digest
-            || binding.deployment_digest() != self.deployment_digest
-            || binding.deployment_digest() != self.registry_digest
-            || binding.chain_id() != self.chain_id
-            || trusted_chain_id.as_bytes() != &self.chain_id
-            || runtime.expected_identity() != &expected_identity
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+        // Every pin keeps its own name. Twenty-four distinct commitments used
+        // to collapse into one refusal, and a single structurally impossible
+        // comparison among them could stop the whole ceremony while looking
+        // exactly like any of the other twenty-three.
+        for (pin, refused) in [
+            ("face", self.face != SettlementFaceV1::Dom),
+            ("exposure", !exposure_valid),
+            (
+                "zero_digest",
+                [
+                    self.route_id,
+                    self.effect_id,
+                    self.settlement_id,
+                    self.semantic_digest,
+                    self.intent_digest,
+                    self.custody_digest,
+                    self.transaction_id,
+                    self.terms_digest,
+                    self.registry_digest,
+                    self.profile_digest,
+                    self.deployment_digest,
+                    self.chain_id,
+                ]
+                .contains(&ZERO_DIGEST),
+            ),
+            // Two independent fences, never one. The route fence and the
+            // actuator lease fence are owned by different stores and neither
+            // `acquire_lease` accepts an epoch from the other, so the two
+            // counters cannot be aligned. Pin each against its own source.
+            ("route_fence", self.route_fencing_epoch == 0),
+            ("lease_fence", lease.fencing_epoch() == 0),
+            (
+                "coordinator_fence",
+                self.coordinator_fencing_epoch
+                    .is_some_and(|epoch| epoch == 0),
+            ),
+            (
+                "lease_participant",
+                lease.participant_id() != binding.participant().participant_id(),
+            ),
+            ("binding_route", binding.route_id() != self.route_id),
+            ("session_settlement", settlement_id != self.settlement_id),
+            ("terms", route_terms_digest != self.terms_digest),
+            // The binding carries the raw consensus-rules digest of the
+            // admitted deployment; the request carries the adapter-profile
+            // hash derived over the whole deployment, which contains it. The
+            // two are different commitments and can never be equal, so the
+            // binding is pinned against its own source instead.
+            (
+                "binding_consensus_rules",
+                binding.profile_digest() != dom_consensus_rules_digest,
+            ),
+            (
+                "binding_deployment",
+                binding.deployment_digest() != self.deployment_digest,
+            ),
+            (
+                "binding_registry",
+                binding.deployment_digest() != self.registry_digest,
+            ),
+            ("binding_chain", binding.chain_id() != self.chain_id),
+            (
+                "trusted_chain",
+                trusted_chain_id.as_bytes() != &self.chain_id,
+            ),
+            (
+                "runtime_identity",
+                runtime.expected_identity() != &expected_identity,
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_CHILD_STATIC_PIN_V25 pin={pin}");
+                return Err(child_conflict_at_v25(2428));
+            }
         }
         Ok(())
     }
@@ -2439,24 +2550,65 @@ impl ExpectedDomBindingsV1 {
         let request = retained.request();
         let scope = request.scope();
         let locator = retained.locator();
-        if scope.binding() != binding
-            || scope.effect_id() != self.effect_id
-            || scope.action() != dom_action(self.action)
-            || request.semantic_digest() != self.semantic_digest
-            || request.registry_digest() != self.registry_digest
-            || request.intent_digest() != self.intent_digest
-            || request.custody_digest() != self.custody_digest
-            || request.exposure() != dom_exposure(self.exposure)
-            || retained.transaction_id() != self.transaction_id
-            || retained.operation_fencing_epoch() == 0
-            || retained.operation_fencing_epoch() > lease.fencing_epoch()
-            || retained.operation_evidence_digest() == ZERO_DIGEST
-            || retained.operation_authorization_digest() == ZERO_DIGEST
-            || locator.effect_id() != self.effect_id
-            || locator.custody_digest() != self.custody_digest
-            || locator.binding_record_digest() == ZERO_DIGEST
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+        // Named pins for the same reason as `validate_static`: every term here
+        // is a separate commitment, and one collapsed refusal cannot say which.
+        // The operation fence and the lease fence do belong together — both are
+        // counters of this one DOM actuator store — so comparing them is sound.
+        for (pin, refused) in [
+            ("scope_binding", scope.binding() != binding),
+            ("scope_effect", scope.effect_id() != self.effect_id),
+            ("scope_action", scope.action() != dom_action(self.action)),
+            (
+                "request_semantic",
+                request.semantic_digest() != self.semantic_digest,
+            ),
+            (
+                "request_registry",
+                request.registry_digest() != self.registry_digest,
+            ),
+            (
+                "request_intent",
+                request.intent_digest() != self.intent_digest,
+            ),
+            (
+                "request_custody",
+                request.custody_digest() != self.custody_digest,
+            ),
+            (
+                "request_exposure",
+                request.exposure() != dom_exposure(self.exposure),
+            ),
+            (
+                "transaction_id",
+                retained.transaction_id() != self.transaction_id,
+            ),
+            ("operation_fence", retained.operation_fencing_epoch() == 0),
+            (
+                "operation_fence_ahead",
+                retained.operation_fencing_epoch() > lease.fencing_epoch(),
+            ),
+            (
+                "operation_evidence",
+                retained.operation_evidence_digest() == ZERO_DIGEST,
+            ),
+            (
+                "operation_authorization",
+                retained.operation_authorization_digest() == ZERO_DIGEST,
+            ),
+            ("locator_effect", locator.effect_id() != self.effect_id),
+            (
+                "locator_custody",
+                locator.custody_digest() != self.custody_digest,
+            ),
+            (
+                "locator_record",
+                locator.binding_record_digest() == ZERO_DIGEST,
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_CHILD_RETAINED_PIN_V25 pin={pin}");
+                return Err(child_conflict_at_v25(2459));
+            }
         }
         Ok(())
     }
@@ -2533,9 +2685,9 @@ fn exact_dom_session_index_v1(
         .iter()
         .enumerate()
         .filter(|(_, session)| session.1 == settlement_id);
-    let (index, (retained_leg, _)) = matches.next().ok_or(ChildAuthorityRefusalV1::Conflict)?;
+    let (index, (retained_leg, _)) = matches.next().ok_or_else(|| child_conflict_at_v25(2536))?;
     if matches.next().is_some() || *retained_leg != leg {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2538));
     }
     Ok(index)
 }
@@ -2686,7 +2838,7 @@ fn validate_dispatch_request_shape(
         || request.attempt() == 0
         || request.child_index() >= 2
     {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2689));
     }
     Ok(())
 }
@@ -2718,7 +2870,7 @@ fn validate_observation_request_shape(
             .prior_finality_evidence_digest
             .is_some_and(|digest| digest == ZERO_DIGEST)
     {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2721));
     }
     Ok(())
 }
@@ -2814,7 +2966,7 @@ fn request_digest(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, ChildAutho
     let mut hasher = Blake2bVar::new(32).map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
     hasher.update(domain);
     for part in parts {
-        let length = u64::try_from(part.len()).map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        let length = u64::try_from(part.len()).map_err(|_| child_conflict_at_v25(2817))?;
         hasher.update(&length.to_be_bytes());
         hasher.update(part);
     }
@@ -2823,7 +2975,7 @@ fn request_digest(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, ChildAutho
         .finalize_variable(&mut output)
         .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
     if output == ZERO_DIGEST {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2826));
     }
     Ok(output)
 }
@@ -2921,7 +3073,7 @@ fn renew_dom_lease_v12(
     duration: u64,
 ) -> Result<DomLeaseV1, ChildAuthorityRefusalV1> {
     if duration == 0 || duration > 3_600_000 || now == 0 {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2924));
     }
     if now >= lease.lease_until_unix_ms() {
         return Err(ChildAuthorityRefusalV1::Unavailable);
@@ -2978,7 +3130,7 @@ fn fresh_dom_time<C: ProductionDomChildClockV1>(
 ) -> Result<u64, ChildAuthorityRefusalV1> {
     let fresh = clock.now_unix_ms()?;
     if fresh < prior_unix_ms {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2981));
     }
     Ok(fresh)
 }
@@ -3344,4 +3496,10 @@ mod tests {
             Err(ChildAuthorityRefusalV1::Conflict)
         ));
     }
+}
+
+// DIAG(temporary): names the source line of the child refusal that fired.
+fn child_conflict_at_v25(line: u32) -> ChildAuthorityRefusalV1 {
+    eprintln!("DOM_CHILD_CONFLICT_V25 file=production_child_dom.rs line={line}");
+    ChildAuthorityRefusalV1::Conflict
 }

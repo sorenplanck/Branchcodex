@@ -83,6 +83,23 @@ pub(crate) struct FundingGuardV23<T> {
 #[cfg(not(any(feature = "development", feature = "simulation", test)))]
 impl<T> crate::supervisor::authority_seal::Sealed for FundingGuardV23<T> {}
 
+/// DIAG(temporary): count the funding refusals this closed window produced and
+/// print on the first one and then on each power-of-two, so a permanent stall
+/// is visible without one line per round.
+fn diag_window_refusal_v25(site: &'static str) {
+    use std::cell::Cell;
+    thread_local! {
+        static REFUSALS_V25: Cell<u64> = const { Cell::new(0) };
+    }
+    REFUSALS_V25.with(|count| {
+        let seen = count.get().saturating_add(1);
+        count.set(seen);
+        if seen.is_power_of_two() {
+            eprintln!("DOM_FUNDING_WINDOW_REFUSAL_V25 site={site} count={seen}");
+        }
+    });
+}
+
 impl<T: RouteActionAuthority> RouteActionAuthority for FundingGuardV23<T> {
     fn authorize_route_action(
         &mut self,
@@ -92,6 +109,10 @@ impl<T: RouteActionAuthority> RouteActionAuthority for FundingGuardV23<T> {
             return Err(AuthorityRefusalV1::Refused);
         }
         if request.action() == ActionKindV1::Funding && !self.window.available() {
+            // DIAG(temporary): this refusal is the single reason a route can
+            // sit in `NotPrepared` for an entire run. It is `Unavailable`, so
+            // no existing diagnostic covers it and the driver simply waits.
+            diag_window_refusal_v25("authorize");
             return Err(AuthorityRefusalV1::Unavailable);
         }
         self.inner.authorize_route_action(request)
@@ -107,6 +128,7 @@ impl<T: SettlementChildAuthorityV1> SettlementChildAuthorityV1 for FundingGuardV
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         if request.action() == SettlementActionV1::Funding && !self.window.available() {
+            diag_window_refusal_v25("dispatch");
             return Err(ChildAuthorityRefusalV1::Unavailable);
         }
         self.inner.externalize_child(request)
