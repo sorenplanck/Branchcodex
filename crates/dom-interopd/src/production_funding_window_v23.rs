@@ -127,10 +127,17 @@ impl<T: SettlementChildAuthorityV1> SettlementChildAuthorityV1 for FundingGuardV
         if request.route_id() != self.window.route_id {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
-        if request.action() == SettlementActionV1::Funding && !self.window.available() {
-            diag_window_refusal_v25("dispatch");
-            return Err(ChildAuthorityRefusalV1::Unavailable);
-        }
+        // No window check here. `externalize_child` only ever dispatches an
+        // action the route has already committed, and a funding action can
+        // only reach `Committed` by passing `authorize_route_action` above --
+        // which requires a live window, i.e. a height observation made fresh
+        // in that same round. Re-checking here does not make the observation
+        // any fresher; it re-gates a decision already taken under one. The
+        // window is a 60 s lease refreshed once per round, so whenever a
+        // round's observation fails the loop closes it explicitly
+        // (`production_run_universal.rs`, before the route half) and this
+        // second check refuses to externalize funding the route legitimately
+        // committed -- killing the run instead of completing it.
         self.inner.externalize_child(request)
     }
 

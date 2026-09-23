@@ -232,3 +232,84 @@ mod tests {
         ));
     }
 }
+
+impl RealDomRpcRuntimeV1 {
+    /// Bounded, resumable canonical snapshot for the F7 claim observation.
+    ///
+    /// `canonical_terminal_snapshot` rewalks the chain from genesis on every
+    /// call, so the claim phase — which observes once per round while the tip
+    /// keeps growing — eventually spends more wall clock in one round than the
+    /// actuator lease lasts, and the composition root kills the daemon. This
+    /// reuses the funding scanner's retained prefix under its own cache scope.
+    ///
+    /// The retained prefix is never evidence: the walk still closes against a
+    /// freshly rechecked tip (twice, with no advance between) before any
+    /// snapshot is returned, and a reorg drops the scope instead of granting.
+    pub(crate) fn claim_finality_snapshot_until_v26(
+        &self,
+        evidence: &EvidenceRefV1,
+        expected_tx_hash: [u8; 32],
+        expected_template_hash: [u8; 32],
+        expected_shared_output_commitment: [u8; 33],
+        deadline: Instant,
+    ) -> Result<CanonicalTerminalSnapshotV1, RealDomError> {
+        require_live(deadline)?;
+        // Same evidence binding the unbounded snapshot applied: the caller's
+        // scope must match this chain, and outside resolve mode the located
+        // transaction must sit at exactly the height, block and index the
+        // caller asserted. Retaining a scan prefix must not cost either check.
+        let resolve_mode = self.validate_evidence_scope(evidence)?;
+        if evidence.tx_id != expected_tx_hash
+            || expected_tx_hash == [0; 32]
+            || expected_template_hash == [0; 32]
+            || expected_shared_output_commitment == [0; 33]
+        {
+            return Err(RealDomError::InvalidEvidence);
+        }
+        let scope = digest_parts(
+            b"DOM/CLAIM-FINALITY-SCAN/V26\0",
+            &[
+                &self.adapter.expected_identity().chain_id,
+                &expected_tx_hash,
+                &expected_template_hash,
+                &expected_shared_output_commitment,
+            ],
+        );
+        let mut cache = self
+            .claim_finality_scan_v26
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => {
+                    RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
+                }
+                std::sync::TryLockError::Poisoned(_) => RealDomError::LockPoisoned,
+            })?;
+        reserve_scope(&mut cache, scope, Instant::now());
+        let progress = cache.get_mut(&scope).ok_or(RealDomError::InvalidEvidence)?;
+        match self.scan_funding_until_v23(progress, expected_tx_hash, deadline) {
+            Ok(snapshot) => {
+                if resolve_mode {
+                    return Ok(snapshot);
+                }
+                validate_evidence_reference(evidence, snapshot.transaction.clone())?;
+                Ok(snapshot)
+            }
+            // A reorg invalidates the retained prefix, never the caller: drop
+            // the scope and let the next round rebuild it from genesis.
+            Err(RealDomError::Chain(ChainAdapterError::ReorgDetected)) => {
+                cache.remove(&scope);
+                Err(ChainAdapterError::TemporarilyUnavailable.into())
+            }
+            // Out of budget or not yet on chain: keep the authenticated prefix
+            // so the next round resumes instead of rewalking.
+            Err(
+                error @ (RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
+                | RealDomError::EvidenceNotFound),
+            ) => Err(error),
+            Err(error) => {
+                cache.remove(&scope);
+                Err(error)
+            }
+        }
+    }
+}

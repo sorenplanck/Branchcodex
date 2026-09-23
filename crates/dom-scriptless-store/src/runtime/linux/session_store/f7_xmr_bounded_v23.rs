@@ -180,9 +180,8 @@ impl ContractsSessionStoreV1 {
         let chain = self.require_process_trusted_chain_v23(&gate.chain_id)?;
         let role = FinalClaimRoleBindingV1::decode_canonical(&chain, gate.role.canonical_bytes())
             .map_err(|_| SessionStoreError::Quarantined)?;
-        let produced = self.reconstruct_completed_xmr_graph_v23(gate.session_id)?;
-        let scope =
-            self.require_xmr_graph_custody_ready_locked_v23(&role, &produced, gate.custody_id)?;
+        let (scope, produced) =
+            self.reconstruct_ready_xmr_graph_locked_v25(&role, gate.custody_id)?;
         let graph = produced.graph();
         let binding = self.authenticate_xmr_graph_signing_session_v23(
             gate.session_id,

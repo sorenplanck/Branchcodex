@@ -231,10 +231,14 @@ impl ProductionSettlementChildRouterV1 {
     /// Visit every installed owner, including an idle route position. Idle
     /// children need their lease while the peer waits for chain confirmations.
     pub(crate) fn renew_actuator_leases_v12(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
-        self.dom.renew_actuator_lease_v12()?;
+        self.dom.renew_actuator_lease_v12().inspect_err(|refusal| {
+            eprintln!("DOM_RENEW_SITE_V26 site=dom_child refusal={refusal:?}");
+        })?;
         if let Some(selected) = &mut self.by_leg {
-            for port in &mut selected.ports {
-                port.renew_actuator_lease_v12()?;
+            for (index, port) in selected.ports.iter_mut().enumerate() {
+                port.renew_actuator_lease_v12().inspect_err(|refusal| {
+                    eprintln!("DOM_RENEW_SITE_V26 site=leg_port index={index} refusal={refusal:?}");
+                })?;
             }
         } else {
             for port in [

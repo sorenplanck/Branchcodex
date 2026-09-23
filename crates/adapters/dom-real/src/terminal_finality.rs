@@ -570,12 +570,47 @@ impl RealDomRpcRuntimeV1 {
     /// Verify a universal F7 claim with native public facts and one canonical
     /// snapshot. The native terminal checkpoint preserves the existing bounded
     /// reorg format; no adaptor scalar is extracted at this boundary.
+    /// Verify a universal F7 claim with native public facts and one canonical
+    /// snapshot. Walks the chain from genesis; prefer the bounded sibling on
+    /// any path that observes once per round.
     pub fn verified_f7_claim_finality_v15(
         &self,
         facts: &dom_scriptless_store::F7ClaimObserverFactsV15,
         evidence: &EvidenceRefV1,
         expected_tx_hash: [u8; 32],
         max_reorg_depth: u32,
+    ) -> Result<VerifiedDomClaimFinalityV1, RealDomError> {
+        let snapshot = self.canonical_terminal_snapshot(evidence)?;
+        self.f7_claim_finality_from_snapshot_v26(facts, expected_tx_hash, max_reorg_depth, snapshot)
+    }
+
+    /// Same verification under a caller budget, resuming the retained prefix
+    /// instead of rewalking from genesis. Running out of budget yields
+    /// `TemporarilyUnavailable`, which the caller already retries.
+    pub fn verified_f7_claim_finality_until_v26(
+        &self,
+        facts: &dom_scriptless_store::F7ClaimObserverFactsV15,
+        evidence: &EvidenceRefV1,
+        expected_tx_hash: [u8; 32],
+        max_reorg_depth: u32,
+        deadline: std::time::Instant,
+    ) -> Result<VerifiedDomClaimFinalityV1, RealDomError> {
+        let snapshot = self.claim_finality_snapshot_until_v26(
+            evidence,
+            expected_tx_hash,
+            facts.template_hash(),
+            facts.shared_commitment(),
+            deadline,
+        )?;
+        self.f7_claim_finality_from_snapshot_v26(facts, expected_tx_hash, max_reorg_depth, snapshot)
+    }
+
+    fn f7_claim_finality_from_snapshot_v26(
+        &self,
+        facts: &dom_scriptless_store::F7ClaimObserverFactsV15,
+        expected_tx_hash: [u8; 32],
+        max_reorg_depth: u32,
+        snapshot: CanonicalTerminalSnapshotV1,
     ) -> Result<VerifiedDomClaimFinalityV1, RealDomError> {
         let expected_template_hash = facts.template_hash();
         let expected_shared_output_commitment = facts.shared_commitment();
@@ -588,7 +623,6 @@ impl RealDomRpcRuntimeV1 {
         {
             return Err(RealDomError::InvalidEvidence);
         }
-        let snapshot = self.canonical_terminal_snapshot(evidence)?;
         if snapshot.transaction.tx_hash() != expected_tx_hash
             || snapshot.transaction.template_hash()? != expected_template_hash
             || !snapshot

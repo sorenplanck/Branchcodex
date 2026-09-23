@@ -9,7 +9,10 @@ use route_executor::{
     SecretVisibilityV1,
 };
 use std::{
+    collections::BTreeMap,
+    io::Read,
     net::TcpListener,
+    path::Path,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -32,6 +35,203 @@ use timing_v24::{LaneV24, PhaseV24, SnapshotTimingV24};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const PHASE_TIMEOUT: Duration = Duration::from_secs(7200);
+const CUSTODY_READY_TIMEOUT_V25: Duration = Duration::from_secs(1800);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CustodyMarkerStateV25 {
+    started: usize,
+    ready: usize,
+}
+
+impl CustodyMarkerStateV25 {
+    fn complete(self) -> bool {
+        self.started == 1 && self.ready == 1
+    }
+}
+
+// Structural observation only: the production Store authenticates the graph.
+// Mirror its immutable journal framing so mere filenames cannot prove Ready.
+const CUSTODY_RECORD_MAX_V25: usize = 16_384;
+const CUSTODY_RECORD_DOMAIN_V25: &str = "DOM:xmr-graph-custody-provisioning:v23";
+
+fn validate_custody_record_v25(bytes: &[u8], prefix: &str, ready: bool) -> Result<()> {
+    if !(372..=CUSTODY_RECORD_MAX_V25).contains(&bytes.len()) {
+        return Err("focused custody record size".into());
+    }
+    let parent: String = bytes[48..80]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let role_length = u32::from_le_bytes(bytes[336..340].try_into()?);
+    let end = bytes.len() - 32;
+    if &bytes[..8] != b"DXGCPV23"
+        || bytes[8] != u8::from(ready)
+        || !matches!(bytes[9], 1 | 2)
+        || bytes[10..16] != [0; 6]
+        || parent != prefix
+        || bytes[48..80] == [0; 32]
+        || role_length as usize != end - 340
+        || dom_crypto::blake2b_256_tagged(CUSTODY_RECORD_DOMAIN_V25, &bytes[..end]).as_bytes()
+            != &bytes[end..]
+    {
+        return Err("focused custody record framing or identity".into());
+    }
+    Ok(())
+}
+
+fn read_custody_record_v25(path: &Path, prefix: &str, ready: bool) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    observer::owned_file(path)?
+        .take(CUSTODY_RECORD_MAX_V25 as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    validate_custody_record_v25(&bytes, prefix, ready)?;
+    Ok(bytes)
+}
+
+fn require_custody_record_pair_v25(started: &[u8], ready: &[u8]) -> Result<()> {
+    // State and its checksum are the only differences allowed by change_state.
+    if started.len() != ready.len()
+        || started[..8] != ready[..8]
+        || started[9..started.len() - 32] != ready[9..ready.len() - 32]
+    {
+        return Err("focused custody Started/Ready binding mismatch".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod custody_observation_v25_tests {
+    use super::*;
+
+    fn seal(bytes: &mut [u8]) {
+        let end = bytes.len() - 32;
+        let hash = dom_crypto::blake2b_256_tagged(CUSTODY_RECORD_DOMAIN_V25, &bytes[..end]);
+        bytes[end..].copy_from_slice(hash.as_bytes());
+    }
+
+    // Framing fixture only; this cannot pass the production graph auditor.
+    fn record(ready: bool) -> Vec<u8> {
+        let mut bytes = vec![0; 376];
+        bytes[..8].copy_from_slice(b"DXGCPV23");
+        bytes[8] = u8::from(ready);
+        bytes[9] = 1;
+        bytes[48..80].fill(0x12);
+        bytes[336..340].copy_from_slice(&4_u32.to_le_bytes());
+        seal(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn custody_observer_requires_bytes_state_identity_and_checksum() {
+        let prefix = "12".repeat(32);
+        assert!(validate_custody_record_v25(&[], &prefix, true).is_err());
+        let bytes = record(true);
+        assert!(validate_custody_record_v25(&bytes, &prefix, true).is_ok());
+        assert!(validate_custody_record_v25(&bytes, &prefix, false).is_err());
+        assert!(validate_custody_record_v25(&bytes, &"13".repeat(32), true).is_err());
+        for offset in [0, 9, 10, 48, 100, 336, 375] {
+            let mut bad = bytes.clone();
+            bad[offset] ^= 0xff;
+            assert!(validate_custody_record_v25(&bad, &prefix, true).is_err());
+        }
+    }
+
+    #[test]
+    fn custody_observer_rejects_validly_checksummed_mismatched_graph_pair() {
+        let started = record(false);
+        let mut ready = record(true);
+        assert!(require_custody_record_pair_v25(&started, &ready).is_ok());
+        ready[144] ^= 1;
+        seal(&mut ready);
+        assert!(validate_custody_record_v25(&ready, &"12".repeat(32), true).is_ok());
+        assert!(require_custody_record_pair_v25(&started, &ready).is_err());
+    }
+}
+
+/// Observe the daemon-owned immutable provisioning records without opening a
+/// live Contracts Store. Exact prefix pairing prevents an unrelated Started
+/// and Ready record from satisfying the focused bilateral test.
+fn custody_marker_state_v25(state: &Path) -> Result<[CustodyMarkerStateV25; 2]> {
+    use crate::production_config::{
+        ProductionBootstrapConfigV1, ProductionBootstrapModeV1, ProductionPathRoleV1,
+        PRODUCTION_CREATE_CONFIG_FILE_V11,
+    };
+
+    let mut bytes = Vec::new();
+    observer::owned_file(&state.join(PRODUCTION_CREATE_CONFIG_FILE_V11))?
+        .take(65_537)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 65_536 {
+        return Err("focused custody manifest exceeds canonical bound".into());
+    }
+    let config = ProductionBootstrapConfigV1::decode_canonical_v11_for_mode(
+        &bytes,
+        ProductionBootstrapModeV1::Create,
+    )?;
+    let mut result = [CustodyMarkerStateV25::default(); 2];
+    for (index, role) in [
+        ProductionPathRoleV1::UpstreamContracts,
+        ProductionPathRoleV1::DownstreamContracts,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = state
+            .join(config.relative_path(role))
+            .join("session-rosters");
+        let mut started = BTreeMap::new();
+        let mut ready = BTreeMap::new();
+        match std::fs::read_dir(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    let name = name.to_str().ok_or("focused custody marker encoding")?;
+                    let (prefix, is_ready, destination) = if let Some(prefix) =
+                        name.strip_suffix(".xmr-graph-custody-started-v23")
+                    {
+                        (prefix, false, &mut started)
+                    } else if let Some(prefix) = name.strip_suffix(".xmr-graph-custody-ready-v23") {
+                        (prefix, true, &mut ready)
+                    } else {
+                        continue;
+                    };
+                    if prefix.len() != 64
+                        || prefix.bytes().any(|byte| !byte.is_ascii_hexdigit())
+                        || prefix.bytes().all(|byte| byte == b'0')
+                    {
+                        return Err("focused custody marker has invalid session name".into());
+                    }
+                    let record = read_custody_record_v25(&entry.path(), prefix, is_ready)?;
+                    destination.insert(prefix.to_owned(), record);
+                }
+            }
+        }
+        // Directory iteration is not an atomic snapshot: Ready may be published
+        // during enumeration. Read its original Started by exact path if the
+        // iterator did not return it; a genuinely absent Started remains an error.
+        for (prefix, record) in &ready {
+            if !started.contains_key(prefix) {
+                let path = directory.join(format!("{prefix}.xmr-graph-custody-started-v23"));
+                started.insert(
+                    prefix.clone(),
+                    read_custody_record_v25(&path, prefix, false)?,
+                );
+            }
+            require_custody_record_pair_v25(&started[prefix], record)?;
+        }
+        if started.len() > 1 || ready.len() > 1 {
+            return Err("focused custody markers are unpaired or ambiguous".into());
+        }
+        result[index] = CustodyMarkerStateV25 {
+            started: started.len(),
+            ready: ready.len(),
+        };
+    }
+    Ok(result)
+}
 
 fn fresh_local_policy() -> Result<route_time_anchor::RouteTimePolicyLimitsV2> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -175,13 +375,87 @@ fn wait_claims(
         }
         if start.elapsed().saturating_sub(announced) >= Duration::from_secs(30) {
             announced = start.elapsed();
+            let custody = [
+                custody_marker_state_v25(running.state_dir(0)?)?,
+                custody_marker_state_v25(running.state_dir(1)?)?,
+            ];
             eprintln!(
-                "native real daemon: awaiting two final economic claims after {}s",
-                announced.as_secs()
+                "native real daemon: awaiting two final economic claims after {}s custody={custody:?}",
+                announced.as_secs(),
             );
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Focused real-daemon reproduction for the graph-signing/custody handoff.
+/// It deliberately stops before Funding, Claim, compensation or refund.
+#[test]
+#[ignore = "requires the real release daemon, offline funding helper and GPL sidecar"]
+fn native_real_daemon_bilateral_xmr_graph_custody_ready_v25() -> Result<()> {
+    let binary = NativeDaemonBinaryV23::from_environment()?;
+    let configuration = Configuration::require()?;
+    let startup = NativeMainnetStartupV23::prepare(&configuration, fresh_local_policy()?, 10_000)?;
+    let mut xmr = XmrLedgerPumpV23::new(&startup)?;
+    let mut running = launch(startup, &binary)?;
+    let result = (|| -> Result<()> {
+        let mut route_observers = observers(&running)?;
+        let started = Instant::now();
+        let mut announced = Duration::ZERO;
+        loop {
+            let mut snapshots = Vec::with_capacity(2);
+            let mut markers = [[CustodyMarkerStateV25::default(); 2]; 2];
+            for actor in 0..2 {
+                if let Some(status) = running.poll_actor_v23(actor)? {
+                    running.report_diagnostics_v25();
+                    return Err(format!(
+                        "focused custody actor {actor} exited before bilateral Ready: {status}"
+                    )
+                    .into());
+                }
+                if let Some(snapshot) = route_observers[actor].poll()? {
+                    snapshots.push(snapshot);
+                }
+                markers[actor] = custody_marker_state_v25(running.state_dir(actor)?)?;
+            }
+            xmr.pump(&mut running, &snapshots.iter().collect::<Vec<_>>())?;
+            if markers
+                .iter()
+                .flatten()
+                .copied()
+                .all(CustodyMarkerStateV25::complete)
+            {
+                eprintln!(
+                    "DOM_FOCUSED_CUSTODY_READY_V25 elapsed_seconds={} markers={markers:?}",
+                    started.elapsed().as_secs()
+                );
+                // This scenario intentionally ends before the economic route
+                // can return naturally. Reap both harness-owned processes as
+                // controlled crashes after the durable proof has been read.
+                running.crash_actor(0)?;
+                running.crash_actor(1)?;
+                return Ok(());
+            }
+            if started.elapsed() >= CUSTODY_READY_TIMEOUT_V25 {
+                running.report_stall_v25();
+                return Err(
+                    format!("focused bilateral custody deadline; markers={markers:?}").into(),
+                );
+            }
+            if started.elapsed().saturating_sub(announced) >= Duration::from_secs(30) {
+                announced = started.elapsed();
+                eprintln!(
+                    "DOM_FOCUSED_CUSTODY_PROGRESS_V25 elapsed_seconds={} markers={markers:?}",
+                    announced.as_secs()
+                );
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    })();
+    if result.is_err() {
+        running.report_diagnostics_v25();
+    }
+    result
 }
 
 /// A dedicated dependency-gated test: absent real release binary/helper is an

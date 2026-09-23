@@ -109,8 +109,13 @@ impl ContractsSessionStoreV1 {
         edge: XmrGraphRecoverySigningEdgeV23,
         recovery_scope: Option<&RecoveryTransportAuditScopeV1>,
     ) -> Result<(), SessionStoreError> {
+        #[cfg(debug_assertions)]
+        let profile_v26 = std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26")
+            .map(|_| std::time::Instant::now());
         let binding =
             self.authenticate_xmr_graph_signing_session_v23(current.session_id(), edge)?;
+        #[cfg(debug_assertions)]
+        let binding_us_v26 = profile_v26.map(|start| start.elapsed().as_micros());
         let phase = self.require_next_graph_signing_message_v23(
             &binding,
             current,
@@ -118,6 +123,14 @@ impl ContractsSessionStoreV1 {
             signed_bytes,
             recovery_scope,
         )?;
+        #[cfg(debug_assertions)]
+        if let (Some(start), Some(binding_us)) = (profile_v26, binding_us_v26) {
+            eprintln!(
+                "DOM_GRAPH_SUCCESSOR_COST_V26 binding_us={} round_us={}",
+                binding_us,
+                start.elapsed().as_micros().saturating_sub(binding_us),
+            );
+        }
         let mut expected_flags = current.irreversible();
         if envelope.message_type == 0x0e {
             expected_flags.any_signing_share_sent = true;

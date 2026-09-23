@@ -19,8 +19,18 @@ impl RealDomRpcRuntimeV1 {
         {
             return Err(RealDomError::InvalidEvidence);
         }
-        let (state, identity) = self.scan_through_with_tip(0)?;
-        let (_, identity) = self.scan_snapshot_to_tip(state, identity)?;
+        // Bounded exactly like `find_f7_final_claim_v15` below. This runs once
+        // per round per leg from the route loop, and the unbounded walk starts
+        // at genesis with no ceiling of any kind — the one shape that has cost
+        // this route its actuator lease before. Expiry is
+        // `TemporarilyUnavailable`, which the caller already treats as retry.
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .ok_or(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable,
+            ))?;
+        let (state, identity) = self.scan_through_with_tip_until_v26(0, deadline)?;
+        let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
         let candidate = {
             let mut cache = self.cache()?;
             cache

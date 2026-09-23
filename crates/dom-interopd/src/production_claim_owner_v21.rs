@@ -101,6 +101,11 @@ impl ProductionDomChildStoreAuthorityV1 {
         now_unix_ms: u64,
     ) -> Result<bool, super::ProductionF7FinalClaimErrorV14> {
         let actuator = self.bind()?;
+        if actuator.f7_receiver_observation_v25(chain)?.is_some() {
+            // The received transaction already has a native observation. Its
+            // child will retain an observation receipt; no local adaptation.
+            return Ok(true);
+        }
         let Some(progress) = actuator.f7_final_claim_progress_v21(chain)? else {
             if self
                 .store

@@ -662,7 +662,8 @@ impl NativeF6XmrInventorySourceV23 {
             || !request.secret_store.starts_with(&request.state_dir)
             || !request.sidecar_socket.starts_with(&request.state_dir)
             || request.sidecar_timeout_ms == 0
-            || request.sidecar_timeout_ms > 180_000
+            || request.sidecar_timeout_ms
+                > crate::production_universal_leg_authority::MAX_SIDECAR_CALL_MS_V26
             || *request.local_store_key == [0; 32]
             || *request.sidecar_auth == [0; 32]
             || *request.local_store_key == *request.sidecar_auth

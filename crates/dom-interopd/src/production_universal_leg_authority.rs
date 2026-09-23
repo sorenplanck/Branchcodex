@@ -198,7 +198,7 @@ impl ProductionUniversalLegAuthorityV11 {
                 let refund = session.refund_bundle().ok_or(Refusal::Conflict)?;
                 relative_path(&value.secret_store)?;
                 relative_path(&value.sidecar_socket)?;
-                require_milliseconds(value.sidecar_timeout_ms, 180_000)?;
+                require_milliseconds(value.sidecar_timeout_ms, MAX_SIDECAR_CALL_MS_V26)?;
                 if value.secret_store == value.sidecar_socket
                     || value.setup_binding_hash != session.setup().binding_hash()
                     || value.refund_template_hash != refund.template_hash
@@ -886,7 +886,7 @@ impl ProductionUniversalXmrAuthorityV11 {
         let sidecar = BlockingUdsSidecarPort::with_timeout(
             sidecar_path,
             SidecarAuthKey::new(*sidecar_auth).map_err(|_| Refusal::Conflict)?,
-            require_milliseconds(self.sidecar_timeout_ms, 180_000)?,
+            require_milliseconds(self.sidecar_timeout_ms, MAX_SIDECAR_CALL_MS_V26)?,
         )
         .map_err(|_| Refusal::Conflict)?;
         ProductionXmrSweepAuthorityV10::authenticate(
@@ -919,6 +919,19 @@ fn canonical_u128(text: &str) -> Result<u128, Refusal> {
     }
     Ok(value)
 }
+
+/// Ceiling for one blocking XMR sidecar call.
+///
+/// A sidecar call is an external call and must obey the same discipline as
+/// every other one: `ProductionRuntimeBoundsV1` already refuses a config whose
+/// `external_call_timeout_ms` exceeds `dispatch_lease_ms`, and caps it at
+/// `MAX_EXTERNAL_CALL_TIMEOUT_MS_V1`. The sidecar escaped that rule with a
+/// free-standing 180 s ceiling — half again the whole DOM actuator lease. One
+/// slow call then spends the entire lease inside a single route step, which
+/// renews only on entry, and the lease lapses mid-step while its owner is
+/// alive and working. Matching the external-call ceiling keeps at least half
+/// the lease as margin after the slowest permitted call.
+pub(crate) const MAX_SIDECAR_CALL_MS_V26: u64 = 60_000;
 
 fn require_milliseconds(value: u64, maximum: u64) -> Result<Duration, Refusal> {
     if value == 0 || value > maximum {

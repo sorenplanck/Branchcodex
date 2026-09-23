@@ -548,6 +548,10 @@ pub struct RealDomRpcRuntimeV1 {
     f7_claim_scan_v24: Mutex<BTreeMap<[u8; 32], f7_claim_receiver_v15::F7ClaimScanProgressV24>>,
     f7_xmr_funding_scan_v24: Mutex<f7_anchor_authority::DomFundingScanProgressV24>,
     funding_finality_scan_v23: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
+    // Same retained-prefix machinery for the F7 claim finality observation.
+    // Its unbounded sibling rewalked the chain from genesis on every round of
+    // the claim phase, which is where the actuator lease used to lapse.
+    claim_finality_scan_v26: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
     xmr_refund_reorg_scan_v23: Mutex<
         std::collections::BTreeMap<[u8; 32], xmr_recovery_finality::NativeGraphScanProgressV23>,
     >,
@@ -578,6 +582,7 @@ impl RealDomRpcRuntimeV1 {
                 f7_anchor_authority::DomFundingScanProgressV24::new(),
             ),
             funding_finality_scan_v23: Mutex::new(BTreeMap::new()),
+            claim_finality_scan_v26: Mutex::new(BTreeMap::new()),
             xmr_refund_reorg_scan_v23: Mutex::new(std::collections::BTreeMap::new()),
             history_limit,
         })
@@ -951,6 +956,109 @@ impl RealDomRpcRuntimeV1 {
         }
     }
 
+    /// Same genesis walk as `scan_through_with_tip`, stopped by a wall clock.
+    ///
+    /// The unbounded twin has no iteration limit and no deadline at all, so its
+    /// cost is the chain height divided by the page size, times whatever the
+    /// node takes per page. Run inside a route step it can outlast the actuator
+    /// lease that step is holding. Expiry is `TemporarilyUnavailable`: the
+    /// caller retries on the next round and never sees a truncated chain as an
+    /// answer.
+    fn scan_through_with_tip_until_v26(
+        &self,
+        height: u64,
+        deadline: Instant,
+    ) -> Result<(CursorStateV1, ObservedDomIdentityV1), RealDomError> {
+        let unavailable = || RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable);
+        let mut state = CursorStateV1::genesis();
+        loop {
+            if Instant::now() >= deadline {
+                return Err(unavailable());
+            }
+            let remaining = height
+                .checked_sub(state.next_height)
+                .and_then(|value| value.checked_add(1))
+                .unwrap_or(1)
+                .min(MAX_SCRIPTLESS_SCAN_BLOCKS_V1);
+            let (_, next, identity) = self.scan_state_until_v26(&state, remaining, deadline)?;
+            if next.next_height > height {
+                return Ok((next, identity));
+            }
+            let after_tip = identity
+                .tip_height
+                .checked_add(1)
+                .ok_or(RealDomError::BoundsExceeded)?;
+            if next.next_height == state.next_height || next.next_height > after_tip {
+                return Err(RealDomError::EvidenceNotFound);
+            }
+            state = next;
+        }
+    }
+
+    /// `scan_state` with the page fetch bounded by the same deadline.
+    fn scan_state_until_v26(
+        &self,
+        state: &CursorStateV1,
+        max_blocks: u64,
+        deadline: Instant,
+    ) -> Result<
+        (
+            Vec<CanonicalBlockEvidenceV1>,
+            CursorStateV1,
+            ObservedDomIdentityV1,
+        ),
+        RealDomError,
+    > {
+        let page =
+            self.adapter
+                .scan_page_until_v23(state.scanner_cursor(), max_blocks, deadline)?;
+        self.cache_blocks(&page.blocks)?;
+        let mut next = state.clone();
+        for block in &page.blocks {
+            next.append(block.height, block.block_hash, self.history_limit)?;
+        }
+        if next.scanner_cursor() != page.next_cursor {
+            return Err(RealDomError::InvalidEvidence);
+        }
+        Ok((page.blocks, next, page.identity))
+    }
+
+    /// `scan_snapshot_to_tip` with a wall clock as well as a page ceiling. The
+    /// page ceiling alone bounds nothing in time: 16_384 pages at a node's
+    /// request timeout is far past any lease.
+    fn scan_snapshot_to_tip_until_v26(
+        &self,
+        mut state: CursorStateV1,
+        mut identity: ObservedDomIdentityV1,
+        deadline: Instant,
+    ) -> Result<(CursorStateV1, ObservedDomIdentityV1), RealDomError> {
+        let unavailable = || RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable);
+        for _ in 0..MAX_SNAPSHOT_SCAN_PAGES {
+            if Instant::now() >= deadline {
+                return Err(unavailable());
+            }
+            if state.next_height > identity.tip_height {
+                let (tip_height, tip_hash) = state
+                    .history
+                    .last()
+                    .copied()
+                    .ok_or(RealDomError::InvalidEvidence)?;
+                if tip_height != identity.tip_height || tip_hash != identity.tip_hash {
+                    return Err(RealDomError::InvalidEvidence);
+                }
+                return Ok((state, identity));
+            }
+            let (_, next, next_identity) =
+                self.scan_state_until_v26(&state, MAX_SCRIPTLESS_SCAN_BLOCKS_V1, deadline)?;
+            if next.next_height == state.next_height {
+                return Err(RealDomError::EvidenceNotFound);
+            }
+            state = next;
+            identity = next_identity;
+        }
+        Err(RealDomError::BoundsExceeded)
+    }
+
     fn scan_snapshot_to_tip(
         &self,
         mut state: CursorStateV1,
@@ -1082,8 +1190,20 @@ impl RealDomRpcRuntimeV1 {
         } else {
             evidence.block_height
         };
-        let (state, identity) = self.scan_through_with_tip(anchor_height)?;
-        let (_, identity) = self.scan_snapshot_to_tip(state, identity)?;
+        // Bounded: in resolve mode this walks from genesis, and the route step
+        // reaches it while holding the actuator lease — the public-secret
+        // extraction of an observed F7 claim goes through here on every claim
+        // round. The unbounded twins have no iteration limit and no clock at
+        // all. Sixty seconds is the same budget the F7 claim search next door
+        // uses, and expiry is `TemporarilyUnavailable`, which the plan source
+        // already treats as "not yet" rather than as absence.
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .ok_or(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable,
+            ))?;
+        let (state, identity) = self.scan_through_with_tip_until_v26(anchor_height, deadline)?;
+        let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
         let transaction = self.cached_transaction_on_walked_chain(&evidence.tx_id, &identity)?;
         let transaction = if resolve_mode {
             if transaction.tx_hash() != evidence.tx_id {
@@ -2426,8 +2546,10 @@ mod tests {
         );
         assert!(!proving.is_empty(), "the proving refetch was not found");
         assert!(
-            proving.contains("self.scan_snapshot_to_tip(state, identity)?"),
-            "the refetch must close the hash-linked walk against the reported tip"
+            proving.contains("self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?"),
+            "the refetch must close the hash-linked walk against the reported tip, \
+             and must do it under a deadline: the route step reaches this while \
+             holding the actuator lease and the unbounded twin has no clock"
         );
         assert!(
             !proving.contains("let _ = self.scan_through("),

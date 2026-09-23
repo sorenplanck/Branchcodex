@@ -473,6 +473,17 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         if self.stage_or_wait_xmr_graph_commit_pending_v23(pending, expiry)? {
             return Ok(());
         }
+        if owner.refund_complete {
+            // The refund round is terminal: no further refund-edge message can
+            // arrive that this ingress would admit, and a byte-identical late
+            // redelivery is answered by the generic derived duplicate path
+            // without one. Re-minting the ingress here costs a full transport
+            // audit — roster inventory plus signature re-verification of every
+            // durable message of every session — per tick, to reinstall an
+            // authority nothing will consume. Pending outbound bytes were
+            // already re-staged above.
+            return Ok(());
+        }
         let ingress = self.store.prepare_xmr_graph_signing_ingress_v23(
             self.session_id,
             XmrGraphRecoverySigningEdgeV23::RefundAdaptor,
@@ -480,9 +491,6 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         self.refresh_reissued_contracts_ingress_v16(
             PreparedContractsIngressV1::xmr_graph_signing_v23(ingress),
         )?;
-        if owner.refund_complete {
-            return Ok(());
-        }
         keep()?;
         // The auxiliary signers at indices 0 and 2 remain held. Sending them
         // through this parent's session-scoped Relay is forbidden.

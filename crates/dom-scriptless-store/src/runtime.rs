@@ -34,7 +34,7 @@ pub use linux::{
     ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
     DurableContractsReservationLookupV1, DurableTransportOutcomeV1, DurableTransportReceiptV1,
     ExactDomFundingBroadcasterV1, ExactDomRefundBroadcasterV1, F7AnchorRequestBindingV12,
-    F7ClaimObserverFactsV15, F7FinalClaimActionV14, F7FinalClaimFactsV14, F7FinalClaimProgressV14,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, F7FinalClaimActionV14, F7FinalClaimFactsV14, F7FinalClaimProgressV14,
     F7FundingAuthorizationV12, F7FundingGatePreparationV12, F7RecoveryPreparationV12,
     FinalClaimTransactionSinkRefV2, FundingAuthorizationRefV1, FundingAuthorizationV1,
     FundingBroadcastV1, FundingRetransmissionV1, FundingTransactionSinkRefV1,

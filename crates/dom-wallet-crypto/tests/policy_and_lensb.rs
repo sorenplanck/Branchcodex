@@ -180,34 +180,6 @@ fn concurrent_saves_publish_only_complete_envelopes_and_clean_staging() {
 
 // ───────────────────────────── Lens B: zeroization ───────────────────────────
 
-/// [ignore][w] LENS B FINDING — un-zeroized key intermediate in
-/// `derive_wallet_key`.
-///
-/// lib.rs:160  `let mut key_bytes = [0u8; 32];`   // HKDF output buffer
-/// lib.rs:161  `hkdf.expand(HKDF_INFO, &mut key_bytes)`
-/// lib.rs:164  `Ok(WalletKey::from_bytes(key_bytes))`  // [u8;32] is Copy
-///
-/// `key_bytes` is a plain `[u8; 32]` (Copy). `WalletKey::from_bytes` takes it
-/// BY VALUE, which COPIES the 32 raw key bytes into the Zeroizing buffer; the
-/// ORIGINAL stack array `key_bytes` is NOT zeroized and is left on the stack to
-/// be overwritten only by chance. So the final wallet key exists in cleartext
-/// in (at least) two places, and one of them is never wiped.
-///
-/// Contrast: the Argon2 `stretched` buffer (lib.rs:154) IS `Zeroizing`. The
-/// HKDF output is the one un-wrapped intermediate.
-///
-/// WHY [ignore]: zeroization of a stack local is not observable from outside the
-/// crate (no public hook, and reading freed/old stack memory is UB). This is a
-/// real intermediate-leak finding provable only by source review, not by a
-/// passing runtime assertion. FIX (separate queue, human decision — touches
-/// key-derivation): make `key_bytes` `Zeroizing<[u8;32]>` and move via clone, or
-/// have `from_bytes` take `Zeroizing`.
-#[test]
-#[ignore = "Lens B: HKDF key_bytes [u8;32] Copy not zeroized after move into WalletKey (lib.rs:160-164) — source-only finding"]
-fn key_intermediate_left_unzeroized() {
-    unreachable!("documented finding — see note");
-}
-
 /// [ignore][w] LENS B FINDING — plaintext JSON not zeroized on SAVE.
 ///
 /// lib.rs:186  `let json = serde_json::to_vec(value)...`   // Vec<u8>, plaintext

@@ -105,7 +105,7 @@ impl ProductionUniversalXmrEnrollmentAuthorityV23 {
         let sidecar = BlockingUdsSidecarPort::with_timeout(
             sidecar_path,
             SidecarAuthKey::new(*sidecar_auth).map_err(|_| Refusal::Conflict)?,
-            require_milliseconds(self.sidecar_timeout_ms, 180_000)?,
+            require_milliseconds(self.sidecar_timeout_ms, crate::production_universal_leg_authority::MAX_SIDECAR_CALL_MS_V26)?,
         )
         .map_err(|_| Refusal::Conflict)?;
         let enrolled =

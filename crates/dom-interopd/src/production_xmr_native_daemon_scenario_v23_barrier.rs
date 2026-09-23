@@ -47,6 +47,7 @@ impl NativeBarrierV23 {
 
 pub(super) struct XmrLedgerPumpV23 {
     confirmations: u64,
+    collateral_confirmations: [u32; 2],
     last_poll: Option<Instant>,
 }
 
@@ -72,6 +73,7 @@ impl XmrLedgerPumpV23 {
         }
         Ok(Self {
             confirmations,
+            collateral_confirmations: startup.collateral_confirmations_v25()?,
             last_poll: None,
         })
     }
@@ -99,6 +101,18 @@ impl XmrLedgerPumpV23 {
                         ActionKindV1::Refund,
                     ] {
                         if let Some(action) = coordinator.poll(snapshot, leg, kind)? {
+                            if kind == ActionKindV1::Funding {
+                                let position = match leg {
+                                    LegIdV1::Upstream => 0,
+                                    LegIdV1::Downstream => 1,
+                                };
+                                // Only native inclusion can unlock maturation. This
+                                // cannot release a held submission or mint finality.
+                                running.confirm_dom_funding_v25(
+                                    &action.dom_id,
+                                    self.collateral_confirmations[position],
+                                )?;
+                            }
                             if action.xmr_dispatched {
                                 expected.push((kind, action));
                             }

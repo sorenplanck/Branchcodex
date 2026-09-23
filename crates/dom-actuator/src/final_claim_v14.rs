@@ -447,6 +447,12 @@ impl DomContractsActuatorV1<'_> {
     /// Observe the selected native claim profile using the sole Store opening.
     /// Verification is deferred until the completed round exists. Universal
     /// finality retains the same fenced terminal checkpoint used for recovery.
+    /// `deadline` bounds the canonical walk this observation may spend. The
+    /// scan keeps its authenticated prefix across calls, so running out of
+    /// budget reports `FinalityPending` and the next round resumes instead of
+    /// rewalking the chain from genesis. That rewalk is what used to outlast
+    /// the actuator lease once the claim phase started.
+    #[allow(clippy::too_many_arguments)]
     pub fn observe_native_claim_settlement_finality_v15(
         &self,
         control: &mut DomActuatorStoreV1,
@@ -455,9 +461,20 @@ impl DomContractsActuatorV1<'_> {
         chain: &TrustedChainIdV1,
         evidence: &EvidenceRefV1,
         now_unix_ms: u64,
+        deadline: std::time::Instant,
     ) -> DomActuatorResult<DomFinalityObservationV1> {
         self.require_trusted_chain_binding(chain)?;
         self.require_dom_runtime_binding(runtime)?;
+        if let Some(observed) = self.f7_receiver_observation_v25(chain)? {
+            if evidence.chain_id.0 != observed.chain_id() || evidence.tx_id != observed.tx_hash() {
+                return Err(DomActuatorError::CapabilityMismatch);
+            }
+            let finality = self.verified_f7_receiver_claim_v25(runtime, chain, observed.tx_hash())?;
+            let observation = finality_observation(finality.tx_hash(), finality.block_height(),
+                finality.block_hash(), finality.evidence_digest());
+            self.persist_claim_finality(control, lease, finality, now_unix_ms)?;
+            return Ok(observation);
+        }
         let facts = self
             .session_store
             .f7_claim_verification_facts_v15(
@@ -499,11 +516,12 @@ impl DomContractsActuatorV1<'_> {
             return Err(DomActuatorError::CapabilityMismatch);
         }
         let finality = runtime
-            .verified_f7_claim_finality_v15(
+            .verified_f7_claim_finality_until_v26(
                 &facts,
                 evidence,
                 claim.tx_hash,
                 self.binding.max_reorg_depth(),
+                deadline,
             )
             .map_err(map_finality_error)?;
         let observation = finality_observation(
@@ -655,7 +673,7 @@ impl DomContractsActuatorV1<'_> {
     }
 }
 
-fn map_f7_claim_store_error_v21(error: SessionStoreError) -> DomActuatorError {
+pub(super) fn map_f7_claim_store_error_v21(error: SessionStoreError) -> DomActuatorError {
     match error {
         SessionStoreError::Filesystem | SessionStoreError::StoreBusy => {
             DomActuatorError::ContractsAuthorityUnavailable

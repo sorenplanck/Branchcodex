@@ -891,6 +891,19 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn observation_refresh_retries_without_relaxing_scope_or_consumed_custody() {
+        assert!(ProductionF7RuntimeErrorV12::Claim(
+            ProductionDomClaimRuntimeErrorV12::RefreshRequired,
+        ).retryable_v20());
+        assert!(!ProductionF7RuntimeErrorV12::Claim(
+            ProductionDomClaimRuntimeErrorV12::Scope,
+        ).retryable_v20());
+        assert!(!ProductionF7RuntimeErrorV12::RequiresRestart(Some(
+            ProductionDomClaimRuntimeErrorV12::RefreshRequired,
+        )).retryable_v20());
+    }
+
+    #[test]
     fn fresh_exposure_clock_refuses_rpc_delay_past_the_original_lease() {
         let root = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))

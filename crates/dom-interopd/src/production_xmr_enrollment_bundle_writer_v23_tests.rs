@@ -250,7 +250,7 @@ fn public_writer_is_canonical_non_authorizing_and_shares_decoder_refusals() {
     let cases: [fn(&mut ProductionXmrEnrollmentLegResourcesV23); 8] = [
         |r| r.local_participant_id = [99; 32],
         |r| r.sidecar_timeout_ms = 0,
-        |r| r.sidecar_timeout_ms = 180_001,
+        |r| r.sidecar_timeout_ms = 60_001,
         |r| r.custody_id = [0; 32],
         |r| r.custody_directory = "nested/archive".into(),
         |r| r.secret_store = "../outside.sqlite".into(),

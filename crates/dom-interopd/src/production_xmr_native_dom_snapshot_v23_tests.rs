@@ -497,6 +497,23 @@ impl Snapshot {
         )))
     }
 
+    pub(crate) fn confirm_retained_funding_v25(
+        &self,
+        hash: &[u8; 32],
+        confirmations: u32,
+    ) -> Result<()> {
+        let mut state = self
+            .live
+            .as_ref()
+            .ok_or("mutable DOM ledger required")?
+            .lock()
+            .map_err(|_| "local DOM ledger poisoned")?;
+        if let Some(target) = state.funding_confirmation_target_v25(hash, confirmations)? {
+            state.advance_to_height(target)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn advance_to_height_v23(&self, target: u64) -> Result<()> {
         let live = self
             .live

@@ -55,6 +55,8 @@ use crate::production_inputs::AuthenticatedProductionInputsV1;
 mod funding_deadline_v24;
 #[path = "production_xmr_funding_loss_v23.rs"]
 mod funding_loss_v23;
+#[path = "production_xmr_funding_reconciliation_v25.rs"]
+mod funding_reconciliation_v25;
 
 const ZERO_DIGEST: Digest32 = [0; 32];
 const TRANSACTION_ID_DOMAIN_V1: &[u8] = b"DOM-INTEROP/INTEROPD/XMR-CHILD/TRANSACTION-ID/V1\0";
@@ -495,6 +497,18 @@ pub(crate) fn resolved_monero_deployment_digest_v1(
     )
 }
 
+/// Budget for one bounded XMR observation.
+///
+/// It mirrors the DOM child's `funding_observation_deadline_v26`. The figure to
+/// measure against is `dispatch_lease_ms` (30 s), the shortest lease a route
+/// step runs under, not the 120 s actuator lease: half of the shortest one
+/// leaves the other half for the rest of the step, and eight observations
+/// still fit inside the actuator lease. A quorum answer fans out over several
+/// daemon calls of 30 s each, so without this the sum alone reaches 180 s.
+pub(crate) fn observation_deadline_v26() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(15)
+}
+
 pub(crate) fn map_actuator_error(error: XmrActuatorErrorV1) -> ChildAuthorityRefusalV1 {
     match error {
         XmrActuatorErrorV1::StorageUnavailable | XmrActuatorErrorV1::ObservationUnavailable => {
@@ -589,7 +603,9 @@ where
 
     fn refresh_lease_v11(&mut self, now: u64) -> Result<(), ChildAuthorityRefusalV1> {
         if let Some(owner) = &self.lease_owner_v11 {
-            self.lease = owner.xmr_lease(now)?;
+            self.lease = owner.xmr_lease(now).inspect_err(|refusal| {
+                eprintln!("DOM_RENEW_SITE_V26 site=xmr_lease refusal={refusal:?}");
+            })?;
         }
         Ok(())
     }
@@ -1183,7 +1199,10 @@ where
                     .funding_window_v23
                     .as_ref()
                     .and_then(|window| window.deadline_for_route(request.route_id()))
-                    .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
+                    .ok_or(ChildAuthorityRefusalV1::Unavailable)
+                    .inspect_err(|error| {
+                        funding_reconciliation_v25::report_refusal("window", error)
+                    })?;
                 Some(
                     funding_deadline_v24::funding_deadline_v24(
                         window,
@@ -1191,7 +1210,10 @@ where
                         now,
                         self.lease.deadline_unix_ms_v24(),
                     )
-                    .ok_or(ChildAuthorityRefusalV1::Unavailable)?,
+                    .ok_or(ChildAuthorityRefusalV1::Unavailable)
+                    .inspect_err(|error| {
+                        funding_reconciliation_v25::report_refusal("deadline", error)
+                    })?,
                 )
             } else {
                 None
@@ -1200,7 +1222,11 @@ where
                 let remaining = funding_deadline
                     .ok_or(ChildAuthorityRefusalV1::Unavailable)?
                     .saturating_duration_since(std::time::Instant::now());
-                let collateral = driver.verify_funding_prerequisite_bounded_v23(remaining)?;
+                let collateral = driver
+                    .verify_funding_prerequisite_bounded_v23(remaining)
+                    .inspect_err(|error| {
+                        funding_reconciliation_v25::report_refusal("collateral", error)
+                    })?;
                 if collateral.collateral().finality().terms_hash() != self.setup.terms_hash() {
                     return Err(child_conflict_at_v25(1205));
                 }
@@ -1217,9 +1243,19 @@ where
                     );
                     authority
                         .sweep_authority
-                        .broadcast_funding_v12(driver, &mut broadcast)?;
-                    let funding = authority.sweep_authority.observe_verified_funding_v22()?;
-                    match driver.tick_with_funding(funding)? {
+                        .broadcast_funding_v12(driver, &mut broadcast)
+                        .inspect_err(|error| {
+                            funding_reconciliation_v25::report_refusal("broadcast", error)
+                        })?;
+                    let funding = authority
+                        .sweep_authority
+                        .observe_verified_funding_v22()
+                        .inspect_err(|error| {
+                            funding_reconciliation_v25::report_refusal("observation", error)
+                        })?;
+                    match driver.tick_with_funding(funding).inspect_err(|error| {
+                        funding_reconciliation_v25::report_refusal("recovery", error)
+                    })? {
                         adapter_dom_real::DomXmrRecoveryProgressV12::CollateralReady(_) => {}
                         _ => return Err(ChildAuthorityRefusalV1::Unavailable),
                     }
@@ -1315,28 +1351,34 @@ where
             dispatch.deployment_digest(),
             dispatch.chain_id(),
         )?;
+        // Same bound as `observe`, for the same reason: reconciliation reads
+        // the chain through the very same quorum port, and its funding branch
+        // also returns before any later statement could set one.
+        self.observation
+            .set_observation_deadline_v26(observation_deadline_v26())
+            .map_err(map_actuator_error)?;
         let action = dispatch.action();
         let binding = ChildEvidenceBindingV1::from_dispatch(dispatch);
         let Some(kind) = operation_for_action(action) else {
-            // External funding: presence at depth externalizes; absence
-            // proves nothing about an external funder and stays Unknown.
+            // Inclusion settles either funding mode. An absent local funding
+            // must also resume its retained exact-byte submission: a failed
+            // prerequisite can leave CallPending before any send occurred.
+            // External funding has no local transmission authority.
             self.validate_funding_request(
                 dispatch.expected_transaction_id(),
                 dispatch.custody_digest(),
                 dispatch.intent_digest(),
             )?;
             let min_confirmations = self.min_confirmations;
-            return match self.funding_inclusion()? {
-                Some(inclusion) if inclusion.confirmations >= min_confirmations => {
-                    Ok(ChildReconciliationOutcomeV1::Externalized(
-                        Self::externalized_receipt(dispatch)?,
-                    ))
-                }
-                _ => Ok(ChildReconciliationOutcomeV1::Unknown {
-                    evidence_digest: unknown_evidence_v1(&binding)
-                        .map_err(|_| child_conflict_at_v25(1337))?,
-                }),
-            };
+            let inclusion = self.funding_inclusion()?;
+            let local = inclusion.is_none() && self.resolved_recovery_v23()?.is_some();
+            return funding_reconciliation_v25::reconcile(
+                inclusion.map(|value| value.confirmations),
+                min_confirmations,
+                Self::externalized_receipt(dispatch)?,
+                unknown_evidence_v1(&binding).map_err(|_| child_conflict_at_v25(1337))?,
+                local.then_some(|| self.externalize(dispatch)),
+            );
         };
         let view = self.validated_view(
             kind,
@@ -1410,6 +1452,18 @@ where
             request.deployment_digest,
             request.chain_id,
         )?;
+        // Bound the whole observation before any branch takes its own exit.
+        // A quorum answer fans out over several daemon calls, each with its
+        // own transport timeout, so the unbounded form lasts their sum — long
+        // enough for the DOM actuator lease held by the surrounding route step
+        // to lapse mid-step. The funding branch below returns without reaching
+        // the claim path, so the bound has to be set here, not beside the one
+        // call that happens to be furthest down. A timed-out observation is
+        // `Unavailable`, which the driver retries on the next round; it never
+        // becomes a wrong answer.
+        self.observation
+            .set_observation_deadline_v26(observation_deadline_v26())
+            .map_err(map_actuator_error)?;
         let action = request.action;
         let binding = ChildObservationEvidenceBindingV1::from_observation(request);
         let Some(kind) = operation_for_action(action) else {

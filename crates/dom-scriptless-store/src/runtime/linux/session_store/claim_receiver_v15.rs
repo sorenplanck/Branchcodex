@@ -7,6 +7,54 @@ pub(super) const OBSERVATION_MAX_V15: usize =
     OBSERVATION_PREFIX_V15 + 4 + SESSION_RECORD_MAX_LEN + 32;
 const OBSERVATION_DOMAIN_V15: &str = "DOM-INTEROP/F7-CLAIM-OBSERVATION/V15\0";
 
+/// Authenticated local role and historical receiver progress. This is never
+/// permission to sign, expose a secret, submit, or claim current finality.
+pub enum F7ClaimReceiverStateV25 {
+    /// This opening belongs to the frozen DOM claim sender.
+    Sender,
+    /// This opening belongs to the receiver; no claim observation is durable.
+    AwaitingObservation,
+    /// Exact receiver observation authenticated from this Store's journals.
+    Observed(ObservedF7FinalClaimV15),
+}
+
+impl ContractsSessionStoreV1 {
+    /// Select receiver handling before attempting a sender-only publication
+    /// operation. Missing or corrupt native ancestors remain errors, even when
+    /// no pre-signature or observation has arrived yet.
+    pub fn f7_claim_receiver_state_v25(
+        &self,
+        gate: &PreparedF7FundingGateV12,
+        chain: TrustedChainIdV1,
+        participant: [u8; 32],
+    ) -> Result<F7ClaimReceiverStateV25, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        let gate = self.authenticate_f7_gate_v12(gate)?;
+        let signer = self.authenticate_local_transport_signer_binding(gate.session_id)?;
+        if gate.chain_id != *chain.as_bytes() || signer.participant_id != participant {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        self.audit_f7_artifact_inventory_v12()?;
+        if participant == gate.role.dom_claim_sender_id().0 {
+            return Ok(F7ClaimReceiverStateV25::Sender);
+        }
+        if participant != gate.role.final_claim_receiver_id().0 {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        if !self.f7_final_claim_observation_exists_v15(gate.session_id)? {
+            return Ok(F7ClaimReceiverStateV25::AwaitingObservation);
+        }
+        let observed = self.observed_f7_handle_v15(gate.session_id)?;
+        if observed.chain != gate.chain_id
+            || observed.session != gate.session_id
+            || observed.receiver != participant
+        {
+            return Err(SessionStoreError::Quarantined);
+        }
+        Ok(F7ClaimReceiverStateV25::Observed(observed))
+    }
+}
+
 /// Public verification material rederived from the complete retained F7 round.
 /// It has no constructor and grants no signing or submission permission.
 pub struct F7ClaimObserverFactsV15 {

@@ -379,6 +379,9 @@ pub(crate) struct QuorumXmrObservationPortV1 {
     readers: Vec<BlockingMoneroDaemonReaderV1>,
     quorum: usize,
     genesis: [u8; 32],
+    /// Aggregate bound applied to the next trait observation. A scoped copy
+    /// carries `None` so scoping never recurses.
+    deadline_v26: Option<std::time::Instant>,
 }
 
 impl QuorumXmrObservationPortV1 {
@@ -402,6 +405,7 @@ impl QuorumXmrObservationPortV1 {
             readers,
             quorum: self.quorum,
             genesis: self.genesis,
+            deadline_v26: None,
         })
     }
 
@@ -469,6 +473,7 @@ impl QuorumXmrObservationPortV1 {
             readers,
             quorum,
             genesis,
+            deadline_v26: None,
         })
     }
 
@@ -622,10 +627,26 @@ impl core::fmt::Debug for QuorumXmrObservationPortV1 {
 }
 
 impl XmrObservationPortV1 for QuorumXmrObservationPortV1 {
+    fn set_observation_deadline_v26(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<(), XmrActuatorErrorV1> {
+        require_observation_deadline_v24(deadline)?;
+        self.deadline_v26 = Some(bounded_observation_deadline_v24(deadline)?);
+        Ok(())
+    }
+
     fn transaction_inclusion(
         &mut self,
         tx_hash: [u8; 32],
     ) -> Result<Option<XmrTxInclusionV1>, XmrActuatorErrorV1> {
+        // One observation fans out over several daemon calls, each with its
+        // own transport timeout; only an aggregate bound stops their sum from
+        // outliving the caller's lease. A scoped copy carries no deadline of
+        // its own, so this delegation cannot recurse.
+        if let Some(deadline) = self.deadline_v26 {
+            return self.transaction_inclusion_with_deadline_v24(tx_hash, deadline);
+        }
         let genesis = self.genesis;
         let votes = std::thread::scope(|scope| {
             let workers: Vec<_> = self
@@ -649,6 +670,12 @@ impl XmrObservationPortV1 for QuorumXmrObservationPortV1 {
     }
 
     fn key_image_spent(&mut self, key_image: [u8; 32]) -> Result<bool, XmrActuatorErrorV1> {
+        if let Some(deadline) = self.deadline_v26 {
+            let mut bounded = self.observation_scope_v24(deadline)?;
+            let result = bounded.key_image_spent(key_image);
+            require_observation_deadline_v24(deadline)?;
+            return result;
+        }
         let genesis = self.genesis;
         let votes = std::thread::scope(|scope| {
             let workers: Vec<_> = self

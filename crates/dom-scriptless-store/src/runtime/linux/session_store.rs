@@ -4150,6 +4150,16 @@ pub struct ContractsSessionStoreV1 {
     process_downstream_claim_gates_v23: Mutex<BTreeMap<[u8; 32], f7_v12::DownstreamClaimLeaseV23>>,
     process_evm_signed_action_imports: Mutex<BTreeSet<[u8; 32]>>,
     xmr_graph_reconstruction_cache_v24: Mutex<Vec<([u8; 32], XmrGraphReconstructionV24)>>,
+    /// Custody Started/Ready record pairs already fully audited by this open
+    /// instance, keyed by parent session. `audit_transport` re-reads both
+    /// durable records on every pass and byte-compares them against this
+    /// audited copy (`recheck_xmr_graph_custody_records_v26`), quarantining on
+    /// any difference, so external tampering is still caught on every audit;
+    /// only the graph reconstruction — a pure function of those same bytes —
+    /// stops being repeated. The two writers of these records invalidate their
+    /// entry, so this process's own Started -> Ready transition is re-audited
+    /// in full rather than mistaken for tampering.
+    audited_custody_pairs_v26: Mutex<BTreeMap<[u8; 32], (Vec<u8>, Option<Vec<u8>>)>>,
 }
 
 /// Move-only, locked production Store opening authenticated before recovery.
@@ -4696,6 +4706,7 @@ impl ContractsSessionStoreV1 {
             operation: Mutex::new(()),
             recovery_projection: Mutex::new(None),
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
+            audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4873,6 +4884,7 @@ impl ContractsSessionStoreV1 {
             operation: Mutex::new(()),
             recovery_projection: Mutex::new(None),
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
+            audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -20150,8 +20162,25 @@ impl ContractsSessionStoreV1 {
         // scan reports the flattened error: reading it first is what lets the
         // host condition win. Nothing is captured without also returning an
         // error, so the inventory always aborts on the first capture.
+        // Opt-in development profiling prints only classes, counts and time.
+        // It does not change any authentication or failure path.
+        #[cfg(debug_assertions)]
+        let profile_v26 = std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26")
+            .map(|_| std::time::Instant::now());
+        #[cfg(debug_assertions)]
+        let mut roster_cost_v26: BTreeMap<&str, (usize, u128)> = BTreeMap::new();
+        #[cfg(debug_assertions)]
+        let mut message_cost_v26: BTreeMap<u8, (usize, u128)> = BTreeMap::new();
         let mut host_failure: Option<SessionStoreError> = None;
+        // Started and Ready name the same custody pair. Authenticate its
+        // graph once in this scan, but reread both records on the other name.
+        let mut audited_custody_pairs_v26 = self
+            .audited_custody_pairs_v26
+            .lock()
+            .map_err(|_| SessionStoreError::StoreBusy)?;
         let inventory = self.rosters.scan_lexicographic(|name, node| {
+            #[cfg(debug_assertions)]
+            let started_v26 = profile_v26.map(|_| std::time::Instant::now());
             if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
                 return Err(LinuxCapabilityError::InvalidObject);
             }
@@ -20367,8 +20396,14 @@ impl ContractsSessionStoreV1 {
             } else if let Some(parent) =
                 xmr_graph_proposal_v22::parse_xmr_graph_custody_provisioning_name_v23(name)
             {
-                self.audit_xmr_graph_custody_provisioning_v23(parent)
-                    .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+                if let Some(audited) = audited_custody_pairs_v26.get(&parent) {
+                    self.recheck_xmr_graph_custody_records_v26(parent, audited)
+                        .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+                } else {
+                    let audited = self.audit_xmr_graph_custody_provisioning_v23(parent)
+                        .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+                    audited_custody_pairs_v26.insert(parent, audited);
+                }
                 parent
             } else if let Some((target, edge, kind, _)) =
                 xmr_graph_proposal_v22::parse_xmr_graph_resource_name_v23(name)
@@ -20451,6 +20486,21 @@ impl ContractsSessionStoreV1 {
             };
             self.load_session_locked(session)
                 .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+            #[cfg(debug_assertions)]
+            if let Some(started) = started_v26 {
+                let class = if name.contains(".outbound-dsc1-") {
+                    "outbound"
+                } else if name.contains(".xmr-graph-custody-") {
+                    "graph-custody"
+                } else if name.contains(".xmr-graph-") {
+                    "graph-other"
+                } else {
+                    "other"
+                };
+                let cost = roster_cost_v26.entry(class).or_default();
+                cost.0 += 1;
+                cost.1 += started.elapsed().as_micros();
+            }
             Ok(())
         });
         if let Some(error) = host_failure {
@@ -20499,6 +20549,8 @@ impl ContractsSessionStoreV1 {
         // same node behind a by-name read fails at `openat2` and reports
         // `Filesystem`.
         for (name, record) in records {
+            #[cfg(debug_assertions)]
+            let started_v26 = profile_v26.map(|_| std::time::Instant::now());
             let (envelope, direction) = self.authenticate_transport_record(&name, &record)?;
             let durable =
                 match self.load_session_revision(record.session_id, record.successor.revision()) {
@@ -20563,6 +20615,12 @@ impl ContractsSessionStoreV1 {
                 let count = accepted_counts.entry(record.session_id).or_default();
                 *count = count.checked_add(1).ok_or(SessionStoreError::Quarantined)?;
             }
+            #[cfg(debug_assertions)]
+            if let Some(started) = started_v26 {
+                let cost = message_cost_v26.entry(record.message_type).or_default();
+                cost.0 += 1;
+                cost.1 += started.elapsed().as_micros();
+            }
         }
         if accepted_counts
             .values()
@@ -20580,6 +20638,13 @@ impl ContractsSessionStoreV1 {
                     return Err(SessionStoreError::Quarantined);
                 }
             }
+        }
+        #[cfg(debug_assertions)]
+        if let Some(started) = profile_v26 {
+            eprintln!(
+                "DOM_STORE_AUDIT_COST_V26 total_us={} rosters={roster_cost_v26:?} messages={message_cost_v26:?}",
+                started.elapsed().as_micros()
+            );
         }
         Ok(())
     }

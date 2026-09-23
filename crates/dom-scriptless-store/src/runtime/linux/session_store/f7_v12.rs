@@ -5,6 +5,9 @@
 //! A private XMR U-final signature is never part of a readiness payload.
 
 use super::*;
+#[cfg(test)]
+#[path = "f7_claim_resume_replay_v25_tests.rs"]
+mod claim_resume_replay_v25_tests;
 #[path = "f7_downstream_claim_gate_v23.rs"]
 mod downstream_claim_gate_v23;
 pub(super) use downstream_claim_gate_v23::DownstreamClaimLeaseV23;
@@ -39,7 +42,7 @@ mod claim_receiver_v15;
 mod final_claim_v14;
 use claim_receiver_v15::{validate_f7_observation_bytes_v15, OBSERVATION_PREFIX_V15};
 pub use claim_receiver_v15::{
-    F7ClaimObserverFactsV15, ObservedF7FinalClaimV15, PreparedF7FinalClaimIngressV15,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, ObservedF7FinalClaimV15, PreparedF7FinalClaimIngressV15,
 };
 pub(super) const OBSERVATION_MAX_V15: usize = claim_receiver_v15::OBSERVATION_MAX_V15;
 use super::super::xmr_recovery::XmrRecoveryCustodyV11;
@@ -582,6 +585,22 @@ impl ContractsSessionStoreV1 {
         &self,
         handle: &PreparedF7FundingGateV12,
     ) -> Result<F7GateRecordV12, SessionStoreError> {
+        self.authenticate_f7_gate_with_graph_v25(handle)
+            .map(|(gate, _)| gate)
+    }
+
+    /// Preserve the graph freshly reconstructed by ancestry authentication.
+    /// The caller holds operation_lock; this is never cached across operations.
+    fn authenticate_f7_gate_with_graph_v25(
+        &self,
+        handle: &PreparedF7FundingGateV12,
+    ) -> Result<
+        (
+            F7GateRecordV12,
+            Option<xmr_refund_policy::graph_builder::ProducedXmrRecoveryGraphV12>,
+        ),
+        SessionStoreError,
+    > {
         if self.policy.profile() != BudgetPolicyProfileV1::ProductionRatified {
             return Err(SessionStoreError::PolicyProfile);
         }
@@ -592,8 +611,16 @@ impl ContractsSessionStoreV1 {
         if gate.digest != handle.digest || gate.ready_digest != handle.ready_digest {
             return Err(SessionStoreError::InvalidTransition);
         }
-        self.authenticate_f7_gate_ancestry_v12(&gate)?;
-        Ok(gate)
+        let graph = match gate.profile {
+            F7RecoveryProfileV23::XmrBounded => {
+                Some(self.authenticate_xmr_bounded_f7_ancestry_v23(&gate)?)
+            }
+            F7RecoveryProfileV23::Legacy => {
+                self.authenticate_f7_gate_ancestry_v12(&gate)?;
+                None
+            }
+        };
+        Ok((gate, graph))
     }
 
     fn authenticate_f7_gate_ancestry_v12(
@@ -1747,7 +1774,7 @@ impl ContractsSessionStoreV1 {
         custody: &XmrRecoveryCustodyV11,
     ) -> Result<VerifiedXmrRecoveryExecutionAuthorityV12, SessionStoreError> {
         let _guard = self.operation_lock()?;
-        let gate = self.authenticate_f7_gate_v12(handle)?;
+        let (gate, graph) = self.authenticate_f7_gate_with_graph_v25(handle)?;
         if gate.family != F7ExternalFamilyV11::Monero {
             return Err(SessionStoreError::InvalidTransition);
         }
@@ -1759,7 +1786,9 @@ impl ContractsSessionStoreV1 {
         let bounded_refund_pre_signature = match gate.profile {
             F7RecoveryProfileV23::Legacy => None,
             F7RecoveryProfileV23::XmrBounded => Some(
-                self.reconstruct_completed_xmr_graph_v23(gate.session_id)?
+                graph
+                    .as_ref()
+                    .ok_or(SessionStoreError::Quarantined)?
                     .graph()
                     .refund_pre_signature()
                     .to_bytes()
@@ -2539,7 +2568,15 @@ impl ContractsSessionStoreV1 {
             let _guard = self.operation_lock()?;
             let (gate, _, _) = self.require_f7_consumed_handle_v12(authorization)?;
             if gate.profile == F7RecoveryProfileV23::XmrBounded {
-                return self.resume_xmr_bounded_claim_signing_locked_v23(chain, authorization);
+                // The handle was fully authenticated under this same lock.
+                // Keep the second time-sensitive check, without reconstructing
+                // its immutable ancestry a second time. The session helper
+                // still authenticates the binding and audits the current round.
+                authorization.require_recent_observation()?;
+                return self.resume_xmr_bounded_claim_session_locked_v23(
+                    chain,
+                    authorization.session_id,
+                );
             }
             self.load_signing_binding(authorization.session_id, PurposeV1::ClaimAdaptor)?
                 .decode(&chain)?

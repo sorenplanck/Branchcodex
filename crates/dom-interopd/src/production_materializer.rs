@@ -319,10 +319,10 @@ impl SharedProductionSettlementRouterV1 {
             &mut ProductionSettlementChildRouterV1,
         ) -> Result<T, ChildAuthorityRefusalV1>,
     ) -> Result<T, ChildAuthorityRefusalV1> {
-        let router = self
-            .slot
-            .take()
-            .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
+        let Some(router) = self.slot.take() else {
+            eprintln!("DOM_RENEW_SITE_V26 site=router_slot_empty");
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        };
         let mut guard = ProductionRouterRestoreGuardV1 {
             slot: self.slot.as_ref(),
             router: Some(router),
@@ -374,8 +374,43 @@ impl ProductionFundingIdentityReaderV20 {
 
 impl ProductionActuatorHeartbeatV12 {
     pub(crate) fn renew(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
-        self.router
-            .with_router(ProductionSettlementChildRouterV1::renew_actuator_leases_v12)
+        let outcome = self
+            .router
+            .with_router(ProductionSettlementChildRouterV1::renew_actuator_leases_v12);
+        // Measured on every call, not only a successful one: the interval that
+        // matters is the one that ends in a refusal, and that one is invisible
+        // if only successes close the window.
+        report_renew_interval_v26();
+        outcome
+    }
+}
+
+/// Diagnostic only: names the stretch between two SUCCESSFUL lease renewals.
+/// The route-loop gap measured arrivals at one site, which is not the same
+/// thing: a renewal can happen deep inside a step the loop never returns from
+/// in time. Only a new worst interval is printed, so one line per run survives
+/// in the log instead of one per round.
+fn report_renew_interval_v26() {
+    use std::cell::Cell;
+    use std::time::Instant;
+    thread_local! {
+        static LAST_RENEW_V26: Cell<Option<Instant>> = const { Cell::new(None) };
+        static WORST_RENEW_V26: Cell<u128> = const { Cell::new(0) };
+        static LAST_PHASE_V26: Cell<&'static str> = const { Cell::new("start") };
+    }
+    let now = Instant::now();
+    let previous = LAST_RENEW_V26.with(|cell| cell.replace(Some(now)));
+    let from = LAST_PHASE_V26.with(|cell| cell.replace(crate::production_relay_stage12::lease_phase_v25()));
+    let Some(previous) = previous else {
+        return;
+    };
+    let gap = now.duration_since(previous).as_millis();
+    if gap >= 30_000 && gap > WORST_RENEW_V26.with(Cell::get) {
+        WORST_RENEW_V26.with(|cell| cell.set(gap));
+        eprintln!(
+            "DOM_RENEW_INTERVAL_V26 gap_ms={gap} from={from} to={}",
+            crate::production_relay_stage12::lease_phase_v25()
+        );
     }
 }
 

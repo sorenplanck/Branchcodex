@@ -693,6 +693,14 @@ pub enum ContractsRelayIngressErrorV1 {
     /// No Store-issued authority exists for this unseen message phase.
     #[error("unseen DSC1 message has no prepared Contracts authority")]
     UnpreparedMessage,
+    /// The peer's authenticated first funding edge arrived in the same Relay
+    /// batch that completed bilateral readiness. Keep it pending until the
+    /// native owner observes the chain and installs its linear authority.
+    #[error("native XMR funding commitment is awaiting its signing handoff")]
+    AwaitingNativeXmrFundingHandoffV25,
+    /// Authenticated first readiness vote awaits the local native gate. No ACK.
+    #[error("native XMR readiness is awaiting local gate construction")]
+    AwaitingNativeXmrReadinessGateV25,
     /// Exact native claim verified, but chain observation has not committed.
     /// Relay keeps this row pending; this is never an acceptance receipt.
     #[error("verified final claim is awaiting its canonical chain observation")]
@@ -1538,9 +1546,16 @@ impl ContractsStoreTransportPortV1 {
                 .ok_or(ContractsRelayIngressErrorV1::UnpreparedMessage);
         };
         let accepted = match &authority.inner {
-            PreparedContractsIngressKindV1::XmrGraphSigningV23(prepared) => self
-                .store
-                .accept_xmr_graph_signing_ingress_v23(prepared, signed_dsc1),
+            PreparedContractsIngressKindV1::XmrGraphSigningV23(prepared) => {
+                if self
+                    .store
+                    .xmr_readiness_awaits_gate_v25(prepared, signed_dsc1)?
+                {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingNativeXmrReadinessGateV25);
+                }
+                self.store
+                    .accept_xmr_graph_signing_ingress_v23(prepared, signed_dsc1)
+            }
             PreparedContractsIngressKindV1::XmrGraphCommitV23(prepared) => self
                 .store
                 .accept_xmr_graph_commit_ingress_v23(prepared, signed_dsc1),
@@ -1736,6 +1751,25 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                     .ok_or(ContractsRelayIngressErrorV1::Store(error)),
             };
         }
+        // DIAG(temporary): the ready-to-fund vote is the one message whose
+        // semantic acceptance lives behind the generic derived entry point.
+        // Name the branch that consumed it and the session revision on both
+        // sides of the call: a vote that is acknowledged without advancing the
+        // recipient's revision is the deadlock this run keeps reproducing.
+        let ready_vote_v25 = parsed.unsigned().kind() as u8 == 0x17;
+        let rev_before_v25 = if ready_vote_v25 {
+            self.store.load_session(self.session_id).map(|s| s.revision()).ok()
+        } else {
+            None
+        };
+        let diag_v25 = |branch: &str, worker: &Self| {
+            if let Some(before) = rev_before_v25 {
+                let after = worker.store.load_session(worker.session_id).map(|s| s.revision()).ok();
+                eprintln!(
+                    "DOM_READY_APPLY_V25 branch={branch} rev_before={before} rev_after={after:?}"
+                );
+            }
+        };
         match self
             .store
             .accept_transport_message_derived(delivery.signed_dsc1())
@@ -1743,7 +1777,10 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
             Ok(DurableTransportOutcomeV1::EquivocationPersisted) if was_failed_closed => self
                 .terminal_commit(true)?
                 .ok_or(ContractsRelayIngressErrorV1::InvalidReceipt),
-            Ok(outcome) => self.map_outcome(outcome),
+            Ok(outcome) => {
+                diag_v25("derived", self);
+                self.map_outcome(outcome)
+            }
             Err(SessionStoreError::InvalidTransition) => {
                 let stale_refund_ingress = matches!(
                     (&self.authority, parsed.unsigned().kind() as u8),
@@ -1780,11 +1817,21 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                 )? {
                     return Err(ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16);
                 }
-                self.accept_unseen(delivery.signed_dsc1())
+                if self.store.xmr_funding_commitment_awaits_handoff_v25(
+                    self.session_id,
+                    delivery.signed_dsc1(),
+                )? {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingNativeXmrFundingHandoffV25);
+                }
+                let outcome = self.accept_unseen(delivery.signed_dsc1());
+                diag_v25("unseen", self);
+                outcome
             }
-            Err(error) => self
-                .terminal_commit(true)?
-                .ok_or(ContractsRelayIngressErrorV1::Store(error)),
+            Err(error) => {
+                diag_v25("store_error", self);
+                self.terminal_commit(true)?
+                    .ok_or(ContractsRelayIngressErrorV1::Store(error))
+            }
         }
     }
 }
@@ -2714,3 +2761,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "production_xmr_readiness_handoff_v25_tests.rs"]
+mod readiness_gate_v25_tests;

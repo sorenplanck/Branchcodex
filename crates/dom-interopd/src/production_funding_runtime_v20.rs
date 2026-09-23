@@ -16,7 +16,7 @@ use relay::TimelockSpec;
 use route_transport::F6TransportPortV1;
 use std::time::Duration;
 
-const F7_FUNDING_CONTEXT_POLL_BOUND_V24: Duration = Duration::from_secs(10);
+pub(crate) const F7_FUNDING_CONTEXT_POLL_BOUND_V24: Duration = Duration::from_secs(10);
 
 fn bounded_f7_funding_context_budget_v24(
     funding_window: &crate::production_timer::ProductionFundingWindowV23,

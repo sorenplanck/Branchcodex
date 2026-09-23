@@ -41,7 +41,7 @@ impl ProductionUniversalXmrEnrollmentAuthorityV23 {
         if self.scope.is_none() {
             return Err(Refusal::Conflict);
         }
-        require_milliseconds(self.sidecar_timeout_ms, 180_000)?;
+        require_milliseconds(self.sidecar_timeout_ms, MAX_SIDECAR_CALL_MS_V26)?;
         Ok((
             existing_resource(state_dir, &self.secret_store, false)?,
             existing_resource(state_dir, &self.sidecar_socket, true)?,
@@ -140,7 +140,7 @@ impl ProductionUniversalXmrEnrollmentAuthorityV23 {
         {
             return Err(Refusal::Conflict);
         }
-        require_milliseconds(self.sidecar_timeout_ms, 180_000)?;
+        require_milliseconds(self.sidecar_timeout_ms, MAX_SIDECAR_CALL_MS_V26)?;
         let paths = self.resource_paths_v23();
         for (index, (path, _)) in paths.iter().enumerate() {
             relative_path(path)?;

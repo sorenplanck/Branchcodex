@@ -147,6 +147,21 @@ pub(crate) fn lease_phase_v25() -> &'static str {
     LEASE_PHASE_V25.with(std::cell::Cell::get)
 }
 
+// Local work only. Unlike the enclosing bootstrap timer, these intervals
+// distinguish vault/round work from graph reconstruction and custody writes.
+fn measure_recovery_phase_v25<T>(index: usize, phase: &'static str, run: impl FnOnce() -> T) -> T {
+    let start = std::time::Instant::now();
+    let result = run();
+    let elapsed = start.elapsed();
+    if elapsed >= std::time::Duration::from_secs(1) {
+        eprintln!(
+            "DOM_RECOVERY_PHASE_V25 leg={index} phase={phase} elapsed_ms={}",
+            elapsed.as_millis()
+        );
+    }
+    result
+}
+
 /// Move-only Stage-12 construction request.
 ///
 /// The relay signing secrets remain zeroizing owners until the exact
@@ -226,6 +241,22 @@ pub(crate) struct ProductionRelayStage12OwnerV1 {
     xmr_recovery_signing_v23:
         [Option<crate::production_contracts::ProductionXmrRecoverySigningOwnerV23>; 2],
     xmr_graph_signing_admission_deferred_v23: [bool; 2],
+    /// Whether the terminal `Custodied` custody for this leg has been audited
+    /// once since it was installed. Cleared on every transition into
+    /// `Custodied`; see `step_xmr_graph_custody_v23`.
+    xmr_custody_revalidated_v25: [bool; 2],
+    /// Whether this leg's F7 funding already reached `Committed` in this
+    /// process. `funding_authorized` is irreversible, so once observed the
+    /// funding scheduler can only ever answer `Committed` again — while
+    /// costing a gate re-authentication, a quorum recount and a committed
+    /// resume (each a full graph reconstruction) per pass to say so. The vault
+    /// release runs on the observation that sets the latch; consumers of the
+    /// committed funding re-authenticate at their own point of use.
+    f7_funding_committed_v25: [bool; 2],
+    /// Whether the one authenticated probe for a retained ready graph already
+    /// ran while this leg's lifecycle is still `Awaiting`. See
+    /// `resume_ready_graph_for_activation_v23`.
+    ready_graph_probe_done_v25: [bool; 2],
     cancelled_v22: [Option<cancelled_v22::CancelledRelayOwnerV22>; 2],
     bootstrap_v16: [Option<crate::production_contracts::ProductionBootstrapLegV16>; 2],
     xmr_graph_templates_v23: [graph_v23::GraphLifecycleV23; 2],
@@ -353,7 +384,9 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Downstream => 1,
         };
         let Some(graph) = self.xmr_graph_templates_v23[index].signing()? else {
-            return self.step_xmr_graph_custody_v23(leg);
+            return measure_recovery_phase_v25(index, "custody_mount", || {
+                self.step_xmr_graph_custody_v23(leg)
+            });
         };
         let setup = self.xmr_graph_setup_v22[index]
             .as_ref()
@@ -390,17 +423,19 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Downstream => &mut self.downstream,
         };
         mark_lease_phase_v25("recovery_contracts_step");
-        owner.contracts.step_xmr_recovery_signing_v23(
-            &mut self.xmr_recovery_signing_v23[index],
-            &self.xmr_graph_vault_provisioner_v23,
-            material,
-            binding,
-            owner.trusted_chain_id,
-            &graph.templates,
-            &graph.keys,
-            expiry,
-            renew_actuator_lease,
-        )?;
+        measure_recovery_phase_v25(index, "parent_signing", || {
+            owner.contracts.step_xmr_recovery_signing_v23(
+                &mut self.xmr_recovery_signing_v23[index],
+                &self.xmr_graph_vault_provisioner_v23,
+                material,
+                binding,
+                owner.trusted_chain_id,
+                &graph.templates,
+                &graph.keys,
+                expiry,
+                renew_actuator_lease,
+            )
+        })?;
         let Some(signing) = self.xmr_recovery_signing_v23[index].as_mut() else {
             return Ok(());
         };
@@ -415,23 +450,40 @@ impl ProductionRelayStage12OwnerV1 {
             });
             if self.xmr_auxiliary_relays_v23[index][slot].is_none() {
                 let binding = signing.auxiliary_binding_v23(edge).ok_or(Error::Binding)?;
-                self.xmr_auxiliary_relays_v23[index][slot] =
-                    Some(self.xmr_auxiliary_provisioners_v23[index].open(owner, binding, edge)?);
+                self.xmr_auxiliary_relays_v23[index][slot] = Some(measure_recovery_phase_v25(
+                    index,
+                    if slot == 0 {
+                        "cancel_open"
+                    } else {
+                        "compensation_open"
+                    },
+                    || self.xmr_auxiliary_provisioners_v23[index].open(owner, binding, edge),
+                )?);
                 renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
             }
-            self.xmr_auxiliary_relays_v23[index][slot]
-                .as_mut()
-                .ok_or(Error::Binding)?
-                .contracts
-                .step_xmr_auxiliary_signing_v23(
-                    signing,
-                    edge,
-                    binding,
-                    owner.trusted_chain_id,
-                    &graph.templates,
-                    &graph.keys,
-                    expiry,
-                )?;
+            measure_recovery_phase_v25(
+                index,
+                if slot == 0 {
+                    "cancel_signing"
+                } else {
+                    "compensation_signing"
+                },
+                || {
+                    self.xmr_auxiliary_relays_v23[index][slot]
+                        .as_mut()
+                        .ok_or(Error::Binding)?
+                        .contracts
+                        .step_xmr_auxiliary_signing_v23(
+                            signing,
+                            edge,
+                            binding,
+                            owner.trusted_chain_id,
+                            &graph.templates,
+                            &graph.keys,
+                            expiry,
+                        )
+                },
+            )?;
             renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
         }
         if setup.claim_context_v23().is_none() {
@@ -440,11 +492,11 @@ impl ProductionRelayStage12OwnerV1 {
         }
         // The equations are owned only after reauditing all three native
         // journals. No template is consumed while a round is incomplete.
-        let completed = owner.contracts.prepare_xmr_graph_completion_v23(
-            signing,
-            &graph.templates,
-            &graph.keys,
-        )?;
+        let completed = measure_recovery_phase_v25(index, "completion_audit", || {
+            owner
+                .contracts
+                .prepare_xmr_graph_completion_v23(signing, &graph.templates, &graph.keys)
+        })?;
         // Renew between reauditing the three journals and consuming the
         // templates, and never after the lifecycle has left Signing: a failed
         // renewal must not strand the graph in Completing.
@@ -478,7 +530,9 @@ impl ProductionRelayStage12OwnerV1 {
         }
         // Mounting custody may write the encrypted archive for the first time.
         renew_actuator_lease().map_err(|()| Error::ActuatorLeaseRenewalV25)?;
-        self.step_xmr_graph_custody_v23(leg)
+        measure_recovery_phase_v25(index, "custody_mount", || {
+            self.step_xmr_graph_custody_v23(leg)
+        })
     }
 
     pub(crate) fn xmr_noise_graph_offer_v22(
@@ -826,6 +880,11 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Upstream => 0,
             LegIdV1::Downstream => 1,
         };
+        if self.f7_funding_committed_v25[index] {
+            // Funding is irreversibly authorized and the vault release already
+            // ran on the pass that observed it. Nothing below can change.
+            return Ok(());
+        }
         // DIAG(temporary): prove the pump is entered at all on this peer.
         // Reasoning from the absence of the later tokens once led to the wrong
         // conclusion; this one fires on entry, before any branch can skip it.
@@ -902,7 +961,49 @@ impl ProductionRelayStage12OwnerV1 {
             "DOM_NATIVE_F7_FUNDING_V24 leg={leg:?} session={} step={step:?}",
             hex::encode(binding.session_id()),
         );
+        if step == crate::production_contracts::ProductionFundingStepV20::Committed {
+            self.f7_funding_committed_v25[index] = true;
+        }
         Ok(())
+    }
+
+    /// Install the same-Store XMR recovery driver before bilateral readiness.
+    ///
+    /// Native graph custody is completed by the Relay bootstrap, while fresh
+    /// funding is deliberately held behind the bilateral `0x17` gate.  Keep
+    /// recovery activation separate from the funding scheduler so readiness
+    /// never depends on entering the scheduler it protects.
+    pub(crate) fn activate_xmr_recovery_for_readiness_v25(
+        &mut self,
+        leg: LegIdV1,
+        scanner: &crate::production_child_dom::ProductionDomF7ScannerAuthorityV1,
+    ) -> Result<(), crate::production_contracts::ProductionFundingErrorV20> {
+        let index = match leg {
+            LegIdV1::Upstream => 0,
+            LegIdV1::Downstream => 1,
+        };
+        let Some(setup) = self.xmr_graph_setup_v22[index].as_ref() else {
+            return Ok(());
+        };
+        if self
+            .pending_xmr_graph_commit_relay_envelope_v23(setup.binding().session_id())
+            .map_err(|_| crate::production_contracts::ProductionFundingErrorV20::Binding)?
+        {
+            return Ok(());
+        }
+        match &mut self.xmr_graph_templates_v23[index] {
+            graph_v23::GraphLifecycleV23::Custodied { custody, recovery } => {
+                let chain = match leg {
+                    LegIdV1::Upstream => self.upstream.trusted_chain_id,
+                    LegIdV1::Downstream => self.downstream.trusted_chain_id,
+                };
+                custody.activate_recovery_v23(chain, setup.setup(), scanner, recovery)
+            }
+            graph_v23::GraphLifecycleV23::Failed | graph_v23::GraphLifecycleV23::Completing => {
+                Err(crate::production_contracts::ProductionFundingErrorV20::Binding)
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn bootstrap_ready_v16(&self) -> bool {
@@ -1591,6 +1692,9 @@ pub(crate) fn construct_production_relay_stage12_v1(
             xmr_graph_vault_provisioner_v23,
             xmr_recovery_signing_v23: [None, None],
             xmr_graph_signing_admission_deferred_v23: [false, false],
+            xmr_custody_revalidated_v25: [false, false],
+            f7_funding_committed_v25: [false, false],
+            ready_graph_probe_done_v25: [false, false],
             cancelled_v22: cancelled,
             bootstrap_v16,
             xmr_graph_templates_v23: [

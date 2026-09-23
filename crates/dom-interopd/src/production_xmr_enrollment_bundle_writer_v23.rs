@@ -27,7 +27,7 @@ pub struct ProductionXmrEnrollmentLegResourcesV23 {
     pub secret_store: String,
     /// Existing independently provisioned authenticated sidecar socket.
     pub sidecar_socket: String,
-    /// Nonzero timeout bounded by the existing daemon limit of 180000 ms.
+    /// Nonzero timeout bounded by the external-call ceiling of 60000 ms.
     pub sidecar_timeout_ms: u64,
     /// One root-level directory name for the separate native graph archive.
     /// This is not the directory containing the encrypted enrollment databases.

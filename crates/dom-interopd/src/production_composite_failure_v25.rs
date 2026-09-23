@@ -59,7 +59,9 @@ closed_tags!(Cause {
     InvalidDsc1 => "invalid_dsc1", WrongDsc1Scope => "wrong_dsc1_scope",
     Unprepared => "unprepared_message", ClaimObservation => "awaiting_claim_observation",
     Templates => "awaiting_template_construction", RefundHandoff => "awaiting_refund_handoff",
-    NativeRefund => "awaiting_native_refund_transport", WrongAuthority => "wrong_authority",
+    NativeRefund => "awaiting_native_refund_transport",
+    ReadinessGate => "awaiting_native_readiness_gate",
+    FundingHandoff => "awaiting_native_funding_handoff", WrongAuthority => "wrong_authority",
     GraphCandidateNoiseOffer => "graph_candidate_noise_offer_absent",
     GraphCandidateSetup => "graph_candidate_setup_absent",
     GraphCandidatePrivateBootstrap => "graph_candidate_private_bootstrap_absent",
@@ -181,6 +183,8 @@ fn ingress(error: &ContractsRelayIngressErrorV1) -> Cause {
         E::AwaitingTemplateConstructionV17 => Cause::Templates,
         E::AwaitingBootstrapRefundHandoffV18 => Cause::RefundHandoff,
         E::AwaitingNativeXmrRefundTransportV23 => Cause::NativeRefund,
+        E::AwaitingNativeXmrFundingHandoffV25 => Cause::FundingHandoff,
+        E::AwaitingNativeXmrReadinessGateV25 => Cause::ReadinessGate,
         E::WrongAuthority => Cause::WrongAuthority,
         E::AuthorityAlreadyInstalled => Cause::AlreadyInstalled,
         E::InvalidReceipt => Cause::Receipt,
@@ -456,6 +460,7 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                 | C::Templates
                 | C::RefundHandoff
                 | C::NativeRefund
+                | C::FundingHandoff
                 | C::WrongAuthority
                 | C::AlreadyInstalled
                 | C::Receipt

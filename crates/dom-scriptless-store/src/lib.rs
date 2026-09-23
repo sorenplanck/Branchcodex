@@ -217,7 +217,7 @@ pub use runtime::{
     ConsumedF7ClaimAuthorizationV12, ContractsNonceVaultV1, F7AnchorRequestBindingV12,
     F7ClaimObserverFactsV15, F7FinalClaimActionV14, F7FinalClaimFactsV14, F7FinalClaimProgressV14,
     F7FundingAuthorizationV12, F7FundingGatePreparationV12, F7RecoveryPreparationV12,
-    InventoryError, ObservedF7FinalClaimV15, PreparedF7ClaimPreSignatureTransportV12,
+    InventoryError, F7ClaimReceiverStateV25, ObservedF7FinalClaimV15, PreparedF7ClaimPreSignatureTransportV12,
     PreparedF7FinalClaimIngressV15, PreparedF7FinalClaimSubmissionV14, PreparedF7FundingGateV12,
     PreparedF7FundingSubmissionV12, PreparedOperationalXmrFundingGateV12,
     PreparedOperationalXmrReadyToFundVoteV12, PreparedXmrRecoveryAttemptV12,

@@ -147,7 +147,7 @@ impl NativeXmrDaemonResourcesV23 {
                 secret_store,
                 nullifier_store,
                 sidecar_socket,
-                sidecar_timeout_ms: 120_000,
+                sidecar_timeout_ms: 60_000,
                 custody_directory: format!("daemon-xmr-{position}-graph-custody"),
                 sealing_key_file,
                 custody_id,

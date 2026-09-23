@@ -81,6 +81,8 @@ enum CompletedPreSignatureV12 {
 pub(crate) enum ProductionDomClaimRuntimeErrorV12 {
     #[error("DOM claim driver belongs to another Contracts owner or F7 profile")]
     Scope,
+    #[error("native F7 observation must be refreshed before continuing claim signing")]
+    RefreshRequired,
     #[error("native DOM claim journal refused the operation")]
     Store(#[from] SessionStoreError),
     #[error("native DOM claim participant refused signing or nonce recovery")]
@@ -98,11 +100,13 @@ pub(crate) enum ProductionDomClaimRuntimeErrorV12 {
 }
 
 impl ProductionDomClaimRuntimeErrorV12 {
-    /// Retry only explicit host contention or I/O. Missing records, signatures,
+    /// Retry explicit host contention, I/O, or a spent observation reuse margin.
+    /// Missing records, signatures,
     /// inconsistent identities and unauthorized scopes are never peer absence.
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
-            Self::Store(SessionStoreError::Filesystem | SessionStoreError::StoreBusy)
+            Self::RefreshRequired
+            | Self::Store(SessionStoreError::Filesystem | SessionStoreError::StoreBusy)
             | Self::Outbound(ProductionContractsOutboundErrorV1::OwnerBusy)
             | Self::Outbound(ProductionContractsOutboundErrorV1::Identity(
                 IdentityStoreError::Filesystem | IdentityStoreError::StoreBusy,
@@ -393,7 +397,16 @@ where
             (
                 ConsumedAuthorityV12::Universal(authority),
                 ProductionDomClaimAnchorsV12::UniversalRecent,
-            ) if authority.can_reuse_observation_v12() => Ok(()),
+            ) => {
+                // The outer driver may have selected reuse just before the
+                // margin expired. Defer before any nonce/signing operation;
+                // its next tick must obtain fresh opaque chain observations.
+                if authority.can_reuse_observation_v12() {
+                    Ok(())
+                } else {
+                    Err(ProductionDomClaimRuntimeErrorV12::RefreshRequired)
+                }
+            }
             _ => Err(ProductionDomClaimRuntimeErrorV12::Scope),
         }
     }
@@ -629,6 +642,8 @@ mod tests {
 
     #[test]
     fn missing_or_substituted_identity_is_not_waiting_for_peer() {
+        assert!(!ProductionDomClaimRuntimeErrorV12::Scope.is_retryable());
+        assert!(ProductionDomClaimRuntimeErrorV12::RefreshRequired.is_retryable());
         for error in [
             IdentityStoreError::AuthenticationFailed,
             IdentityStoreError::InvalidInput,

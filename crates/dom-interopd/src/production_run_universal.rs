@@ -1767,7 +1767,73 @@ pub(super) fn run(
         }};
     }
     let mut terminal_continuation_rounds_v24 = 0_u8;
-    loop {
+    macro_rules! service_relay_v25 {
+        ($label:lifetime, $moved:expr, $site:literal) => {{
+            match crate::production_composite_loop::run_production_composite_relay_half_v25(
+                &mut relay_loop,
+                &mut route_runtime,
+                &mut _run_control,
+                &mut || actuator_heartbeat.renew().map_err(|_| ()),
+            )
+            .map_err(|error| route_runtime_diag_v25($site, &error))?
+            {
+                crate::production_composite_loop::CompositeRelayHalfV25::Shutdown => {
+                    break $label;
+                }
+                crate::production_composite_loop::CompositeRelayHalfV25::Stepped { moved } => {
+                    $moved |= moved;
+                }
+            }
+        }};
+    }
+    macro_rules! service_relay_leg_v25 {
+        ($label:lifetime, $leg:expr, $moved:expr, $site:literal) => {{
+            match crate::production_composite_loop::run_production_composite_relay_leg_v25(
+                &mut relay_loop,
+                &mut route_runtime,
+                &mut _run_control,
+                &mut || actuator_heartbeat.renew().map_err(|_| ()),
+                $leg,
+            )
+            .map_err(|error| route_runtime_diag_v25($site, &error))?
+            {
+                crate::production_composite_loop::CompositeRelayHalfV25::Shutdown => {
+                    break $label;
+                }
+                crate::production_composite_loop::CompositeRelayHalfV25::Stepped { moved } => {
+                    $moved |= moved;
+                }
+            }
+        }};
+    }
+    // Readiness is a two-vote durable quorum over append-only transport
+    // records: once both 0x17 votes are counted the answer cannot regress,
+    // while recounting costs a gate re-authentication (a full graph
+    // reconstruction) per leg per call. Latch the completed answer; fresh
+    // funding still re-authenticates everything at its own point of use.
+    let mut f7_readiness_latched_v25 = false;
+    macro_rules! f7_readiness_complete_v25 {
+        () => {{
+            if f7_readiness_latched_v25 {
+                true
+            } else {
+                let mut complete = true;
+                for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
+                    let selected = relay_loop.stage12_owner_mut_v11().leg_mut(leg);
+                    let chain = selected.trusted_chain_id();
+                    complete &= selected
+                        .contracts_mut()
+                        .f7_readiness_complete_v25(chain)
+                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                }
+                f7_readiness_latched_v25 = complete;
+                complete
+            }
+        }};
+    }
+    // Normal route loop begins here; terminal refund draining above remains
+    // isolated from ordinary bootstrap, recovery and funding work.
+    'route_runtime: loop {
         let before_round = route_runtime
             .snapshot()
             .map_err(|error| route_runtime_diag_v25("L1733_snapshot", &error))?;
@@ -1786,21 +1852,40 @@ pub(super) fn run(
         // allowed the two peers to become phase-shifted: one process waited in
         // observation while the other spent its short authenticated exchange
         // window, leaving a durable readiness envelope permanently queued.
-        let relay_half = crate::production_composite_loop::run_production_composite_relay_half_v25(
-            &mut relay_loop,
-            &mut route_runtime,
-            &mut _run_control,
-            &mut || actuator_heartbeat.renew().map_err(|_| ()),
-        )
-        .map_err(|error| route_runtime_diag_v25("relay_half", &error))?;
-        let mut f7_readiness_complete_v25 = true;
+        let mut relay_moved_v25 = false;
+        service_relay_v25!('route_runtime, relay_moved_v25, "relay_half_before_observation");
+        // Graph custody is completed by the Relay half, but its same-Store
+        // recovery driver must exist before that custody may authorize the
+        // bilateral 0x17 readiness vote.  Activate only that driver here;
+        // fresh funding remains closed until both votes are durable below.
         for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
-            let selected = relay_loop.stage12_owner_mut_v11().leg_mut(leg);
-            let chain = selected.trusted_chain_id();
-            f7_readiness_complete_v25 &= selected
-                .contracts_mut()
-                .f7_readiness_complete_v25(chain)
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            match relay_loop
+                .stage12_owner_mut_v11()
+                .activate_xmr_recovery_for_readiness_v25(leg, &dom_f7_scanner)
+            {
+                Ok(()) => {}
+                Err(error) if error.retryable() => {
+                    diag_funding_retryable_v25(leg, &error);
+                }
+                Err(error) => return Err(settlement_child_diag_v26("xmr_recovery_readiness", &error)),
+            }
+        }
+        let mut f7_readiness_complete_v25 = f7_readiness_complete_v25!();
+        // Readiness is a two-vote canonical exchange. The first pass carries
+        // the first participant's vote; accepting it enables the second
+        // participant to sign, and the second pass carries that reply. Keep
+        // both passes adjacent to recovery activation so neither peer enters
+        // a slow route/chain phase with the other's durable 0x17 still queued.
+        for _ in 0..2 {
+            if f7_readiness_complete_v25 {
+                break;
+            }
+            service_relay_v25!(
+                'route_runtime,
+                relay_moved_v25,
+                "relay_half_for_f7_readiness"
+            );
+            f7_readiness_complete_v25 = f7_readiness_complete_v25!();
         }
 
         retry_height_observation_v23 = true;
@@ -1825,10 +1910,11 @@ pub(super) fn run(
                     .map_err(|error| route_runtime_diag_v25("L1754_from_secs", &error))?;
                 actuator_heartbeat
                     .renew()
-                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    .map_err(|error| settlement_child_diag_v26("heartbeat_before_refund", &error))?;
+            crate::production_relay_stage12::mark_lease_phase_v25("refund_pump");
                 match pump.tick_remote_refund_v24(&snapshot) {
                     Ok(()) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                    Err(refusal) => return Err(settlement_child_refusal_v26("remote_refund_tick", refusal)),
                 }
                 // Separate funding observation and execution ticks preserve the
                 // one-minute freshness bound without a second sidecar owner.
@@ -1837,21 +1923,23 @@ pub(super) fn run(
                     .map_err(|error| route_runtime_diag_v25("L1766_from_secs", &error))?;
                 actuator_heartbeat
                     .renew()
-                    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    .map_err(|error| settlement_child_diag_v26("heartbeat_before_pump", &error))?;
+            crate::production_relay_stage12::mark_lease_phase_v25("xmr_pump");
                 match pump.tick() {
                     Ok(Some(report)) => match route_runtime.record_xmr_compensation_v22(report) {
                         Ok(())
                         | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                        Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                        Err(refusal) => return Err(settlement_child_refusal_v26("xmr_compensation_record", refusal)),
                     },
                     Ok(None)
                     | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                    Err(refusal) => return Err(settlement_child_refusal_v26("xmr_pump_tick", refusal)),
                 }
             }
             actuator_heartbeat
                 .renew()
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                .map_err(|error| settlement_child_diag_v26("heartbeat_after_pump", &error))?;
+            crate::production_relay_stage12::mark_lease_phase_v25("receiver_and_f7");
             // Observe/install receiver authority after the readiness Relay
             // exchange. Each native profile decides readiness; absent F7 on a
             // Bitcoin leg is not treated as a universal claim authorization.
@@ -1859,83 +1947,135 @@ pub(super) fn run(
                 (LegIdV1::Upstream, upstream_dom_binding),
                 (LegIdV1::Downstream, downstream_dom_binding),
             ] {
-                refresh_funding_window_v23!();
-                match owned_native_phase_v24!(relay_loop
-                    .stage12_owner_mut_v11()
-                    .step_f7_funding_v20(
-                        leg,
-                        binding,
-                        &dom_f7_scanner,
-                        &funding_window_v23,
-                        trusted_now_millis_v1()? / 1_000,
-                    )) {
-                    Ok(()) => {}
-                    // DIAG(temporary): a retryable funding refusal is indistinguishable
-                    // from success here, so the same refusal can repeat every round of a
-                    // two-hour run without a single line of output.
-                    Err(error) if error.retryable() => {
-                        diag_funding_retryable_v25(leg, &error);
-                    }
-                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
-                }
                 let index = match leg {
                     LegIdV1::Upstream => 0,
                     LegIdV1::Downstream => 1,
                 };
-                match owned_native_phase_v24!(relay_loop
-                    .stage12_owner_mut_v11()
-                    .step_native_xmr_f7_claim_v23(
-                        leg,
-                        binding,
-                        Rc::clone(&dom_f7_scanner),
-                        trusted_now_millis_v1()? / 1_000,
-                    )) {
-                    Ok(()) => {}
-                    Err(error) if error.retryable_v20() => {}
-                    // Closed Claim windows must leave noncooperative recovery running.
-                    Err(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
-                        f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed,
-                    )) => {}
-                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
-                }
-                if let Some(face) = claim_faces_v20[index] {
-                    let child_leg = match leg {
-                        LegIdV1::Upstream => settlement_coordinator::SettlementLegV1::Upstream,
-                        LegIdV1::Downstream => settlement_coordinator::SettlementLegV1::Downstream,
-                    };
-                    match funding_identities_v20.read(
-                        face,
-                        child_leg,
-                        route_id,
-                        bitcoin_calls[index].settlement_id,
-                    ) {
-                        Ok(Some(id)) => {
-                            match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_claim_v20(leg, binding,
-                            Rc::clone(&dom_f7_scanner), &mut claim_observers_v20[index], id,
-                            trusted_now_millis_v1()? / 1_000)) {
-                            Ok(()) => {}
-                            Err(error) if error.retryable_v20() => {}
-                            // An elapsed signing window refuses claim, while
-                            // leaving the route driver able to execute refund.
-                            Err(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
-                                f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed)) => {}
-                            Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                // Funding and Claim each use a six-envelope alternating
+                // protocol.  Running only one edge per outer route round made
+                // every edge wait behind both recovery pumps, height
+                // observation and an otherwise idle route half.  Keep the
+                // exact Store/scanner/lease checks on every edge, but let a
+                // live pair finish the bounded ceremony while both daemons are
+                // already serving this leg.  Two traffic-free passes cover the
+                // Claim runtime's local start transition and then prove that
+                // there is no envelope currently actionable.  Eight passes
+                // cover that start plus all six edges and the durable terminal
+                // aggregation; the outer loop remains the retry boundary.
+                let mut native_idle_passes_v25 = 0_u8;
+                for native_burst_pass_v25 in 0..8 {
+                    refresh_funding_window_v23!();
+                    match owned_native_phase_v24!(relay_loop
+                        .stage12_owner_mut_v11()
+                        .step_f7_funding_v20(
+                            leg,
+                            binding,
+                            &dom_f7_scanner,
+                            &funding_window_v23,
+                            trusted_now_millis_v1()? / 1_000,
+                        )) {
+                        Ok(()) => {}
+                        // DIAG(temporary): a retryable funding refusal is indistinguishable
+                        // from success here, so the same refusal can repeat every round of a
+                        // two-hour run without a single line of output.
+                        Err(error) if error.retryable() => {
+                            diag_funding_retryable_v25(leg, &error);
                         }
-                        }
-                        Ok(None)
-                        | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                        Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                        Err(error) => return Err(settlement_child_diag_v26("f7_funding_step", &error)),
                     }
-                }
-                match owned_native_phase_v24!(relay_loop
-                    .stage12_owner_mut_v11()
-                    .leg_mut(leg)
-                    .contracts_mut()
-                    .step_f7_claim_receiver_v15(binding, dom_trusted_chain_id, &dom_f7_scanner))
-                {
-                    Ok(_) => {}
-                    Err(error) if error.retryable() => {}
-                    Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
+                    match owned_native_phase_v24!(relay_loop
+                        .stage12_owner_mut_v11()
+                        .step_native_xmr_f7_claim_v23(
+                            leg,
+                            binding,
+                            Rc::clone(&dom_f7_scanner),
+                            trusted_now_millis_v1()? / 1_000,
+                        )) {
+                        Ok(()) => {}
+                        Err(error) if error.retryable_v20() => {}
+                        // Closed Claim windows must leave noncooperative recovery running.
+                        Err(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
+                            f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed,
+                        )) => {}
+                        Err(error) => {
+                            return Err(settlement_child_diag_v26("native_xmr_claim", &error))
+                        }
+                    }
+                    if let Some(face) = claim_faces_v20[index] {
+                        let child_leg = match leg {
+                            LegIdV1::Upstream => settlement_coordinator::SettlementLegV1::Upstream,
+                            LegIdV1::Downstream => {
+                                settlement_coordinator::SettlementLegV1::Downstream
+                            }
+                        };
+                        match funding_identities_v20.read(
+                            face,
+                            child_leg,
+                            route_id,
+                            bitcoin_calls[index].settlement_id,
+                        ) {
+                            Ok(Some(id)) => {
+                                match owned_native_phase_v24!(relay_loop.stage12_owner_mut_v11().step_f7_claim_v20(leg, binding,
+                                Rc::clone(&dom_f7_scanner), &mut claim_observers_v20[index], id,
+                                trusted_now_millis_v1()? / 1_000)) {
+                                Ok(()) => {}
+                                Err(error) if error.retryable_v20() => {}
+                                // An elapsed signing window refuses claim, while
+                                // leaving the route driver able to execute refund.
+                                Err(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
+                                    f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed)) => {}
+                                Err(error) => return Err(settlement_child_diag_v26("f7_claim_step", &error)),
+                            }
+                            }
+                            Ok(None)
+                            | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {
+                            }
+                            Err(refusal) => return Err(settlement_child_refusal_v26("f7_claim_face", refusal)),
+                        }
+                    }
+                    match owned_native_phase_v24!(relay_loop
+                        .stage12_owner_mut_v11()
+                        .leg_mut(leg)
+                        .contracts_mut()
+                        .step_f7_claim_receiver_v15(binding, dom_trusted_chain_id, &dom_f7_scanner))
+                    {
+                        Ok(_) => {}
+                        Err(error) if error.retryable() => {}
+                        Err(error) => {
+                            return Err(settlement_child_diag_v26("claim_receiver", &error))
+                        }
+                    }
+                    // Funding/claim signing can stage the next exact envelope
+                    // at any call above. The first pass stays bilateral: one
+                    // daemon can know both votes are durable while its peer
+                    // still needs the last readiness envelope on the other
+                    // leg. After that synchronization pass, keep both daemons
+                    // on this exact native leg so each signing edge does not
+                    // pay an unrelated socket deadline.
+                    let mut native_pass_moved_v25 = false;
+                    if native_burst_pass_v25 == 0 {
+                        service_relay_v25!(
+                            'route_runtime,
+                            native_pass_moved_v25,
+                            "relay_half_after_native_sync"
+                        );
+                    } else {
+                        service_relay_leg_v25!(
+                            'route_runtime,
+                            leg,
+                            native_pass_moved_v25,
+                            "relay_leg_after_native_edge"
+                        );
+                    }
+                    relay_moved_v25 |= native_pass_moved_v25;
+                    if native_pass_moved_v25 {
+                        native_idle_passes_v25 = 0;
+                    } else {
+                        native_idle_passes_v25 = native_idle_passes_v25.saturating_add(1);
+                        if native_idle_passes_v25 >= 2 {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1949,36 +2089,31 @@ pub(super) fn run(
         // The DOM actuator lease now lives in the DOM child; its heartbeat is
         // the only renewal. It is carried through the relay legs, their
         // bootstraps and the route step, where the wall clock is spent.
-        let round_exit = match relay_half {
-            crate::production_composite_loop::CompositeRelayHalfV25::Shutdown => {
-                ProductionCompositeRuntimeExitV1::Shutdown { rounds: 0 }
+        if f7_readiness_complete_v25 {
+            refresh_funding_window_v23!();
+            // The route consumes this last observation in the current
+            // round; retain the fail-closed result explicitly instead
+            // of leaving the macro's retry state unread.
+            if !retry_height_observation_v23 {
+                funding_window_v23.close();
             }
-            crate::production_composite_loop::CompositeRelayHalfV25::Stepped { moved } => {
-                if f7_readiness_complete_v25 {
-                    refresh_funding_window_v23!();
-                    // The route consumes this last observation in the current
-                    // round; retain the fail-closed result explicitly instead
-                    // of leaving the macro's retry state unread.
-                    if !retry_height_observation_v23 {
-                        funding_window_v23.close();
-                    }
-                }
-                crate::production_composite_loop::run_production_composite_route_half_v25(
-                    &mut relay_loop,
-                    &mut route_runtime,
-                    &mut _run_control,
-                    &mut || actuator_heartbeat.renew().map_err(|_| ()),
-                    moved,
-                )
-                .map_err(|error| route_runtime_diag_v25("route_half", &error))?
-            }
-        };
+        }
+        let round_exit = crate::production_composite_loop::run_production_composite_route_half_v25(
+            &mut relay_loop,
+            &mut route_runtime,
+            &mut _run_control,
+            &mut || actuator_heartbeat.renew().map_err(|_| ()),
+            relay_moved_v25,
+        )
+        .map_err(|error| route_runtime_diag_v25("route_half", &error))?;
         match round_exit {
             ProductionCompositeRuntimeExitV1::Terminal { .. } => {
                 let terminal = route_runtime
                     .snapshot()
                     .map_err(|error| route_runtime_diag_v25("terminal_snapshot", &error))?;
+                crate::production_relay_stage12::mark_lease_phase_v25("terminal_refund_drain");
                 drain_terminal_refund_v24!(terminal);
+                crate::production_relay_stage12::mark_lease_phase_v25("terminal_relay_drain");
                 drain_terminal_relay_v24!();
                 if terminal_continuation_rounds_v24 < 16 {
                     terminal_continuation_rounds_v24 =
@@ -2001,12 +2136,20 @@ pub(super) fn run(
             .into_iter()
             .enumerate()
         {
-            actuator_heartbeat
-                .renew()
-                .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+            route_lease_gap_v26();
+            crate::production_relay_stage12::mark_lease_phase_v25("bitcoin_leg_pass");
+            // Beat unconditionally: this is the only renewal between the route
+            // step and the next round, and a lease is kept alive by the beat,
+            // not by the work that follows it. Its refusal is fatal only where
+            // the Bitcoin post-anchor pass below actually spends the lease; a
+            // route without that transport does no work in this body, so a
+            // transient refusal there must not end the route. Every operation
+            // that does spend the lease revalidates it at its own Store.
+            let beat = actuator_heartbeat.renew();
             let Some(transport) = bitcoin_transports[index].as_mut() else {
                 continue;
             };
+            beat.map_err(|error| settlement_child_diag_v26("heartbeat_bitcoin_pass", &error))?;
             if bitcoin_claim_installed_v22[index] || bitcoin_contracts[index].is_some() {
                 let binding = if index == 0 {
                     upstream_dom_binding
@@ -2146,6 +2289,71 @@ fn route_runtime_diag_v25(
         source = cause.source();
     }
     ProductionRunErrorV1::RouteRuntime
+}
+
+/// Names the concrete refusal behind a fatal settlement-child step instead of
+/// discarding it. `SettlementChildAuthority` is raised from many places, so a
+/// bare classification leaves an operator — and a failing run — with no way to
+/// tell a claim-signing gate from a receiver transition or a custody refusal.
+/// Same redaction contract as `route_runtime_diag_v25`: these chains expose
+/// static refusal classes only, never identifiers, amounts, paths or keys.
+fn settlement_child_diag_v26(
+    site: &'static str,
+    error: &dyn std::error::Error,
+) -> ProductionRunErrorV1 {
+    eprintln!("DOM_SETTLEMENT_CHILD_DIAG_V26 site={site} depth=0 cause={error}");
+    let mut depth = 1usize;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if depth > 8 {
+            break;
+        }
+        eprintln!("DOM_SETTLEMENT_CHILD_DIAG_V26 site={site} depth={depth} cause={cause}");
+        depth = depth.saturating_add(1);
+        source = cause.source();
+    }
+    ProductionRunErrorV1::SettlementChildAuthority
+}
+
+/// Measures the gap between successful actuator-lease heartbeats inside the
+/// route loop and names the phase that spent it. The activation loop already
+/// had `DOM_LEASE_GAP_V25`; the route loop did not, so the only evidence that
+/// a single round outlasts the 120 s lease was the fatal refusal itself. Pure
+/// measurement: a static phase label and a duration, nothing route-derived.
+fn route_lease_gap_v26() {
+    use std::cell::Cell;
+    thread_local! {
+        static LAST_V26: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+        static WORST_V26: Cell<u128> = const { Cell::new(0) };
+    }
+    let now = std::time::Instant::now();
+    LAST_V26.with(|last| {
+        if let Some(previous) = last.get() {
+            let gap = now.duration_since(previous).as_millis();
+            // Report only a new worst gap: a per-round line would bury the run.
+            WORST_V26.with(|worst| {
+                if gap > worst.get() && gap >= 5_000 {
+                    worst.set(gap);
+                    eprintln!(
+                        "DOM_ROUTE_LEASE_GAP_V26 gap_ms={gap} phase={}",
+                        crate::production_relay_stage12::lease_phase_v25()
+                    );
+                }
+            });
+        }
+        last.set(Some(now));
+    });
+}
+
+/// Same purpose as `settlement_child_diag_v26` for the closed child-refusal
+/// enums, which classify rather than nest. Their variants are fixed labels
+/// (`Unavailable`/`Refused`/`Conflict`), so `Debug` carries no route data.
+fn settlement_child_refusal_v26<R: core::fmt::Debug>(
+    site: &'static str,
+    refusal: R,
+) -> ProductionRunErrorV1 {
+    eprintln!("DOM_SETTLEMENT_CHILD_DIAG_V26 site={site} depth=0 refusal={refusal:?}");
+    ProductionRunErrorV1::SettlementChildAuthority
 }
 
 /// Diagnostic constructor for the settlement plan-source refusals. It prints

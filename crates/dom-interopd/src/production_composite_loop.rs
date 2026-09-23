@@ -974,6 +974,7 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
             Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
             Err(error) if is_f6_activation_awaiting(&error) => Ok(false),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
+            Err(error) if is_funding_handoff_awaiting_v25(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -988,6 +989,7 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
             Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
             Err(error) if is_f6_activation_awaiting(&error) => Ok(false),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
+            Err(error) if is_funding_handoff_awaiting_v25(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -1400,6 +1402,7 @@ impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
             // and recovery clock. Never ACK or classify bad evidence as absent.
             Err(error) if is_claim_finality_awaiting_v16(&error) => Ok(false),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
+            Err(error) if is_funding_handoff_awaiting_v25(&error) => Ok(false),
             // Socket absence cannot suppress an already authorized local
             // recovery tick. step_leg still polls the authenticated durable
             // inbox, and any local refusal takes precedence over network loss.
@@ -1489,12 +1492,12 @@ enum CompositeCoreErrorV1<RelayError, RouteError> {
     ActuatorLeaseRenewal,
 }
 
-/// Outcome of the relay half of one interleaved round.
+/// Outcome of bounded Relay work selected by the composition root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompositeRelayHalfV25 {
     /// Shutdown was requested before any leg ran.
     Shutdown,
-    /// Both legs ran; `moved` says whether either moved authenticated traffic.
+    /// The selected leg set ran; `moved` says whether it moved authenticated traffic.
     Stepped { moved: bool },
 }
 
@@ -1552,6 +1555,59 @@ where
     Ok(CompositeRelayHalfV25::Stepped { moved })
 }
 
+/// One named Relay leg with the same shutdown, route-lease and actuator-lease
+/// boundaries as a full Relay half. This is used only after a bilateral half
+/// has synchronized native readiness; it does not weaken the leg's bootstrap,
+/// Noise authentication, Store polling or retained-listener handling.
+fn run_relay_leg_v25<Relay, Route, Ctl>(
+    relay: &mut Relay,
+    route: &mut Route,
+    control: &mut Ctl,
+    renew_actuator_lease: &mut dyn FnMut() -> Result<(), ()>,
+    leg: LegIdV1,
+) -> Result<CompositeRelayHalfV25, CompositeCoreErrorV1<Relay::Error, Route::Error>>
+where
+    Relay: CompositeRelayCycleV1,
+    Route: CompositeRouteCycleV1,
+    Ctl: RouteRunControlV1,
+{
+    if control
+        .shutdown_requested()
+        .map_err(CompositeCoreErrorV1::Control)?
+    {
+        return Ok(CompositeRelayHalfV25::Shutdown);
+    }
+    route
+        .prepare_relay_block_v23(relay.blocking_bound_v23())
+        .map_err(CompositeCoreErrorV1::Route)?;
+    renew_actuator_lease().map_err(|()| CompositeCoreErrorV1::ActuatorLeaseRenewal)?;
+    let mut moved = relay
+        .step_relay_leg_renewing_v25(leg, renew_actuator_lease)
+        .map_err(CompositeCoreErrorV1::Relay)?;
+    // accept_one_until_v25 may yield because the peer is queued on the
+    // sibling listener. Honour that yield here too: a focused native burst
+    // must not leave the waiting sibling behind several signing/scan ticks.
+    // Only already-pending listeners get an extra step, at most once each,
+    // through the ordinary bootstrap, ownership and authenticated exchange.
+    let sibling = match leg {
+        LegIdV1::Upstream => LegIdV1::Downstream,
+        LegIdV1::Downstream => LegIdV1::Upstream,
+    };
+    for pending_leg in [sibling, leg] {
+        if !relay.leg_peer_pending_v25(pending_leg) {
+            continue;
+        }
+        route
+            .prepare_relay_block_v23(relay.blocking_bound_v23())
+            .map_err(CompositeCoreErrorV1::Route)?;
+        renew_actuator_lease().map_err(|()| CompositeCoreErrorV1::ActuatorLeaseRenewal)?;
+        moved |= relay
+            .step_relay_leg_renewing_v25(pending_leg, renew_actuator_lease)
+            .map_err(CompositeCoreErrorV1::Relay)?;
+    }
+    Ok(CompositeRelayHalfV25::Stepped { moved })
+}
+
 /// Route half of one round: one route step, progress record, and the idle
 /// backoff. The lease is renewed right before the step, whose child calls
 /// spend wall clock the DOM lease must outlive.
@@ -1568,7 +1624,21 @@ where
     Ctl: RouteRunControlV1,
 {
     renew_actuator_lease().map_err(|()| CompositeCoreErrorV1::ActuatorLeaseRenewal)?;
+    crate::production_relay_stage12::mark_lease_phase_v25("route_step");
+    let started_v26 = std::time::Instant::now();
     let report = route.step_route().map_err(CompositeCoreErrorV1::Route)?;
+    // Diagnostic only: one driver step that outlasts the actuator lease is
+    // what makes the lease lapse mid-step. Names the stage that did it.
+    let spent_v26 = started_v26.elapsed();
+    if spent_v26 >= std::time::Duration::from_secs(20) {
+        eprintln!(
+            "DOM_ROUTE_STEP_SLOW_V26 ms={} stage={:?} disposition={:?}",
+            spent_v26.as_millis(),
+            report.stage,
+            report.disposition
+        );
+    }
+    crate::production_relay_stage12::mark_lease_phase_v25("route_step_done");
     control
         .record_progress(report)
         .map_err(CompositeCoreErrorV1::Control)?;
@@ -1585,6 +1655,7 @@ where
         RouteDriveDispositionV1::Waiting | RouteDriveDispositionV1::RecoveryRequired
     ) && !relay_moved_traffic
     {
+        crate::production_relay_stage12::mark_lease_phase_v25("idle_backoff");
         wait_idle_or_peer_v25(relay, control, relay.backoff())
             .map_err(CompositeCoreErrorV1::Control)?;
     }
@@ -1715,6 +1786,32 @@ where
     Ctl: RouteRunControlV1,
 {
     run_relay_half_v25(relay, route, control, renew_actuator_lease)
+        .map_err(map_composite_core_error_v25)
+}
+
+/// Relay one named leg after a bilateral synchronization half. The selected
+/// leg still executes the complete production Relay cycle and all lease
+/// checkpoints; only the unrelated socket is left unopened for this pass.
+pub(crate) fn run_production_composite_relay_leg_v25<C, F, A, O, R, E, T, X, Y, Ctl>(
+    relay: &mut ProductionCompositeRelayLoopV1,
+    route: &mut ProductionRouteRuntimeV1<C, F, A, O, R, E, T, X, Y>,
+    control: &mut Ctl,
+    renew_actuator_lease: &mut dyn FnMut() -> Result<(), ()>,
+    leg: LegIdV1,
+) -> Result<CompositeRelayHalfV25, ProductionCompositeLoopErrorV1>
+where
+    C: Clock,
+    F: RefundArmingAuthority,
+    A: RouteActionAuthority,
+    O: ChainObservationAuthority,
+    R: RunnerActionAuthority,
+    E: ExternalCustodyAuthority,
+    T: TimerAuthority,
+    X: TakeoverReconciliationAuthority,
+    Y: RouteSecretRetirementAuthority,
+    Ctl: RouteRunControlV1,
+{
+    run_relay_leg_v25(relay, route, control, renew_actuator_lease, leg)
         .map_err(map_composite_core_error_v25)
 }
 
@@ -1892,6 +1989,14 @@ fn is_template_construction_awaiting_v17(error: &ProductionCompositeLoopErrorV1)
                 | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrRefundTransportV23))))))
 }
 
+fn is_funding_handoff_awaiting_v25(error: &ProductionCompositeLoopErrorV1) -> bool {
+    matches!(error, ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
+        RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
+            route_transport::FramedContractsTransportErrorV2::Contracts(
+                crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrFundingHandoffV25
+                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrReadinessGateV25))))))
+}
+
 fn is_claim_finality_awaiting_v16(error: &ProductionCompositeLoopErrorV1) -> bool {
     matches!(error, ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
         RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
@@ -2006,7 +2111,7 @@ mod tests {
             .split("macro_rules! drain_terminal_refund_v24")
             .nth(1)
             .unwrap()
-            .split("    loop {")
+            .split("// Normal route loop begins here")
             .next()
             .unwrap();
         let receive = drain.find(".step_terminal_refund_v24(leg)").unwrap();
@@ -2245,6 +2350,118 @@ mod tests {
             after_revision: revision + 1,
             disposition,
         }
+    }
+
+    #[test]
+    fn focused_relay_services_peer_waiting_on_sibling_after_accept_yields() {
+        struct WaitingSibling {
+            selected: LegIdV1,
+            pending: bool,
+            calls: Vec<LegIdV1>,
+        }
+        impl CompositeRelayCycleV1 for WaitingSibling {
+            type Error = ();
+
+            fn step_relay_leg(&mut self, leg: LegIdV1) -> Result<bool, ()> {
+                self.calls.push(leg);
+                if leg == self.selected {
+                    // The selected accept has yielded to an already waiting
+                    // peer on the opposite leg; no traffic moved yet.
+                    Ok(false)
+                } else {
+                    assert!(self.pending);
+                    self.pending = false;
+                    Ok(true)
+                }
+            }
+            fn backoff(&self) -> Duration {
+                Duration::ZERO
+            }
+            fn leg_peer_pending_v25(&self, leg: LegIdV1) -> bool {
+                self.pending && leg != self.selected
+            }
+        }
+        for (selected, sibling) in [
+            (LegIdV1::Upstream, LegIdV1::Downstream),
+            (LegIdV1::Downstream, LegIdV1::Upstream),
+        ] {
+            let mut relay = WaitingSibling {
+                selected,
+                pending: true,
+                calls: Vec::new(),
+            };
+            let mut route = TestRouteV1 {
+                log: Rc::new(RefCell::new(Vec::new())),
+                reports: Vec::new(),
+            };
+            let mut renewals = 0;
+            assert_eq!(
+                run_relay_leg_v25(
+                    &mut relay,
+                    &mut route,
+                    &mut TestControlV1::default(),
+                    &mut || {
+                        renewals += 1;
+                        Ok(())
+                    },
+                    selected,
+                )
+                .expect("queued sibling is serviced within the focused pass"),
+                CompositeRelayHalfV25::Stepped { moved: true }
+            );
+            assert!(!relay.pending);
+            assert_eq!(relay.calls, [selected, sibling]);
+            assert_eq!(renewals, 2);
+        }
+    }
+
+    #[test]
+    fn focused_relay_services_only_the_selected_leg_and_honours_shutdown() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut relay = TestRelayV1 {
+            log: Rc::clone(&log),
+            backoff: Duration::from_millis(1),
+        };
+        let mut route = TestRouteV1 {
+            log: Rc::clone(&log),
+            reports: Vec::new(),
+        };
+        let mut control = TestControlV1::default();
+        let mut renewals = 0_u8;
+        assert_eq!(
+            run_relay_leg_v25(
+                &mut relay,
+                &mut route,
+                &mut control,
+                &mut || {
+                    renewals += 1;
+                    Ok(())
+                },
+                LegIdV1::Downstream,
+            )
+            .expect("focused relay leg"),
+            CompositeRelayHalfV25::Stepped { moved: false }
+        );
+        assert_eq!(log.borrow().as_slice(), ["downstream-relay"]);
+        assert_eq!(renewals, 1);
+
+        control.shutdown = true;
+        assert_eq!(
+            run_relay_leg_v25(
+                &mut relay,
+                &mut route,
+                &mut control,
+                &mut || {
+                    renewals += 1;
+                    Ok(())
+                },
+                LegIdV1::Upstream,
+            )
+            .expect("shutdown is a normal focused-relay outcome"),
+            CompositeRelayHalfV25::Shutdown
+        );
+        assert_eq!(log.borrow().as_slice(), ["downstream-relay"]);
+        assert_eq!(renewals, 1);
     }
 
     #[test]
@@ -2741,6 +2958,12 @@ mod tests {
         assert!(is_template_construction_awaiting_v17(&wrap(
             Ingress::AwaitingNativeXmrRefundTransportV23
         )));
+        assert!(is_funding_handoff_awaiting_v25(&wrap(
+            Ingress::AwaitingNativeXmrFundingHandoffV25
+        )));
+        assert!(is_funding_handoff_awaiting_v25(&wrap(
+            Ingress::AwaitingNativeXmrReadinessGateV25
+        )));
         for error in [
             Ingress::UnpreparedMessage,
             Ingress::InvalidDsc1,
@@ -2753,6 +2976,7 @@ mod tests {
             let wrapped = wrap(error);
             assert!(!is_template_construction_awaiting_v17(&wrapped));
             assert!(!is_claim_finality_awaiting_v16(&wrapped));
+            assert!(!is_funding_handoff_awaiting_v25(&wrapped));
         }
     }
 

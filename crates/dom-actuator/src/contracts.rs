@@ -6,6 +6,8 @@ mod final_claim_v14;
 mod funding_dispatch_v23;
 #[path = "native_xmr_refund_v23.rs"]
 mod native_xmr_refund_v23;
+#[path = "native_f7_receiver_claim_v25.rs"]
+mod native_f7_receiver_claim_v25;
 pub use final_claim_v14::{
     DomF7FinalClaimAdmissionV14, DomF7FinalClaimRequestV14, DomF7FinalClaimSubmissionV14,
 };
@@ -519,6 +521,12 @@ impl<'store> DomContractsActuatorV1<'store> {
         now_unix_ms: u64,
     ) -> DomActuatorResult<DomSettlementChildBindingV1> {
         self.require_settlement_child_request(request, DomActionV1::BroadcastClaim)?;
+        if let Some(observed) = self.f7_receiver_observation_v25(trusted_chain_id)? {
+            control.retain_f7_receiver_claim_v25(lease, request.scope(), &observed, now_unix_ms)?;
+            return control.persist_authenticated_settlement_child_binding(
+                lease, request, observed.tx_hash(), now_unix_ms,
+            );
+        }
         let transaction_id = self.retained_final_claim_transaction_id_v2(
             control,
             lease,
@@ -611,6 +619,9 @@ impl<'store> DomContractsActuatorV1<'store> {
         trusted_chain_id: &TrustedChainIdV1,
         now_unix_ms: u64,
     ) -> DomActuatorResult<[u8; 32]> {
+        if let Some(observed) = self.f7_receiver_observation_v25(trusted_chain_id)? {
+            return Ok(observed.tx_hash());
+        }
         if let Some(tx) =
             self.retained_f7_claim_transaction_v21(control, lease, trusted_chain_id, now_unix_ms)?
         {
@@ -2217,10 +2228,20 @@ impl<'store> DomContractsActuatorV1<'store> {
         now_unix_ms: u64,
     ) -> DomActuatorResult<DomFinalityRevalidationV1> {
         self.require_dom_runtime_binding(runtime)?;
-        let custody = control.audit_final_claim_custody_v2(lease, self.binding, now_unix_ms)?;
-        if custody.classification().is_unattempted() {
-            return Err(DomActuatorError::InvalidStage);
-        }
+        let trusted = TrustedChainIdV1::from_authenticated_genesis(
+            self.binding.runtime_identity().network_magic,
+            &dom_crypto::Hash256::from_bytes(self.binding.genesis_hash()),
+        );
+        let claim_tx = match self.f7_receiver_observation_v25(&trusted)? {
+            Some(observed) => observed.tx_hash(),
+            None => {
+                let custody = control.audit_final_claim_custody_v2(lease, self.binding, now_unix_ms)?;
+                if custody.classification().is_unattempted() {
+                    return Err(DomActuatorError::InvalidStage);
+                }
+                custody.tx_hash()
+            }
+        };
         let retained = control.retained_terminal_checkpoint(
             lease,
             self.binding,
@@ -2228,7 +2249,7 @@ impl<'store> DomContractsActuatorV1<'store> {
             now_unix_ms,
         )?;
         if retained.kind != DomTerminalKindV1::Claim
-            || retained.tx_hash != custody.tx_hash()
+            || retained.tx_hash != claim_tx
             || retained.minimum_confirmations != self.binding.min_confirmations()
             || retained.max_reorg_depth != self.binding.max_reorg_depth()
         {
@@ -2274,14 +2295,17 @@ impl<'store> DomContractsActuatorV1<'store> {
         now_unix_ms: u64,
     ) -> DomActuatorResult<Option<DomFinalityRevalidationV1>> {
         self.require_trusted_chain_binding(trusted_chain_id)?;
-        let claim = control.retained_final_claim_identity_v2(lease, self.binding, now_unix_ms)?;
+        let claim_tx = match self.f7_receiver_observation_v25(trusted_chain_id)? {
+            Some(observed) => observed.tx_hash(),
+            None => control.retained_final_claim_identity_v2(lease, self.binding, now_unix_ms)?.tx_hash,
+        };
         let invalidation = control.retained_terminal_invalidation(
             lease,
             self.binding,
             DomTerminalKindV1::Claim,
             now_unix_ms,
         )?;
-        recover_terminal_invalidation(invalidation, DomTerminalKindV1::Claim, claim.tx_hash)
+        recover_terminal_invalidation(invalidation, DomTerminalKindV1::Claim, claim_tx)
     }
 
     fn latch_exposed_final_claim_attempt_v2(

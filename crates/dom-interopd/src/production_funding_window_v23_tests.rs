@@ -250,16 +250,23 @@ fn dispatch(action: SettlementActionV1) -> Result<ChildDispatchRequestV1, Box<dy
 }
 
 #[test]
-fn dispatch_gate_requires_live_funding_but_does_not_rewrite_recovery_v23() -> TestResult {
+fn dispatch_never_regates_an_already_authorized_funding_v23() -> TestResult {
+    // The window gates `authorize_route_action`, which is the only way a
+    // funding action can reach `Committed`. `externalize_child` dispatches an
+    // action that is already committed, so re-checking the window there cannot
+    // make the height observation any fresher -- it only refuses to complete
+    // funding the route legitimately authorized, in the rounds where the
+    // single per-round observation happened to fail. Every action reaches the
+    // inner authority; the route id remains the one gate this face owns. The
+    // guarantee the removed check stood in for is proven against the real
+    // supervisor by `action_gate_blocks_only_new_funding_and_preserves_inner_refusals_v23`.
     let window = ProductionFundingWindowV23::new(ROUTE);
     let mut guard = window.guard(RecordingAuthority::default());
-    let funding = dispatch(SettlementActionV1::Funding)?;
-    assert_eq!(
-        guard.externalize_child(&funding),
-        Err(ChildAuthorityRefusalV1::Unavailable)
-    );
-    assert!(guard.inner.dispatches.is_empty());
-    for action in [SettlementActionV1::Claim, SettlementActionV1::Refund] {
+    for action in [
+        SettlementActionV1::Funding,
+        SettlementActionV1::Claim,
+        SettlementActionV1::Refund,
+    ] {
         let request = dispatch(action)?;
         assert_eq!(
             guard.externalize_child(&request),
@@ -267,19 +274,20 @@ fn dispatch_gate_requires_live_funding_but_does_not_rewrite_recovery_v23() -> Te
         );
         assert_eq!(guard.inner.dispatches.last(), Some(&request));
     }
+    // A live window changes nothing at this face, and neither does closing it.
+    let funding = dispatch(SettlementActionV1::Funding)?;
     window.observed_all_before_deadline(Instant::now());
+    let before = guard.inner.dispatches.len();
     assert_eq!(
         guard.externalize_child(&funding),
         Err(ChildAuthorityRefusalV1::Refused)
     );
-    assert_eq!(guard.inner.dispatches.last(), Some(&funding));
     window.close();
-    let before = guard.inner.dispatches.len();
     assert_eq!(
         guard.externalize_child(&funding),
-        Err(ChildAuthorityRefusalV1::Unavailable)
+        Err(ChildAuthorityRefusalV1::Refused)
     );
-    assert_eq!(guard.inner.dispatches.len(), before);
+    assert_eq!(guard.inner.dispatches.len(), before + 2);
     Ok(())
 }
 
@@ -372,12 +380,20 @@ fn late_observation_completion_never_grants_a_fresh_sixty_seconds_v23() -> TestR
     window.observed_all_before_deadline(old_start);
     assert!(!window.available());
     assert_eq!(window.remaining(), Duration::ZERO);
+    // The expiry is what this test owns, and it is already proven above by
+    // `available()` and `remaining()`. Probe it once more through the gate the
+    // window actually owns -- authorization -- rather than through dispatch,
+    // which no longer re-gates an action the route already committed.
     let mut guard = window.guard(RecordingAuthority::default());
-    assert_eq!(
-        guard.externalize_child(&dispatch(SettlementActionV1::Funding)?),
-        Err(ChildAuthorityRefusalV1::Unavailable)
-    );
-    assert!(guard.inner.dispatches.is_empty());
+    let temporary = temporary()?;
+    let mut supervisor = supervisor(temporary.path())?;
+    assert!(matches!(
+        supervisor.authorize_action([20; 32], LegIdV1::Upstream, ActionKindV1::Funding, &mut guard),
+        Err(RouteSupervisorErrorV1::RouteActionAuthority(
+            AuthorityRefusalV1::Unavailable
+        ))
+    ));
+    assert!(guard.inner.actions.is_empty());
     Ok(())
 }
 

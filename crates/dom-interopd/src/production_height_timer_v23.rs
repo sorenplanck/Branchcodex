@@ -331,7 +331,9 @@ pub(crate) struct ProductionXmrDeadlineSourceV23 {
     chain_id: Digest32,
     genesis: Digest32,
     adapter_profile: Digest32,
-    pool: XmrRpcPool<HttpXmrRpc>,
+    daemon_urls: Vec<String>,
+    network: XmrNetwork,
+    quorum: usize,
     executor: tokio::runtime::Runtime,
 }
 
@@ -361,12 +363,6 @@ impl ProductionXmrDeadlineSourceV23 {
             return Err(Error::Refused);
         }
         validate_source_urls(&profile, &daemon_urls)?;
-        let mut nodes = Vec::with_capacity(daemon_urls.len());
-        for url in daemon_urls {
-            nodes.push(HttpXmrRpc::new(url).map_err(observer_error)?);
-        }
-        let pool = XmrRpcPool::new(nodes, observed, usize::from(profile.rpc_quorum))
-            .map_err(observer_error)?;
         let executor = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -376,7 +372,9 @@ impl ProductionXmrDeadlineSourceV23 {
             chain_id: deployment.profile().chain_id.0,
             genesis: deployment.deployment().genesis_hash,
             adapter_profile: deployment.profile_digest(),
-            pool,
+            daemon_urls,
+            network: observed,
+            quorum: usize::from(profile.rpc_quorum),
             executor,
         })
     }
@@ -390,23 +388,31 @@ impl ProductionXmrDeadlineSourceV23 {
         }
         self.executor.block_on(async {
             tokio::time::timeout(Duration::from_secs(60), async {
-                if self.pool.block_hash(0).await.map_err(observer_error)? != self.genesis {
+                // This current-thread executor is idle between observations.
+                // An HTTP keep-alive socket may have closed while its driver
+                // was not being polled. Retain connections only within this
+                // observation, so a stale pooled POST cannot close funding
+                // for the next entire route round. All quorum, genesis and
+                // stable-tip checks still run under the same deadline.
+                let nodes = self
+                    .daemon_urls
+                    .iter()
+                    .map(|url| HttpXmrRpc::new(url.clone()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(observer_error)?;
+                let pool =
+                    XmrRpcPool::new(nodes, self.network, self.quorum).map_err(observer_error)?;
+                if pool.block_hash(0).await.map_err(observer_error)? != self.genesis {
                     return Err(Error::Refused);
                 }
-                let tip = self.pool.canonical_tip().await.map_err(observer_error)?;
-                if self
-                    .pool
-                    .block_hash(tip.height)
-                    .await
-                    .map_err(observer_error)?
-                    != tip.hash
-                {
+                let tip = pool.canonical_tip().await.map_err(observer_error)?;
+                if pool.block_hash(tip.height).await.map_err(observer_error)? != tip.hash {
                     return Err(Error::Inconsistent);
                 }
-                if self.pool.block_hash(0).await.map_err(observer_error)? != self.genesis {
+                if pool.block_hash(0).await.map_err(observer_error)? != self.genesis {
                     return Err(Error::Refused);
                 }
-                if self.pool.canonical_tip().await.map_err(observer_error)? != tip {
+                if pool.canonical_tip().await.map_err(observer_error)? != tip {
                     return Err(Error::Unavailable);
                 }
                 Ok(tip)

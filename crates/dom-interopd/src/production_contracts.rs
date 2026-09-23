@@ -39,7 +39,9 @@ pub(crate) use dom_claim_runtime_v12::{
 
 #[path = "production_funding_runtime_v20.rs"]
 mod funding_runtime_v20;
-pub(crate) use funding_runtime_v20::ProductionFundingErrorV20;
+pub(crate) use funding_runtime_v20::{
+    ProductionFundingErrorV20, ProductionFundingStepV20, F7_FUNDING_CONTEXT_POLL_BOUND_V24,
+};
 
 #[path = "production_f7_readiness_v19.rs"]
 mod f7_readiness_v19;

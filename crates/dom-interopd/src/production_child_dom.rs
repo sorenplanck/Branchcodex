@@ -79,6 +79,15 @@ pub(crate) trait ProductionDomChildClockV1 {
     fn now_unix_ms(&mut self) -> Result<u64, ChildAuthorityRefusalV1>;
 }
 
+/// Budget for one DOM chain validation context taken inside a route step.
+///
+/// The unbounded form walks from genesis to the tip with no ceiling of any
+/// kind, so its cost grows with the chain and one call can outlast the actuator
+/// lease the step is holding. Ten seconds is the same figure the F7 funding
+/// runtime already polls this context with (`F7_FUNDING_CONTEXT_POLL_BOUND_V24`),
+/// and running out is `TemporarilyUnavailable`, which every caller retries.
+const DOM_CHAIN_CONTEXT_BUDGET_V26: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Host wall-time boundary for production composition.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SystemProductionDomChildClockV1;
@@ -424,6 +433,18 @@ impl ConcreteProductionDomActionAuthorityV1 {
             DomActionV1::BroadcastClaim => {
                 if refund_context.is_some() {
                     return Err(child_conflict_at_v25(426));
+                }
+                if contracts.f7_receiver_observation_v25(trusted_chain_id)
+                    .map_err(map_actuator_error)?.is_some()
+                {
+                    return match contracts.verified_f7_receiver_claim_v25(
+                        runtime, trusted_chain_id, binding.transaction_id(),
+                    ) {
+                        Ok(_) => Ok(ProductionDomActionResultV1::Externalized),
+                        Err(DomActuatorError::FinalityPending | DomActuatorError::RpcAuthorityUnavailable)
+                            => Ok(ProductionDomActionResultV1::Unknown),
+                        Err(error) => Err(map_actuator_error(error)),
+                    };
                 }
                 if let Some(progress) = contracts
                     .f7_final_claim_progress_v21(trusted_chain_id)
@@ -1311,7 +1332,9 @@ where
         {
             Some(
                 self.runtime
-                    .current_transaction_validation_context()
+                    .current_transaction_validation_context_bounded_v23(
+                        DOM_CHAIN_CONTEXT_BUDGET_V26,
+                    )
                     .map_err(map_runtime_binding_error)?,
             )
         } else {
@@ -1639,17 +1662,33 @@ where
         now_unix_ms: u64,
     ) -> Result<DomSettlementChildPortCallOutcomeV1, ChildAuthorityRefusalV1> {
         let evidence = Self::evidence_ref(validated);
+        // Taken before the call borrows `self.control` mutably.
+        let funding_deadline = self.funding_observation_deadline_v26();
         let session = &self.sessions[validated.session_index];
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
         let observed = match validated.expected.action {
-            SettlementActionV1::Funding => contracts.observe_funding_finality(
+            // Bounded, resumable funding observation. The unbounded sibling
+            // rewalks the chain from genesis on every round, so its cost grows
+            // with the tip while the actuator lease stays fixed: past a few
+            // hundred blocks one round outlasts the lease, `renew_actuator_
+            // lease_v12` reports `Unavailable` and the composition root kills
+            // the process. This variant keeps the authenticated prefix across
+            // rounds and yields `TemporarilyUnavailable` when it runs out of
+            // budget, which the caller already treats as "observe again".
+            // A retained prefix is never evidence: each grant still re-anchors
+            // and walks the full canonical chain against the rechecked tip.
+            SettlementActionV1::Funding => contracts.observe_funding_finality_until_v23(
                 &mut self.control,
                 self.lease,
                 &self.runtime,
                 &self.trusted_chain_id,
                 &evidence,
                 now_unix_ms,
+                funding_deadline,
             ),
+            // Same budget as the funding sibling: the claim observation runs
+            // once per round while the tip keeps growing, so an unbounded walk
+            // here is what let the actuator lease lapse mid-claim.
             SettlementActionV1::Claim => contracts.observe_native_claim_settlement_finality_v15(
                 &mut self.control,
                 self.lease,
@@ -1657,6 +1696,7 @@ where
                 &self.trusted_chain_id,
                 &evidence,
                 now_unix_ms,
+                funding_deadline,
             ),
             SettlementActionV1::Refund if validated.native_driver_v23().is_some() => {
                 let driver = validated
@@ -1897,6 +1937,25 @@ where
     }
 }
 
+impl<C, A> ProductionDomChildPortV1<C, A> {
+    /// Budget for one bounded funding observation, taken from the very lease
+    /// it must not outlast. `renew_actuator_lease_v12` renews once the lease
+    /// has less than half its renewal window left, so spending at most a
+    /// quarter of that window here keeps a scan from ever eating the renewal
+    /// headroom, whatever the chain height. Without a configured renewal the
+    /// child never renews and no lease can lapse, so a fixed modest budget is
+    /// enough to keep each round bounded.
+    fn funding_observation_deadline_v26(&self) -> std::time::Instant {
+        const DEFAULT_BUDGET_MS_V26: u64 = 15_000;
+        let budget = self
+            .lease_renewal_ms_v12
+            .map_or(DEFAULT_BUDGET_MS_V26, |renewal| {
+                (renewal / 4).clamp(1_000, DEFAULT_BUDGET_MS_V26)
+            });
+        std::time::Instant::now() + std::time::Duration::from_millis(budget)
+    }
+}
+
 impl<C, A> ProductionSettlementChildPortV1 for ProductionDomChildPortV1<C, A>
 where
     C: ProductionDomChildClockV1,
@@ -1906,18 +1965,35 @@ where
         SettlementFaceV1::Dom
     }
 
+
     fn renew_actuator_lease_v12(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
         let Some(duration) = self.lease_renewal_ms_v12 else {
             return Ok(());
         };
         let now = self.clock.now_unix_ms()?;
-        let remaining = self
+        let Some(remaining) = self
             .lease
             .lease_until_unix_ms()
             .checked_sub(now)
             .filter(|remaining| *remaining > 0)
-            .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
-        if remaining <= duration / 2 {
+        else {
+            eprintln!(
+                "DOM_RENEW_SITE_V26 site=dom_lease_lapsed until={} now={now} phase={}",
+                self.lease.lease_until_unix_ms(),
+                crate::production_relay_stage12::lease_phase_v25()
+            );
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        };
+        // Top up as soon as an eighth of the lease has been spent. Renewing
+        // only at the half-way mark silently assumes the heartbeat is sampled
+        // far more often than half a lease; a single route step that outlasts
+        // that assumption never produces the half-way call, and the lease
+        // lapses while its owner is alive and working. Spending an eighth
+        // bounds the write rate to one per eighth-lease while leaving the
+        // full remaining lease as the margin against a slow step. Nothing is
+        // weakened: the lease still dies if the owner stops beating for a
+        // whole duration, and every operation revalidates it at the Store.
+        if remaining <= duration - duration / 8 {
             self.lease = renew_dom_lease_v12(&mut self.control, self.lease, now, duration)?;
         }
         Ok(())
@@ -2087,7 +2163,9 @@ where
             if request.action == SettlementActionV1::Refund && native_refund.is_none() {
                 Some(
                     self.runtime
-                        .current_transaction_validation_context()
+                        .current_transaction_validation_context_bounded_v23(
+                            DOM_CHAIN_CONTEXT_BUDGET_V26,
+                        )
                         .map_err(map_runtime_binding_error)?,
                 )
             } else {
@@ -3080,7 +3158,11 @@ fn renew_dom_lease_v12(
     }
     actuator
         .renew_lease(lease, now, duration)
-        .map_err(map_actuator_error)
+        .map_err(|error| {
+            eprintln!("DOM_RENEW_SITE_V26 site=dom_store_renew error={error:?} until={} now={now}",
+                lease.lease_until_unix_ms());
+            map_actuator_error(error)
+        })
 }
 
 fn map_actuator_error(error: DomActuatorError) -> ChildAuthorityRefusalV1 {

@@ -34,7 +34,7 @@ use hkdf::Hkdf;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -46,6 +46,20 @@ use zeroize::Zeroizing;
 /// MUST NOT change without a wallet format-version bump — any alteration
 /// silently invalidates all existing wallets.
 const HKDF_INFO: &[u8] = b"DOM:wallet-key:v1";
+const KDF_MEMO_TAG: &[u8] = b"DOM:wallet-key-kdf-memo:v1";
+const KDF_MEMO_CAPACITY: usize = 16;
+
+/// Process-local memo of completed Argon2id/HKDF derivations.
+///
+/// Wallet reopen validates and decrypts the same immutable envelope once while
+/// checking migration and again while loading its state. Production recovery
+/// can repeat that exact reopen many times. Every new password/salt/parameter
+/// tuple still pays the complete canonical KDF; only a byte-identical tuple
+/// whose derivation already completed in this process can reuse its key. The
+/// bounded entries are zeroized on eviction and lock failure takes the normal
+/// uncached path.
+static KDF_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Length of the magic field in the header.
 pub const MAGIC_LEN: usize = 14;
@@ -143,6 +157,23 @@ pub fn derive_wallet_key(
     salt: &[u8; 32],
     params: &KdfParams,
 ) -> Result<WalletKey, EnvelopeError> {
+    let mut memo_material = Zeroizing::new(Vec::with_capacity(
+        KDF_MEMO_TAG.len() + 8 + password.len() + 32 + 12,
+    ));
+    memo_material.extend_from_slice(KDF_MEMO_TAG);
+    memo_material.extend_from_slice(&(password.len() as u64).to_le_bytes());
+    memo_material.extend_from_slice(password.as_bytes());
+    memo_material.extend_from_slice(salt);
+    memo_material.extend_from_slice(&params.m_cost_kib.to_le_bytes());
+    memo_material.extend_from_slice(&params.t_cost.to_le_bytes());
+    memo_material.extend_from_slice(&params.parallelism.to_le_bytes());
+    let memo_key: [u8; 32] = Sha256::digest(&memo_material).into();
+    if let Ok(memo) = KDF_MEMO.lock() {
+        if let Some((_, key)) = memo.iter().find(|(retained, _)| *retained == memo_key) {
+            return Ok(WalletKey::from_bytes(**key));
+        }
+    }
+
     let argon_params = Params::new(
         params.m_cost_kib,
         params.t_cost,
@@ -158,11 +189,17 @@ pub fn derive_wallet_key(
         .map_err(|e| EnvelopeError::Kdf(format!("Argon2id failed: {e}")))?;
 
     let hkdf = Hkdf::<Sha256>::new(Some(&salt[..]), &stretched[..]);
-    let mut key_bytes = [0u8; 32];
-    hkdf.expand(HKDF_INFO, &mut key_bytes)
+    let mut key_bytes = Zeroizing::new([0u8; 32]);
+    hkdf.expand(HKDF_INFO, key_bytes.as_mut())
         .map_err(|_| EnvelopeError::Kdf("HKDF expansion failed".into()))?;
 
-    Ok(WalletKey::from_bytes(key_bytes))
+    if let Ok(mut memo) = KDF_MEMO.lock() {
+        if memo.len() >= KDF_MEMO_CAPACITY {
+            memo.remove(0);
+        }
+        memo.push((memo_key, key_bytes.clone()));
+    }
+    Ok(WalletKey::from_bytes(*key_bytes))
 }
 
 /// Encrypt `value` and write it to `path` as a versioned envelope, atomically.

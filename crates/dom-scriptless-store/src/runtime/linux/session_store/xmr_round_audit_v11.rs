@@ -103,6 +103,22 @@ impl ContractsSessionStoreV1 {
         sessions: XmrOrdinaryRecoveryRoundSessionsV11,
     ) -> Result<VerifiedXmrOrdinaryRecoveryRoundsV11, SessionStoreError> {
         let _guard = self.operation_lock()?;
+        self.audit_xmr_ordinary_recovery_rounds_locked_v25(
+            role, graph, policy, custody, sessions, None,
+        )
+    }
+
+    // A supplied reconstruction comes only from this operation's Ready audit.
+    // It is never retained across calls or obtained from caller-owned evidence.
+    fn audit_xmr_ordinary_recovery_rounds_locked_v25(
+        &self,
+        role: &FinalClaimRoleBindingV1,
+        graph: &VerifiedXmrRecoveryGraphV11,
+        policy: &ValidatedXmrCompensationPolicyV11,
+        custody: &XmrRecoveryCustodyV11,
+        sessions: XmrOrdinaryRecoveryRoundSessionsV11,
+        ready_graph: Option<&xmr_refund_policy::graph_builder::ProducedXmrRecoveryGraphV12>,
+    ) -> Result<VerifiedXmrOrdinaryRecoveryRoundsV11, SessionStoreError> {
         let terms = role.terms();
         let binding = graph.binding();
         let parent_session = terms.session_id.0;
@@ -149,17 +165,6 @@ impl ContractsSessionStoreV1 {
         {
             // Bind this token to the immutable U terminal, not today's head.
             // Readiness and funding advance the journal without changing these rounds.
-            let rebuilt = self.reconstruct_completed_xmr_graph_v23(parent_session)?;
-            if rebuilt.graph().binding() != graph.binding()
-                || rebuilt.graph().graph_digest() != graph.graph_digest()
-                || rebuilt.graph().refund_pre_signature().to_bytes()
-                    != graph.refund_pre_signature().to_bytes()
-                || rebuilt.graph().cancel_bytes() != graph.cancel_bytes()
-                || rebuilt.graph().punish_bytes() != graph.punish_bytes()
-                || rebuilt.economic().policy() != &revalidated_policy
-            {
-                return Err(SessionStoreError::Quarantined);
-            }
             let origin = self.authenticate_xmr_graph_signing_session_v23(
                 parent_session,
                 XmrGraphRecoverySigningEdgeV23::RefundAdaptor,
@@ -177,15 +182,35 @@ impl ContractsSessionStoreV1 {
             {
                 return Err(SessionStoreError::Quarantined);
             }
-            if current.revision() != revision || current.irreversible().funding_authorized {
-                let ready = self.require_xmr_graph_custody_ready_locked_v23(
-                    role,
-                    &rebuilt,
-                    custody.scope().custody_id,
-                )?;
-                if &ready != custody.scope() {
-                    return Err(SessionStoreError::Quarantined);
-                }
+            let reconstructed;
+            let rebuilt = if let Some(ready) = ready_graph {
+                ready
+            } else {
+                reconstructed = if current.revision() != revision
+                    || current.irreversible().funding_authorized
+                {
+                    let (ready, rebuilt) = self
+                        .reconstruct_ready_xmr_graph_locked_v25(role, custody.scope().custody_id)?;
+                    if &ready != custody.scope() {
+                        return Err(SessionStoreError::Quarantined);
+                    }
+                    rebuilt
+                } else {
+                    // Before custody provisioning, the original terminal transcript
+                    // remains sufficient; do not require or manufacture Ready here.
+                    self.reconstruct_completed_xmr_graph_v23(parent_session)?
+                };
+                &reconstructed
+            };
+            if rebuilt.graph().binding() != graph.binding()
+                || rebuilt.graph().graph_digest() != graph.graph_digest()
+                || rebuilt.graph().refund_pre_signature().to_bytes()
+                    != graph.refund_pre_signature().to_bytes()
+                || rebuilt.graph().cancel_bytes() != graph.cancel_bytes()
+                || rebuilt.graph().punish_bytes() != graph.punish_bytes()
+                || rebuilt.economic().policy() != &revalidated_policy
+            {
+                return Err(SessionStoreError::Quarantined);
             }
             terminal
         } else {
@@ -302,6 +327,43 @@ impl ContractsSessionStoreV1 {
                 cancel_session: audited.cancel_session,
                 compensation_session: audited.compensation_session,
             },
+        )?;
+        if fresh.scope_digest != audited.scope_digest {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        Ok(())
+    }
+
+    /// Revalidate Ready and the ordinary rounds using one freshly reconstructed
+    /// graph under one Store lock. All retained graph bytes remain compared.
+    pub fn revalidate_xmr_ready_custody_and_rounds_v25(
+        &self,
+        audited: &VerifiedXmrOrdinaryRecoveryRoundsV11,
+        role: &FinalClaimRoleBindingV1,
+        produced: &xmr_refund_policy::graph_builder::ProducedXmrRecoveryGraphV12,
+        custody: &XmrRecoveryCustodyV11,
+    ) -> Result<(), SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        self.audit_transport()?;
+        let (scope, rebuilt) =
+            self.reconstruct_ready_xmr_graph_locked_v25(role, custody.scope().custody_id)?;
+        self.require_same_xmr_graph_v25(&rebuilt, produced)?;
+        if scope != *custody.scope() {
+            return Err(SessionStoreError::Quarantined);
+        }
+        if audited.open_instance_id != self.open_instance_id {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let fresh = self.audit_xmr_ordinary_recovery_rounds_locked_v25(
+            role,
+            produced.graph(),
+            produced.economic().policy(),
+            custody,
+            XmrOrdinaryRecoveryRoundSessionsV11 {
+                cancel_session: audited.cancel_session,
+                compensation_session: audited.compensation_session,
+            },
+            Some(&rebuilt),
         )?;
         if fresh.scope_digest != audited.scope_digest {
             return Err(SessionStoreError::InvalidTransition);

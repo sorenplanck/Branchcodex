@@ -54,12 +54,24 @@ impl ProductionXmrGraphCustodyV23 {
         deferred: &crate::production_xmr_sweep::ProductionXmrDeferredRecoveryV23,
     ) -> Result<(), crate::production_contracts::ProductionFundingErrorV20> {
         use crate::production_contracts::ProductionFundingErrorV20 as Error;
-        self.revalidate().map_err(|_| Error::Binding)?;
+        // Once the gate and driver are installed this call is a per-round
+        // no-op, and the full custody revalidation — graph reconstruction plus
+        // both ordinary-round audits — costs seconds per tick for a result
+        // that cannot change. The audit belongs to the act of installing:
+        // it runs below, immediately before the gate is prepared, and every
+        // later consumer of the custody revalidates at its own point of use.
         if self.funding_gate.is_some() {
             deferred.require_driver().map_err(|_| Error::Binding)?;
             return Ok(());
         }
-        let context = scanner.funding_validation_context_v20()?;
+        self.revalidate().map_err(|_| Error::Binding)?;
+        // Bounded like every other per-tick use of this context. The unbounded
+        // form walks the chain to the tip with no ceiling at all, and this gate
+        // is prepared once per round inside the route step that holds the DOM
+        // actuator lease.
+        let context = scanner.funding_validation_context_bounded_v23(
+            crate::production_contracts::F7_FUNDING_CONTEXT_POLL_BOUND_V24,
+        )?;
         let gate = Rc::new(self.store.prepare_or_resume_xmr_bounded_f7_gate_v23(
             chain,
             dom_scriptless_store::F7FundingGatePreparationV12 {
@@ -141,19 +153,10 @@ impl ProductionXmrGraphCustodyV23 {
 
     pub(crate) fn revalidate(&self) -> Result<(), ProductionXmrGraphCustodyErrorV23> {
         self.custody.revalidate()?;
-        let scope = self.store.require_xmr_graph_custody_ready_v23(
-            &self.role,
-            &self.produced,
-            self.custody.scope().custody_id,
-        )?;
-        if scope != *self.custody.scope() {
-            return Err(ProductionXmrGraphCustodyErrorV23::Scope);
-        }
-        self.store.revalidate_xmr_ordinary_recovery_rounds_v11(
+        self.store.revalidate_xmr_ready_custody_and_rounds_v25(
             &self.ordinary,
             &self.role,
-            self.produced.graph(),
-            self.produced.economic().policy(),
+            &self.produced,
             &self.custody,
         )?;
         Ok(())

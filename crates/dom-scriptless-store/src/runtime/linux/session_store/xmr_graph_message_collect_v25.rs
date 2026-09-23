@@ -1,12 +1,12 @@
-//! Fresh physical collection for the two native graph message-prefix audits.
+//! Fresh physical collection for native graph and bounded funding prefix audits.
 //! Decoded records are NOT identity authentication or a signing capability.
 use super::*;
 
 /// The caller owns the Store operation lock and still authenticates every
 /// returned record, durable successor and complete revision-ordered prefix.
-/// Only the two read-only graph collectors use this helper. Global transport,
+/// Only read-only graph and bounded funding collectors use this helper. Global transport,
 /// roster and sequence audits continue through their original paths.
-pub(super) fn collect_untrusted_messages_v25(
+pub(in super::super) fn collect_untrusted_messages_v25(
     messages: &RetainedDirectory,
     session: [u8; 32],
 ) -> Result<Vec<(String, TransportMessageRecordV1)>, LinuxCapabilityError> {

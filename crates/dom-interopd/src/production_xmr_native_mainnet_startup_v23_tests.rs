@@ -305,6 +305,24 @@ impl NativeMainnetStartupV23 {
             .ok_or("startup actor")?
             .1)
     }
+    pub(crate) fn collateral_confirmations_v25(&self) -> ColdStartResult<[u32; 2]> {
+        let cold = self.cold.as_ref().ok_or("startup cold owner absent")?;
+        let mut confirmations = [0; 2];
+        for (position, depth) in confirmations.iter_mut().enumerate() {
+            let policy = xmr_refund_policy::compensation::XmrCompensationPolicyV11::from_bytes(
+                &cold.compensation_policy(position)?,
+            )?;
+            *depth = policy
+                .validate_for(&cold.terms[position])?
+                .policy()
+                .collateral_confirmations;
+            if *depth == 0 || *depth > 64 {
+                return Err("scenario collateral confirmation bound".into());
+            }
+        }
+        Ok(confirmations)
+    }
+
     pub(crate) fn f6(&self) -> ColdStartResult<&NativeF6ProvisionV23> {
         self.f6
             .as_ref()
@@ -456,6 +474,16 @@ impl NativeXmrRunningColdStartV23 {
 
     /// Append genuine validated coinbase/UTXO transitions to the controlled
     /// RPC ledger. The headers are still a simulation, not proof of mainnet PoW.
+    pub(crate) fn confirm_dom_funding_v25(
+        &self,
+        hash: &[u8; 32],
+        confirmations: u32,
+    ) -> ColdStartResult<()> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .confirm_retained_funding_v25(hash, confirmations)
+    }
+
     pub(crate) fn advance_dom_height_v23(&self, target: u64) -> ColdStartResult<()> {
         self.mainnet_dependencies_v23()?
             ._baseline
