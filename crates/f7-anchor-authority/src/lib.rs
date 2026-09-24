@@ -1132,9 +1132,23 @@ fn verify_dom_funding_evidence_with_progress_v24(
     {
         return Err(F7AnchorAuthorityError::RouteBindingMismatch);
     }
+    // Narrow here, not only in the `_until_v23` wrapper. A caller's own
+    // deadline may be anchored somewhere other than this step — the native XMR
+    // claim gate derives it from the funding observation's `observed_at`, so a
+    // fresh observation admits a full extra minute of scanning inside a route
+    // step that is already spending its lease. That is how a claim step
+    // measured 144.4 s against a 120 s lease while the step ceiling was armed
+    // and no single child operation exceeded 30 s.
+    let external_deadline = route_step_deadline::clamp_or_armed(external_deadline);
     let scan_deadline = Instant::now()
         .checked_add(DOM_FUNDING_SCAN_TIMEOUT)
         .ok_or(F7AnchorAuthorityError::BoundsExceeded)?;
+    // The retry loop below sleeps between attempts and stops at this figure;
+    // it must never outlive the step either.
+    let scan_deadline = match external_deadline {
+        Some(external) => scan_deadline.min(external),
+        None => scan_deadline,
+    };
     let mut scope = sha2::Sha256::new();
     use sha2::Digest as _;
     scope.update(b"DOM-INTEROP/F7-DOM-FUNDING-SCAN/V24\0");

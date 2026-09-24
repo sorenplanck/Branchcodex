@@ -154,9 +154,12 @@ impl RealDomRpcRuntimeV1 {
         if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
             return Err(unavailable());
         }
-        let deadline = std::time::Instant::now()
-            .checked_add(budget)
-            .ok_or_else(unavailable)?;
+        // Same narrowing as every other scan reached from a route step.
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            std::time::Instant::now()
+                .checked_add(budget)
+                .ok_or_else(unavailable)?,
+        );
         authority.require_custody(custody)?;
         let prior = decode_native_refund_v23(checkpoint)?;
         if prior.chain != authority.chain_id()

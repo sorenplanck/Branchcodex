@@ -278,9 +278,15 @@ impl RealDomRpcRuntimeV1 {
         if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
             return Err(unavailable());
         }
-        let deadline = std::time::Instant::now()
-            .checked_add(budget)
-            .ok_or_else(unavailable)?;
+        // The caller's budget bounds this scan; the armed route-step ceiling
+        // bounds the step that contains it. Narrow to whichever ends first —
+        // a budget anchored at "now" otherwise admits a fresh full minute
+        // inside a step that has already spent most of its lease.
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            std::time::Instant::now()
+                .checked_add(budget)
+                .ok_or_else(unavailable)?,
+        );
         self.verified_xmr_recovery_state_until_v24(
             graph,
             minimum_confirmations,
