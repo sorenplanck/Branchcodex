@@ -3012,9 +3012,15 @@ fn map_contracts_outbound_error(
             | DurableRelaySenderErrorV1::FramedTransferActive
             | DurableRelaySenderErrorV1::Queue(_),
         )) => ChildAuthorityRefusalV1::Unavailable,
+        // A busy or unavailable Store staged nothing; the next turn retries,
+        // exactly as the sender's StorageUnavailable above already does.
+        ProductionContractsOutboundErrorV1::Relay(RelayWorkerOutboundErrorV1::StoreRejected(
+            dom_scriptless_store::SessionStoreError::StoreBusy
+            | dom_scriptless_store::SessionStoreError::Filesystem,
+        )) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Relay(
             RelayWorkerOutboundErrorV1::Sender(_)
-            | RelayWorkerOutboundErrorV1::StoreRejected
+            | RelayWorkerOutboundErrorV1::StoreRejected(_)
             | RelayWorkerOutboundErrorV1::InvalidDsc1
             | RelayWorkerOutboundErrorV1::WrongDsc1Scope,
         ) => ChildAuthorityRefusalV1::Conflict,

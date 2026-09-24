@@ -847,8 +847,13 @@ pub enum RelayWorkerOutboundErrorV1 {
     Sender(#[from] DurableRelaySenderErrorV1),
     /// The shared Contracts Store rejected, quarantined or could not
     /// reauthenticate the Store-issued outbound handle.
-    #[error("Contracts Store refused outbound Relay staging")]
-    StoreRejected,
+    /// Carries the Store's own answer. A unit variant here discarded it, and
+    /// with it the difference between "busy, try again" and "this is wrong" —
+    /// a difference that `is_retryable` in the DOM claim runtime, and
+    /// `child_dom`'s refusal mapping, both already act on for every other
+    /// Store error. Run 87 died as `store_rejected` with the cause erased.
+    #[error("Contracts Store refused outbound Relay staging: {0}")]
+    StoreRejected(SessionStoreError),
     /// The proposed inner payload is not one exact canonical DSC1 envelope.
     #[error("outbound DSC1 is not canonically encoded")]
     InvalidDsc1,
@@ -2192,7 +2197,7 @@ where
         let store = Rc::clone(&self.contracts.contracts_mut().store);
         store
             .revalidate_committed_outbound_dsc1(outbound)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
 
         Ok(self
             .sender
@@ -2238,7 +2243,7 @@ where
         let store = Rc::clone(&self.contracts.contracts_mut().store);
         store
             .revalidate_committed_outbound_dsc1(&outbound)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
 
         let parsed = SignedMessageV1::decode_exact(outbound.signed_bytes())
             .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
@@ -2282,7 +2287,7 @@ where
             RouteApplicationDispositionV2::AlreadyAcked(_) => {
                 store
                     .complete_outbound_dsc1_relay_handoff(outbound)
-                    .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+                    .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
                 Ok(disposition)
             }
         }
@@ -2323,7 +2328,7 @@ where
         let session = contracts.session_id;
         let retained = store
             .resume_outbound_dsc1(session)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
         let retained = match retained {
             dom_scriptless_store::OutboundDsc1RecoveryV1::None if pending.is_none() && !frames => {
                 return Ok(RelayOutboundStepV1::Idle);
@@ -2343,7 +2348,9 @@ where
                 return Ok(RelayOutboundStepV1::Idle);
             }
             dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) => retained,
-            _ => return Err(RelayWorkerOutboundErrorV1::StoreRejected),
+            _ => return Err(RelayWorkerOutboundErrorV1::StoreRejected(
+                SessionStoreError::InvalidTransition,
+            )),
         };
         let message = SignedMessageV1::decode_exact(retained.signed_bytes())
             .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
@@ -2382,9 +2389,11 @@ where
         if matches!(submitted, RelayOutboundStepV1::Acked { .. }) {
             let dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) = store
                 .resume_outbound_dsc1(session)
-                .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?
+                .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?
             else {
-                return Err(RelayWorkerOutboundErrorV1::StoreRejected);
+                return Err(RelayWorkerOutboundErrorV1::StoreRejected(
+                SessionStoreError::InvalidTransition,
+            ));
             };
             if retained.application_id() != &application_id
                 || retained.message_digest() != &message_digest
@@ -2405,7 +2414,7 @@ where
         let retained = contracts
             .store
             .resume_outbound_dsc1(contracts.session_id)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
         let retained_refund = match retained {
             dom_scriptless_store::OutboundDsc1RecoveryV1::None => false,
             dom_scriptless_store::OutboundDsc1RecoveryV1::SigningRequest(request) => {

@@ -2854,7 +2854,7 @@ fn outbound_handle_requires_the_workers_exact_store_opening() -> Result<(), Box<
     )?;
     assert!(matches!(
         worker.stage_store_outbound_dsc1(unrelated, expiry()),
-        Err(RelayWorkerOutboundErrorV1::StoreRejected)
+        Err(RelayWorkerOutboundErrorV1::StoreRejected(_))
     ));
     assert!(!worker.sender_stats()?.pending);
 
@@ -2872,7 +2872,7 @@ fn outbound_handle_requires_the_workers_exact_store_opening() -> Result<(), Box<
     )?;
     assert!(matches!(
         reopened_worker.stage_store_outbound_dsc1(old_opening, expiry()),
-        Err(RelayWorkerOutboundErrorV1::StoreRejected)
+        Err(RelayWorkerOutboundErrorV1::StoreRejected(_))
     ));
     assert!(!reopened_worker.sender_stats()?.pending);
     Ok(())

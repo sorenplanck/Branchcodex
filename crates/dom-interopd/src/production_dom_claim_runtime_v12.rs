@@ -115,7 +115,10 @@ impl ProductionDomClaimRuntimeErrorV12 {
                 SessionStoreError::Filesystem | SessionStoreError::StoreBusy,
             ))
             | Self::Outbound(ProductionContractsOutboundErrorV1::Relay(
-                RelayWorkerOutboundErrorV1::OwnerBusy,
+                RelayWorkerOutboundErrorV1::OwnerBusy
+                | RelayWorkerOutboundErrorV1::StoreRejected(
+                    SessionStoreError::Filesystem | SessionStoreError::StoreBusy,
+                ),
             ))
             | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
             | Self::Ingress(ContractsRelayIngressErrorV1::Store(

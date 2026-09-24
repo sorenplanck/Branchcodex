@@ -159,7 +159,11 @@ fn outbound(error: &RelayWorkerOutboundErrorV1) -> Cause {
         E::OwnerBusy => Cause::OwnerBusy,
         E::EntropyUnavailable => Cause::Entropy,
         E::Sender(_) => Cause::Sender,
-        E::StoreRejected => Cause::StoreRejected,
+        E::StoreRejected(
+            dom_scriptless_store::SessionStoreError::StoreBusy
+            | dom_scriptless_store::SessionStoreError::Filesystem,
+        ) => Cause::StoreBusy,
+        E::StoreRejected(_) => Cause::StoreRejected,
         E::InvalidDsc1 => Cause::InvalidDsc1,
         E::WrongDsc1Scope => Cause::WrongDsc1Scope,
     }
