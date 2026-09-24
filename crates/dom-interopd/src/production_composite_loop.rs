@@ -1637,6 +1637,11 @@ where
     Route: CompositeRouteCycleV1,
     Ctl: RouteRunControlV1,
 {
+    // Local durable work spends the route lease too. Top up both owners at
+    // this boundary rather than relying on an earlier relay/native heartbeat.
+    route
+        .prepare_relay_block_v23(Duration::from_millis(1))
+        .map_err(CompositeCoreErrorV1::Route)?;
     renew_actuator_lease().map_err(|()| CompositeCoreErrorV1::ActuatorLeaseRenewal)?;
     crate::production_relay_stage12::mark_lease_phase_v25("route_step");
     let started_v26 = std::time::Instant::now();
@@ -2287,7 +2292,7 @@ mod tests {
                 Ok(report(RouteDriveDispositionV1::RecoveryRequired, 4))
             }
         }
-        for refuse_on in [0, 1, 2] {
+        for refuse_on in [0, 1, 2, 3] {
             let log = Rc::new(RefCell::new(Vec::new()));
             let mut relay = TestRelayV1 {
                 log: Rc::clone(&log),
@@ -2314,15 +2319,22 @@ mod tests {
                         "upstream-relay",
                         "renew-route",
                         "downstream-relay",
+                        "renew-route",
                         "route-step"
                     ]
                 );
             } else {
                 assert!(matches!(result, Err(CompositeCoreErrorV1::Route(()))));
-                let expected: &[&str] = if refuse_on == 1 {
-                    &["renew-route"]
-                } else {
-                    &["renew-route", "upstream-relay", "renew-route"]
+                let expected: &[&str] = match refuse_on {
+                    1 => &["renew-route"],
+                    2 => &["renew-route", "upstream-relay", "renew-route"],
+                    _ => &[
+                        "renew-route",
+                        "upstream-relay",
+                        "renew-route",
+                        "downstream-relay",
+                        "renew-route",
+                    ],
                 };
                 assert_eq!(log.borrow().as_slice(), expected);
             }

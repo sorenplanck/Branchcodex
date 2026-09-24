@@ -721,6 +721,10 @@ struct ProductionDomChildSessionV1<A> {
     binding: DomSessionBindingV1,
     contracts: ProductionDomChildStoreAuthorityV1,
     actions: A,
+    // A process-local continuation of an already durable admission. The exact
+    // dispatch digest pins it across reconciliation; losing it on restart is
+    // harmless because the Contracts journal rehydrates that same admission.
+    pending_claim_transport_v29: Option<(Digest32, ProductionDomActionResultV1)>,
 }
 
 /// One exact DOM settlement context owned by the composed route port.
@@ -1202,6 +1206,7 @@ where
                     binding: upstream.binding,
                     contracts: upstream.contracts,
                     actions: upstream_actions,
+                    pending_claim_transport_v29: None,
                 },
                 ProductionDomChildSessionV1 {
                     leg: downstream.leg,
@@ -1209,6 +1214,7 @@ where
                     binding: downstream.binding,
                     contracts: downstream.contracts,
                     actions: downstream_actions,
+                    pending_claim_transport_v29: None,
                 },
             ],
             lease,
@@ -1951,12 +1957,11 @@ where
 
 impl<C, A> ProductionDomChildPortV1<C, A> {
     /// Budget for one bounded funding observation, taken from the very lease
-    /// it must not outlast. `renew_actuator_lease_v12` renews once the lease
-    /// has less than half its renewal window left, so spending at most a
-    /// quarter of that window here keeps a scan from ever eating the renewal
-    /// headroom, whatever the chain height. Without a configured renewal the
-    /// child never renews and no lease can lapse, so a fixed modest budget is
-    /// enough to keep each round bounded.
+    /// it must not outlast. `renew_actuator_lease_v12` tops up after one
+    /// eighth of the lease has been spent. This scan uses at most a quarter
+    /// of the configured duration and also respects the enclosing step's
+    /// deadline. Without automatic renewal, the fixed fallback still needs
+    /// the same Store lease checks before its result can be committed.
     fn funding_observation_deadline_v26(&self) -> std::time::Instant {
         const DEFAULT_BUDGET_MS_V26: u64 = 15_000;
         let budget = self
@@ -2318,7 +2323,11 @@ where
         {
             return Err(ChildAuthorityRefusalV1::Unavailable);
         }
-        let validated = crate::production_relay_stage12::step_segment_v28("dom_validate_dispatch", || self.validate_dispatch(request, now))?;
+        let validated = crate::production_relay_stage12::step_segment_v28(
+            "dom_validate_dispatch",
+            || self.validate_dispatch(request, now),
+        )?;
+        self.renew_actuator_lease_v12()?;
         let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = dispatch_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
@@ -2341,9 +2350,21 @@ where
             request_digest,
             refund_context: validated.refund_context,
         };
+        let dispatch_identity = request_digest;
         let session = &mut self.sessions[validated.session_index];
+        let pending = session.pending_claim_transport_v29.take();
+        if pending
+            .as_ref()
+            .is_some_and(|(identity, _)| *identity != dispatch_identity)
+        {
+            session.pending_claim_transport_v29 = pending;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        let resuming_transport = pending.is_some();
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
-        let returned = if let Some(native) = &validated.native_refund {
+        let returned = if let Some((_, admitted)) = pending {
+            admitted
+        } else if let Some(native) = &validated.native_refund {
             // The completed locator is backed by a fresh canonical U token,
             // not a new send permission. Do not invoke the plain broadcaster.
             native
@@ -2367,9 +2388,34 @@ where
                 )
             })?
         };
-        let returned = crate::production_relay_stage12::step_segment_v28("dom_stage_claim_transport", || {
-            stage_final_claim_transport_v1(&mut session.contracts, &self.trusted_chain_id, returned)
-        })?;
+        // Admission and transport staging are separate durable operations.
+        // Do not spend both in the same leased route step. In particular, a
+        // receiver's Externalized result never enters this sender continuation.
+        if !resuming_transport
+            && route_step_deadline::armed().is_some()
+            && matches!(
+                &returned,
+                ProductionDomActionResultV1::F7ClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimTransportStarted
+            )
+        {
+            session.pending_claim_transport_v29 = Some((dispatch_identity, returned));
+            self.renew_actuator_lease_v12()?;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        self.renew_actuator_lease_v12()?;
+        let session = &mut self.sessions[validated.session_index];
+        let returned = crate::production_relay_stage12::step_segment_v28(
+            "dom_stage_claim_transport",
+            || {
+                stage_final_claim_transport_v1(
+                    &mut session.contracts,
+                    &self.trusted_chain_id,
+                    returned,
+                )
+            },
+        )?;
         let outcome = Self::dispatch_authority_outcome(request, returned)?;
         self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
@@ -2397,6 +2443,7 @@ where
             return Err(child_conflict_at_v25(2204));
         }
         let validated = self.validate_dispatch(&request.dispatch, now)?;
+        self.renew_actuator_lease_v12()?;
         let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = reconciliation_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
@@ -2419,9 +2466,21 @@ where
             request_digest,
             refund_context: validated.refund_context,
         };
+        let dispatch_identity = dispatch_request_digest(&request.dispatch)?;
         let session = &mut self.sessions[validated.session_index];
+        let pending = session.pending_claim_transport_v29.take();
+        if pending
+            .as_ref()
+            .is_some_and(|(identity, _)| *identity != dispatch_identity)
+        {
+            session.pending_claim_transport_v29 = pending;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        let resuming_transport = pending.is_some();
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
-        let returned = if let Some(native) = &validated.native_refund {
+        let returned = if let Some((_, admitted)) = pending {
+            admitted
+        } else if let Some(native) = &validated.native_refund {
             native
                 .observed
                 .require_recent_v23()
@@ -2441,6 +2500,24 @@ where
                 call,
             )?
         };
+        // Admission and transport staging are separate durable operations.
+        // Do not spend both in the same leased route step. In particular, a
+        // receiver's Externalized result never enters this sender continuation.
+        if !resuming_transport
+            && route_step_deadline::armed().is_some()
+            && matches!(
+                &returned,
+                ProductionDomActionResultV1::F7ClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimTransportStarted
+            )
+        {
+            session.pending_claim_transport_v29 = Some((dispatch_identity, returned));
+            self.renew_actuator_lease_v12()?;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        self.renew_actuator_lease_v12()?;
+        let session = &mut self.sessions[validated.session_index];
         let returned = stage_final_claim_transport_v1(
             &mut session.contracts,
             &self.trusted_chain_id,

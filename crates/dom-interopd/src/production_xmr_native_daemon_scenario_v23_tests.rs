@@ -25,7 +25,7 @@ mod barrier;
 use barrier::{NativeBarrierV23, XmrLedgerPumpV23};
 #[path = "production_xmr_native_daemon_scenario_v23_coordinator.rs"]
 pub(super) mod coordinator;
-use coordinator::{CoordinatorObserverV23, NativeActionV23};
+use coordinator::{CoordinatorObserverV23, NativeActionV23, NativeEconomicIdentityV25};
 use route_executor::ActionKindV1;
 #[path = "production_xmr_native_refund_publication_v24_tests.rs"]
 mod refund_publication_v24;
@@ -498,18 +498,15 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
         for snapshot in &before {
             require_claimed(snapshot)?;
         }
-        for actor in 0..2 {
-            require_native_claims(running.state_dir(actor)?, &before[actor])?;
-        }
-        for (left, right) in [
-            (&before[0].upstream, &before[1].upstream),
-            (&before[0].downstream, &before[1].downstream),
-        ] {
-            if left.funding.transaction_id() != right.funding.transaction_id()
-                || left.claim.transaction_id() != right.claim.transaction_id()
-            {
-                return Err("real actors disagree on final funding or claim identities".into());
-            }
+        let native_before = [
+            require_native_claims(running.state_dir(0)?, &before[0])?,
+            require_native_claims(running.state_dir(1)?, &before[1])?,
+        ];
+        // Aggregate IDs also bind actor-local fences and first-exposure
+        // attempts. Compare authenticated chain identities; each actor's
+        // aggregate/effect binding was checked by its own coordinator replay.
+        if native_before[0] != native_before[1] {
+            return Err("real actors disagree on final native funding or claim identities".into());
         }
         let heartbeats = [observers[0].heartbeat()?, observers[1].heartbeat()?];
         audit.finish();
@@ -552,13 +549,14 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
         for actor in 0..2 {
             let after = observers[actor].replay_stopped()?;
             require_claimed(&after)?;
-            require_native_claims(running.state_dir(actor)?, &after)?;
+            let native_after = require_native_claims(running.state_dir(actor)?, &after)?;
             // Recovery may add administrative journal events, but must never
             // replace economic identities, finality evidence or first exposure.
             if before[actor].upstream != after.upstream
                 || before[actor].downstream != after.downstream
                 || before[actor].secret_visibility != after.secret_visibility
                 || before[actor].bindings != after.bindings
+                || native_before[actor] != native_after
             {
                 return Err("reopening changed final economic state or secret evidence".into());
             }
@@ -1110,24 +1108,29 @@ fn require_unbuilt_refund_v24(
     Ok(())
 }
 
-fn require_native_claims(state: &std::path::Path, snapshot: &RouteSnapshotV1) -> Result<()> {
+fn require_native_claims(
+    state: &std::path::Path,
+    snapshot: &RouteSnapshotV1,
+) -> Result<Vec<NativeEconomicIdentityV25>> {
     let observer = CoordinatorObserverV23::new(state)?;
+    let mut identities = Vec::with_capacity(4);
     for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
         let mut native = Vec::<NativeActionV23>::new();
         for action in [ActionKindV1::Funding, ActionKindV1::Claim] {
-            let recorded = observer
-                .replay_stopped(snapshot, leg, action)?
+            let (recorded, identity) = observer
+                .replay_stopped_with_identity(snapshot, leg, action)?
                 .ok_or("final native coordinator action absent")?;
             if !recorded.xmr_final {
                 return Err("aggregate finality lacks native XMR child finality".into());
             }
             native.push(recorded);
+            identities.push(identity);
         }
         if native[0].xmr_id == native[1].xmr_id || native[0].dom_id == native[1].dom_id {
             return Err("native funding and claim identities aliased".into());
         }
     }
-    Ok(())
+    Ok(identities)
 }
 
 fn retained_refund_candidate(

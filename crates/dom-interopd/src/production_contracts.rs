@@ -921,9 +921,17 @@ where
                 // Let the ordinary sole Relay owner drain an earlier message.
                 // Such a message is never mislabeled as the completed claim.
                 let request = match pending {
-                    OutboundDsc1RecoveryV1::None => self
-                        .store
-                        .prepare_f7_final_claim_dsc1_request_v14(&admitted)?,
+                    OutboundDsc1RecoveryV1::None => {
+                        let prepared = self
+                            .store
+                            .prepare_f7_final_claim_dsc1_request_v14(&admitted)?;
+                        if route_step_deadline::armed().is_some() {
+                            // The exact request is durable. Resume it under the
+                            // next step's leases before doing identity signing.
+                            return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
+                        }
+                        prepared
+                    }
                     OutboundDsc1RecoveryV1::SigningRequest(prepared) => {
                         if prepared.message_type() != 0x12 {
                             return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
@@ -940,6 +948,20 @@ where
                         return Err(ProductionContractsOutboundErrorV1::OwnerBusy)
                     }
                 };
+                if route_step_deadline::armed().is_some() {
+                    if request.session_id() != &self.session_id
+                        || request.sender_id() != &self.local_participant
+                    {
+                        return Err(SessionStoreError::InvalidTransition.into());
+                    }
+                    // The identity/store boundary authenticates and durably
+                    // commits the exact 0x12. The TransportCommitted branch
+                    // will reauthenticate and stage it on the next route step;
+                    // do not combine signing and relay staging in this lease.
+                    let _committed = self.identity
+                        .sign_and_commit_store_prepared_dsc1(self.store.as_ref(), request)?;
+                    return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
+                }
                 sign_commit_and_stage_with_shared_relay(
                     self.session_id,
                     self.local_participant,

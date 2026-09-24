@@ -17,7 +17,76 @@ type Capture = Receiver<std::io::Result<Zeroizing<Vec<u8>>>>;
 /// after the daemon exits and an EOF-only capture returns nothing for that
 /// actor: exactly half of a bilateral failure disappears. The reader thread
 /// keeps this in step with what it has consumed.
-type LiveCapture = std::sync::Arc<std::sync::Mutex<Zeroizing<Vec<u8>>>>;
+type LiveCapture = std::sync::Arc<std::sync::Mutex<RetainedCaptureV25>>;
+
+const CAPTURE_HEAD_BYTES_V25: usize = MAX_CAPTURE / 2;
+const CAPTURE_TAIL_BYTES_V25: usize = MAX_CAPTURE - CAPTURE_HEAD_BYTES_V25;
+const CAPTURE_GAP_V25: &[u8] = b"\nDOM_NATIVE_DIAGNOSTICS_TRUNCATED_V25\n";
+
+/// Preserve the initial diagnostics and a rolling recent tail. Both buffers
+/// allocate their full capacity once, and are zeroized when their owner drops.
+struct RetainedCaptureV25 {
+    head: Zeroizing<Vec<u8>>,
+    tail: Zeroizing<Vec<u8>>,
+    truncated: bool,
+}
+
+impl RetainedCaptureV25 {
+    fn new() -> Self {
+        Self {
+            head: Zeroizing::new(Vec::with_capacity(CAPTURE_HEAD_BYTES_V25)),
+            tail: Zeroizing::new(Vec::with_capacity(CAPTURE_TAIL_BYTES_V25)),
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let head_count = bytes.len().min(CAPTURE_HEAD_BYTES_V25 - self.head.len());
+        self.head.extend_from_slice(&bytes[..head_count]);
+        let bytes = &bytes[head_count..];
+        if bytes.len() >= CAPTURE_TAIL_BYTES_V25 {
+            self.truncated |= !self.tail.is_empty() || bytes.len() > CAPTURE_TAIL_BYTES_V25;
+            self.tail.clear();
+            self.tail
+                .extend_from_slice(&bytes[bytes.len() - CAPTURE_TAIL_BYTES_V25..]);
+            return;
+        }
+        let overflow = (self.tail.len() + bytes.len()).saturating_sub(CAPTURE_TAIL_BYTES_V25);
+        if overflow != 0 {
+            self.truncated = true;
+            self.tail.copy_within(overflow.., 0);
+            let retained = self.tail.len() - overflow;
+            self.tail.truncate(retained);
+        }
+        self.tail.extend_from_slice(bytes);
+    }
+
+    fn snapshot(&self) -> Zeroizing<Vec<u8>> {
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_CAPTURE));
+        if !self.truncated {
+            bytes.extend_from_slice(&self.head);
+            bytes.extend_from_slice(&self.tail);
+            return bytes;
+        }
+        // Never concatenate unrelated fragments into an apparently complete
+        // public error line. Keep complete head lines, mark the gap, then keep
+        // complete tail lines within the original classifier's total bound.
+        let head_end = self
+            .head
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        bytes.extend_from_slice(&self.head[..head_end]);
+        bytes.extend_from_slice(CAPTURE_GAP_V25);
+        let available = MAX_CAPTURE - bytes.len();
+        let tail_start = self.tail.len().saturating_sub(available);
+        let tail = &self.tail[tail_start..];
+        if let Some(newline) = tail.iter().position(|byte| *byte == b'\n') {
+            bytes.extend_from_slice(&tail[newline + 1..]);
+        }
+        bytes
+    }
+}
 
 mod exit_diagnostic_v24;
 
@@ -39,41 +108,29 @@ fn drain(stream: impl Read + Send + 'static) -> Capture {
 
 fn drain_live(mut stream: impl Read + Send + 'static) -> (Capture, LiveCapture) {
     let (send, receive) = mpsc::sync_channel(1);
-    let live: LiveCapture = std::sync::Arc::new(std::sync::Mutex::new(Zeroizing::new(Vec::new())));
+    let live: LiveCapture =
+        std::sync::Arc::new(std::sync::Mutex::new(RetainedCaptureV25::new()));
     let writer = std::sync::Arc::clone(&live);
     thread::spawn(move || {
         let result = (|| {
-            // Allocate before reading so a reallocation cannot leave a copy.
-            let mut bytes = Zeroizing::new(vec![0; MAX_CAPTURE]);
-            let mut length = 0;
-            // Past the bound the overflow is read into a fixed scratch buffer
-            // and dropped. Retaining the first bytes rather than failing keeps
-            // the earliest diagnostics — the ones that name where a run first
-            // went wrong — instead of discarding the whole capture because a
-            // later, noisier phase overran it; and it keeps reading, so the
-            // daemon never blocks on a full pipe.
-            let mut overflow = Zeroizing::new(vec![0; 8 * 1024]);
+            let mut retained = RetainedCaptureV25::new();
+            let mut scratch = Zeroizing::new(vec![0; 8 * 1024]);
             loop {
-                let read = if length < MAX_CAPTURE {
-                    stream.read(&mut bytes[length..])
-                } else {
-                    stream.read(&mut overflow)
-                };
-                match read {
+                // Keep draining after the retention bound, so a noisy daemon
+                // cannot block on a full stdout/stderr pipe.
+                match stream.read(&mut scratch) {
                     Ok(0) => break,
                     Ok(count) => {
-                        let previous = length;
-                        length = length.saturating_add(count).min(MAX_CAPTURE);
+                        retained.push(&scratch[..count]);
                         if let Ok(mut live) = writer.lock() {
-                            live.extend_from_slice(&bytes[previous..length]);
+                            live.push(&scratch[..count]);
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
                 }
             }
-            bytes.truncate(length);
-            Ok(bytes)
+            Ok(retained.snapshot())
         })();
         let _ = send.send(result);
     });
@@ -181,7 +238,7 @@ impl NativeDaemonProcessV23 {
             // nothing for this actor.
             if self.captured_stderr.is_none() {
                 if let Ok(live) = self.stderr_live.lock() {
-                    self.captured_stderr = Some(Ok(live.clone()));
+                    self.captured_stderr = Some(Ok(live.snapshot()));
                 }
             }
             let code = match self.captured_stderr.as_ref() {

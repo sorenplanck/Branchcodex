@@ -20,6 +20,7 @@ pub mod route_step_deadline_v27 {
     };
 }
 
+mod canonical_scan_bounded_v27;
 mod terminal_finality;
 mod xmr_recovery_execution_v12;
 mod xmr_recovery_finality;
@@ -555,6 +556,7 @@ pub struct RealDomRpcRuntimeV1 {
     adapter: DomHttpChainAdapterV1,
     cache: Mutex<RuntimeCacheV1>,
     deadline_scan_v23: Mutex<CursorStateV1>,
+    canonical_scan_v27: Mutex<BTreeMap<[u8; 32], canonical_scan_bounded_v27::CanonicalScanProgressV27>>,
     f7_claim_scan_v24: Mutex<BTreeMap<[u8; 32], f7_claim_receiver_v15::F7ClaimScanProgressV24>>,
     f7_xmr_funding_scan_v24: Mutex<f7_anchor_authority::DomFundingScanProgressV24>,
     funding_finality_scan_v23: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
@@ -587,6 +589,7 @@ impl RealDomRpcRuntimeV1 {
             adapter,
             cache: Mutex::new(RuntimeCacheV1::default()),
             deadline_scan_v23: Mutex::new(CursorStateV1::genesis()),
+            canonical_scan_v27: Mutex::new(BTreeMap::new()),
             f7_claim_scan_v24: Mutex::new(BTreeMap::new()),
             f7_xmr_funding_scan_v24: Mutex::new(
                 f7_anchor_authority::DomFundingScanProgressV24::new(),
@@ -1027,9 +1030,18 @@ impl RealDomRpcRuntimeV1 {
         ),
         RealDomError,
     > {
-        let page =
-            self.adapter
-                .scan_page_until_v23(state.scanner_cursor(), max_blocks, deadline)?;
+        let page = self
+            .adapter
+            .scan_page_until_v23(state.scanner_cursor(), max_blocks, deadline)
+            .map_err(|error| match error {
+                // This legacy walker owns only a call-local cursor. Refuse
+                // this incomplete view and let its next call restart at
+                // genesis instead of treating a moved anchor as corruption.
+                ChainAdapterError::ReorgDetected => {
+                    RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable)
+                }
+                error => RealDomError::Chain(error),
+            })?;
         self.cache_blocks(&page.blocks)?;
         let mut next = state.clone();
         for block in &page.blocks {
@@ -1167,7 +1179,7 @@ impl RealDomRpcRuntimeV1 {
     /// belong to a different branch — which is precisely the pairing that lets
     /// an orphaned claim pass a depth test.
     ///
-    /// `scan_snapshot_to_tip` is what closes it: it continues the same
+    /// The resumable canonical scanner closes it: it continues the same
     /// anchored cursor, page by prev-hash-linked page, until the accumulated
     /// history's last entry *is* the reported tip, identity included. Every
     /// block between the observed one and that tip is therefore linked, so the
@@ -1188,52 +1200,18 @@ impl RealDomRpcRuntimeV1 {
         &self,
         evidence: &EvidenceRefV1,
     ) -> Result<(CanonicalTransactionEvidenceV1, ObservedDomIdentityV1), RealDomError> {
-        // Always re-read the canonical chain through the anchored scanner. A
-        // cached transaction may belong to a branch invalidated after its
-        // durable outbox effect was created.
-        //
-        // A zero block reference is the documented "resolve" contract of
-        // `dom_refund_evidence_ref`: the caller supplies only the transaction
-        // identity and asks the scanner to resolve and authenticate the
-        // canonical location, rather than asserting one. The previous code
-        // scanned "through height 0" and then required the found location to
-        // equal the zero fields, which cannot ever succeed — the refund
-        // terminal confirmation was unreachable by construction in every
-        // execution shape, resumed or fresh (F-20260819T000139Z). In resolve
-        // mode the scan runs to the canonical tip and the located transaction's
-        // own authenticated location is returned.
-        let resolve_mode = self.validate_evidence_scope(evidence)?;
-        let anchor_height = if resolve_mode {
-            0
-        } else {
-            evidence.block_height
-        };
-        // Bounded: in resolve mode this walks from genesis, and the route step
-        // reaches it while holding the actuator lease — the public-secret
-        // extraction of an observed F7 claim goes through here on every claim
-        // round. The unbounded twins have no iteration limit and no clock at
-        // all. Sixty seconds is the same budget the F7 claim search next door
-        // uses, and expiry is `TemporarilyUnavailable`, which the plan source
-        // already treats as "not yet" rather than as absence.
+        // Retain the authenticated prefix on timeout, but recheck its anchor
+        // and close twice at a fresh tip before returning the exact transaction.
         let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
-                .ok_or(RealDomError::Chain(
-                    ChainAdapterError::TemporarilyUnavailable,
-                ))?,
+                .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
         );
-        let (state, identity) = self.scan_through_with_tip_until_v26(anchor_height, deadline)?;
-        let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
-        let transaction = self.cached_transaction_on_walked_chain(&evidence.tx_id, &identity)?;
-        let transaction = if resolve_mode {
-            if transaction.tx_hash() != evidence.tx_id {
-                return Err(RealDomError::InvalidEvidence);
-            }
-            transaction
-        } else {
-            validate_evidence_reference(evidence, transaction)?
-        };
-        Ok((transaction, identity))
+        let snapshot = self.transaction_snapshot_until_v27(evidence, deadline)?;
+        Ok((
+            snapshot.transaction.ok_or(RealDomError::EvidenceNotFound)?,
+            snapshot.identity,
+        ))
     }
 
     /// Validate the authenticated chain and the closed anchored/resolve shapes.
@@ -1245,54 +1223,16 @@ impl RealDomRpcRuntimeV1 {
         validate_evidence_scope_v1(self.adapter.expected_identity().chain_id, evidence)
     }
 
-    /// Reads one cached transaction after discarding everything the walk just
-    /// contradicted.
-    ///
-    /// The cache is keyed by transaction identity and survives across scans, so
-    /// without this an entry left behind by a branch that has since been
-    /// reorganised away could still be returned. Two rules retire such
-    /// residue: nothing above the proved tip may be read at all, and a
-    /// transaction is kept only if the walked chain holds its exact block
-    /// identity at its own height. Copied from `canonical_terminal_snapshot`,
-    /// which already applied both.
-    fn cached_transaction_on_walked_chain(
-        &self,
-        tx_id: &[u8; 32],
-        identity: &ObservedDomIdentityV1,
-    ) -> Result<CanonicalTransactionEvidenceV1, RealDomError> {
-        let mut cache = self.cache()?;
-        cache
-            .blocks
-            .retain(|height, _| *height <= identity.tip_height);
-        let canonical_blocks = cache.blocks.clone();
-        cache.transactions.retain(|_, transaction| {
-            transaction.location().block_height() <= identity.tip_height
-                && canonical_blocks
-                    .get(&transaction.location().block_height())
-                    .is_some_and(|(hash, _)| hash == &transaction.location().block_hash())
-        });
-        cache
-            .transactions
-            .get(tx_id)
-            .cloned()
-            .ok_or(RealDomError::EvidenceNotFound)
-    }
-
     /// Refetches and revalidates one canonical transaction, returning an
     /// opaque evidence value suitable for the F7 M.8 anchor bridge.
     pub fn verified_transaction(
         &self,
         evidence: &EvidenceRefV1,
     ) -> Result<CanonicalDomTransactionEvidenceV1, RealDomError> {
-        let evidence = self.transaction(evidence)?;
-        let block_time_seconds = authenticated_block_time(
-            &self.cache()?.blocks,
-            evidence.location().block_height(),
-            evidence.location().block_hash(),
-        )?;
+        let snapshot = self.canonical_terminal_snapshot(evidence)?;
         Ok(CanonicalDomTransactionEvidenceV1 {
-            evidence,
-            block_time_seconds,
+            evidence: snapshot.transaction,
+            block_time_seconds: snapshot.block_time_seconds,
         })
     }
 
@@ -1317,7 +1257,9 @@ impl RealDomRpcRuntimeV1 {
         // Resolve-mode and anchored references both use the same unbroken walk
         // through the reported tip. The transaction is then retained only if
         // its own authenticated block remains on that exact walked branch.
-        let (transaction, identity) = self.transaction_with_proved_tip(evidence)?;
+        let snapshot = self.canonical_terminal_snapshot(evidence)?;
+        let transaction = snapshot.transaction;
+        let identity = snapshot.identity;
         let created = transaction
             .transaction()
             .outputs
@@ -1339,11 +1281,7 @@ impl RealDomRpcRuntimeV1 {
         if confirmation_depth < minimum_confirmations {
             return Err(RealDomError::InsufficientConfirmations);
         }
-        let block_time_seconds = authenticated_block_time(
-            &self.cache()?.blocks,
-            transaction.location().block_height(),
-            transaction.location().block_hash(),
-        )?;
+        let block_time_seconds = snapshot.block_time_seconds;
         Ok(CanonicalDomFundingEvidenceV1 {
             evidence: transaction,
             block_time_seconds,
@@ -2589,11 +2527,11 @@ mod tests {
     fn the_canonical_refetch_walks_to_the_reported_tip() {
         let proving = source_block(
             "    pub fn transaction_with_proved_tip(",
-            "    /// Reads one cached transaction after discarding",
+            "    /// Validate the authenticated chain and the closed anchored/resolve shapes.",
         );
         assert!(!proving.is_empty(), "the proving refetch was not found");
         assert!(
-            proving.contains("self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?"),
+            proving.contains("self.transaction_snapshot_until_v27(evidence, deadline)?"),
             "the refetch must close the hash-linked walk against the reported tip, \
              and must do it under a deadline: the route step reaches this while \
              holding the actuator lease and the unbounded twin has no clock"

@@ -24,9 +24,10 @@ use settlement_coordinator::{
     ChildPublicExposureV1, ChildStageV1, CompositeSettlementPlanV1, CoordinatorDriveOutcomeV1,
     CoordinatorErrorV1, CoordinatorLeaseV1, CoordinatorObservationOutcomeV1,
     CustodyTakeoverStatusV1, DeferredChildMaterializationCapabilityV1,
-    DeferredChildMaterializationResultV1, Digest32, DurableSettlementCoordinatorV1,
-    PartialCustodyProgressV1, SecretRequirementV1, SettlementActionV1, SettlementChildAuthorityV1,
-    SettlementChildObserverV1, SettlementChildrenV1, SettlementDeferredChildAuthorityV1,
+    DeferredChildMaterializationResultV1, DeferredSettlementChildV1, Digest32,
+    DurableSettlementCoordinatorV1, PartialCustodyProgressV1, SecretRequirementV1,
+    SettlementActionV1, SettlementChildAuthorityV1, SettlementChildObserverV1,
+    SettlementChildPlanV1, SettlementChildrenV1, SettlementDeferredChildAuthorityV1,
     SettlementLegV1, SettlementPlanBindingsV1, SettlementPlanViewV1, StoredSettlementPlanV1,
 };
 
@@ -109,9 +110,32 @@ pub(crate) trait ProductionSettlementPlanSourceV1 {
     ) -> Result<(), AuthorityRefusalV1>;
 }
 
+// Only public retained-child commitments survive a clean materialization
+// cutoff. A new coordinator capability is still required to commit them; the
+// old move-only capability and any recovered scalar are never cached.
+#[derive(Eq, PartialEq)]
+struct DeferredMaterializationScopeV28 {
+    route_id: Digest32,
+    plan_id: Digest32,
+    plan_digest: Digest32,
+    attempt_id: Digest32,
+    coordinator_fencing_epoch: u64,
+    bindings: SettlementPlanBindingsV1,
+    descriptor: DeferredSettlementChildV1,
+    exposure: ChildPublicExposureV1,
+    route_exposure: PublicExposureV1,
+}
+
+struct RetainedDeferredMaterializationV28 {
+    scope: DeferredMaterializationScopeV28,
+    child: SettlementChildPlanV1,
+}
+
 struct ProductionDeferredChildAuthorityAdapterV1<'owner> {
     source: &'owner mut dyn ProductionSettlementPlanSourceV1,
     route_exposure: &'owner PublicExposureV1,
+    coordinator_fencing_epoch: u64,
+    retained: &'owner mut Option<RetainedDeferredMaterializationV28>,
 }
 
 impl SettlementDeferredChildAuthorityV1 for ProductionDeferredChildAuthorityAdapterV1<'_> {
@@ -123,13 +147,59 @@ impl SettlementDeferredChildAuthorityV1 for ProductionDeferredChildAuthorityAdap
         &mut self,
         capability: DeferredChildMaterializationCapabilityV1,
     ) -> Result<DeferredChildMaterializationResultV1, ChildAuthorityRefusalV1> {
-        self.source
+        let scope = DeferredMaterializationScopeV28 {
+            route_id: capability.route_id(),
+            plan_id: capability.plan_id(),
+            plan_digest: capability.plan_digest(),
+            attempt_id: capability.attempt_id(),
+            coordinator_fencing_epoch: self.coordinator_fencing_epoch,
+            bindings: capability.bindings().clone(),
+            descriptor: capability.descriptor().clone(),
+            exposure: *capability.exposure(),
+            route_exposure: self.route_exposure.clone(),
+        };
+        let authority_id = self.authority_id();
+        if scope.descriptor.materializer_authority_id != authority_id {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        if let Some(retained) = self.retained.as_ref() {
+            if retained.scope == scope {
+                // Reuse facts, never authority. Completion consumes the newly
+                // minted capability and the coordinator revalidates its live
+                // lease, both fences and exact pending attempt before commit.
+                return DeferredChildMaterializationResultV1::complete(
+                    capability,
+                    authority_id,
+                    retained.child.clone(),
+                )
+                .map_err(|_| ChildAuthorityRefusalV1::Conflict);
+            }
+        }
+        // A refence or different plan/attempt cannot inherit this checkpoint.
+        // The actuator's durable retained bytes remain the reopen authority.
+        *self.retained = None;
+        let materialized = self
+            .source
             .materialize_deferred_child(capability, self.route_exposure)
             .map_err(|error| match error {
                 AuthorityRefusalV1::Unavailable => ChildAuthorityRefusalV1::Unavailable,
                 AuthorityRefusalV1::Refused => ChildAuthorityRefusalV1::Refused,
                 AuthorityRefusalV1::Inconsistent => ChildAuthorityRefusalV1::Conflict,
-            })
+            })?;
+        if materialized.authority_id() != authority_id
+            || materialized.attempt_id() != scope.attempt_id
+            || self.authority_id() != authority_id
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        // Retain before the coordinator's post-call deadline check. Otherwise
+        // a completed build that used the remaining window would be repeated
+        // forever. Fast calls may still commit on this same tick.
+        *self.retained = Some(RetainedDeferredMaterializationV28 {
+            scope,
+            child: materialized.child().clone(),
+        });
+        Ok(materialized)
     }
 }
 
@@ -324,6 +394,7 @@ struct ProductionSettlementBridgeCoreV1 {
     plan_persistence: Box<dyn ProductionSettlementPlanPersistenceV1>,
     child_port: BoxedChildPortAuthorityV1,
     clock: Box<dyn SettlementBridgeClockV1>,
+    retained_deferred: Option<RetainedDeferredMaterializationV28>,
 }
 
 impl core::fmt::Debug for ProductionSettlementBridgeCoreV1 {
@@ -525,6 +596,7 @@ where
         plan_persistence: Box::new(plan_persistence),
         child_port,
         clock: Box::new(clock),
+        retained_deferred: None,
     }));
     ProductionSettlementAuthoritiesV1 {
         action: ProductionSettlementActionAuthorityV1(Rc::clone(&shared)),
@@ -865,9 +937,15 @@ impl ProductionSettlementBridgeCoreV1 {
         )
         .map_err(map_coordinator_error)?;
         if matches!(current, CoordinatorDriveOutcomeV1::Unknown { .. }) {
+            let clock = self.clock.as_ref();
             let outcome = self
                 .coordinator
-                .reconcile_current_child_one(lease, &mut self.child_port, now)
+                .reconcile_current_child_one_with_clock_v28(
+                    lease,
+                    &mut self.child_port,
+                    now,
+                    || clock.now_unix_ms().map_err(|_| CoordinatorErrorV1::StorageUnavailable),
+                )
                 .map_err(map_coordinator_error)?;
             self.seal_drive_outcome_before_release(&stored, &outcome)?;
             return map_drive_outcome(capability, outcome);
@@ -880,9 +958,10 @@ impl ProductionSettlementBridgeCoreV1 {
         // A private downstream claim is intentionally installed with only
         // its DOM first-exposure child.  The route must acknowledge the exact
         // public exposure in a later capability before the counterparty claim
-        // may even be materialized.  Materialization is its own durable tick:
-        // this call commits the retained child facts and returns the existing
-        // partial progress; only a subsequent custody call may broadcast it.
+        // may even be materialized. Materialization and dispatch are separate
+        // ticks. If preparation exhausts this capability's window, retain its
+        // exact public child facts for a fresh grant to commit; only a later
+        // custody call may broadcast the coordinator-committed child.
         if deferred_child_requires_materialization(&stored, &current)? {
             let route_exposure = capability
                 .route_first_public_exposure()
@@ -891,41 +970,103 @@ impl ProductionSettlementBridgeCoreV1 {
             let plan_source = self.plan_source.as_mut();
             let clock = self.clock.as_ref();
             let capability_expires_at = capability.expires_at_unix_ms();
+            // The outer route tick can allow more time than this dispatch
+            // capability. Narrow every nested RPC/scan to its remaining life,
+            // measured after plan replay, instead of starting another 60 s
+            // budget under a capability that lasts only 30 s.
+            let budget_started = std::time::Instant::now();
+            let materialization_now = clock.now_unix_ms()?;
+            if capability_expires_at <= materialization_now {
+                // The grant was live on entry but plan replay consumed it.
+                // No preparation may start; retry only if ownership is still
+                // current, without extending this expired dispatch grant.
+                self.coordinator
+                    .current_custody_progress(lease, materialization_now)
+                    .map_err(map_coordinator_error)?;
+                return Err(AuthorityRefusalV1::Unavailable);
+            }
+            let remaining_ms = capability_expires_at - materialization_now;
+            let deadline = budget_started
+                .checked_add(std::time::Duration::from_millis(remaining_ms))
+                .ok_or(AuthorityRefusalV1::Refused)?;
+            let _capability_ceiling_v28 = route_step_deadline::Armed::new(Some(deadline));
+            route_step_deadline::remaining(std::time::Duration::from_millis(1))
+                .ok_or(AuthorityRefusalV1::Unavailable)?;
             let mut authority = ProductionDeferredChildAuthorityAdapterV1 {
                 source: plan_source,
                 route_exposure,
+                coordinator_fencing_epoch: lease.coordinator_fencing_epoch(),
+                retained: &mut self.retained_deferred,
             };
             let materialized = crate::production_relay_stage12::step_segment_v28(
                 "custody_materialize_deferred",
                 || {
                     self.coordinator
-                        .materialize_deferred_child_one(lease, &mut authority, now, || {
-                            let fresh_now = clock
-                                .now_unix_ms()
-                                .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
-                            if capability_expires_at < fresh_now {
-                                return Err(CoordinatorErrorV1::LeaseExpired);
-                            }
-                            Ok(fresh_now)
-                        })
+                        .materialize_deferred_child_one(
+                            lease,
+                            &mut authority,
+                            materialization_now,
+                            || {
+                                let fresh_now = clock
+                                    .now_unix_ms()
+                                    .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+                                if capability_expires_at < fresh_now {
+                                    // No completion under an expired route
+                                    // grant. Its prepared public facts survive
+                                    // for a later, independently minted grant.
+                                    return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+                                }
+                                // A clean cutoff leaves the exact deferred
+                                // attempt pending without granting more time.
+                                route_step_deadline::remaining(std::time::Duration::from_millis(1))
+                                    .ok_or(CoordinatorErrorV1::ChildAuthorityRefused)?;
+                                Ok(fresh_now)
+                            },
+                        )
                 },
-            )
-            .map_err(map_coordinator_error)?;
+            );
+            let materialized = match materialized {
+                Ok(materialized) => materialized,
+                Err(CoordinatorErrorV1::ChildAuthorityRefused) => {
+                    // Temporary preparation/cutoff is retryable only while
+                    // this exact coordinator owner and both fences remain
+                    // current. An expired/stale coordinator lease still fails
+                    // closed; this read neither renews it nor commits a child.
+                    let fresh_now = clock.now_unix_ms()?;
+                    self.coordinator
+                        .current_custody_progress(lease, fresh_now)
+                        .map_err(map_coordinator_error)?;
+                    return Err(AuthorityRefusalV1::Unavailable);
+                }
+                Err(error) => return Err(map_coordinator_error(error)),
+            };
             validate_deferred_materialization_transition(&prior_view, &materialized)?;
+            self.retained_deferred = None;
             let post_materialization_now = clock.now_unix_ms()?;
-            if capability_expires_at < post_materialization_now {
-                return Err(AuthorityRefusalV1::Refused);
-            }
             let retained_progress = self
                 .coordinator
                 .current_custody_progress(lease, post_materialization_now)
                 .map_err(map_coordinator_error)?;
+            if capability_expires_at < post_materialization_now {
+                // Commit was authorized at its own fresh-time check, but its
+                // audit/replay used the rest of the dispatch window. Keep the
+                // durable child and let a new grant report its exact progress.
+                return Err(AuthorityRefusalV1::Unavailable);
+            }
             return map_drive_outcome(capability, retained_progress);
         }
 
+        let clock = self.clock.as_ref();
         let outcome = crate::production_relay_stage12::step_segment_v28(
             "custody_drive_one",
-            || self.coordinator.drive_one(lease, &mut self.child_port, now),
+            || {
+                self.coordinator.drive_one_with_clock_v28(
+                    lease,
+                    &mut self.child_port,
+                    now,
+                    || clock.now_unix_ms().map_err(|_| CoordinatorErrorV1::StorageUnavailable),
+                )
+            },
         )
         .map_err(map_coordinator_error)?;
         crate::production_relay_stage12::step_segment_v28("custody_seal", || {
@@ -956,9 +1097,15 @@ impl ProductionSettlementBridgeCoreV1 {
             .takeover_status(lease, now)
             .map_err(map_coordinator_error)?;
         if matches!(status, CustodyTakeoverStatusV1::Unknown { .. }) {
+            let clock = self.clock.as_ref();
             status = self
                 .coordinator
-                .reconcile_takeover_one(lease, &mut self.child_port, now)
+                .reconcile_takeover_one_with_clock_v28(
+                    lease,
+                    &mut self.child_port,
+                    now,
+                    || clock.now_unix_ms().map_err(|_| CoordinatorErrorV1::StorageUnavailable),
+                )
                 .map_err(map_coordinator_error)?;
         }
         self.seal_takeover_status_before_release(&stored, &status)?;
@@ -1052,9 +1199,16 @@ impl ProductionSettlementBridgeCoreV1 {
         validate_observation_request(request, leg, action, &stored)?;
         let lease = self.acquire_observation_lease(request, &stored, now)?;
         let child_index = select_observation_child(request.query(), stored.view())?;
+        let clock = self.clock.as_ref();
         let outcome = self
             .coordinator
-            .observe_child_once(lease, child_index, &mut self.child_port, now)
+            .observe_child_once_with_clock_v28(
+                lease,
+                child_index,
+                &mut self.child_port,
+                now,
+                || clock.now_unix_ms().map_err(|_| CoordinatorErrorV1::StorageUnavailable),
+            )
             .map_err(map_coordinator_error)?;
         map_observation_outcome(request.query(), outcome)
     }
@@ -3311,7 +3465,7 @@ mod tests {
             .expect_err("expired route capability must not commit materialization");
         assert!(matches!(
             expired,
-            RouteSupervisorErrorV1::ExternalCustodyAuthority(AuthorityRefusalV1::Refused)
+            RouteSupervisorErrorV1::ExternalCustodyAuthority(AuthorityRefusalV1::Unavailable)
         ));
         let route_after_expired_materialization = route
             .supervisor
@@ -3359,10 +3513,9 @@ mod tests {
             .dispatch_one_effect(&mut RefusingRunnerV1, &mut authorities.custody)
             .expect("retry exact pending materialization under fresh route capability");
         assert_eq!(retried.custody_partial_progress, 1);
-        assert_eq!(materialization_calls.get(), 2);
+        assert_eq!(materialization_calls.get(), 1);
         let attempts = materialization_attempts.borrow();
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0], attempts[1]);
+        assert_eq!(attempts.len(), 1, "reuse retained facts with a fresh capability");
         drop(attempts);
         assert_eq!(child_state.borrow().calls.len(), 1);
         {

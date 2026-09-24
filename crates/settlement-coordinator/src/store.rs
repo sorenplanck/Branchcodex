@@ -3709,12 +3709,29 @@ impl DurableSettlementCoordinatorV1 {
         }
     }
 
-    /// Persist and execute at most one child authority call.
+    /// Persist and execute at most one child authority call using a fixed clock.
+    /// Blocking production callers must use [`Self::drive_one_with_clock_v28`].
     pub fn drive_one<A: SettlementChildAuthorityV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
         now_unix_ms: u64,
+    ) -> Result<CoordinatorDriveOutcomeV1> {
+        self.drive_one_with_clock_v28(lease, authority, now_unix_ms, || Ok(now_unix_ms))
+    }
+
+    /// Persist one exact child call, then recheck its lease at the trusted
+    /// post-call time before retaining any result. A late result leaves the
+    /// original attempt pending for reconciliation; it cannot renew ownership.
+    pub fn drive_one_with_clock_v28<
+        A: SettlementChildAuthorityV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        authority: &mut A,
+        now_unix_ms: u64,
+        post_authority_time: F,
     ) -> Result<CoordinatorDriveOutcomeV1> {
         let view = self.load_plan(lease.plan_id)?;
         if matches!(
@@ -3732,7 +3749,7 @@ impl DurableSettlementCoordinatorV1 {
         let outcome = authority
             .externalize_child(pending.request())
             .map_err(child_refusal_v25)?;
-        self.complete_child_call(lease, pending, outcome, now_unix_ms)
+        self.complete_child_call(lease, pending, outcome, post_authority_time()?)
     }
 
     /// Reconstruct the exact current custody outcome without invoking a child.
@@ -3812,12 +3829,34 @@ impl DurableSettlementCoordinatorV1 {
     }
 
     /// Persist and perform at most one same-fence reconciliation authority
-    /// call. This method never invokes `externalize_child`.
+    /// call. This fixed-clock method never invokes `externalize_child`.
+    /// Blocking production callers must use
+    /// [`Self::reconcile_current_child_one_with_clock_v28`].
     pub fn reconcile_current_child_one<A: SettlementChildAuthorityV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
         now_unix_ms: u64,
+    ) -> Result<CoordinatorDriveOutcomeV1> {
+        self.reconcile_current_child_one_with_clock_v28(
+            lease,
+            authority,
+            now_unix_ms,
+            || Ok(now_unix_ms),
+        )
+    }
+
+    /// Reconcile the retained same-fence attempt and validate its lease using
+    /// a fresh trusted clock after the child call, before recording the result.
+    pub fn reconcile_current_child_one_with_clock_v28<
+        A: SettlementChildAuthorityV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        authority: &mut A,
+        now_unix_ms: u64,
+        post_authority_time: F,
     ) -> Result<CoordinatorDriveOutcomeV1> {
         let status = self.current_custody_progress(lease, now_unix_ms)?;
         if !matches!(status, CoordinatorDriveOutcomeV1::Unknown { .. }) {
@@ -3827,7 +3866,7 @@ impl DurableSettlementCoordinatorV1 {
         let outcome = authority
             .reconcile_child(pending.request())
             .map_err(child_refusal_v25)?;
-        self.complete_current_reconciliation(lease, pending, outcome, now_unix_ms)
+        self.complete_current_reconciliation(lease, pending, outcome, post_authority_time()?)
     }
 
     /// Persist or resume exact reconciliation of the single pending child
@@ -3852,12 +3891,31 @@ impl DurableSettlementCoordinatorV1 {
         self.takeover_status(lease, now_unix_ms)
     }
 
-    /// Persist and perform at most one child reconciliation authority call.
+    /// Persist and perform at most one child reconciliation call at a fixed time.
+    /// Blocking production callers must use
+    /// [`Self::reconcile_takeover_one_with_clock_v28`].
     pub fn reconcile_takeover_one<A: SettlementChildAuthorityV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
         now_unix_ms: u64,
+    ) -> Result<CustodyTakeoverStatusV1> {
+        self.reconcile_takeover_one_with_clock_v28(lease, authority, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
+    }
+
+    /// Reconcile an exact takeover attempt and recheck both fences and lease
+    /// expiry at the trusted post-call time before accepting its result.
+    pub fn reconcile_takeover_one_with_clock_v28<
+        A: SettlementChildAuthorityV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        authority: &mut A,
+        now_unix_ms: u64,
+        post_authority_time: F,
     ) -> Result<CustodyTakeoverStatusV1> {
         let status = self.takeover_status(lease, now_unix_ms)?;
         if !matches!(status, CustodyTakeoverStatusV1::Unknown { .. }) {
@@ -3867,7 +3925,7 @@ impl DurableSettlementCoordinatorV1 {
         let outcome = authority
             .reconcile_child(pending.request())
             .map_err(child_refusal_v25)?;
-        self.complete_takeover_reconciliation(lease, pending, outcome, now_unix_ms)
+        self.complete_takeover_reconciliation(lease, pending, outcome, post_authority_time()?)
     }
 
     fn prepare_reconciliation(
@@ -4469,12 +4527,32 @@ impl DurableSettlementCoordinatorV1 {
 
     /// Observe one exact child. The request is journaled before the single
     /// chain-observer call, and aggregate finality requires both child proofs.
+    /// Blocking production callers must use
+    /// [`Self::observe_child_once_with_clock_v28`] instead of this fixed clock.
     pub fn observe_child_once<O: SettlementChildObserverV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         child_index: u8,
         observer: &mut O,
         now_unix_ms: u64,
+    ) -> Result<CoordinatorObservationOutcomeV1> {
+        self.observe_child_once_with_clock_v28(lease, child_index, observer, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
+    }
+
+    /// Observe one exact child and validate lease expiry at the trusted
+    /// post-observation time before recording either child or aggregate finality.
+    pub fn observe_child_once_with_clock_v28<
+        O: SettlementChildObserverV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        child_index: u8,
+        observer: &mut O,
+        now_unix_ms: u64,
+        post_observation_time: F,
     ) -> Result<CoordinatorObservationOutcomeV1> {
         if usize::from(child_index) >= MAX_SETTLEMENT_CHILDREN_V1 {
             return Err(CoordinatorErrorV1::InvalidBound);
@@ -4484,7 +4562,13 @@ impl DurableSettlementCoordinatorV1 {
         let outcome = observer
             .observe_child(&request)
             .map_err(|_| CoordinatorErrorV1::ChildObserverRefused)?;
-        self.complete_observation(lease, request, request_digest, outcome, now_unix_ms)
+        self.complete_observation(
+            lease,
+            request,
+            request_digest,
+            outcome,
+            post_observation_time()?,
+        )
     }
 
     fn prepare_observation(

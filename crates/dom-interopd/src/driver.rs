@@ -562,41 +562,14 @@ where
         }
     }
 
-    for (leg, stage) in [
-        (LegIdV1::Downstream, RouteDriveStageV1::DownstreamRefund),
-        (LegIdV1::Upstream, RouteDriveStageV1::UpstreamRefund),
-    ] {
-        let leg_snapshot = snapshot.leg(leg);
-        if matches!(
-            leg_snapshot.funding.progress(),
-            ActionProgressV1::Externalized | ActionProgressV1::Final
-        ) && leg_snapshot.claim.progress() == ActionProgressV1::NotPrepared
-            && leg_snapshot.refund.progress() == ActionProgressV1::NotPrepared
-        {
-            return drive_action_once(
-                supervisor,
-                ActionDriveContextV1 {
-                    before_revision,
-                    stage,
-                    leg,
-                    action: ActionKindV1::Refund,
-                },
-                action_authority,
-                observer,
-                runner,
-                external_custody,
-                timers,
-            );
-        }
-    }
-
     // A funding that was already externalized before the route entered
-    // recovery still has to be observed final: nothing else in this lane
-    // records funding finality, so it would stay Externalized forever. For an
-    // Externalized action `drive_action_once` only records a chain finality
-    // observation; it never dispatches, commits or re-broadcasts, so this adds
-    // no economic action to the exit-only lane. It runs only when no claim or
-    // refund above had work, so it can never delay or displace one of them.
+    // recovery still has to be observed final. Preserve the priority of an
+    // existing claim/refund above, but observe funding before authorizing a
+    // new refund: an absent U owner can leave that authorization unavailable
+    // forever. This observation also remains necessary after DOM compensation,
+    // which closes the economic leg without recording funding finality. An
+    // Externalized action only observes the chain here; it cannot dispatch,
+    // commit or re-broadcast funding in the exit-only lane.
     for (leg, stage) in [
         (LegIdV1::Upstream, RouteDriveStageV1::UpstreamFunding),
         (LegIdV1::Downstream, RouteDriveStageV1::DownstreamFunding),
@@ -609,6 +582,36 @@ where
                     stage,
                     leg,
                     action: ActionKindV1::Funding,
+                },
+                action_authority,
+                observer,
+                runner,
+                external_custody,
+                timers,
+            );
+        }
+    }
+
+    for (leg, stage) in [
+        (LegIdV1::Downstream, RouteDriveStageV1::DownstreamRefund),
+        (LegIdV1::Upstream, RouteDriveStageV1::UpstreamRefund),
+    ] {
+        let leg_snapshot = snapshot.leg(leg);
+        if !leg_snapshot.is_terminal()
+            && matches!(
+                leg_snapshot.funding.progress(),
+                ActionProgressV1::Externalized | ActionProgressV1::Final
+            )
+            && leg_snapshot.claim.progress() == ActionProgressV1::NotPrepared
+            && leg_snapshot.refund.progress() == ActionProgressV1::NotPrepared
+        {
+            return drive_action_once(
+                supervisor,
+                ActionDriveContextV1 {
+                    before_revision,
+                    stage,
+                    leg,
+                    action: ActionKindV1::Refund,
                 },
                 action_authority,
                 observer,

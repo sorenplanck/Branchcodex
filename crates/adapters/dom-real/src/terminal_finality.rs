@@ -319,11 +319,11 @@ fn capture_tail(
 }
 
 #[derive(Clone)]
-struct CanonicalTerminalSnapshotV1 {
-    transaction: CanonicalTransactionEvidenceV1,
+pub(super) struct CanonicalTerminalSnapshotV1 {
+    pub(super) transaction: CanonicalTransactionEvidenceV1,
     state: CursorStateV1,
-    identity: ObservedDomIdentityV1,
-    block_time_seconds: u64,
+    pub(super) identity: ObservedDomIdentityV1,
+    pub(super) block_time_seconds: u64,
 }
 
 impl RealDomRpcRuntimeV1 {
@@ -333,43 +333,29 @@ impl RealDomRpcRuntimeV1 {
         self.adapter.expected_identity()
     }
 
-    fn canonical_terminal_snapshot(
+    pub(super) fn canonical_terminal_snapshot(
         &self,
         evidence: &EvidenceRefV1,
     ) -> Result<CanonicalTerminalSnapshotV1, RealDomError> {
-        let resolve_mode = self.validate_evidence_scope(evidence)?;
-        let anchor_height = if resolve_mode {
-            0
-        } else {
-            evidence.block_height
-        };
-        // Bounded by the route-step ceiling: this runs inside the step that
-        // holds the actuator lease, and the unbounded twins have no clock.
-        // Unarmed, the budget is the same minute the claim search uses.
         let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
                 .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
         );
-        let (state, identity) = self.scan_through_with_tip_until_v26(anchor_height, deadline)?;
-        let (state, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
-        let transaction = self.cached_transaction_on_walked_chain(&evidence.tx_id, &identity)?;
-        let transaction = if resolve_mode {
-            transaction
-        } else {
-            validate_evidence_reference(evidence, transaction)?
-        };
-        let cache = self.cache()?;
+        let snapshot = self.transaction_snapshot_until_v27(evidence, deadline)?;
+        let transaction = snapshot.transaction.ok_or(RealDomError::EvidenceNotFound)?;
         let block_time_seconds = authenticated_block_time(
-            &cache.blocks,
+            &snapshot.required_blocks,
             transaction.location().block_height(),
             transaction.location().block_hash(),
         )?;
-        drop(cache);
+        if snapshot.transaction_time != Some(block_time_seconds) {
+            return Err(RealDomError::InvalidEvidence);
+        }
         Ok(CanonicalTerminalSnapshotV1 {
             transaction,
-            state,
-            identity,
+            state: snapshot.state,
+            identity: snapshot.identity,
             block_time_seconds,
         })
     }
@@ -826,37 +812,38 @@ impl RealDomRpcRuntimeV1 {
             minimum_confirmations,
             max_reorg_depth,
         )?;
-        // Same bound as the terminal snapshot above; this one always starts
-        // at genesis, so without a clock its cost is the whole chain height.
         let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
                 .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
         );
-        let (state, identity) = self.scan_through_with_tip_until_v26(0, deadline)?;
-        let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
-        let mut cache = self.cache()?;
-        cache
-            .blocks
-            .retain(|height, _| *height <= identity.tip_height);
-        let canonical_blocks = cache.blocks.clone();
-        cache.transactions.retain(|_, transaction| {
-            transaction.location().block_height() <= identity.tip_height
-                && canonical_blocks
-                    .get(&transaction.location().block_height())
-                    .is_some_and(|(hash, _)| hash == &transaction.location().block_hash())
-        });
-        let current_transaction_location = cache
-            .transactions
-            .get(&expected_tx_hash)
+        // This exact checkpoint scopes the retained canonical walk. Keep only
+        // its candidate transaction and the heights needed to prove the fork,
+        // not an unrelated global cache populated by another scan.
+        let retained_checkpoint_digest = checkpoint_digest(checkpoint_bytes);
+        let mut required_heights = checkpoint
+            .canonical_tail
+            .iter()
+            .map(|(height, _)| *height)
+            .collect::<Vec<_>>();
+        required_heights.push(checkpoint.block_height);
+        let snapshot = self.canonical_scan_until_v27(
+            retained_checkpoint_digest,
+            expected_tx_hash,
+            &required_heights,
+            deadline,
+        )?;
+        let current_transaction_location = snapshot
+            .transaction
+            .as_ref()
             .map(|tx| (tx.location().block_height(), tx.location().block_hash()));
         let reorg = verify_reorg_against_canonical(
             &checkpoint,
-            &cache.blocks,
-            identity.tip_height,
-            identity.tip_hash,
+            &snapshot.required_blocks,
+            snapshot.identity.tip_height,
+            snapshot.identity.tip_hash,
             current_transaction_location,
-            checkpoint_digest(checkpoint_bytes),
+            retained_checkpoint_digest,
         )?;
         Ok(reorg)
     }

@@ -163,10 +163,12 @@ impl ProductionPublicSecretRetentionV1 {
             {
                 self.vault.read(&self.key, bindings).map_err(|error| {
                     if error == RouteSecretVaultError::NotFound {
-                        // The coordinator proves the exposure, not that this
-                        // process completed its pre-release seal. Never turn
-                        // an absent seal into a generic private fallback.
-                        AuthorityRefusalV1::Inconsistent
+                        // A first normal sealing attempt uses this same
+                        // coordinator capability. Its vault entry does not
+                        // exist yet, so a transient canonical-read failure
+                        // must wait for fresh evidence. No scalar is returned
+                        // and the supervisor must not journal Public yet.
+                        AuthorityRefusalV1::Unavailable
                     } else {
                         map_route_secret_vault_error(error)
                     }
@@ -2612,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_exposure_without_a_completed_seal_cannot_fabricate_private_recovery(
+    fn coordinator_exposure_without_a_completed_seal_waits_for_canonical_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let authority =
@@ -2631,7 +2633,7 @@ mod tests {
                 Err(AuthorityRefusalV1::Unavailable),
                 VaultRecoveryAuthorizationV1::AuthenticatedCoordinatorExposure(&authority),
             ),
-            Err(AuthorityRefusalV1::Inconsistent)
+            Err(AuthorityRefusalV1::Unavailable)
         ));
         Ok(())
     }

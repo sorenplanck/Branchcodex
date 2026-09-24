@@ -148,7 +148,12 @@ impl ProductionXmrRecoveryDriverV12 {
             {
                 adapter_dom_real::VerifiedDomXmrRecoveryStateV11::Refunded(secret) => Ok(secret),
                 adapter_dom_real::VerifiedDomXmrRecoveryStateV11::Compensated(_) => {
-                    Err(Refusal::Conflict)
+                    // The recovery pump observes and records compensation in
+                    // separate ticks. Until its durable route marker arrives,
+                    // the route may still ask for U. Refuse that competing
+                    // refund without terminating the writer that must record
+                    // compensation; a compensated graph never supplies U.
+                    Err(Refusal::Unavailable)
                 }
                 _ => Err(Refusal::Unavailable),
             }
