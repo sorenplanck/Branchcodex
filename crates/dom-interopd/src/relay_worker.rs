@@ -693,14 +693,6 @@ pub enum ContractsRelayIngressErrorV1 {
     /// No Store-issued authority exists for this unseen message phase.
     #[error("unseen DSC1 message has no prepared Contracts authority")]
     UnpreparedMessage,
-    /// The final claim receiver persisted its observation, but the ingress
-    /// authority that accepts the sender's final claim lives only in this
-    /// relay's memory and is installed by the next native round. Keep the
-    /// message pending until then: a fresh process after reopen, or a relay
-    /// turn ahead of that round, must not fail closed on a claim it will
-    /// accept moments later.
-    #[error("F7 final claim is awaiting its ingress handoff")]
-    AwaitingFinalClaimIngressHandoffV29,
     /// The peer's authenticated first funding edge arrived in the same Relay
     /// batch that completed bilateral readiness. Keep it pending until the
     /// native owner observes the chain and installs its linear authority.
@@ -1829,16 +1821,6 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                     delivery.signed_dsc1(),
                 )? {
                     return Err(ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16);
-                }
-                if !matches!(
-                    self.authority.as_ref().map(|value| &value.inner),
-                    Some(PreparedContractsIngressKindV1::UniversalFinalClaimV15(_))
-                ) && self.store.f7_final_claim_awaits_ingress_handoff_v29(
-                    self.session_id,
-                    self.local_participant.0,
-                    delivery.signed_dsc1(),
-                )? {
-                    return Err(ContractsRelayIngressErrorV1::AwaitingFinalClaimIngressHandoffV29);
                 }
                 if self.store.xmr_funding_commitment_awaits_handoff_v25(
                     self.session_id,
