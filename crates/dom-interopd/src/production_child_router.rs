@@ -85,6 +85,27 @@ pub(crate) enum ProductionRetainedFundingIdV20 {
     Solana(solana_types::SolanaSignature),
 }
 
+/// Diagnostic only: names one child operation that alone outlasts a quarter of
+/// the actuator lease. Prints a fixed site literal and the closed face enum,
+/// never an identifier, amount or digest. A step is built out of these, so the
+/// one that is slow is the one to bound or split.
+fn measure_child_operation_v27<T>(
+    site: &'static str,
+    face: SettlementFaceV1,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let started = std::time::Instant::now();
+    let outcome = operation();
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_secs(30) {
+        eprintln!(
+            "DOM_CHILD_OP_SLOW_V27 site={site} face={face:?} ms={}",
+            elapsed.as_millis()
+        );
+    }
+    outcome
+}
+
 pub(crate) trait ProductionSettlementChildPortV1 {
     /// Exact public identity from this child's existing audited custody.
     /// None means no signed funding; it never means invalid retained evidence.
@@ -287,6 +308,28 @@ impl ProductionSettlementChildRouterV1 {
             }
         }
         Ok(())
+    }
+
+    /// Renew every actuator lease at the seam before one child operation.
+    ///
+    /// The relay half already does this between its own phases (`keep`). The
+    /// route step had no equivalent: the whole step ran under one lease that
+    /// was last renewed before it started. Measured on this route, one claim
+    /// step took 145.6 s against a 120 s lease and lapsed 25.8 s before
+    /// returning — while the step ceiling was armed, because the time is spent
+    /// in signature verification, store writes and fsync, which no deadline
+    /// preempts. A child operation is the natural seam: it is where the step
+    /// spends that wall clock, and every operation revalidates the lease at
+    /// its own Store anyway. This cannot revive an expired lease, take over an
+    /// epoch or mint a signing grant; it only stops a live owner from losing
+    /// the lease while it is doing the work the lease exists to protect.
+    fn renew_before_child_operation_v27(
+        &mut self,
+        site: &'static str,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        self.renew_actuator_leases_inner_v27(true).inspect_err(|refusal| {
+            eprintln!("DOM_CHILD_SEAM_RENEW_V27 site={site} refusal={refusal:?}");
+        })
     }
 
     /// Installs both independently scoped counterparties for any of the 16
@@ -591,11 +634,14 @@ impl ProductionSettlementChildRouterV1 {
                 request.deployment_digest,
             )?;
         }
+        self.renew_before_child_operation_v27("materialize")?;
         let port = self.port(face, request.leg, request.route_id, request.settlement_id)?;
         if port.face() != face {
             return Err(child_conflict_at_v25(559));
         }
-        port.materialize(request, public_scalar)
+        measure_child_operation_v27("materialize", face, || {
+            port.materialize(request, public_scalar)
+        })
     }
 
     pub(crate) fn take_bitcoin_public_extraction_handoff(
@@ -657,6 +703,7 @@ impl SettlementChildAuthorityV1 for ProductionSettlementChildRouterV1 {
                 request.deployment_digest(),
             )?;
         }
+        self.renew_before_child_operation_v27("externalize")?;
         let port = self.port(
             expected,
             request.leg(),
@@ -666,7 +713,7 @@ impl SettlementChildAuthorityV1 for ProductionSettlementChildRouterV1 {
         if port.face() != expected {
             return Err(child_conflict_at_v25(630));
         }
-        port.externalize(request)
+        measure_child_operation_v27("externalize", expected, || port.externalize(request))
     }
 
     fn reconcile_child(
@@ -687,6 +734,7 @@ impl SettlementChildAuthorityV1 for ProductionSettlementChildRouterV1 {
                 request.dispatch.deployment_digest(),
             )?;
         }
+        self.renew_before_child_operation_v27("reconcile")?;
         let port = self.port(
             expected,
             request.dispatch.leg(),
@@ -696,7 +744,7 @@ impl SettlementChildAuthorityV1 for ProductionSettlementChildRouterV1 {
         if port.face() != expected {
             return Err(child_conflict_at_v25(660));
         }
-        port.reconcile(request)
+        measure_child_operation_v27("reconcile", expected, || port.reconcile(request))
     }
 }
 
@@ -718,6 +766,7 @@ impl SettlementChildObserverV1 for ProductionSettlementChildRouterV1 {
                 request.deployment_digest,
             )?;
         }
+        self.renew_before_child_operation_v27("observe")?;
         let port = self.port(
             expected,
             request.leg,
@@ -727,7 +776,7 @@ impl SettlementChildObserverV1 for ProductionSettlementChildRouterV1 {
         if port.face() != expected {
             return Err(child_conflict_at_v25(691));
         }
-        port.observe(request)
+        measure_child_operation_v27("observe", expected, || port.observe(request))
     }
 }
 
