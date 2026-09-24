@@ -391,6 +391,49 @@ fn serve(stream: &mut TcpStream, ledger: &Arc<Mutex<Snapshot>>) -> Result<()> {
                 .ok_or_else(|| anyhow!("missing tx hashes"))?;
             snapshot.transaction_response(hashes)?
         }
+        // The daemon's ring lookup (`ring_members_v23`) posts JSON to
+        // `/get_outs`, exactly as monerod serves it beside `/get_outs.bin`.
+        // Answering only the Epee form left the JSON caller with a 404 it
+        // classifies as retryable, so a remote refund retried forever. Same
+        // ledger facts and bounds as the Epee arm; nothing is invented here.
+        ("POST", "/get_outs") => {
+            let request: Value = serde_json::from_slice(body)?;
+            let entries = request
+                .get("outputs")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("missing outputs"))?;
+            ensure!(
+                !entries.is_empty() && entries.len() <= epee::MAX_OUTPUTS,
+                "output request scope"
+            );
+            let mut indexes = Vec::with_capacity(entries.len());
+            for entry in entries {
+                ensure!(
+                    entry.get("amount").and_then(Value::as_u64) == Some(0),
+                    "only RingCT output indices supported"
+                );
+                indexes.push(
+                    entry
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| anyhow!("output index"))?,
+                );
+            }
+            let outputs = epee::Ledger::outputs(&*snapshot, &indexes)?;
+            ensure!(
+                outputs.len() == indexes.len(),
+                "ledger output cardinality mismatch"
+            );
+            let outs = outputs
+                .iter()
+                .map(|output| {
+                    json!({"height":output.height,"key":hex::encode(output.key),
+                        "mask":hex::encode(output.mask),"txid":hex::encode(output.txid),
+                        "unlocked":output.unlocked})
+                })
+                .collect::<Vec<_>>();
+            json!({"status":"OK","untrusted":false,"outs":outs})
+        }
         ("POST", "/send_raw_transaction") if snapshot.mutable_scenario() => {
             submission(body, &mut snapshot)
         }

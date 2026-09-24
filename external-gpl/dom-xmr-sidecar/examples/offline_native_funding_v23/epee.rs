@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, ensure};
 use monero_epee::{Array, HEADER, Type, VERSION};
 
 const MAX_REQUEST: usize = 16_384;
-const MAX_OUTPUTS: usize = 128;
+pub(super) const MAX_OUTPUTS: usize = 128;
 const MAX_HEIGHTS: usize = 1_000_001;
 const MAX_RESPONSE: usize = 65_536;
 const MAX_DISTRIBUTION_RESPONSE: usize = 8 * 1024 * 1024;

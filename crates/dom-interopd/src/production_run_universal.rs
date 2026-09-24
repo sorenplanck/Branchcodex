@@ -2770,6 +2770,13 @@ impl SelectedLegV11 {
                     Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable)
                         if attempt < REOPEN_FUNDING_ATTEMPTS_V25 =>
                     {
+                        // Unavailable is the quorum saying "not from this
+                        // observation"; retrying within the same millisecond
+                        // observed nothing new, so four attempts collapsed into
+                        // one and a reopened daemon ended on a transient. Give
+                        // the next attempt a real chance. Bounded: at most 1.5 s
+                        // over the whole loop, only at process start.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                         attempt += 1;
                     }
                     Err(_) => return Err(ProductionRunErrorV1::SettlementChildAuthority),
