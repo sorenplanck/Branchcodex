@@ -1089,7 +1089,7 @@ fn verify_dom_funding_evidence_inner(
 
 // Native XMR promotion carries the original external proof deadline into the
 // scan. Legacy callers retain their existing retry window through None.
-fn verify_dom_funding_evidence_until_v23(
+pub(crate) fn verify_dom_funding_evidence_until_v23(
     dom: &DomHttpChainAdapterV1,
     expected_funding_txid: [u8; 32],
     expected_shared_output_commitment: [u8; 33],
@@ -1098,6 +1098,10 @@ fn verify_dom_funding_evidence_until_v23(
     require_unspent: bool,
     external_deadline: Option<Instant>,
 ) -> Result<VerifiedDomFundingEvidenceV1, F7AnchorAuthorityError> {
+    // Every caller that omits a deadline still runs inside a route step that
+    // holds the actuator lease; the armed ceiling is that step's clock. The
+    // scan below walks up to MAX_F7_DOM_SCAN_PAGES with no clock of its own.
+    let external_deadline = route_step_deadline::clamp_or_armed(external_deadline);
     let mut progress = DomFundingScanProgressV24::new();
     verify_dom_funding_evidence_with_progress_v24(
         dom,

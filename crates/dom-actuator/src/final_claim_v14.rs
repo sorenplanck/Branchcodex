@@ -283,7 +283,23 @@ impl DomContractsActuatorV1<'_> {
                     | ChainAdapterError::CapabilityUnavailable,
                 )
                 | RealDomError::LockPoisoned => DomActuatorError::RpcAuthorityUnavailable,
-                _ => DomActuatorError::CapabilityMismatch,
+                // A retained-store failure is unavailability of the local
+                // authority, not a mismatch of the claim; and a claim the
+                // scanner cannot find yet is pending, not wrong. Folding both
+                // into `CapabilityMismatch` erased the cause and turned a
+                // retryable state into a terminal one.
+                RealDomError::Store(_) => DomActuatorError::StorageUnavailable,
+                RealDomError::EvidenceNotFound | RealDomError::InsufficientConfirmations => {
+                    DomActuatorError::FinalityPending
+                }
+                RealDomError::TransactionStillCanonical => DomActuatorError::TerminalStillCanonical,
+                RealDomError::ReorgBeyondPolicy => DomActuatorError::ReorgBeyondPolicy,
+                RealDomError::Chain(_)
+                | RealDomError::Leg(_)
+                | RealDomError::InvalidEvidence
+                | RealDomError::Observation(_)
+                | RealDomError::BoundsExceeded
+                | RealDomError::FinalityPolicyInvalid => DomActuatorError::CapabilityMismatch,
             })
     }
 

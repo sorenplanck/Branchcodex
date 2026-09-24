@@ -191,6 +191,14 @@ impl VerifiedXmrEconomicRecoveryGraphV11 {
         {
             return Err(Refusal::GraphMismatch);
         }
+        // The signed fees were only ever bounded from above. Nothing refused a
+        // claim whose fee sat below the DOM relay minimum, and such a claim is
+        // a template the counterparty can never confirm: it was built, signed,
+        // broadcast and silently dropped by every node. The chain-neutral
+        // policy crate cannot know the DOM fee schedule; this is the first
+        // point that holds both the signed fees and the real DOM templates.
+        require_dom_relay_floor_v27(claim, signed.claim_fee_noms)?;
+        require_dom_relay_floor_v27(graph.refund_template(), signed.refund_fee_noms)?;
         require_payout(
             &policy,
             &roster,
@@ -325,6 +333,29 @@ pub fn verify_xmr_economic_recovery_graph_v11(
         &payouts[0],
         &payouts[1],
     )
+}
+
+/// Refuses a DOM template whose signed fee is below what the network relays.
+///
+/// `dom_core::fee_policy` is the same schedule the node applies at admission;
+/// the shape is taken from the template itself, never assumed.
+fn require_dom_relay_floor_v27(
+    template: &dom_consensus::Transaction,
+    signed_fee_noms: u64,
+) -> Result<(), Refusal> {
+    let shape = dom_core::fee_policy::TransactionShape::from_counts(
+        template.inputs.len(),
+        template.outputs.len(),
+        template.kernels.len(),
+    )
+    .map_err(|_| Refusal::GraphMismatch)?;
+    let floor = dom_core::fee_policy::fee_breakdown(shape)
+        .map_err(|_| Refusal::GraphMismatch)?
+        .minimum_fee_noms;
+    if signed_fee_noms < floor {
+        return Err(Refusal::GraphMismatch);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

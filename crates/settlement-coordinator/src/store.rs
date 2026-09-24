@@ -45,7 +45,8 @@ fn child_refusal_v25(refusal: crate::model::ChildAuthorityRefusalV1) -> Coordina
     use crate::model::ChildAuthorityRefusalV1 as Child;
     match refusal {
         Child::Unavailable => CoordinatorErrorV1::ChildAuthorityRefused,
-        Child::Refused | Child::Conflict => CoordinatorErrorV1::ChildAuthorityRejected,
+        Child::Refused => CoordinatorErrorV1::ChildAuthorityRejected,
+        Child::Conflict => CoordinatorErrorV1::ChildAuthorityConflict,
     }
 }
 
@@ -7590,14 +7591,16 @@ mod child_refusal_v25_tests {
             child_refusal_v25(ChildAuthorityRefusalV1::Unavailable),
             CoordinatorErrorV1::ChildAuthorityRefused
         );
-        for permanent in [
-            ChildAuthorityRefusalV1::Refused,
-            ChildAuthorityRefusalV1::Conflict,
-        ] {
-            assert_eq!(
-                child_refusal_v25(permanent),
-                CoordinatorErrorV1::ChildAuthorityRejected
-            );
-        }
+        // Both are permanent for the call, and each keeps its own name: a
+        // policy refusal and a state conflict reach the route driver as
+        // different refusals and are handled differently there.
+        assert_eq!(
+            child_refusal_v25(ChildAuthorityRefusalV1::Refused),
+            CoordinatorErrorV1::ChildAuthorityRejected
+        );
+        assert_eq!(
+            child_refusal_v25(ChildAuthorityRefusalV1::Conflict),
+            CoordinatorErrorV1::ChildAuthorityConflict
+        );
     }
 }

@@ -67,6 +67,7 @@ dependencies = [
  "f7-anchor-authority",
  "hex",
  "kaystra-core",
+ "route-step-deadline",
  "serde_json",
  "thiserror 1.0.69",
  "xmr-live-sidecar-uds-client",
@@ -1684,6 +1685,7 @@ dependencies = [
  "route-composer",
  "route-executor",
  "route-secret-vault",
+ "route-step-deadline",
  "route-time-anchor",
  "route-transport",
  "rusqlite",
@@ -2916,6 +2918,7 @@ dependencies = [
  "dom-scriptless-chain-adapter",
  "dom-scriptless-crypto",
  "kaystra-core",
+ "route-step-deadline",
  "serde_json",
  "sha2",
  "solana-escrow-wire",
@@ -5815,6 +5818,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "route-step-deadline"
+version = "0.1.0"
+
+[[package]]
 name = "route-time-anchor"
 version = "0.2.0"
 dependencies = [
@@ -8530,6 +8537,7 @@ version = "0.2.0"
 dependencies = [
  "nix",
  "rand 0.8.6",
+ "route-step-deadline",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -8650,6 +8658,7 @@ name = "xmr-rpc-broadcast-blocking"
 version = "0.2.0"
 dependencies = [
  "reqwest",
+ "route-step-deadline",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

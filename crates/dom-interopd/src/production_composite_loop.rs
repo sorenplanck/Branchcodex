@@ -1644,10 +1644,10 @@ where
     // `TemporarilyUnavailable`, which the driver already treats as "not yet"
     // and retries on the next round with the lease renewed again.
     let step_ceiling_v27 = started_v26.checked_add(ROUTE_STEP_CEILING_V27);
-    let restore_v27 = adapter_dom_real::route_step_deadline_v27::arm_v27(step_ceiling_v27);
-    let report = route.step_route().map_err(CompositeCoreErrorV1::Route);
-    adapter_dom_real::route_step_deadline_v27::arm_v27(restore_v27);
-    let report = report?;
+    let report = {
+        let _armed = route_step_deadline::Armed::new(step_ceiling_v27);
+        route.step_route().map_err(CompositeCoreErrorV1::Route)
+    }?;
     // Diagnostic only: one driver step that outlasts the actuator lease is
     // what makes the lease lapse mid-step. Names the stage that did it.
     let spent_v26 = started_v26.elapsed();

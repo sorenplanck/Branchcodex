@@ -1912,6 +1912,12 @@ pub(super) fn run(
                     .renew()
                     .map_err(|error| settlement_child_diag_v26("heartbeat_before_refund", &error))?;
             crate::production_relay_stage12::mark_lease_phase_v25("refund_pump");
+                // The block bound declared just above is a promise to the
+                // runtime, not a limit on the tick; the armed ceiling is what
+                // makes it one. Dropped at the end of the match.
+                let _pump_ceiling_v27 = route_step_deadline::Armed::new(
+                    std::time::Instant::now().checked_add(std::time::Duration::from_secs(60)),
+                );
                 match pump.tick_remote_refund_v24(&snapshot) {
                     Ok(()) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
                     Err(refusal) => return Err(settlement_child_refusal_v26("remote_refund_tick", refusal)),
@@ -1925,6 +1931,11 @@ pub(super) fn run(
                     .renew()
                     .map_err(|error| settlement_child_diag_v26("heartbeat_before_pump", &error))?;
             crate::production_relay_stage12::mark_lease_phase_v25("xmr_pump");
+                // Two funding observations of 60 s each can run inside one
+                // tick; without a ceiling their sum is exactly the lease.
+                let _pump_ceiling_v27 = route_step_deadline::Armed::new(
+                    std::time::Instant::now().checked_add(std::time::Duration::from_secs(60)),
+                );
                 match pump.tick() {
                     Ok(Some(report)) => match route_runtime.record_xmr_compensation_v22(report) {
                         Ok(())

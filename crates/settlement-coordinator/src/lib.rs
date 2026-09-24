@@ -111,6 +111,13 @@ pub enum CoordinatorErrorV1 {
     /// the same call can change that.
     #[error("settlement child authority rejected the exact child")]
     ChildAuthorityRejected,
+    /// External child authority found its retained state, fence or epoch in
+    /// conflict with the call. Also permanent for this call — but it is a
+    /// different fact from a policy refusal, and the route driver treats an
+    /// inconsistency differently from a refusal. Folding the two together
+    /// erased the cause at the first boundary it crossed.
+    #[error("settlement child authority state conflicts with the exact child")]
+    ChildAuthorityConflict,
     /// Chain observation authority refused or became unavailable.
     #[error("settlement child observer refused")]
     ChildObserverRefused,

@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+route-step-deadline = { path = "../../route-step-deadline" }
 xmr-raw-tx-verify = { path = "../xmr-raw-tx-verify" }
 reqwest = { workspace = true }
 serde_json = { workspace = true }

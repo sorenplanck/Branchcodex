@@ -382,6 +382,12 @@ pub(crate) struct QuorumXmrObservationPortV1 {
     /// Aggregate bound applied to the next trait observation. A scoped copy
     /// carries `None` so scoping never recurses.
     deadline_v26: Option<std::time::Instant>,
+    /// True on a copy whose readers already carry the route-step ceiling.
+    /// The fan-out below runs on spawned threads, where the thread-local
+    /// ceiling is not visible, so it has to be resolved here on the parent
+    /// thread and baked into each reader before spawning. This flag stops a
+    /// scoped copy from scoping itself again.
+    scoped_v27: bool,
 }
 
 impl QuorumXmrObservationPortV1 {
@@ -406,7 +412,21 @@ impl QuorumXmrObservationPortV1 {
             quorum: self.quorum,
             genesis: self.genesis,
             deadline_v26: None,
+            scoped_v27: true,
         })
+    }
+
+    /// A copy bounded by the route-step ceiling, when one is armed and this is
+    /// not already such a copy. Resolved on the calling thread on purpose: the
+    /// voters run on spawned threads that cannot see the thread-local.
+    fn step_scoped_v27(&self) -> Result<Option<Self>, XmrActuatorErrorV1> {
+        if self.scoped_v27 {
+            return Ok(None);
+        }
+        match route_step_deadline::armed() {
+            Some(step) => self.observation_scope_v24(step).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Same original deadline for all voters and all nested RPCs. A timed-out
@@ -474,6 +494,7 @@ impl QuorumXmrObservationPortV1 {
             quorum,
             genesis,
             deadline_v26: None,
+            scoped_v27: false,
         })
     }
 
@@ -485,6 +506,9 @@ impl QuorumXmrObservationPortV1 {
         &self,
         claimed: &[xmr_remote_sweep_wire::RemoteRingMemberV23],
     ) -> Result<Vec<xmr_raw_tx_verify::RingMemberEvidenceV23>, XmrActuatorErrorV1> {
+        if let Some(mut bounded) = self.step_scoped_v27()? {
+            return bounded.authenticate_remote_ring_v23(claimed);
+        }
         if claimed.len() != xmr_remote_sweep_wire::RING_MEMBERS_V23
             || claimed
                 .windows(2)
@@ -554,6 +578,9 @@ impl QuorumXmrObservationPortV1 {
         &self,
         funding_tx_hash: [u8; 32],
     ) -> Result<Vec<u8>, XmrActuatorErrorV1> {
+        if let Some(mut bounded) = self.step_scoped_v27()? {
+            return bounded.authenticated_funding_raw_v23(funding_tx_hash);
+        }
         if funding_tx_hash == [0; 32] {
             return Err(XmrActuatorErrorV1::Conflict);
         }
@@ -647,6 +674,9 @@ impl XmrObservationPortV1 for QuorumXmrObservationPortV1 {
         if let Some(deadline) = self.deadline_v26 {
             return self.transaction_inclusion_with_deadline_v24(tx_hash, deadline);
         }
+        if let Some(mut bounded) = self.step_scoped_v27()? {
+            return bounded.transaction_inclusion(tx_hash);
+        }
         let genesis = self.genesis;
         let votes = std::thread::scope(|scope| {
             let workers: Vec<_> = self
@@ -675,6 +705,9 @@ impl XmrObservationPortV1 for QuorumXmrObservationPortV1 {
             let result = bounded.key_image_spent(key_image);
             require_observation_deadline_v24(deadline)?;
             return result;
+        }
+        if let Some(mut bounded) = self.step_scoped_v27()? {
+            return bounded.key_image_spent(key_image);
         }
         let genesis = self.genesis;
         let votes = std::thread::scope(|scope| {

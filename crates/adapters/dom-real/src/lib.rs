@@ -10,57 +10,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-/// Wall clock shared by every bounded observation of one route step.
-///
-/// Bounding each call on its own does not bound the step: a step makes several
-/// of them, and their ceilings add up. Measured on this route, per-call limits
-/// of 15 s, 30 s and 60 s still produced a 141.7 s step against a 120 s
-/// actuator lease, because three of them ran in sequence. The composition root
-/// arms this before the step and disarms it after; every bounded call then
-/// spends `min(its own budget, what remains of the step)`, so the sum can never
-/// outlive the lease the step is holding. Unarmed, every call keeps its own
-/// budget and nothing changes.
+/// The route-step ceiling, defined in the leaf crate so that every adapter
+/// that can block inside a step sees the same clock. Kept under this name so
+/// the constructors in this crate read as one family.
 pub mod route_step_deadline_v27 {
-    use std::cell::Cell;
-    use std::time::Instant;
-
-    thread_local! {
-        static DEADLINE_V27: Cell<Option<Instant>> = const { Cell::new(None) };
-    }
-
-    /// Arms the shared ceiling for the step about to run, returning the
-    /// previous value so a nested arm can restore it.
-    pub fn arm_v27(deadline: Option<Instant>) -> Option<Instant> {
-        DEADLINE_V27.with(|cell| cell.replace(deadline))
-    }
-
-    /// The step ceiling, when one is armed.
-    pub fn armed_v27() -> Option<Instant> {
-        DEADLINE_V27.with(Cell::get)
-    }
-
-    /// Narrows a caller's own deadline to the step ceiling. Never widens it.
-    pub fn clamp_v27(own: Instant) -> Instant {
-        match armed_v27() {
-            Some(step) if step < own => step,
-            _ => own,
-        }
-    }
-
-    /// The same narrowing expressed as a duration, for the blocking waits that
-    /// take a timeout rather than a deadline. Returns `None` when the step has
-    /// no time left, which the caller must treat as "not now", never as a
-    /// verdict about the chain.
-    pub fn remaining_v27(own: std::time::Duration) -> Option<std::time::Duration> {
-        let Some(step) = armed_v27() else {
-            return Some(own);
-        };
-        let left = step.checked_duration_since(Instant::now())?;
-        if left.is_zero() {
-            return None;
-        }
-        Some(left.min(own))
-    }
+    pub use route_step_deadline::{
+        arm as arm_v27, armed as armed_v27, clamp as clamp_v27,
+        clamp_or_armed as clamp_or_armed_v27, remaining as remaining_v27, Armed as ArmedV27,
+    };
 }
 
 mod terminal_finality;
@@ -673,6 +630,7 @@ impl RealDomRpcRuntimeV1 {
             expected_dom_funding_txid,
             round_start_transcript_hash,
             external,
+            crate::route_step_deadline_v27::armed_v27(),
         )
     }
 
@@ -687,11 +645,16 @@ impl RealDomRpcRuntimeV1 {
         f7_anchor_authority::families_v11::VerifiedF7AnchorAuthorizationV12,
         f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11,
     > {
+        // Carry the route-step ceiling into the anchor scan. Without it the
+        // scan walks the chain with no clock while the step holds the actuator
+        // lease, and the enclosing `tokio` timeout cannot preempt a blocking
+        // scan. Unarmed, this is the same unbounded behaviour as before.
         let evidence = f7_anchor_authority::families_v11::verify_dom_xmr_anchor_evidence_v11(
             &self.adapter,
             request,
             sidecar,
             secrets,
+            crate::route_step_deadline_v27::armed_v27(),
         )
         .await?;
         f7_anchor_authority::families_v11::VerifiedF7AnchorAuthorizationV12::from_dom_xmr(evidence)
@@ -2109,7 +2072,16 @@ impl ExactDomFundingBroadcasterV1 for RealDomExactBroadcasterV1<'_> {
         &mut self,
         exact_bytes: &[u8],
     ) -> Result<Self::Receipt, Self::Error> {
-        self.adapter.submit_canonical_transaction(exact_bytes)
+        // A broadcast is one bounded external call; the route-step ceiling
+        // is the outer bound the step is holding its lease under.
+        self.adapter.submit_canonical_transaction_until_v23(
+            exact_bytes,
+            crate::route_step_deadline_v27::clamp_v27(
+                Instant::now()
+                    .checked_add(Duration::from_secs(30))
+                    .ok_or(ChainAdapterError::TemporarilyUnavailable)?,
+            ),
+        )
     }
 }
 
@@ -2118,7 +2090,16 @@ impl ExactDomRefundBroadcasterV1 for RealDomExactBroadcasterV1<'_> {
     type Receipt = SubmissionReceiptV1;
 
     fn broadcast_exact_refund(&mut self, exact_bytes: &[u8]) -> Result<Self::Receipt, Self::Error> {
-        self.adapter.submit_canonical_transaction(exact_bytes)
+        // A broadcast is one bounded external call; the route-step ceiling
+        // is the outer bound the step is holding its lease under.
+        self.adapter.submit_canonical_transaction_until_v23(
+            exact_bytes,
+            crate::route_step_deadline_v27::clamp_v27(
+                Instant::now()
+                    .checked_add(Duration::from_secs(30))
+                    .ok_or(ChainAdapterError::TemporarilyUnavailable)?,
+            ),
+        )
     }
 }
 
@@ -2127,7 +2108,16 @@ impl ExactDomClaimBroadcasterV1 for RealDomExactBroadcasterV1<'_> {
     type Receipt = SubmissionReceiptV1;
 
     fn broadcast_exact_claim(&mut self, exact_bytes: &[u8]) -> Result<Self::Receipt, Self::Error> {
-        self.adapter.submit_canonical_transaction(exact_bytes)
+        // A broadcast is one bounded external call; the route-step ceiling
+        // is the outer bound the step is holding its lease under.
+        self.adapter.submit_canonical_transaction_until_v23(
+            exact_bytes,
+            crate::route_step_deadline_v27::clamp_v27(
+                Instant::now()
+                    .checked_add(Duration::from_secs(30))
+                    .ok_or(ChainAdapterError::TemporarilyUnavailable)?,
+            ),
+        )
     }
 }
 

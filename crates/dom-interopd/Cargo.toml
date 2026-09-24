@@ -117,6 +117,7 @@ evidence-only-ancestry-tests = ["dom-scriptless-store?/evidence-only"]
 config-only = []
 
 [dependencies]
+route-step-deadline = { path = "../route-step-deadline" }
 hex = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 adapter-evm = { path = "../adapters/evm", default-features = false }

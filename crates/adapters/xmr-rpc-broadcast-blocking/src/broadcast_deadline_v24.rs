@@ -24,7 +24,11 @@ pub(super) fn send_before_v24(
     builder: RequestBuilder,
     deadline: Option<Instant>,
 ) -> Result<Response, SpendPortError> {
-    let Some(deadline) = deadline else {
+    // A reader built without a deadline used to send with only the transport
+    // timeout, so six such calls inside one route step summed past the lease.
+    // The armed route-step ceiling fills the gap; with nothing armed the
+    // behaviour is unchanged.
+    let Some(deadline) = route_step_deadline::clamp_or_armed(deadline) else {
         return builder.send().map_err(|_| SpendPortError::Retryable);
     };
     let mut request = builder.build().map_err(|_| SpendPortError::Rejected)?;

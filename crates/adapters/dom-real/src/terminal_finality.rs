@@ -343,8 +343,16 @@ impl RealDomRpcRuntimeV1 {
         } else {
             evidence.block_height
         };
-        let (state, identity) = self.scan_through_with_tip(anchor_height)?;
-        let (state, identity) = self.scan_snapshot_to_tip(state, identity)?;
+        // Bounded by the route-step ceiling: this runs inside the step that
+        // holds the actuator lease, and the unbounded twins have no clock.
+        // Unarmed, the budget is the same minute the claim search uses.
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
+        );
+        let (state, identity) = self.scan_through_with_tip_until_v26(anchor_height, deadline)?;
+        let (state, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
         let transaction = self.cached_transaction_on_walked_chain(&evidence.tx_id, &identity)?;
         let transaction = if resolve_mode {
             transaction
@@ -818,8 +826,15 @@ impl RealDomRpcRuntimeV1 {
             minimum_confirmations,
             max_reorg_depth,
         )?;
-        let (state, identity) = self.scan_through_with_tip(0)?;
-        let (_, identity) = self.scan_snapshot_to_tip(state, identity)?;
+        // Same bound as the terminal snapshot above; this one always starts
+        // at genesis, so without a clock its cost is the whole chain height.
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
+        );
+        let (state, identity) = self.scan_through_with_tip_until_v26(0, deadline)?;
+        let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
         let mut cache = self.cache()?;
         cache
             .blocks

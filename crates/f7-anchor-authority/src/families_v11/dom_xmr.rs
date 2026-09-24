@@ -145,6 +145,10 @@ pub async fn verify_dom_xmr_anchor_evidence_v11(
     request: DomXmrAnchorValidationRequestV11<'_>,
     sidecar: &mut BlockingUdsSidecarPort,
     secrets: &EncryptedSqliteSecretStore,
+    // The DOM scan below walks up to 16_384 pages with no clock of its own,
+    // and the `tokio` timeout its caller wraps this in cannot preempt it: the
+    // scan is blocking. Only a deadline carried into the scan bounds it.
+    external_deadline: Option<std::time::Instant>,
 ) -> Result<VerifiedDomXmrAnchorEvidenceV11, Error> {
     validate_scope(&request)?;
     let role = request.role;
@@ -152,13 +156,14 @@ pub async fn verify_dom_xmr_anchor_evidence_v11(
     let terms = role.terms();
     let policy = request.compensation_policy;
     let xmr = verify_xmr_funding_v11(request.xmr, sidecar, secrets).await?;
-    let dom_evidence = verify_dom_funding_evidence_inner(
+    let dom_evidence = crate::verify_dom_funding_evidence_until_v23(
         dom,
         request.expected_dom_funding_txid,
         ready.shared_output_commitment(),
         ready.funding_template_hash(),
         policy.collateral_confirmations,
         true,
+        external_deadline,
     )
     .map_err(map_dom)?;
     if dom_evidence.chain_id != terms.dom_leg.chain_id.0

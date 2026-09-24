@@ -47,6 +47,7 @@ members = [
     "crates/adapters/btc-secp-sys",
     "crates/adapters/btc-vault",
     "crates/adapters/dom-real",
+    "crates/route-step-deadline",
     "crates/adapters/evm",
     "crates/btc-actuator",
     "crates/chain-profile",

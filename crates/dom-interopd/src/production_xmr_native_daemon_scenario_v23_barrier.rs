@@ -101,18 +101,22 @@ impl XmrLedgerPumpV23 {
                         ActionKindV1::Refund,
                     ] {
                         if let Some(action) = coordinator.poll(snapshot, leg, kind)? {
-                            if kind == ActionKindV1::Funding {
-                                let position = match leg {
-                                    LegIdV1::Upstream => 0,
-                                    LegIdV1::Downstream => 1,
-                                };
-                                // Only native inclusion can unlock maturation. This
-                                // cannot release a held submission or mint finality.
-                                running.confirm_dom_funding_v25(
-                                    &action.dom_id,
-                                    self.collateral_confirmations[position],
-                                )?;
-                            }
+                            // Every native DOM action needs the same thing from
+                            // the local chain: blocks on top of its inclusion.
+                            // Confirming only Funding left Claim and Refund
+                            // waiting for confirmations nothing would mine, which
+                            // is exactly the compensation and refund scenarios.
+                            // The helper is generic by transaction hash; only
+                            // native inclusion can unlock maturation, and this
+                            // cannot release a held submission or mint finality.
+                            let position = match leg {
+                                LegIdV1::Upstream => 0,
+                                LegIdV1::Downstream => 1,
+                            };
+                            running.confirm_dom_funding_v25(
+                                &action.dom_id,
+                                self.collateral_confirmations[position],
+                            )?;
                             if action.xmr_dispatched {
                                 expected.push((kind, action));
                             }

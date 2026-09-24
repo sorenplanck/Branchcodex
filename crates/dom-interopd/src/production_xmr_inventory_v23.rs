@@ -690,7 +690,13 @@ impl NativeF6XmrInventorySourceV23 {
             request.sidecar_socket,
             xmr_sidecar_auth::SidecarAuthKey::new(*request.sidecar_auth)
                 .map_err(|_| ProductionXmrInventoryErrorV23::Ownership)?,
-            std::time::Duration::from_millis(request.sidecar_timeout_ms),
+            // Already validated against `MAX_SIDECAR_CALL_MS_V26` above; the
+            // `min` keeps this site honest if that check ever moves.
+            std::time::Duration::from_millis(
+                request
+                    .sidecar_timeout_ms
+                    .min(crate::production_universal_leg_authority::MAX_SIDECAR_CALL_MS_V26),
+            ),
         )
         .map_err(|_| ProductionXmrInventoryErrorV23::Ownership)?;
         Ok(Self {
