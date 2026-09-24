@@ -3016,7 +3016,8 @@ fn map_contracts_outbound_error(
         // exactly as the sender's StorageUnavailable above already does.
         ProductionContractsOutboundErrorV1::Relay(RelayWorkerOutboundErrorV1::StoreRejected(
             dom_scriptless_store::SessionStoreError::StoreBusy
-            | dom_scriptless_store::SessionStoreError::Filesystem,
+            | dom_scriptless_store::SessionStoreError::Filesystem
+            | dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable,
         )) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Relay(
             RelayWorkerOutboundErrorV1::Sender(_)

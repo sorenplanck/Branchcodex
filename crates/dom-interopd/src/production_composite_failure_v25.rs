@@ -163,6 +163,9 @@ fn outbound(error: &RelayWorkerOutboundErrorV1) -> Cause {
             dom_scriptless_store::SessionStoreError::StoreBusy
             | dom_scriptless_store::SessionStoreError::Filesystem,
         ) => Cause::StoreBusy,
+        E::StoreRejected(
+            dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable,
+        ) => Cause::StoreClaimSigning,
         E::StoreRejected(_) => Cause::StoreRejected,
         E::InvalidDsc1 => Cause::InvalidDsc1,
         E::WrongDsc1Scope => Cause::WrongDsc1Scope,

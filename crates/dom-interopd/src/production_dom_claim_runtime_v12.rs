@@ -117,7 +117,14 @@ impl ProductionDomClaimRuntimeErrorV12 {
             | Self::Outbound(ProductionContractsOutboundErrorV1::Relay(
                 RelayWorkerOutboundErrorV1::OwnerBusy
                 | RelayWorkerOutboundErrorV1::StoreRejected(
-                    SessionStoreError::Filesystem | SessionStoreError::StoreBusy,
+                    SessionStoreError::Filesystem
+                    | SessionStoreError::StoreBusy
+                    // Staging a final claim re-checks the downstream claim
+                    // gate, which answers this once its retained observation
+                    // lease passes sixty seconds. Run 87's claim step measured
+                    // 98.3 s, so the lease aged out mid-step. Observe again and
+                    // retry, as every other consumer of this answer now does.
+                    | SessionStoreError::ClaimSigningAuthorityUnavailable,
                 ),
             ))
             | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
