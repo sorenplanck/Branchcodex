@@ -976,7 +976,10 @@ impl ProductionSettlementBridgeCoreV1 {
             // budget under a capability that lasts only 30 s.
             let budget_started = std::time::Instant::now();
             let materialization_now = clock.now_unix_ms()?;
-            if capability_expires_at <= materialization_now {
+            // `<`, not `<=`: a grant is live through its expiry instant, the
+            // boundary the closure below and the post-materialization check
+            // already use on this same path.
+            if capability_expires_at < materialization_now {
                 // The grant was live on entry but plan replay consumed it.
                 // No preparation may start; retry only if ownership is still
                 // current, without extending this expired dispatch grant.
@@ -989,9 +992,15 @@ impl ProductionSettlementBridgeCoreV1 {
             let deadline = budget_started
                 .checked_add(std::time::Duration::from_millis(remaining_ms))
                 .ok_or(AuthorityRefusalV1::Refused)?;
+            // The ceiling bounds the child's own work (its scans answer
+            // Unavailable when it runs out). It is real time derived from a
+            // domain-clock budget, so it is never consulted here as a verdict:
+            // the domain clock alone decides whether the grant expired, at the
+            // three checks on this path. A settlement-side `remaining()` check
+            // conflated the two bases and, under a simulated clock, refused a
+            // live grant whenever real elapsed time crossed its budget — the
+            // source of the flaky settlement tests.
             let _capability_ceiling_v28 = route_step_deadline::Armed::new(Some(deadline));
-            route_step_deadline::remaining(std::time::Duration::from_millis(1))
-                .ok_or(AuthorityRefusalV1::Unavailable)?;
             let mut authority = ProductionDeferredChildAuthorityAdapterV1 {
                 source: plan_source,
                 route_exposure,
@@ -1016,10 +1025,6 @@ impl ProductionSettlementBridgeCoreV1 {
                                     // for a later, independently minted grant.
                                     return Err(CoordinatorErrorV1::ChildAuthorityRefused);
                                 }
-                                // A clean cutoff leaves the exact deferred
-                                // attempt pending without granting more time.
-                                route_step_deadline::remaining(std::time::Duration::from_millis(1))
-                                    .ok_or(CoordinatorErrorV1::ChildAuthorityRefused)?;
                                 Ok(fresh_now)
                             },
                         )
