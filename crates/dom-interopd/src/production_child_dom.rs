@@ -434,12 +434,17 @@ impl ConcreteProductionDomActionAuthorityV1 {
                 if refund_context.is_some() {
                     return Err(child_conflict_at_v25(426));
                 }
-                if contracts.f7_receiver_observation_v25(trusted_chain_id)
-                    .map_err(map_actuator_error)?.is_some()
+                if crate::production_relay_stage12::step_segment_v28("claim_receiver_observation", || {
+                    contracts.f7_receiver_observation_v25(trusted_chain_id)
+                })
+                .map_err(map_actuator_error)?
+                .is_some()
                 {
-                    return match contracts.verified_f7_receiver_claim_v25(
-                        runtime, trusted_chain_id, binding.transaction_id(),
-                    ) {
+                    return match crate::production_relay_stage12::step_segment_v28("claim_receiver_verify", || {
+                        contracts.verified_f7_receiver_claim_v25(
+                            runtime, trusted_chain_id, binding.transaction_id(),
+                        )
+                    }) {
                         Ok(_) => Ok(ProductionDomActionResultV1::Externalized),
                         Err(DomActuatorError::FinalityPending | DomActuatorError::RpcAuthorityUnavailable)
                             => Ok(ProductionDomActionResultV1::Unknown),
@@ -469,8 +474,9 @@ impl ConcreteProductionDomActionAuthorityV1 {
                                     recovery,
                                 )
                                 .map_err(map_actuator_error)?;
-                            let receipt =
-                                match contracts.dispatch_f7_final_claim_v14(runtime, &submission) {
+                            let receipt = match crate::production_relay_stage12::step_segment_v28("claim_dispatch_f7_submit", || {
+                                contracts.dispatch_f7_final_claim_v14(runtime, &submission)
+                            }) {
                                     Ok(receipt) => receipt,
                                     Err(DomActuatorError::RpcAuthorityUnavailable) => {
                                         return Ok(ProductionDomActionResultV1::Unknown)
@@ -2312,7 +2318,7 @@ where
         {
             return Err(ChildAuthorityRefusalV1::Unavailable);
         }
-        let validated = self.validate_dispatch(request, now)?;
+        let validated = crate::production_relay_stage12::step_segment_v28("dom_validate_dispatch", || self.validate_dispatch(request, now))?;
         let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = dispatch_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
@@ -2346,24 +2352,24 @@ where
                 .map_err(map_runtime_binding_error)?;
             ProductionDomActionResultV1::Externalized
         } else {
-            session.actions.externalize(
-                ProductionDomActionContextV1 {
-                    contracts: &contracts,
-                    control: &mut self.control,
-                    lease: self.lease,
-                    trusted_chain_id: &self.trusted_chain_id,
-                    runtime: &self.runtime,
-                    now_unix_ms: now,
-                    funding_limit_v23,
-                },
-                call,
-            )?
+            crate::production_relay_stage12::step_segment_v28("dom_actions_externalize", || {
+                session.actions.externalize(
+                    ProductionDomActionContextV1 {
+                        contracts: &contracts,
+                        control: &mut self.control,
+                        lease: self.lease,
+                        trusted_chain_id: &self.trusted_chain_id,
+                        runtime: &self.runtime,
+                        now_unix_ms: now,
+                        funding_limit_v23,
+                    },
+                    call,
+                )
+            })?
         };
-        let returned = stage_final_claim_transport_v1(
-            &mut session.contracts,
-            &self.trusted_chain_id,
-            returned,
-        )?;
+        let returned = crate::production_relay_stage12::step_segment_v28("dom_stage_claim_transport", || {
+            stage_final_claim_transport_v1(&mut session.contracts, &self.trusted_chain_id, returned)
+        })?;
         let outcome = Self::dispatch_authority_outcome(request, returned)?;
         self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
