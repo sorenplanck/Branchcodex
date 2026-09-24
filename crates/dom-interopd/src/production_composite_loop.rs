@@ -578,10 +578,11 @@ impl ProductionCompositeRelayLoopV1 {
         {
             let selected = self.owner.leg_mut(leg);
             let chain = selected.trusted_chain_id();
-            selected
-                .contracts_mut()
-                .step_f7_readiness_v19(chain, now)
-                .map_err(ProductionCompositeLoopErrorV1::F7Readiness)?;
+            if let Err(error) = selected.contracts_mut().step_f7_readiness_v19(chain, now) {
+                if !readiness_refusal_is_retryable_v29(&error) {
+                    return Err(ProductionCompositeLoopErrorV1::F7Readiness(error));
+                }
+            }
         }
         Ok(())
     }
@@ -734,10 +735,13 @@ impl ProductionCompositeRelayLoopV1 {
         {
             let selected = self.owner.leg_mut(leg);
             let chain = selected.trusted_chain_id();
-            selected
-                .contracts_mut()
-                .step_f7_readiness_v19(chain, after_exchange)
-                .map_err(ProductionCompositeLoopErrorV1::F7Readiness)?;
+            if let Err(error) =
+                selected.contracts_mut().step_f7_readiness_v19(chain, after_exchange)
+            {
+                if !readiness_refusal_is_retryable_v29(&error) {
+                    return Err(ProductionCompositeLoopErrorV1::F7Readiness(error));
+                }
+            }
         }
         if let Some((contracts, relay)) = self.owner.cancelled_and_relay_mut_v22(leg) {
             let _cancelled_inbound = contracts
@@ -1883,6 +1887,30 @@ where
             Ok(ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { rounds: 1 })
         }
     }
+}
+
+/// A readiness refusal that only means "not with this observation" must not end
+/// the route.
+///
+/// `ClaimSigningAuthorityUnavailable` is raised by the Store when the retained
+/// anchor observation has aged past `MAX_V11_EXTERNAL_ANCHOR_AGE` (60 s). The
+/// remedy is to observe again, which the next turn of this loop does anyway.
+/// Measured on this route after the claim step became resumable, one claim
+/// step alone spends 57-70 s, so a 60 s observation routinely ages out inside
+/// a single step: run 84 died with "post-anchor DOM claim-signing authority is
+/// unavailable" while nothing was wrong and no lease had lapsed. A busy store
+/// is the same class of answer. Every other refusal stays fatal, and nothing
+/// is signed or staged from evidence this boundary already refused.
+fn readiness_refusal_is_retryable_v29(
+    error: &crate::production_contracts::ProductionF7ReadinessErrorV19,
+) -> bool {
+    use dom_scriptless_store::SessionStoreError as Store;
+    matches!(
+        error,
+        crate::production_contracts::ProductionF7ReadinessErrorV19::Store(
+            Store::ClaimSigningAuthorityUnavailable | Store::StoreBusy
+        )
+    )
 }
 
 fn derive_noise_session(

@@ -1829,10 +1829,21 @@ pub(super) fn run(
                 for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
                     let selected = relay_loop.stage12_owner_mut_v11().leg_mut(leg);
                     let chain = selected.trusted_chain_id();
-                    complete &= selected
-                        .contracts_mut()
-                        .f7_readiness_complete_v25(chain)
-                        .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                    // Same class as the loop's readiness step: a Store that
+                    // refuses because the retained anchor observation aged out
+                    // (60 s) is saying "not with this one", not "the route is
+                    // broken". Treat it as not-yet-complete and re-observe on
+                    // the next turn instead of ending the run.
+                    complete &= match selected.contracts_mut().f7_readiness_complete_v25(chain) {
+                        Ok(ready) => ready,
+                        Err(crate::production_contracts::ProductionF7ReadinessErrorV19::Store(
+                            dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable
+                            | dom_scriptless_store::SessionStoreError::StoreBusy,
+                        )) => false,
+                        Err(_) => {
+                            return Err(ProductionRunErrorV1::SettlementChildAuthority);
+                        }
+                    };
                 }
                 f7_readiness_latched_v25 = complete;
                 complete
