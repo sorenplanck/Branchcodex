@@ -693,6 +693,12 @@ pub enum ContractsRelayIngressErrorV1 {
     /// No Store-issued authority exists for this unseen message phase.
     #[error("unseen DSC1 message has no prepared Contracts authority")]
     UnpreparedMessage,
+    /// A claim signing-round message arrived before this side's claim step
+    /// installed its OperationalSigning ingress authority. The authority lives
+    /// only in this worker's memory and the Store already entitles this side
+    /// to it, so the message waits for that step instead of ending the route.
+    #[error("claim signing round is awaiting its ingress handoff")]
+    AwaitingClaimSigningHandoffV29,
     /// The peer's authenticated first funding edge arrived in the same Relay
     /// batch that completed bilateral readiness. Keep it pending until the
     /// native owner observes the chain and installs its linear authority.
@@ -1821,6 +1827,14 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                     delivery.signed_dsc1(),
                 )? {
                     return Err(ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16);
+                }
+                if self.authority.is_none()
+                    && self.store.xmr_bounded_claim_round_awaits_handoff_v29(
+                        self.session_id,
+                        delivery.signed_dsc1(),
+                    )?
+                {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingClaimSigningHandoffV29);
                 }
                 if self.store.xmr_funding_commitment_awaits_handoff_v25(
                     self.session_id,

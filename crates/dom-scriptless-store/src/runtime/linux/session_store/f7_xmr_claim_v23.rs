@@ -156,6 +156,79 @@ impl ContractsSessionStoreV1 {
 }
 
 impl ContractsSessionStoreV1 {
+    /// A claim signing-round message (`0x0c`-`0x0e`, ClaimAdaptor) that reached
+    /// this side before it installed its own `OperationalSigning` ingress
+    /// authority.
+    ///
+    /// That authority is not durable. `ensure_signing_ingress` prepares and
+    /// installs it inside the local claim step, and that step does not run
+    /// while the funding observation is not yet Verified, nor on the pass that
+    /// first creates the claim runtime and returns Started. A peer that has
+    /// already begun the round therefore meets an empty ingress, and
+    /// `accept_unseen` ended the route closed. Runs 85 and 88 died exactly
+    /// here, on byte-identical records: upstream session, sequence 16,
+    /// authority class 16, message type 0x0c.
+    ///
+    /// Answer true only for a message this side will be entitled to accept
+    /// once that step runs: the binding, round and profile that
+    /// `prepare_xmr_bounded_claim_transport_locked_v23` requires, plus the
+    /// peer's exact next envelope at the current revision, verified against
+    /// the roster. Every entitlement check answers false rather than raising,
+    /// so a message outside this exact shape keeps the behaviour it had.
+    pub fn xmr_bounded_claim_round_awaits_handoff_v29(
+        &self,
+        session: [u8; 32],
+        signed_bytes: &[u8],
+    ) -> Result<bool, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+        if !matches!(envelope.message_type, 0x0c | 0x0d | 0x0e)
+            || envelope.session_id != session
+            || !self.xmr_bounded_funding_profile_locked_v23(session)?
+        {
+            return Ok(false);
+        }
+        let payload = envelope.payload(signed_bytes)?;
+        if signing_payload_purpose(envelope.message_type, payload)? != PurposeV1::ClaimAdaptor {
+            return Ok(false);
+        }
+        let Ok(binding) = self.authenticate_xmr_bounded_claim_binding_v23(session) else {
+            return Ok(false);
+        };
+        if self.require_xmr_claim_binding_record_v23(&binding).is_err() {
+            return Ok(false);
+        }
+        let current = self.load_session_locked(session)?;
+        if self
+            .audit_xmr_bounded_claim_current_round_v23(&binding, &current)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let roster = self.load_transport_roster(session)?;
+        let identities = self.load_transport_identity_binding(session)?;
+        require_transport_identity_binding(&roster, &identities)?;
+        let Some(sender) = roster
+            .participants
+            .iter()
+            .find(|participant| participant.participant_id == envelope.sender_id)
+        else {
+            return Ok(false);
+        };
+        if envelope.chain_id != roster.chain_id
+            || envelope.previous_transcript_hash != current.transcript_hash()
+            || envelope.sequence
+                != self.transport_sequence_at_revision(
+                    session,
+                    sender.participant_id,
+                    current.revision(),
+                )?
+        {
+            return Ok(false);
+        }
+        Ok(envelope.verify(&sender.identity_key).is_ok())
+    }
+
     pub(in super::super) fn prepare_xmr_bounded_claim_transport_locked_v23(
         &self,
         chain: TrustedChainIdV1,
