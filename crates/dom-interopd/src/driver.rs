@@ -722,11 +722,15 @@ where
                 }
             }
             let event_id = driver_event_id(snapshot.route_id, stage, Some((leg, action)), None)?;
-            let result = supervisor.authorize_action(event_id, leg, action, action_authority);
+            let result = crate::production_relay_stage12::step_segment_v28("authorize_action", || {
+                supervisor.authorize_action(event_id, leg, action, action_authority)
+            });
             authority_step(supervisor, before_revision, stage, result)
         }
         ActionStateV1::Committed(reference) => {
-            match supervisor.dispatch_one_due_timer(timers) {
+            match crate::production_relay_stage12::step_segment_v28("committed_timer", || {
+                supervisor.dispatch_one_due_timer(timers)
+            }) {
                 Ok(report) => {
                     if report.urgent_externalized != 0
                         || report.runner_externalized != 0
@@ -772,7 +776,9 @@ where
                 }
                 Err(error) => return Err(error.into()),
             }
-            match supervisor.dispatch_one_effect(runner, external_custody) {
+            match crate::production_relay_stage12::step_segment_v28("committed_effect", || {
+                supervisor.dispatch_one_effect(runner, external_custody)
+            }) {
                 Ok(report) => {
                     let after = supervisor.snapshot()?;
                     let (reported_stage, disposition) = match after.leg(leg).action(action) {
@@ -828,14 +834,19 @@ where
                 Some((leg, action)),
                 Some((transaction_id, snapshot.last_event_digest)),
             )?;
-            let result = supervisor.record_chain_observation(
-                event_id,
-                ChainObservationQueryV1::Finality {
-                    leg,
-                    action,
-                    transaction_id,
+            let result = crate::production_relay_stage12::step_segment_v28(
+                "externalized_observation",
+                || {
+                    supervisor.record_chain_observation(
+                        event_id,
+                        ChainObservationQueryV1::Finality {
+                            leg,
+                            action,
+                            transaction_id,
+                        },
+                        observer,
+                    )
                 },
-                observer,
             );
             authority_step(supervisor, before_revision, stage, result)
         }

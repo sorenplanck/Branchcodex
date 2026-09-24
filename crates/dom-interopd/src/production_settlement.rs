@@ -849,17 +849,21 @@ impl ProductionSettlementBridgeCoreV1 {
         if capability.expires_at_unix_ms() < now {
             return Err(AuthorityRefusalV1::Refused);
         }
-        let (stored, lease) = self.load_or_refence_for_capability(capability, now)?;
+        let (stored, lease) = crate::production_relay_stage12::step_segment_v28(
+            "custody_load_plan",
+            || self.load_or_refence_for_capability(capability, now),
+        )?;
         validate_capability_against_stored(capability, &stored)?;
 
         // The audited current outcome is checked before another child can run.
         // In particular, a secret-bearing prefix whose response was lost is
         // replayed to the route until its exact public checkpoint appears in a
         // later capability.
-        let current = self
-            .coordinator
-            .current_custody_progress(lease, now)
-            .map_err(map_coordinator_error)?;
+        let current = crate::production_relay_stage12::step_segment_v28(
+            "custody_current_progress",
+            || self.coordinator.current_custody_progress(lease, now),
+        )
+        .map_err(map_coordinator_error)?;
         if matches!(current, CoordinatorDriveOutcomeV1::Unknown { .. }) {
             let outcome = self
                 .coordinator
@@ -891,18 +895,22 @@ impl ProductionSettlementBridgeCoreV1 {
                 source: plan_source,
                 route_exposure,
             };
-            let materialized = self
-                .coordinator
-                .materialize_deferred_child_one(lease, &mut authority, now, || {
-                    let fresh_now = clock
-                        .now_unix_ms()
-                        .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
-                    if capability_expires_at < fresh_now {
-                        return Err(CoordinatorErrorV1::LeaseExpired);
-                    }
-                    Ok(fresh_now)
-                })
-                .map_err(map_coordinator_error)?;
+            let materialized = crate::production_relay_stage12::step_segment_v28(
+                "custody_materialize_deferred",
+                || {
+                    self.coordinator
+                        .materialize_deferred_child_one(lease, &mut authority, now, || {
+                            let fresh_now = clock
+                                .now_unix_ms()
+                                .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+                            if capability_expires_at < fresh_now {
+                                return Err(CoordinatorErrorV1::LeaseExpired);
+                            }
+                            Ok(fresh_now)
+                        })
+                },
+            )
+            .map_err(map_coordinator_error)?;
             validate_deferred_materialization_transition(&prior_view, &materialized)?;
             let post_materialization_now = clock.now_unix_ms()?;
             if capability_expires_at < post_materialization_now {
@@ -915,11 +923,14 @@ impl ProductionSettlementBridgeCoreV1 {
             return map_drive_outcome(capability, retained_progress);
         }
 
-        let outcome = self
-            .coordinator
-            .drive_one(lease, &mut self.child_port, now)
-            .map_err(map_coordinator_error)?;
-        self.seal_drive_outcome_before_release(&stored, &outcome)?;
+        let outcome = crate::production_relay_stage12::step_segment_v28(
+            "custody_drive_one",
+            || self.coordinator.drive_one(lease, &mut self.child_port, now),
+        )
+        .map_err(map_coordinator_error)?;
+        crate::production_relay_stage12::step_segment_v28("custody_seal", || {
+            self.seal_drive_outcome_before_release(&stored, &outcome)
+        })?;
         map_drive_outcome(capability, outcome)
     }
 
