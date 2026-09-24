@@ -564,7 +564,17 @@ impl ScopedXmrSweepAuthorityV1 for ProductionXmrSweepAuthorityV10 {
             .executor
             .block_on(async {
                 tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
+                    // What is left of the route step, never more than the
+                    // original minute. A `tokio` timeout cannot preempt the
+                    // blocking sidecar call inside, so this only bounds the
+                    // async part — the sidecar carries its own ceiling.
+                    // A step with no time left still has to call: the inner
+                    // wait refuses immediately and the round retries, which is
+                    // the same outcome as a timeout and never a chain verdict.
+                    adapter_dom_real::route_step_deadline_v27::remaining_v27(
+                        std::time::Duration::from_secs(60),
+                    )
+                    .unwrap_or(std::time::Duration::from_millis(1)),
                     verify_xmr_funding_v11(
                         XmrFundingObservationRequestV11 {
                             terms: &self.funding_terms_v22,

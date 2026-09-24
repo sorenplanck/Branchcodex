@@ -395,7 +395,10 @@ impl ProductionSelectedF7ObserverV12 {
                                 }
                                 let funding = executor.block_on(async {
                                     tokio::time::timeout(
-                                        Duration::from_secs(60),
+                                        adapter_dom_real::route_step_deadline_v27::remaining_v27(
+                                            Duration::from_secs(60),
+                                        )
+                                        .unwrap_or(Duration::from_millis(1)),
                                         f7_anchor_authority::families_v11::verify_xmr_funding_v11(
                                             xmr_request(),
                                             &mut sidecar,

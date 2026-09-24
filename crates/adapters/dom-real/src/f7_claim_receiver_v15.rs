@@ -24,11 +24,13 @@ impl RealDomRpcRuntimeV1 {
         // at genesis with no ceiling of any kind — the one shape that has cost
         // this route its actuator lease before. Expiry is
         // `TemporarilyUnavailable`, which the caller already treats as retry.
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(60))
-            .ok_or(RealDomError::Chain(
-                ChainAdapterError::TemporarilyUnavailable,
-            ))?;
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .ok_or(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))?,
+        );
         let (state, identity) = self.scan_through_with_tip_until_v26(0, deadline)?;
         let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
         let candidate = {
@@ -109,12 +111,13 @@ impl RealDomRpcRuntimeV1 {
     ) -> Result<Option<VerifiedDomClaimObservationV1>, RealDomError> {
         // Existing receiver/downstream-gate consumers use the bounded path
         // without creating another scanner or changing their authority API.
-        let deadline =
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
                 .ok_or(RealDomError::Chain(
                     ChainAdapterError::TemporarilyUnavailable,
-                ))?;
+                ))?,
+        );
         self.find_f7_final_claim_until_v24(facts, deadline)
     }
 

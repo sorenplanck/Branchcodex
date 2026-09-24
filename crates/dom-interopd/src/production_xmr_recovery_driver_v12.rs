@@ -450,8 +450,13 @@ fn recovery_deadline_v23(
     if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
         return Err(Refusal::Unavailable);
     }
+    // Narrow to the route-step ceiling when one is armed: this is the single
+    // constructor every bounded recovery call goes through, so clamping here
+    // covers the whole family at once. Per-call budgets do not compose, and
+    // several of these run inside one step.
     started
         .checked_add(budget)
+        .map(adapter_dom_real::route_step_deadline_v27::clamp_v27)
         .filter(|deadline| *deadline > std::time::Instant::now())
         .ok_or(Refusal::Unavailable)
 }

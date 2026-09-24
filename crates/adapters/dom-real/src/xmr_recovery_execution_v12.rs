@@ -15,7 +15,9 @@ use dom_scriptless_store::{
 struct NativeRecoveryDeadlineV23(std::time::Instant);
 impl NativeRecoveryDeadlineV23 {
     fn until(deadline: std::time::Instant) -> Result<Self, RealDomError> {
-        let value = Self(deadline);
+        // The route-step ceiling never widens a caller's deadline; it only
+        // stops the sum of several of them from outliving the step's lease.
+        let value = Self(crate::route_step_deadline_v27::clamp_v27(deadline));
         if value.remaining()? > std::time::Duration::from_secs(60) {
             return Err(recovery_deadline_unavailable_v23());
         }
@@ -27,6 +29,7 @@ impl NativeRecoveryDeadlineV23 {
         }
         std::time::Instant::now()
             .checked_add(budget)
+            .map(crate::route_step_deadline_v27::clamp_v27)
             .map(Self)
             .ok_or_else(recovery_deadline_unavailable_v23)
     }

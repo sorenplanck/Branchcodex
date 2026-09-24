@@ -10,6 +10,59 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// Wall clock shared by every bounded observation of one route step.
+///
+/// Bounding each call on its own does not bound the step: a step makes several
+/// of them, and their ceilings add up. Measured on this route, per-call limits
+/// of 15 s, 30 s and 60 s still produced a 141.7 s step against a 120 s
+/// actuator lease, because three of them ran in sequence. The composition root
+/// arms this before the step and disarms it after; every bounded call then
+/// spends `min(its own budget, what remains of the step)`, so the sum can never
+/// outlive the lease the step is holding. Unarmed, every call keeps its own
+/// budget and nothing changes.
+pub mod route_step_deadline_v27 {
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    thread_local! {
+        static DEADLINE_V27: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// Arms the shared ceiling for the step about to run, returning the
+    /// previous value so a nested arm can restore it.
+    pub fn arm_v27(deadline: Option<Instant>) -> Option<Instant> {
+        DEADLINE_V27.with(|cell| cell.replace(deadline))
+    }
+
+    /// The step ceiling, when one is armed.
+    pub fn armed_v27() -> Option<Instant> {
+        DEADLINE_V27.with(Cell::get)
+    }
+
+    /// Narrows a caller's own deadline to the step ceiling. Never widens it.
+    pub fn clamp_v27(own: Instant) -> Instant {
+        match armed_v27() {
+            Some(step) if step < own => step,
+            _ => own,
+        }
+    }
+
+    /// The same narrowing expressed as a duration, for the blocking waits that
+    /// take a timeout rather than a deadline. Returns `None` when the step has
+    /// no time left, which the caller must treat as "not now", never as a
+    /// verdict about the chain.
+    pub fn remaining_v27(own: std::time::Duration) -> Option<std::time::Duration> {
+        let Some(step) = armed_v27() else {
+            return Some(own);
+        };
+        let left = step.checked_duration_since(Instant::now())?;
+        if left.is_zero() {
+            return None;
+        }
+        Some(left.min(own))
+    }
+}
+
 mod terminal_finality;
 mod xmr_recovery_execution_v12;
 mod xmr_recovery_finality;
@@ -807,7 +860,9 @@ impl RealDomRpcRuntimeV1 {
         if budget.is_zero() {
             return Err(unavailable());
         }
-        let deadline = Instant::now().checked_add(budget).ok_or_else(unavailable)?;
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            Instant::now().checked_add(budget).ok_or_else(unavailable)?,
+        );
         self.current_transaction_validation_context_until_v23(deadline)
     }
 
@@ -1197,11 +1252,13 @@ impl RealDomRpcRuntimeV1 {
         // all. Sixty seconds is the same budget the F7 claim search next door
         // uses, and expiry is `TemporarilyUnavailable`, which the plan source
         // already treats as "not yet" rather than as absence.
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(60))
-            .ok_or(RealDomError::Chain(
-                ChainAdapterError::TemporarilyUnavailable,
-            ))?;
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .ok_or(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))?,
+        );
         let (state, identity) = self.scan_through_with_tip_until_v26(anchor_height, deadline)?;
         let (_, identity) = self.scan_snapshot_to_tip_until_v26(state, identity, deadline)?;
         let transaction = self.cached_transaction_on_walked_chain(&evidence.tx_id, &identity)?;

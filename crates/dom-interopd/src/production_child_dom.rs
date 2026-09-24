@@ -1952,7 +1952,9 @@ impl<C, A> ProductionDomChildPortV1<C, A> {
             .map_or(DEFAULT_BUDGET_MS_V26, |renewal| {
                 (renewal / 4).clamp(1_000, DEFAULT_BUDGET_MS_V26)
             });
-        std::time::Instant::now() + std::time::Duration::from_millis(budget)
+        adapter_dom_real::route_step_deadline_v27::clamp_v27(
+            std::time::Instant::now() + std::time::Duration::from_millis(budget),
+        )
     }
 }
 

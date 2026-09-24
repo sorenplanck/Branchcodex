@@ -79,9 +79,11 @@ impl DomContractsActuatorV1<'_> {
         // out yields `TemporarilyUnavailable`, which the callers already retry,
         // and the retained scan prefix means the next round resumes rather than
         // restarting.
-        let deadline = std::time::Instant::now()
-            .checked_add(std::time::Duration::from_secs(30))
-            .ok_or(DomActuatorError::RpcAuthorityUnavailable)?;
+        let deadline = adapter_dom_real::route_step_deadline_v27::clamp_v27(
+            std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(30))
+                .ok_or(DomActuatorError::RpcAuthorityUnavailable)?,
+        );
         runtime
             .verified_f7_claim_finality_until_v26(
                 &facts,

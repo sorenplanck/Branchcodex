@@ -75,6 +75,15 @@ const MAX_INTERLEAVED_ROUNDS_V1: u64 = 1_000_000;
 
 /// Operational drain limits, not negotiated route or Relay message expiry.
 /// Time is fixed once; neither an unavailable peer nor a new frame renews it.
+/// Ceiling for one whole route step, not for one call inside it.
+///
+/// The step runs under the DOM actuator lease of 120 s, renewed immediately
+/// before it and not again until it returns. Ninety seconds leaves the round a
+/// thirty-second margin and still covers the longest step measured doing real
+/// work on this route (59 s, `Progressed`). Shorter would truncate legitimate
+/// progress; longer would not fit inside the lease.
+const ROUTE_STEP_CEILING_V27: Duration = Duration::from_secs(90);
+
 const TERMINAL_REFUND_DRAIN_TIME_V24: Duration = Duration::from_secs(180);
 const TERMINAL_REFUND_DRAIN_ROUNDS_V24: u16 = route_transport::MAX_ROUTE_FRAME_COUNT_V2 + 2;
 
@@ -1626,7 +1635,19 @@ where
     renew_actuator_lease().map_err(|()| CompositeCoreErrorV1::ActuatorLeaseRenewal)?;
     crate::production_relay_stage12::mark_lease_phase_v25("route_step");
     let started_v26 = std::time::Instant::now();
-    let report = route.step_route().map_err(CompositeCoreErrorV1::Route)?;
+    // Arm one ceiling for every bounded observation this step makes. Each of
+    // them already carries a budget, but budgets do not compose: three calls
+    // of 60 s, 60 s and 20 s produced a 141.7 s step against the 120 s
+    // actuator lease the step is holding, and the lease lapsed mid-step. The
+    // ceiling is the lease the caller just renewed, less the margin the rest
+    // of the round needs. A step that reaches it returns
+    // `TemporarilyUnavailable`, which the driver already treats as "not yet"
+    // and retries on the next round with the lease renewed again.
+    let step_ceiling_v27 = started_v26.checked_add(ROUTE_STEP_CEILING_V27);
+    let restore_v27 = adapter_dom_real::route_step_deadline_v27::arm_v27(step_ceiling_v27);
+    let report = route.step_route().map_err(CompositeCoreErrorV1::Route);
+    adapter_dom_real::route_step_deadline_v27::arm_v27(restore_v27);
+    let report = report?;
     // Diagnostic only: one driver step that outlasts the actuator lease is
     // what makes the lease lapse mid-step. Names the stage that did it.
     let spent_v26 = started_v26.elapsed();

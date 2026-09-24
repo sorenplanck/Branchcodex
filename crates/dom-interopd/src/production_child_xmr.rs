@@ -506,7 +506,9 @@ pub(crate) fn resolved_monero_deployment_digest_v1(
 /// still fit inside the actuator lease. A quorum answer fans out over several
 /// daemon calls of 30 s each, so without this the sum alone reaches 180 s.
 pub(crate) fn observation_deadline_v26() -> std::time::Instant {
-    std::time::Instant::now() + std::time::Duration::from_secs(15)
+    adapter_dom_real::route_step_deadline_v27::clamp_v27(
+        std::time::Instant::now() + std::time::Duration::from_secs(15),
+    )
 }
 
 pub(crate) fn map_actuator_error(error: XmrActuatorErrorV1) -> ChildAuthorityRefusalV1 {
