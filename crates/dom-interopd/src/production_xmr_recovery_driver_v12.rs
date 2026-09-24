@@ -631,9 +631,15 @@ mod compensation_handoff_tests {
 
 fn map_store(error: SessionStoreError) -> Refusal {
     match error {
+        // Every "not yet" answer from the Store is Unavailable, never
+        // Conflict: a claim-signing authority whose observation aged out and a
+        // refund transport still awaiting canonical public U are both
+        // resolved by the next round, and Conflict is fatal at the pump.
         SessionStoreError::Filesystem
         | SessionStoreError::StoreBusy
-        | SessionStoreError::FundingAuthorityUnavailable => Refusal::Unavailable,
+        | SessionStoreError::FundingAuthorityUnavailable
+        | SessionStoreError::ClaimSigningAuthorityUnavailable
+        | SessionStoreError::NativeXmrRefundTransportPendingV23 => Refusal::Unavailable,
         _ => Refusal::Conflict,
     }
 }
@@ -648,7 +654,9 @@ fn map_real(error: RealDomError) -> Refusal {
         | RealDomError::Store(
             SessionStoreError::Filesystem
             | SessionStoreError::StoreBusy
-            | SessionStoreError::FundingAuthorityUnavailable,
+            | SessionStoreError::FundingAuthorityUnavailable
+            | SessionStoreError::ClaimSigningAuthorityUnavailable
+            | SessionStoreError::NativeXmrRefundTransportPendingV23,
         ) => Refusal::Unavailable,
         _ => Refusal::Conflict,
     }

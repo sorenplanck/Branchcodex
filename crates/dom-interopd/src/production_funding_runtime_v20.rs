@@ -45,7 +45,17 @@ impl ProductionFundingErrorV20 {
     pub(crate) fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::Store(SessionStoreError::StoreBusy | SessionStoreError::Filesystem)
+            // The two *AuthorityUnavailable answers mean the Store has no
+            // authority to hand out *yet* (gate not prepared, observation
+            // aged past its window); the next round prepares or re-observes.
+            // Run 84 died on the claim-signing one; the funding one is the
+            // same answer from the fresh-gate predicates in recovery.
+            Self::Store(
+                SessionStoreError::StoreBusy
+                    | SessionStoreError::Filesystem
+                    | SessionStoreError::FundingAuthorityUnavailable
+                    | SessionStoreError::ClaimSigningAuthorityUnavailable
+            )
                 | Self::Observation(adapter_dom_real::RealDomError::Chain(
                     dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
                 ))

@@ -1838,6 +1838,7 @@ pub(super) fn run(
                         Ok(ready) => ready,
                         Err(crate::production_contracts::ProductionF7ReadinessErrorV19::Store(
                             dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable
+                            | dom_scriptless_store::SessionStoreError::FundingAuthorityUnavailable
                             | dom_scriptless_store::SessionStoreError::StoreBusy,
                         )) => false,
                         Err(_) => {

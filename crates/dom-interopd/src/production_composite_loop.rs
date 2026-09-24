@@ -496,6 +496,7 @@ impl ProductionCompositeRelayLoopV1 {
                 // local frame job is flush evidence. A missing peer is not.
                 Ok(!pending && !exchange.outbound_backlog_remains)
             }
+            Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             // The next public publisher tick may install the retained public
             // transport witness. No ACK is invented for the pending 0x19.
@@ -523,6 +524,7 @@ impl ProductionCompositeRelayLoopV1 {
         match self.step_exchange_and_poll_renewing_v25(leg, true, renew_actuator_lease) {
             Ok(report) => Ok(relay_step_moved_traffic_v1(&report)),
             Err(error) if is_terminal_relay_bootstrap_awaiting_v24(&error) => Ok(false),
+            Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -910,6 +912,20 @@ fn complete_exchange_poll_v23<T, U>(
     Ok((exchange?, inbound))
 }
 
+/// The Store or the single-threaded owner was busy when an inbound DSC1
+/// arrived. Nothing was accepted, so the message stays queued and the next
+/// turn reads it again; ending the route here turned a lock held by another
+/// operation into a fatal exit.
+fn is_inbound_store_busy_v29(error: &ProductionCompositeLoopErrorV1) -> bool {
+    matches!(error, ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
+        RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
+            route_transport::FramedContractsTransportErrorV2::Contracts(
+                crate::relay_worker::ContractsRelayIngressErrorV1::OwnerBusy
+                | crate::relay_worker::ContractsRelayIngressErrorV1::Store(
+                    dom_scriptless_store::SessionStoreError::StoreBusy
+                )))))))
+}
+
 fn is_peer_temporarily_unavailable_v23(error: &ProductionCompositeLoopErrorV1) -> bool {
     matches!(
         error,
@@ -993,6 +1009,7 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
             Err(error) if is_f6_activation_awaiting(&error) => Ok(false),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
             Err(error) if is_funding_handoff_awaiting_v25(&error) => Ok(false),
+            Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -1008,6 +1025,7 @@ impl CompositeActivationRelayV1 for ProductionCompositeRelayLoopV1 {
             Err(error) if is_f6_activation_awaiting(&error) => Ok(false),
             Err(error) if is_template_construction_awaiting_v17(&error) => Ok(false),
             Err(error) if is_funding_handoff_awaiting_v25(&error) => Ok(false),
+            Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -1424,6 +1442,7 @@ impl CompositeRelayCycleV1 for ProductionCompositeRelayLoopV1 {
             // Socket absence cannot suppress an already authorized local
             // recovery tick. step_leg still polls the authenticated durable
             // inbox, and any local refusal takes precedence over network loss.
+            Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
             Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -1908,7 +1927,9 @@ fn readiness_refusal_is_retryable_v29(
     matches!(
         error,
         crate::production_contracts::ProductionF7ReadinessErrorV19::Store(
-            Store::ClaimSigningAuthorityUnavailable | Store::StoreBusy
+            Store::ClaimSigningAuthorityUnavailable
+                | Store::FundingAuthorityUnavailable
+                | Store::StoreBusy
         )
     )
 }
@@ -2927,7 +2948,8 @@ mod tests {
             );
             match result {
                 Ok(_) => Ok(false),
-                Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
+                Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
+            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
                 Err(error) => Err(error),
             }
         }
