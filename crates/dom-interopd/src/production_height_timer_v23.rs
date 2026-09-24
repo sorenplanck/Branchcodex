@@ -102,13 +102,21 @@ impl ProductionHeightDeadlineAuthorityV23 {
         if self.require_complete_source_scopes_v23(&scopes).is_err() {
             return vec![Err(Error::Refused)];
         }
+        // The step ceiling is a thread-local: a worker spawned below cannot see
+        // it, so every observation there would fall back to its own full
+        // minute, outside whatever bound the caller is holding. Resolve it on
+        // this thread and re-arm the exact same instant inside each worker.
+        let ceiling_v28 = route_step_deadline::armed();
         std::thread::scope(|scope| {
             let mut workers = Vec::with_capacity(sources.len());
             let mut observations = Vec::with_capacity(sources.len() + 1);
             for source in sources {
                 match std::thread::Builder::new()
                     .name("xmr-height-observer".into())
-                    .spawn_scoped(scope, move || self.observe_xmr_v23(source))
+                    .spawn_scoped(scope, move || {
+                        let _armed = route_step_deadline::Armed::new(ceiling_v28);
+                        self.observe_xmr_v23(source)
+                    })
                 {
                     Ok(worker) => workers.push(worker),
                     Err(_) => observations.push(Err(Error::Unavailable)),
