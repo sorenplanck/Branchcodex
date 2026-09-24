@@ -383,6 +383,17 @@ impl ProductionActuatorHeartbeatV12 {
         report_renew_interval_v26();
         outcome
     }
+
+    /// Renewal for the instant before one route step: the DOM lease is
+    /// extended unconditionally so the step always starts with its full
+    /// duration, never with whatever a write-rate skip happened to leave.
+    pub(crate) fn renew_before_step_v27(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
+        let outcome = self.router.with_router(
+            ProductionSettlementChildRouterV1::renew_actuator_leases_before_step_v27,
+        );
+        report_renew_interval_v26();
+        outcome
+    }
 }
 
 /// Diagnostic only: names the stretch between two SUCCESSFUL lease renewals.

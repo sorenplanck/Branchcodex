@@ -387,7 +387,14 @@ impl ProductionXmrDeadlineSourceV23 {
             return Err(Error::Unavailable);
         }
         self.executor.block_on(async {
-            tokio::time::timeout(Duration::from_secs(60), async {
+            // Sixty seconds is this observation's own budget; when a ceiling
+            // is armed around the observation pass, narrow to what it leaves.
+            // With nothing armed the figure is unchanged.
+            let budget = match route_step_deadline::remaining(Duration::from_secs(60)) {
+                Some(budget) => budget,
+                None => return Err(Error::Unavailable),
+            };
+            tokio::time::timeout(budget, async {
                 // This current-thread executor is idle between observations.
                 // An HTTP keep-alive socket may have closed while its driver
                 // was not being polled. Retain connections only within this

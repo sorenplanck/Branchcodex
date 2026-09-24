@@ -77,12 +77,17 @@ const MAX_INTERLEAVED_ROUNDS_V1: u64 = 1_000_000;
 /// Time is fixed once; neither an unavailable peer nor a new frame renews it.
 /// Ceiling for one whole route step, not for one call inside it.
 ///
-/// The step runs under the DOM actuator lease of 120 s, renewed immediately
-/// before it and not again until it returns. Ninety seconds leaves the round a
-/// thirty-second margin and still covers the longest step measured doing real
-/// work on this route (59 s, `Progressed`). Shorter would truncate legitimate
-/// progress; longer would not fit inside the lease.
-const ROUTE_STEP_CEILING_V27: Duration = Duration::from_secs(90);
+/// The step runs under the DOM actuator lease of 120 s, renewed unconditionally
+/// immediately before it and not again until it returns. The ceiling bounds
+/// only the deadline-carrying calls inside the step; the local work between
+/// them — store writes, fsync, signature verification — obeys no clock and was
+/// measured at up to ~53 s across one claim step under load (90 s ceiling +
+/// 53 s local work = 143 s against the 120 s lease). Sixty seconds still covers
+/// the longest step measured doing real chain work on this route (59 s,
+/// `Progressed`) and leaves the other sixty to the unclockable local work. A
+/// step cut by the ceiling returns `TemporarilyUnavailable` and retries on the
+/// next round under a fresh lease; nothing is weakened.
+const ROUTE_STEP_CEILING_V27: Duration = Duration::from_secs(60);
 
 const TERMINAL_REFUND_DRAIN_TIME_V24: Duration = Duration::from_secs(180);
 const TERMINAL_REFUND_DRAIN_ROUNDS_V24: u16 = route_transport::MAX_ROUTE_FRAME_COUNT_V2 + 2;

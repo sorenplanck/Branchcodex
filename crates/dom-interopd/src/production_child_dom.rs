@@ -1771,10 +1771,16 @@ where
                     .filter(|remaining| *remaining > 0)
                     .ok_or(DomActuatorError::LeaseExpired)?
                     .min(60_000);
+                // The lease-derived figure bounds this call alone; the armed
+                // route-step ceiling bounds the step all such calls share.
+                let budget = route_step_deadline::remaining(
+                    std::time::Duration::from_millis(budget_ms),
+                )
+                .ok_or(DomActuatorError::RpcAuthorityUnavailable)?;
                 let observed = driver.observe_refund_reorg_v23(
                     &checkpoint,
                     validated.binding.transaction_id(),
-                    std::time::Duration::from_millis(budget_ms),
+                    budget,
                 );
                 let now_unix_ms = fresh_dom_time(&mut self.clock, observation_now)
                     .map_err(|_| DomActuatorError::RpcAuthorityUnavailable)?;
@@ -1998,6 +2004,37 @@ where
         if remaining <= duration - duration / 8 {
             self.lease = renew_dom_lease_v12(&mut self.control, self.lease, now, duration)?;
         }
+        Ok(())
+    }
+
+    /// Unconditional variant for the instant before one route step. The step
+    /// spends its whole wall clock against this lease without renewing, so the
+    /// write-rate skip above is wrong there: skipping at a remaining lease of
+    /// 106 s once cost the step that then legitimately ran 113 s. One extra
+    /// single-row write per route step is the entire cost. A lapsed lease is
+    /// still refused, exactly as above.
+    fn renew_actuator_lease_before_step_v27(
+        &mut self,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        let Some(duration) = self.lease_renewal_ms_v12 else {
+            return Ok(());
+        };
+        let now = self.clock.now_unix_ms()?;
+        if self
+            .lease
+            .lease_until_unix_ms()
+            .checked_sub(now)
+            .filter(|remaining| *remaining > 0)
+            .is_none()
+        {
+            eprintln!(
+                "DOM_RENEW_SITE_V26 site=dom_lease_lapsed until={} now={now} phase={}",
+                self.lease.lease_until_unix_ms(),
+                crate::production_relay_stage12::lease_phase_v25()
+            );
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        self.lease = renew_dom_lease_v12(&mut self.control, self.lease, now, duration)?;
         Ok(())
     }
 
@@ -2753,7 +2790,11 @@ fn native_refund_budget_v23(
         .filter(|value| *value > 0)
         .ok_or(ChildAuthorityRefusalV1::Unavailable)?
         .min(60_000);
-    Ok(std::time::Duration::from_millis(millis))
+    // Narrow to the armed route-step ceiling: the lease-derived figure bounds
+    // this observation alone, and per-call budgets do not compose across the
+    // step. Unarmed callers keep the exact figure above.
+    route_step_deadline::remaining(std::time::Duration::from_millis(millis))
+        .ok_or(ChildAuthorityRefusalV1::Unavailable)
 }
 
 fn exact_dom_session_index_v1(

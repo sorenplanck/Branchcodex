@@ -109,6 +109,15 @@ pub(crate) trait ProductionSettlementChildPortV1 {
         Ok(())
     }
 
+    /// Same renewal, but never skipped while the lease is live. The route step
+    /// that follows spends wall clock against this exact lease and renews
+    /// nothing until it returns, so "recent enough" is decided by the step
+    /// ceiling, not by a write-rate heuristic. It still cannot revive an
+    /// expired lease or change its owner.
+    fn renew_actuator_lease_before_step_v27(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
+        self.renew_actuator_lease_v12()
+    }
+
     /// Reserves no nonce and reveals no scalar. A Bitcoin child freezes the
     /// actual action session and refuses claim execution until M.8 completes.
     fn prepare_bitcoin_claim_v11(
@@ -231,7 +240,31 @@ impl ProductionSettlementChildRouterV1 {
     /// Visit every installed owner, including an idle route position. Idle
     /// children need their lease while the peer waits for chain confirmations.
     pub(crate) fn renew_actuator_leases_v12(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
-        self.dom.renew_actuator_lease_v12().inspect_err(|refusal| {
+        self.renew_actuator_leases_inner_v27(false)
+    }
+
+    /// Renewal for the instant before one route step: the DOM lease, which the
+    /// whole step runs under, is extended unconditionally. Round 77 lost its
+    /// claim step because the between-steps renewal skipped at a remaining
+    /// lease of 106 s (the one-eighth write-rate rule) and the step then ran
+    /// longer than what remained.
+    pub(crate) fn renew_actuator_leases_before_step_v27(
+        &mut self,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        self.renew_actuator_leases_inner_v27(true)
+    }
+
+    fn renew_actuator_leases_inner_v27(
+        &mut self,
+        before_step: bool,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        let dom = &mut self.dom;
+        if before_step {
+            dom.renew_actuator_lease_before_step_v27()
+        } else {
+            dom.renew_actuator_lease_v12()
+        }
+        .inspect_err(|refusal| {
             eprintln!("DOM_RENEW_SITE_V26 site=dom_child refusal={refusal:?}");
         })?;
         if let Some(selected) = &mut self.by_leg {

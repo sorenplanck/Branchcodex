@@ -72,8 +72,18 @@ pub struct Armed(Option<Instant>);
 
 impl Armed {
     /// Arms `deadline` and returns the guard that restores the prior value.
+    ///
+    /// Narrow-only: when a ceiling is already armed, the effective ceiling is
+    /// the earlier of the two. A nested guard can therefore shorten the step
+    /// it runs inside but can never extend it — an extension would let an
+    /// inner phase outlive the lease the outer step is holding.
     pub fn new(deadline: Option<Instant>) -> Self {
-        Self(arm(deadline))
+        let effective = match (deadline, armed()) {
+            (Some(own), Some(step)) => Some(own.min(step)),
+            (Some(own), None) => Some(own),
+            (None, step) => step,
+        };
+        Self(arm(effective))
     }
 }
 

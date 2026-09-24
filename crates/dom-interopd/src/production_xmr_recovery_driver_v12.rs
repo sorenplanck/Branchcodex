@@ -121,7 +121,7 @@ impl ProductionXmrRecoveryDriverV12 {
     pub(crate) fn observe_refund_share(
         &self,
     ) -> Result<adapter_dom_real::VerifiedDomRefundSecretV11, Refusal> {
-        self.observe_refund_share_bounded_v23(std::time::Duration::from_secs(60))
+        self.observe_refund_share_bounded_v23(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn observe_refund_share_bounded_v23(
@@ -160,7 +160,7 @@ impl ProductionXmrRecoveryDriverV12 {
     /// U revelation and DOM compensation are deliberately different variants;
     /// only the XMR actuator can later report an actual refunded XMR sweep.
     pub(crate) fn tick(&self) -> Result<DomXmrRecoveryProgressV12, Refusal> {
-        self.tick_bounded_v23(std::time::Duration::from_secs(60))
+        self.tick_bounded_v23(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn tick_bounded_v23(
@@ -184,7 +184,7 @@ impl ProductionXmrRecoveryDriverV12 {
         &self,
         funding: f7_anchor_authority::families_v11::VerifiedXmrFundingV11,
     ) -> Result<DomXmrRecoveryProgressV12, Refusal> {
-        self.tick_with_funding_bounded_v23(funding, std::time::Duration::from_secs(60))
+        self.tick_with_funding_bounded_v23(funding, default_recovery_budget_v27()?)
     }
 
     pub(crate) fn tick_with_funding_bounded_v23(
@@ -330,7 +330,7 @@ impl ProductionXmrRecoveryDriverV12 {
     pub(crate) fn verify_funding_prerequisite(
         &self,
     ) -> Result<VerifiedDomXmrFundingPrerequisiteV12, Refusal> {
-        self.verify_funding_prerequisite_bounded_v23(std::time::Duration::from_secs(60))
+        self.verify_funding_prerequisite_bounded_v23(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn verify_funding_prerequisite_bounded_v23(
@@ -353,7 +353,7 @@ impl ProductionXmrRecoveryDriverV12 {
     pub(crate) fn observe_remote_refund_event_v23(
         &self,
     ) -> Result<(adapter_dom_real::VerifiedDomRefundSecretV11, [u8; 32]), Refusal> {
-        self.observe_remote_refund_event_bounded_v24(std::time::Duration::from_secs(60))
+        self.observe_remote_refund_event_bounded_v24(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn observe_remote_refund_event_bounded_v24(
@@ -459,6 +459,13 @@ fn recovery_deadline_v23(
         .map(adapter_dom_real::route_step_deadline_v27::clamp_v27)
         .filter(|deadline| *deadline > std::time::Instant::now())
         .ok_or(Refusal::Unavailable)
+}
+
+/// Sixty seconds is each unnamed caller's own budget; when a route-step or
+/// pump ceiling is armed on this thread, narrow to what it leaves. Budgets do
+/// not compose across one step, and these observations all run inside one.
+fn default_recovery_budget_v27() -> Result<std::time::Duration, Refusal> {
+    route_step_deadline::remaining(std::time::Duration::from_secs(60)).ok_or(Refusal::Unavailable)
 }
 
 #[cfg(test)]

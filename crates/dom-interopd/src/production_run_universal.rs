@@ -1543,6 +1543,14 @@ pub(super) fn run(
                 actuator_heartbeat
                     .renew()
                     .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+                // One ceiling over the whole observation pass: each source
+                // already bounds its own calls, but the sources run in
+                // sequence and their budgets do not compose against the lease
+                // renewed above. Narrow-only: an already armed tighter
+                // ceiling stays in force.
+                let _observation_ceiling_v27 = route_step_deadline::Armed::new(
+                    std::time::Instant::now().checked_add(observation_bound),
+                );
                 for observed in height_deadlines_v23.observe_selected_v23(
                     &dom_f7_scanner,
                     external_call_bound,
@@ -2109,6 +2117,13 @@ pub(super) fn run(
                 funding_window_v23.close();
             }
         }
+        // The route step spends its whole wall clock against the DOM lease
+        // without renewing. Extend it unconditionally here — the between-steps
+        // heartbeat may skip on its write-rate rule (round 77: skipped at a
+        // remaining lease of 106 s; the following claim step ran longer).
+        actuator_heartbeat
+            .renew_before_step_v27()
+            .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
         let round_exit = crate::production_composite_loop::run_production_composite_route_half_v25(
             &mut relay_loop,
             &mut route_runtime,
