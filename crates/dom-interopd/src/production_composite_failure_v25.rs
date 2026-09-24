@@ -58,6 +58,7 @@ closed_tags!(Cause {
     Entropy => "entropy_unavailable", StoreRejected => "store_rejected",
     InvalidDsc1 => "invalid_dsc1", WrongDsc1Scope => "wrong_dsc1_scope",
     Unprepared => "unprepared_message", ClaimObservation => "awaiting_claim_observation",
+    ClaimHandoff => "awaiting_claim_ingress_handoff",
     Templates => "awaiting_template_construction", RefundHandoff => "awaiting_refund_handoff",
     NativeRefund => "awaiting_native_refund_transport",
     ReadinessGate => "awaiting_native_readiness_gate",
@@ -180,6 +181,7 @@ fn ingress(error: &ContractsRelayIngressErrorV1) -> Cause {
         E::Store(error) => store_cause(error),
         E::UnpreparedMessage => Cause::Unprepared,
         E::AwaitingFinalClaimObservationV16 => Cause::ClaimObservation,
+        E::AwaitingFinalClaimIngressHandoffV29 => Cause::ClaimHandoff,
         E::AwaitingTemplateConstructionV17 => Cause::Templates,
         E::AwaitingBootstrapRefundHandoffV18 => Cause::RefundHandoff,
         E::AwaitingNativeXmrRefundTransportV23 => Cause::NativeRefund,
@@ -457,6 +459,7 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
             C::OwnerBusy
                 | C::Unprepared
                 | C::ClaimObservation
+                | C::ClaimHandoff
                 | C::Templates
                 | C::RefundHandoff
                 | C::NativeRefund

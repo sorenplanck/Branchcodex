@@ -2060,7 +2060,8 @@ fn is_claim_finality_awaiting_v16(error: &ProductionCompositeLoopErrorV1) -> boo
     matches!(error, ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
         RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
             route_transport::FramedContractsTransportErrorV2::Contracts(
-                crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16))))))
+                crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16
+                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingFinalClaimIngressHandoffV29))))))
 }
 
 fn is_terminal_relay_bootstrap_awaiting_v24(error: &ProductionCompositeLoopErrorV1) -> bool {
@@ -2070,6 +2071,7 @@ fn is_terminal_relay_bootstrap_awaiting_v24(error: &ProductionCompositeLoopError
             error:
                 crate::production_contracts::ProductionBootstrapRuntimeErrorV16::Ingress(
                     crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16
+                        | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingFinalClaimIngressHandoffV29
                         | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingTemplateConstructionV17
                         | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingBootstrapRefundHandoffV18
                         | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrRefundTransportV23,
@@ -3020,6 +3022,9 @@ mod tests {
         };
         assert!(is_claim_finality_awaiting_v16(&wrap(
             Ingress::AwaitingFinalClaimObservationV16
+        )));
+        assert!(is_claim_finality_awaiting_v16(&wrap(
+            Ingress::AwaitingFinalClaimIngressHandoffV29
         )));
         assert!(is_template_construction_awaiting_v17(&wrap(
             Ingress::AwaitingNativeXmrRefundTransportV23
