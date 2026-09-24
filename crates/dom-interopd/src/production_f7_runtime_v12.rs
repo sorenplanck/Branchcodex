@@ -66,6 +66,15 @@ impl ProductionF7RuntimeErrorV12 {
             Self::Claim(error) => error.is_retryable(),
             Self::Evidence(F7FamilyAuthorityErrorV11::Unavailable)
             | Self::Store(SessionStoreError::StoreBusy | SessionStoreError::Filesystem) => true,
+            // The downstream claim gate answers with this while its retained
+            // observation lease is absent or older than sixty seconds. Both
+            // are "observe again", not "this route is broken": the Store has
+            // refused, so nothing is authorized, signed or staged from the
+            // stale evidence, and the next turn re-observes. Run 84 died here
+            // — `native_xmr_claim` treated it as fatal moments after the claim
+            // exposed the secret, which is exactly when the observer stops
+            // refreshing that lease.
+            Self::Store(SessionStoreError::ClaimSigningAuthorityUnavailable) => true,
             _ => false,
         }
     }

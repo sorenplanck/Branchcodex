@@ -1832,13 +1832,18 @@ fn select_observation_child(
             .find(|child| !matches!(child.stage, ChildStageV1::Final | ChildStageV1::Deferred))
             .map(|child| child.child_index)
             .or_else(|| {
-                let index = usize::try_from(view.revision % 2).ok()?;
+                // Alternate by completed observations, not by raw revision:
+                // each completed observation advances the revision twice (the
+                // prepared call and its outcome), so `revision % 2` keeps the
+                // same parity and can re-read one child forever while a reorg
+                // of the other goes unobserved.
+                let index = usize::try_from((view.revision / 2) % 2).ok()?;
                 Some(view.children[index].child_index)
             })
             .ok_or(AuthorityRefusalV1::Inconsistent),
         ChainObservationQueryV1::Invalidation { .. } => {
-            let first =
-                usize::try_from(view.revision % 2).map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+            let first = usize::try_from((view.revision / 2) % 2)
+                .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
             for index in [first, 1usize.wrapping_sub(first)] {
                 if view.children[index].stage == ChildStageV1::Final {
                     return Ok(view.children[index].child_index);

@@ -353,7 +353,12 @@ fn wait_claims(
                     }
                     timing.observe(actor, &snapshot);
                     complete &= claimed(&snapshot) && exited.is_some();
-                    scoped_snapshots.push(snapshot);
+                    // Carry the actor that produced this snapshot: the pump
+                    // must ask that actor's own coordinator about it. The two
+                    // actors can hold different aggregate identities for the
+                    // same effect, so crossing them fails a binding check that
+                    // is not actually violated.
+                    scoped_snapshots.push((actor, snapshot));
                 }
                 None if exited.is_some() => {
                     running.report_diagnostics_v25();
@@ -362,7 +367,13 @@ fn wait_claims(
                 None => complete = false,
             }
         }
-        xmr.pump(running, &scoped_snapshots.iter().collect::<Vec<_>>())?;
+        xmr.pump(
+            running,
+            &scoped_snapshots
+                .iter()
+                .map(|(actor, snapshot)| (*actor, snapshot))
+                .collect::<Vec<_>>(),
+        )?;
         if complete {
             return Ok(());
         }
@@ -414,11 +425,17 @@ fn native_real_daemon_bilateral_xmr_graph_custody_ready_v25() -> Result<()> {
                     .into());
                 }
                 if let Some(snapshot) = route_observers[actor].poll()? {
-                    snapshots.push(snapshot);
+                    snapshots.push((actor, snapshot));
                 }
                 markers[actor] = custody_marker_state_v25(running.state_dir(actor)?)?;
             }
-            xmr.pump(&mut running, &snapshots.iter().collect::<Vec<_>>())?;
+            xmr.pump(
+                &mut running,
+                &snapshots
+                    .iter()
+                    .map(|(actor, snapshot)| (*actor, snapshot))
+                    .collect::<Vec<_>>(),
+            )?;
             if markers
                 .iter()
                 .flatten()
@@ -659,6 +676,7 @@ pub(super) trait FundingBarrierControlV23 {
     fn pump_expected_xmr(
         &mut self,
         running: &mut NativeXmrRunningColdStartV23,
+        actor: usize,
         snapshot: &RouteSnapshotV1,
     ) -> Result<()>;
 
@@ -923,7 +941,7 @@ fn run_noncooperative_exit_v23(
                 // reopened. Retain the new exact candidate before inclusion.
                 if expected != RecoveryExitV23::XmrRefund || retained_refund_without_peer.is_some()
                 {
-                    control.pump_expected_xmr(&mut running, &snapshot)?;
+                    control.pump_expected_xmr(&mut running, boundary.survivor, &snapshot)?;
                 }
                 let funded = selected(&snapshot, boundary.leg);
                 if funded.funding.progress() == ActionProgressV1::Final {
@@ -975,7 +993,7 @@ fn run_noncooperative_exit_v23(
                             // absent. The GPL pool verifies proof/conservation;
                             // the controller supplies neither U nor a LOAD grant.
                             retained_refund_without_peer = Some((action.aggregate_id, id));
-                            control.pump_expected_xmr(&mut running, &snapshot)?;
+                            control.pump_expected_xmr(&mut running, boundary.survivor, &snapshot)?;
                         }
                     }
                 }

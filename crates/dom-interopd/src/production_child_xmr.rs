@@ -1478,6 +1478,19 @@ where
             let funding_tx_hash = self.setup.funding_tx_hash();
             return match self.funding_inclusion()? {
                 Some(inclusion) if inclusion.confirmations >= min_confirmations => {
+                    // The digest below commits to the live confirmation count,
+                    // so the same transaction in the same block answers with a
+                    // different digest once another block arrives, and the
+                    // coordinator refuses that as CorruptState against an
+                    // aggregate it already recorded final. Once a final
+                    // evidence digest exists, keep answering with it: only a
+                    // changed inclusion may change the answer, and that leaves
+                    // through `pending_or_invalidated` below, never here.
+                    if let Some(prior) = request.prior_finality_evidence_digest {
+                        return Ok(ChildObservationOutcomeV1::Final {
+                            evidence_digest: prior,
+                        });
+                    }
                     let facts = ChildFinalityFactsV1 {
                         final_evidence_digest: digest_parts(
                             FUNDING_EVIDENCE_DOMAIN_V1,

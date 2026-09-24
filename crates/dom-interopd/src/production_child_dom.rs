@@ -2435,7 +2435,14 @@ where
         let now = self.clock.now_unix_ms()?;
         let funding_limit_v23 =
             self.funding_limit_v23(request.dispatch.route_id(), now, started)?;
-        if request.current_route_fencing_epoch != request.dispatch.route_fencing_epoch()
+        // Refuse a regression, not an authenticated advance. The coordinator
+        // resumes a pending call under a newer owner by preserving the original
+        // operation and presenting the current authority separately, so
+        // demanding equality here turned a legitimate takeover into Conflict
+        // after any restart with a call in flight. The XMR child already
+        // compares both epochs this way, and the exact operation is still
+        // authenticated below by `validate_dispatch`.
+        if request.current_route_fencing_epoch < request.dispatch.route_fencing_epoch()
             || request.current_coordinator_fencing_epoch
                 < request.dispatch.coordinator_fencing_epoch()
             || request.reconciliation_attempt_id == ZERO_DIGEST

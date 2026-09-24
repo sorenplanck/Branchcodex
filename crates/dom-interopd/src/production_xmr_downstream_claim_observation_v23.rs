@@ -18,7 +18,20 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             return Ok(true);
         }
         let head = self.store.load_session(self.session_id)?;
-        if head.irreversible().adaptor_secret_exposed
+        // Exposure alone does not end the observation. Preparing, signing and
+        // resuming the claim still require the retained gate lease, and that
+        // lease is only refreshed here: stopping at exposure let it age past
+        // its sixty seconds while the very work it protects was still running,
+        // and the Store then refused with ClaimSigningAuthorityUnavailable.
+        // Keep observing until the claim is fully reconciled — the point at
+        // which nothing else asks for the lease. A refund or failed close ends
+        // it as before, since no claim work remains on those paths.
+        let claim_settled = matches!(
+            self.store
+                .f7_final_claim_progress_v14(chain, self.session_id)?,
+            dom_scriptless_store::F7FinalClaimProgressV14::TransportReconciled
+        );
+        if (head.irreversible().adaptor_secret_exposed && claim_settled)
             || matches!(
                 head.phase(),
                 dom_scriptless_store::SessionPhaseV1::RefundBroadcast
