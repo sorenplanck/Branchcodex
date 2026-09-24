@@ -949,7 +949,7 @@ fn run_legacy_production_v3(
     // crash anywhere in this pair exactly resumable.
     let (upstream_dom_payout, downstream_dom_payout, dom_lease) = authenticate_dom_f6_payouts(
         &inputs,
-        contracts_stage10_owner.private_bootstrap_v13.as_mut(),
+        contracts_stage10_owner.private_bootstrap_v13.as_deref_mut(),
         &mut chain_signers,
         &mut dom_actuator_store,
         pins.process_owner_id,

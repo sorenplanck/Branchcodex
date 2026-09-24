@@ -1020,7 +1020,7 @@ pub(crate) fn resume_completed_bootstrap_v13(
     bindings: [DomSessionBindingV1; 2],
     identity_path: &Path,
     identity_passphrase: &[u8],
-) -> Result13<Option<MountedBootstrapV13>> {
+) -> Result13<Option<Box<MountedBootstrapV13>>> {
     use BootstrapCommandErrorV13::{Binding, Custody, Peer, Storage};
     if artifact_path.file_name() != Some(std::ffi::OsStr::new(ARTIFACT)) {
         return Ok(None);
@@ -1138,7 +1138,12 @@ pub(crate) fn resume_completed_bootstrap_v13(
     }
     let cancelled_shares =
         xmr_cancelled_v22::resume(&context, &plan, &cap, work, &unlock, &policy)?;
-    Ok(Some(MountedBootstrapV13 {
+    // Boxed on return: the value is 45 KB and used to be copied by value at
+    // every level of the reopen chain (resume -> mount -> actor). In an
+    // unoptimized build those copies are real, and four reopened owners in one
+    // frame overflowed a 2 MiB test stack. The heap costs one allocation per
+    // reopen and every field keeps its exact ownership.
+    Ok(Some(Box::new(MountedBootstrapV13 {
         _shares: shares.try_into().map_err(|_| Custody)?,
         _f6_native_principals_v25: [None, None],
         _cancelled_shares: cancelled_shares,
@@ -1146,7 +1151,7 @@ pub(crate) fn resume_completed_bootstrap_v13(
             &context, &plan, &cap, &policy, &journal,
         )?,
         _ceremony: journal,
-    }))
+    })))
 }
 
 fn valid_record_name(name: &[u8]) -> bool {

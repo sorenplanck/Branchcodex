@@ -269,8 +269,11 @@ pub(crate) struct ProductionRelayStage12OwnerV1 {
         [Option<crate::production_noise_relay::ProductionXmrGraphPublicMaterialV22>; 2],
     xmr_graph_setup_v22:
         [Option<crate::production_xmr_graph_setup_v22::ProductionXmrGraphSetupV22>; 2],
+    // Boxed for the same reason the producer boxes it on return: 45 KB moved
+    // by value through every reopen level, which no optimized build is
+    // required to elide.
     _private_bootstrap_v13:
-        Option<crate::production_contracts_bootstrap::producer_v13::MountedBootstrapV13>,
+        Option<Box<crate::production_contracts_bootstrap::producer_v13::MountedBootstrapV13>>,
     relay: ProductionRelayV1,
     identity: Rc<ContractsTransportIdentityStoreV1>,
     dom_chain_adapter: Option<DomHttpChainAdapterV1>,

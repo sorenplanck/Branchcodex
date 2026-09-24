@@ -18,7 +18,7 @@ pub(crate) struct NativeF6SourceFixtureV25 {
 }
 
 pub(crate) struct NativeF6SourceActorV25 {
-    pub(crate) mounted: MountedBootstrapV13,
+    pub(crate) mounted: Box<MountedBootstrapV13>,
     pub(crate) source: ProductionNoiseGraphOfferV22,
 }
 
@@ -35,7 +35,7 @@ pub(crate) fn with_native_f6_source_fixture_v25(
 }
 
 impl NativeF6SourceFixtureV25 {
-    fn mount(&self, actor: usize) -> Result<(MountedBootstrapV13, Plan, Context)> {
+    fn mount(&self, actor: usize) -> Result<(Box<MountedBootstrapV13>, Plan, Context)> {
         let plan_path = self
             .original
             .plan

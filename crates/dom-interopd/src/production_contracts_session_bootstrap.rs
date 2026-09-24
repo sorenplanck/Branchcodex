@@ -98,7 +98,7 @@ pub(crate) struct ProductionContractsSessionLegBootstrapV1 {
 /// and linear early-transport authorities.
 pub(crate) struct ProductionContractsSessionBootstrapV1 {
     pub(crate) private_bootstrap_v13:
-        Option<crate::production_contracts_bootstrap::producer_v13::MountedBootstrapV13>,
+        Option<Box<crate::production_contracts_bootstrap::producer_v13::MountedBootstrapV13>>,
     pub(crate) dom_chain_adapter: DomHttpChainAdapterV1,
     pub(crate) identity: Rc<ContractsTransportIdentityStoreV1>,
     pub(crate) upstream: ProductionContractsSessionLegBootstrapV1,
