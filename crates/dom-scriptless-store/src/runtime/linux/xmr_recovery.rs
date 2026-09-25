@@ -155,9 +155,8 @@ impl XmrRecoveryCustodyV11 {
         }
         // Validate and seal before creating any persistent state. In particular
         // a wrong U/private signature cannot leave an apparently initialized root.
-        let envelope =
-            seal_xmr_recovery_archive_v11(graph, scope.custody_id, &key, private_refund)?;
-        let archive = open_archive(scope, &key, &envelope)?;
+        let envelope = seal_xmr_recovery_archive_v11(graph, scope.custody_id, key, private_refund)?;
+        let archive = open_archive(scope, key, &envelope)?;
         let root = RetainedDirectory::create_under(
             Arc::new(parent),
             ValidatedComponent::operator_selected_root(root_name)?,
@@ -324,8 +323,7 @@ fn encode_scope(scope: XmrRecoveryCustodyScopeV11) -> Result<Vec<u8>> {
         scope.graph_digest,
         scope.custody_id,
     ]
-    .iter()
-    .any(|value| *value == [0; 32])
+    .contains(&[0; 32])
     {
         return Err(XmrRecoveryCustodyErrorV11::Conflict);
     }

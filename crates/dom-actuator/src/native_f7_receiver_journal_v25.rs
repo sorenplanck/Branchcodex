@@ -60,10 +60,8 @@ pub(super) fn receiver_transaction_v25(
         let scope = ScopedDomActionV1::new(binding, effect, DomActionV1::BroadcastClaim)?;
         let operation =
             load_operation(transaction, effect)?.ok_or(DomActuatorError::UnsupportedFormat)?;
-        if receiver_operation_matches_v25(scope, tx, &operation) {
-            if found.replace(tx).is_some() {
-                return Err(DomActuatorError::UnsupportedFormat);
-            }
+        if receiver_operation_matches_v25(scope, tx, &operation) && found.replace(tx).is_some() {
+            return Err(DomActuatorError::UnsupportedFormat);
         }
     }
     Ok(found)

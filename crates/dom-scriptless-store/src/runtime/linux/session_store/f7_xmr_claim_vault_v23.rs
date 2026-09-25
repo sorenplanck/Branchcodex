@@ -2,6 +2,9 @@
 //! tombstone; this does not reuse any recovery edge or create signing authority.
 use super::*;
 
+/// Local participant id, roster digest and the two scope digests of one vault.
+type LocalVaultContextV23 = ([u8; 32], [u8; 32], [u8; 32], [u8; 32]);
+
 const MAGIC: &[u8; 8] = b"DOMXCV23";
 const DOMAIN: &str = "DOM-INTEROP/F7-XMR-CLAIM-VAULT/V23\0";
 const BODY: usize = 16 + 9 * 32;
@@ -286,7 +289,7 @@ impl ContractsSessionStoreV1 {
     fn claim_vault_local_context_v23(
         &self,
         binding: &NativeXmrClaimBindingV23,
-    ) -> Result<([u8; 32], [u8; 32], [u8; 32], [u8; 32]), SessionStoreError> {
+    ) -> Result<LocalVaultContextV23, SessionStoreError> {
         let origin = binding;
         let local = self.authenticate_local_transport_signer_binding(origin.issued.session_id)?;
         let index = origin

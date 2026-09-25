@@ -327,9 +327,10 @@ impl ProductionSettlementChildRouterV1 {
         &mut self,
         site: &'static str,
     ) -> Result<(), ChildAuthorityRefusalV1> {
-        self.renew_actuator_leases_inner_v27(true).inspect_err(|refusal| {
-            eprintln!("DOM_CHILD_SEAM_RENEW_V27 site={site} refusal={refusal:?}");
-        })
+        self.renew_actuator_leases_inner_v27(true)
+            .inspect_err(|refusal| {
+                eprintln!("DOM_CHILD_SEAM_RENEW_V27 site={site} refusal={refusal:?}");
+            })
     }
 
     /// Installs both independently scoped counterparties for any of the 16

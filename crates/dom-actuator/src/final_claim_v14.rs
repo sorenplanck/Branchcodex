@@ -485,9 +485,14 @@ impl DomContractsActuatorV1<'_> {
             if evidence.chain_id.0 != observed.chain_id() || evidence.tx_id != observed.tx_hash() {
                 return Err(DomActuatorError::CapabilityMismatch);
             }
-            let finality = self.verified_f7_receiver_claim_v25(runtime, chain, observed.tx_hash())?;
-            let observation = finality_observation(finality.tx_hash(), finality.block_height(),
-                finality.block_hash(), finality.evidence_digest());
+            let finality =
+                self.verified_f7_receiver_claim_v25(runtime, chain, observed.tx_hash())?;
+            let observation = finality_observation(
+                finality.tx_hash(),
+                finality.block_height(),
+                finality.block_hash(),
+                finality.evidence_digest(),
+            );
             self.persist_claim_finality(control, lease, finality, now_unix_ms)?;
             return Ok(observation);
         }

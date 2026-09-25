@@ -18,8 +18,10 @@ mod downstream_claim_v23;
 #[path = "production_relay_xmr_enrollment_v23.rs"]
 mod xmr_enrollment_v23;
 
+pub(crate) use crate::route_step_segment_v28::{
+    lease_phase_v25, mark_lease_phase_v25, step_segment_v28,
+};
 use std::{path::Path, rc::Rc};
-pub(crate) use crate::route_step_segment_v28::{lease_phase_v25, mark_lease_phase_v25, step_segment_v28};
 
 #[path = "production_relay_cancelled_v22.rs"]
 mod cancelled_v22;

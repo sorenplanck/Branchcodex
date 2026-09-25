@@ -78,6 +78,7 @@ pub(super) fn verified<T: Clone, E>(
     Ok(value)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     use super::*;

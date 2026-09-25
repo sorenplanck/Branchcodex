@@ -1775,13 +1775,20 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
         // recipient's revision is the deadlock this run keeps reproducing.
         let ready_vote_v25 = parsed.unsigned().kind() as u8 == 0x17;
         let rev_before_v25 = if ready_vote_v25 {
-            self.store.load_session(self.session_id).map(|s| s.revision()).ok()
+            self.store
+                .load_session(self.session_id)
+                .map(|s| s.revision())
+                .ok()
         } else {
             None
         };
         let diag_v25 = |branch: &str, worker: &Self| {
             if let Some(before) = rev_before_v25 {
-                let after = worker.store.load_session(worker.session_id).map(|s| s.revision()).ok();
+                let after = worker
+                    .store
+                    .load_session(worker.session_id)
+                    .map(|s| s.revision())
+                    .ok();
                 eprintln!(
                     "DOM_READY_APPLY_V25 branch={branch} rev_before={before} rev_after={after:?}"
                 );
@@ -2359,9 +2366,11 @@ where
                 return Ok(RelayOutboundStepV1::Idle);
             }
             dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) => retained,
-            _ => return Err(RelayWorkerOutboundErrorV1::StoreRejected(
-                SessionStoreError::InvalidTransition,
-            )),
+            _ => {
+                return Err(RelayWorkerOutboundErrorV1::StoreRejected(
+                    SessionStoreError::InvalidTransition,
+                ))
+            }
         };
         let message = SignedMessageV1::decode_exact(retained.signed_bytes())
             .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
@@ -2403,8 +2412,8 @@ where
                 .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?
             else {
                 return Err(RelayWorkerOutboundErrorV1::StoreRejected(
-                SessionStoreError::InvalidTransition,
-            ));
+                    SessionStoreError::InvalidTransition,
+                ));
             };
             if retained.application_id() != &application_id
                 || retained.message_digest() != &message_digest

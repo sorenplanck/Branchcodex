@@ -17,8 +17,7 @@ pub(super) fn funding_deadline_v24(
     // The route step that holds the DOM actuator lease is the outer bound on
     // all of this: a funding window still valid for the rest of the lease is
     // no licence to spend the whole step on one broadcast.
-    let deadline =
-        adapter_dom_real::route_step_deadline_v27::clamp_v27(window.min(lease));
+    let deadline = adapter_dom_real::route_step_deadline_v27::clamp_v27(window.min(lease));
     (deadline > observed_before_clock).then_some(deadline)
 }
 

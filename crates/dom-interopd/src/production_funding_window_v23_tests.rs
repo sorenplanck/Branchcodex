@@ -388,7 +388,12 @@ fn late_observation_completion_never_grants_a_fresh_sixty_seconds_v23() -> TestR
     let temporary = temporary()?;
     let mut supervisor = supervisor(temporary.path())?;
     assert!(matches!(
-        supervisor.authorize_action([20; 32], LegIdV1::Upstream, ActionKindV1::Funding, &mut guard),
+        supervisor.authorize_action(
+            [20; 32],
+            LegIdV1::Upstream,
+            ActionKindV1::Funding,
+            &mut guard
+        ),
         Err(RouteSupervisorErrorV1::RouteActionAuthority(
             AuthorityRefusalV1::Unavailable
         ))

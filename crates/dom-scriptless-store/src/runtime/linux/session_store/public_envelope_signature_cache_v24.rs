@@ -90,6 +90,7 @@ fn verify_using(
     Ok(accepted)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "public_envelope_signature_cache_v24_tests.rs"]
 mod tests;

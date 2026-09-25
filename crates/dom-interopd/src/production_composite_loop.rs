@@ -567,9 +567,9 @@ impl ProductionCompositeRelayLoopV1 {
         let TimelockSpec::TimestampSeconds { value: now } = self.fresh_relay_time()? else {
             return Err(ProductionCompositeLoopErrorV1::ClockUnavailable);
         };
-        if let Err(error) = self
-            .owner
-            .step_bootstrap_with_renewal_v25(leg, now, renew_actuator_lease)
+        if let Err(error) =
+            self.owner
+                .step_bootstrap_with_renewal_v25(leg, now, renew_actuator_lease)
         {
             let error = ProductionCompositeLoopErrorV1::BootstrapAtV25 {
                 context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
@@ -736,8 +736,7 @@ impl ProductionCompositeRelayLoopV1 {
                 };
                 if is_bootstrap_store_busy_v29(&error) {
                     // Nothing was applied; repeat on the next turn.
-                } else if !terminal_relay_drain
-                    || !is_terminal_relay_bootstrap_awaiting_v24(&error)
+                } else if !terminal_relay_drain || !is_terminal_relay_bootstrap_awaiting_v24(&error)
                 {
                     return Err(error);
                 }
@@ -750,8 +749,9 @@ impl ProductionCompositeRelayLoopV1 {
         {
             let selected = self.owner.leg_mut(leg);
             let chain = selected.trusted_chain_id();
-            if let Err(error) =
-                selected.contracts_mut().step_f7_readiness_v19(chain, after_exchange)
+            if let Err(error) = selected
+                .contracts_mut()
+                .step_f7_readiness_v19(chain, after_exchange)
             {
                 if !readiness_refusal_is_retryable_v29(&error) {
                     return Err(ProductionCompositeLoopErrorV1::F7Readiness(error));
@@ -930,13 +930,19 @@ fn complete_exchange_poll_v23<T, U>(
 /// turn reads it again; ending the route here turned a lock held by another
 /// operation into a fatal exit.
 fn is_inbound_store_busy_v29(error: &ProductionCompositeLoopErrorV1) -> bool {
-    matches!(error, ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
-        RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
-            route_transport::FramedContractsTransportErrorV2::Contracts(
-                crate::relay_worker::ContractsRelayIngressErrorV1::OwnerBusy
-                | crate::relay_worker::ContractsRelayIngressErrorV1::Store(
-                    dom_scriptless_store::SessionStoreError::StoreBusy
-                )))))))
+    matches!(
+        error,
+        ProductionCompositeLoopErrorV1::Inbound(ProductionContractsPollErrorV1::Worker(
+            RelayWorkerInboundErrorV1::Contracts(route_transport::RouteDispatchErrorV1::Contracts(
+                route_transport::FramedContractsTransportErrorV2::Contracts(
+                    crate::relay_worker::ContractsRelayIngressErrorV1::OwnerBusy
+                        | crate::relay_worker::ContractsRelayIngressErrorV1::Store(
+                            dom_scriptless_store::SessionStoreError::StoreBusy
+                        )
+                )
+            ))
+        ))
+    )
 }
 
 /// A bootstrap step refused by a Store that was busy or could not read. The
@@ -2980,7 +2986,7 @@ mod tests {
             match result {
                 Ok(_) => Ok(false),
                 Err(error) if is_inbound_store_busy_v29(&error) => Ok(false),
-            Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
+                Err(error) if is_peer_temporarily_unavailable_v23(&error) => Ok(false),
                 Err(error) => Err(error),
             }
         }

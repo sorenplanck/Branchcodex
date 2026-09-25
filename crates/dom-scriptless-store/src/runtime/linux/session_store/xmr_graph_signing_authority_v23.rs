@@ -99,6 +99,7 @@ impl ContractsSessionStoreV1 {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in super::super) fn require_graph_signing_successor_v23(
         &self,
         current: &SessionRecordV1,
@@ -110,8 +111,8 @@ impl ContractsSessionStoreV1 {
         recovery_scope: Option<&RecoveryTransportAuditScopeV1>,
     ) -> Result<(), SessionStoreError> {
         #[cfg(debug_assertions)]
-        let profile_v26 = std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26")
-            .map(|_| std::time::Instant::now());
+        let profile_v26 =
+            std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26").map(|_| std::time::Instant::now());
         let binding =
             self.authenticate_xmr_graph_signing_session_v23(current.session_id(), edge)?;
         #[cfg(debug_assertions)]

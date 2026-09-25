@@ -321,6 +321,7 @@ fn verify_using_v25<B: SigningSemanticBindingAccessV1>(
     Ok(result)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "public_signing_semantics_cache_v25_tests.rs"]
 mod tests;

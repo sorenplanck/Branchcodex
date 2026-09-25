@@ -340,7 +340,9 @@ impl RealDomRpcRuntimeV1 {
         let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
-                .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
+                .ok_or(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))?,
         );
         let snapshot = self.transaction_snapshot_until_v27(evidence, deadline)?;
         let transaction = snapshot.transaction.ok_or(RealDomError::EvidenceNotFound)?;
@@ -815,7 +817,9 @@ impl RealDomRpcRuntimeV1 {
         let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
-                .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
+                .ok_or(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))?,
         );
         // This exact checkpoint scopes the retained canonical walk. Keep only
         // its candidate transaction and the heights needed to prove the fork,

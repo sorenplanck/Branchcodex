@@ -292,6 +292,7 @@ impl ContractsSessionStoreV1 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_origin(
     chain: TrustedChainIdV1,
     route: [u8; 32],

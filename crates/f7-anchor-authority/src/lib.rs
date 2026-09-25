@@ -1115,6 +1115,7 @@ pub(crate) fn verify_dom_funding_evidence_until_v23(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_dom_funding_evidence_with_progress_v24(
     dom: &DomHttpChainAdapterV1,
     expected_funding_txid: [u8; 32],

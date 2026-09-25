@@ -182,7 +182,7 @@ impl ContractsSessionStoreV1 {
     ) -> Result<bool, SessionStoreError> {
         let _guard = self.operation_lock()?;
         let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
-        if !matches!(envelope.message_type, 0x0c | 0x0d | 0x0e)
+        if !matches!(envelope.message_type, 0x0c..=0x0e)
             || envelope.session_id != session
             || !self.xmr_bounded_funding_profile_locked_v23(session)?
         {

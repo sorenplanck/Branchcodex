@@ -681,10 +681,9 @@ impl ContractsSessionStoreV1 {
                 && envelope.session_id == session_id
                 && envelope.sender_id == requester_id
                 && candidate == payload
+                && (record.equivocation || sequence.replace(envelope.sequence).is_some())
             {
-                if record.equivocation || sequence.replace(envelope.sequence).is_some() {
-                    return Err(SessionStoreError::Conflict);
-                }
+                return Err(SessionStoreError::Conflict);
             }
             Ok(())
         })?;
@@ -715,10 +714,9 @@ impl ContractsSessionStoreV1 {
             if envelope.session_id == session_id
                 && envelope.sender_id == signer_id
                 && response.request_message_digest() == request_message_digest
+                && (record.equivocation || sequence.replace(envelope.sequence).is_some())
             {
-                if record.equivocation || sequence.replace(envelope.sequence).is_some() {
-                    return Err(SessionStoreError::Conflict);
-                }
+                return Err(SessionStoreError::Conflict);
             }
             Ok(())
         })?;

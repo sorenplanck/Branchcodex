@@ -4,6 +4,14 @@
 use super::*;
 use dom_scriptless_crypto::VerifiedXmrRecoveryGraphV11;
 
+/// Graph trace, resumable cursor and the authenticated chain identity.
+type XmrRecoveryFinalityTraceV23 = (
+    GraphTrace,
+    CursorStateV1,
+    ObservedDomIdentityV1,
+    std::collections::BTreeMap<u64, [u8; 32]>,
+);
+
 #[path = "xmr_refund_reorg_v23.rs"]
 mod refund_reorg_v23;
 pub use refund_reorg_v23::{VerifiedDomXmrRefundReorgV23, VerifiedDomXmrRefundRevalidationV23};
@@ -357,15 +365,7 @@ impl RealDomRpcRuntimeV1 {
         watched: &std::collections::BTreeSet<u64>,
         deadline: Option<std::time::Instant>,
         cache_scope: Option<[u8; 32]>,
-    ) -> Result<
-        (
-            GraphTrace,
-            CursorStateV1,
-            ObservedDomIdentityV1,
-            std::collections::BTreeMap<u64, [u8; 32]>,
-        ),
-        RealDomError,
-    > {
+    ) -> Result<XmrRecoveryFinalityTraceV23, RealDomError> {
         if watched.len() > MAX_CURSOR_HISTORY + 1 {
             return Err(RealDomError::BoundsExceeded);
         }

@@ -8,7 +8,6 @@
 
 mod admission;
 mod driver;
-mod route_step_segment_v28;
 #[cfg(feature = "production")]
 mod production_bitcoin_prebroadcast;
 #[cfg(feature = "production")]
@@ -65,6 +64,7 @@ mod production_relay_peer_scope_v23;
 mod production_xmr_compensation;
 #[cfg(feature = "production")]
 mod production_xmr_funding_command_v12;
+mod route_step_segment_v28;
 #[cfg(feature = "production")]
 pub use production_f6_factory::artifact_writer_v23::{
     F6ArtifactWriteErrorV23, PreparedUntrustedF6ArtifactV23, PublicF6ArtifactInputsV23,

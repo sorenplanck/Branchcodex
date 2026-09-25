@@ -353,7 +353,7 @@ impl DomContractsActuatorV1<'_> {
             || finality.minimum_confirmations() != self.binding.min_confirmations()
             || finality.max_reorg_depth() != self.binding.max_reorg_depth()
             || finality.confirmation_depth() < self.binding.min_confirmations()
-            || finality.cancel_tx_hash().is_none_or(|cancel| {
+            || finality.cancel_tx_hash().map_or(true, |cancel| {
                 cancel == [0; 32]
                     || cancel == funding.tx_hash()
                     || cancel == finality.transaction_hash()

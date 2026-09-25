@@ -4,10 +4,10 @@
 mod final_claim_v14;
 #[path = "funding_dispatch_v23.rs"]
 mod funding_dispatch_v23;
-#[path = "native_xmr_refund_v23.rs"]
-mod native_xmr_refund_v23;
 #[path = "native_f7_receiver_claim_v25.rs"]
 mod native_f7_receiver_claim_v25;
+#[path = "native_xmr_refund_v23.rs"]
+mod native_xmr_refund_v23;
 pub use final_claim_v14::{
     DomF7FinalClaimAdmissionV14, DomF7FinalClaimRequestV14, DomF7FinalClaimSubmissionV14,
 };
@@ -524,7 +524,10 @@ impl<'store> DomContractsActuatorV1<'store> {
         if let Some(observed) = self.f7_receiver_observation_v25(trusted_chain_id)? {
             control.retain_f7_receiver_claim_v25(lease, request.scope(), &observed, now_unix_ms)?;
             return control.persist_authenticated_settlement_child_binding(
-                lease, request, observed.tx_hash(), now_unix_ms,
+                lease,
+                request,
+                observed.tx_hash(),
+                now_unix_ms,
             );
         }
         let transaction_id = self.retained_final_claim_transaction_id_v2(
@@ -2235,7 +2238,8 @@ impl<'store> DomContractsActuatorV1<'store> {
         let claim_tx = match self.f7_receiver_observation_v25(&trusted)? {
             Some(observed) => observed.tx_hash(),
             None => {
-                let custody = control.audit_final_claim_custody_v2(lease, self.binding, now_unix_ms)?;
+                let custody =
+                    control.audit_final_claim_custody_v2(lease, self.binding, now_unix_ms)?;
                 if custody.classification().is_unattempted() {
                     return Err(DomActuatorError::InvalidStage);
                 }
@@ -2297,7 +2301,11 @@ impl<'store> DomContractsActuatorV1<'store> {
         self.require_trusted_chain_binding(trusted_chain_id)?;
         let claim_tx = match self.f7_receiver_observation_v25(trusted_chain_id)? {
             Some(observed) => observed.tx_hash(),
-            None => control.retained_final_claim_identity_v2(lease, self.binding, now_unix_ms)?.tx_hash,
+            None => {
+                control
+                    .retained_final_claim_identity_v2(lease, self.binding, now_unix_ms)?
+                    .tx_hash
+            }
         };
         let invalidation = control.retained_terminal_invalidation(
             lease,

@@ -37,6 +37,7 @@ pub(in super::super) fn collect_untrusted_messages_v25(
     Ok(retained)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "xmr_graph_message_collect_v25_tests.rs"]
 mod tests;

@@ -388,9 +388,9 @@ impl ProductionActuatorHeartbeatV12 {
     /// extended unconditionally so the step always starts with its full
     /// duration, never with whatever a write-rate skip happened to leave.
     pub(crate) fn renew_before_step_v27(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
-        let outcome = self.router.with_router(
-            ProductionSettlementChildRouterV1::renew_actuator_leases_before_step_v27,
-        );
+        let outcome = self
+            .router
+            .with_router(ProductionSettlementChildRouterV1::renew_actuator_leases_before_step_v27);
         report_renew_interval_v26();
         outcome
     }
@@ -411,7 +411,8 @@ fn report_renew_interval_v26() {
     }
     let now = Instant::now();
     let previous = LAST_RENEW_V26.with(|cell| cell.replace(Some(now)));
-    let from = LAST_PHASE_V26.with(|cell| cell.replace(crate::production_relay_stage12::lease_phase_v25()));
+    let from = LAST_PHASE_V26
+        .with(|cell| cell.replace(crate::production_relay_stage12::lease_phase_v25()));
     let Some(previous) = previous else {
         return;
     };

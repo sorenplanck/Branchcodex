@@ -3027,7 +3027,11 @@ impl DomActuatorStoreV1 {
         validate_lease(&transaction, lease, now_unix_ms)?;
         require_binding(&transaction, lease, binding)?;
         if record.kind == DomTerminalKindV1::Claim {
-            native_f7_receiver_journal_v25::require_terminal_claim_identity_v25(&transaction, binding, record.tx_hash)?;
+            native_f7_receiver_journal_v25::require_terminal_claim_identity_v25(
+                &transaction,
+                binding,
+                record.tx_hash,
+            )?;
         }
         let expected_stage = match record.kind {
             DomTerminalKindV1::Claim => STAGE_CLAIM_BROADCAST,
@@ -3286,7 +3290,11 @@ impl DomActuatorStoreV1 {
         validate_lease(&transaction, lease, now_unix_ms)?;
         require_binding(&transaction, lease, binding)?;
         if record.kind == DomTerminalKindV1::Claim {
-            native_f7_receiver_journal_v25::require_terminal_claim_identity_v25(&transaction, binding, record.tx_hash)?;
+            native_f7_receiver_journal_v25::require_terminal_claim_identity_v25(
+                &transaction,
+                binding,
+                record.tx_hash,
+            )?;
         }
         let expected_stage = match record.kind {
             DomTerminalKindV1::Claim => STAGE_CLAIM_FINAL,
@@ -5779,9 +5787,15 @@ fn settlement_child_transaction_matches_operation(
             let Some(attempt) =
                 load_final_claim_attempt_v2(transaction, request.scope().binding().session_id())?
             else {
-                return Ok(load_claim_custody(transaction, request.scope().binding().session_id())?.is_none()
+                return Ok(load_claim_custody(
+                    transaction,
+                    request.scope().binding().session_id(),
+                )?
+                .is_none()
                     && native_f7_receiver_journal_v25::receiver_operation_matches_v25(
-                        request.scope(), transaction_id, &operation,
+                        request.scope(),
+                        transaction_id,
+                        &operation,
                     ));
             };
             validate_final_claim_attempt_operation_v2(transaction, &attempt)?;
@@ -6501,7 +6515,8 @@ fn require_no_refund_after_claim_exposure(
     // attempt row and any V1 custody row now fail closed alike.
     if load_final_claim_attempt_v2(transaction, scope.binding().session_id())?.is_some()
         || load_claim_custody(transaction, scope.binding().session_id())?.is_some()
-        || native_f7_receiver_journal_v25::receiver_transaction_v25(transaction, scope.binding())?.is_some()
+        || native_f7_receiver_journal_v25::receiver_transaction_v25(transaction, scope.binding())?
+            .is_some()
     {
         return Err(DomActuatorError::InvalidStage);
     }
@@ -7233,8 +7248,12 @@ fn audit_terminal_finality_records(transaction: &Transaction<'_>) -> DomActuator
         }
         match kind {
             DomTerminalKindV1::Claim => {
-                native_f7_receiver_journal_v25::require_terminal_claim_identity_v25(transaction, binding, retained.tx_hash)
-                    .map_err(|_| DomActuatorError::UnsupportedFormat)?;
+                native_f7_receiver_journal_v25::require_terminal_claim_identity_v25(
+                    transaction,
+                    binding,
+                    retained.tx_hash,
+                )
+                .map_err(|_| DomActuatorError::UnsupportedFormat)?;
             }
             DomTerminalKindV1::Funding | DomTerminalKindV1::Refund => {
                 let action_tag = if kind == DomTerminalKindV1::Funding {

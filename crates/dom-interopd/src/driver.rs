@@ -725,9 +725,10 @@ where
                 }
             }
             let event_id = driver_event_id(snapshot.route_id, stage, Some((leg, action)), None)?;
-            let result = crate::route_step_segment_v28::step_segment_v28("authorize_action", || {
-                supervisor.authorize_action(event_id, leg, action, action_authority)
-            });
+            let result =
+                crate::route_step_segment_v28::step_segment_v28("authorize_action", || {
+                    supervisor.authorize_action(event_id, leg, action, action_authority)
+                });
             authority_step(supervisor, before_revision, stage, result)
         }
         ActionStateV1::Committed(reference) => {
@@ -837,9 +838,8 @@ where
                 Some((leg, action)),
                 Some((transaction_id, snapshot.last_event_digest)),
             )?;
-            let result = crate::route_step_segment_v28::step_segment_v28(
-                "externalized_observation",
-                || {
+            let result =
+                crate::route_step_segment_v28::step_segment_v28("externalized_observation", || {
                     supervisor.record_chain_observation(
                         event_id,
                         ChainObservationQueryV1::Finality {
@@ -849,8 +849,7 @@ where
                         },
                         observer,
                     )
-                },
-            );
+                });
             authority_step(supervisor, before_revision, stage, result)
         }
         ActionStateV1::Final { .. } => Err(RouteDriverErrorV1::InconsistentProgress),

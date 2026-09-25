@@ -3723,10 +3723,7 @@ impl DurableSettlementCoordinatorV1 {
     /// Persist one exact child call, then recheck its lease at the trusted
     /// post-call time before retaining any result. A late result leaves the
     /// original attempt pending for reconciliation; it cannot renew ownership.
-    pub fn drive_one_with_clock_v28<
-        A: SettlementChildAuthorityV1,
-        F: FnOnce() -> Result<u64>,
-    >(
+    pub fn drive_one_with_clock_v28<A: SettlementChildAuthorityV1, F: FnOnce() -> Result<u64>>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
@@ -3838,12 +3835,9 @@ impl DurableSettlementCoordinatorV1 {
         authority: &mut A,
         now_unix_ms: u64,
     ) -> Result<CoordinatorDriveOutcomeV1> {
-        self.reconcile_current_child_one_with_clock_v28(
-            lease,
-            authority,
-            now_unix_ms,
-            || Ok(now_unix_ms),
-        )
+        self.reconcile_current_child_one_with_clock_v28(lease, authority, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
     }
 
     /// Reconcile the retained same-fence attempt and validate its lease using

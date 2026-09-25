@@ -1887,7 +1887,9 @@ pub(super) fn run(
                 Err(error) if error.retryable() => {
                     diag_funding_retryable_v25(leg, &error);
                 }
-                Err(error) => return Err(settlement_child_diag_v26("xmr_recovery_readiness", &error)),
+                Err(error) => {
+                    return Err(settlement_child_diag_v26("xmr_recovery_readiness", &error))
+                }
             }
         }
         let mut f7_readiness_complete_v25 = f7_readiness_complete_v25!();
@@ -1928,10 +1930,10 @@ pub(super) fn run(
                 route_runtime
                     .prepare_bounded_external_block(std::time::Duration::from_secs(60))
                     .map_err(|error| route_runtime_diag_v25("L1754_from_secs", &error))?;
-                actuator_heartbeat
-                    .renew()
-                    .map_err(|error| settlement_child_diag_v26("heartbeat_before_refund", &error))?;
-            crate::production_relay_stage12::mark_lease_phase_v25("refund_pump");
+                actuator_heartbeat.renew().map_err(|error| {
+                    settlement_child_diag_v26("heartbeat_before_refund", &error)
+                })?;
+                crate::production_relay_stage12::mark_lease_phase_v25("refund_pump");
                 // The block bound declared just above is a promise to the
                 // runtime, not a limit on the tick; the armed ceiling is what
                 // makes it one. Dropped at the end of the match.
@@ -1940,7 +1942,9 @@ pub(super) fn run(
                 );
                 match pump.tick_remote_refund_v24(&snapshot) {
                     Ok(()) | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                    Err(refusal) => return Err(settlement_child_refusal_v26("remote_refund_tick", refusal)),
+                    Err(refusal) => {
+                        return Err(settlement_child_refusal_v26("remote_refund_tick", refusal))
+                    }
                 }
                 // Separate funding observation and execution ticks preserve the
                 // one-minute freshness bound without a second sidecar owner.
@@ -1950,7 +1954,7 @@ pub(super) fn run(
                 actuator_heartbeat
                     .renew()
                     .map_err(|error| settlement_child_diag_v26("heartbeat_before_pump", &error))?;
-            crate::production_relay_stage12::mark_lease_phase_v25("xmr_pump");
+                crate::production_relay_stage12::mark_lease_phase_v25("xmr_pump");
                 // Two funding observations of 60 s each can run inside one
                 // tick; without a ceiling their sum is exactly the lease.
                 let _pump_ceiling_v27 = route_step_deadline::Armed::new(
@@ -1960,11 +1964,18 @@ pub(super) fn run(
                     Ok(Some(report)) => match route_runtime.record_xmr_compensation_v22(report) {
                         Ok(())
                         | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                        Err(refusal) => return Err(settlement_child_refusal_v26("xmr_compensation_record", refusal)),
+                        Err(refusal) => {
+                            return Err(settlement_child_refusal_v26(
+                                "xmr_compensation_record",
+                                refusal,
+                            ))
+                        }
                     },
                     Ok(None)
                     | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {}
-                    Err(refusal) => return Err(settlement_child_refusal_v26("xmr_pump_tick", refusal)),
+                    Err(refusal) => {
+                        return Err(settlement_child_refusal_v26("xmr_pump_tick", refusal))
+                    }
                 }
             }
             actuator_heartbeat
@@ -2012,7 +2023,9 @@ pub(super) fn run(
                         Err(error) if error.retryable() => {
                             diag_funding_retryable_v25(leg, &error);
                         }
-                        Err(error) => return Err(settlement_child_diag_v26("f7_funding_step", &error)),
+                        Err(error) => {
+                            return Err(settlement_child_diag_v26("f7_funding_step", &error))
+                        }
                     }
                     match owned_native_phase_v24!(relay_loop
                         .stage12_owner_mut_v11()
@@ -2061,7 +2074,9 @@ pub(super) fn run(
                             Ok(None)
                             | Err(settlement_coordinator::ChildAuthorityRefusalV1::Unavailable) => {
                             }
-                            Err(refusal) => return Err(settlement_child_refusal_v26("f7_claim_face", refusal)),
+                            Err(refusal) => {
+                                return Err(settlement_child_refusal_v26("f7_claim_face", refusal))
+                            }
                         }
                     }
                     match owned_native_phase_v24!(relay_loop

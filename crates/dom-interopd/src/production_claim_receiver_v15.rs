@@ -32,14 +32,12 @@ impl ProductionClaimReceiverErrorV15 {
                     | SessionStoreError::Filesystem
                     | SessionStoreError::FundingAuthorityUnavailable
                     | SessionStoreError::ClaimSigningAuthorityUnavailable
-            )
-                | Self::Observation(
-                    RealDomError::LockPoisoned
-                        | RealDomError::Chain(
-                            dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
-                        )
-                )
-                | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
+            ) | Self::Observation(
+                RealDomError::LockPoisoned
+                    | RealDomError::Chain(
+                        dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
+                    )
+            ) | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
         )
     }
 }

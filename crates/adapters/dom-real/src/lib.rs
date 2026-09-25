@@ -556,7 +556,8 @@ pub struct RealDomRpcRuntimeV1 {
     adapter: DomHttpChainAdapterV1,
     cache: Mutex<RuntimeCacheV1>,
     deadline_scan_v23: Mutex<CursorStateV1>,
-    canonical_scan_v27: Mutex<BTreeMap<[u8; 32], canonical_scan_bounded_v27::CanonicalScanProgressV27>>,
+    canonical_scan_v27:
+        Mutex<BTreeMap<[u8; 32], canonical_scan_bounded_v27::CanonicalScanProgressV27>>,
     f7_claim_scan_v24: Mutex<BTreeMap<[u8; 32], f7_claim_receiver_v15::F7ClaimScanProgressV24>>,
     f7_xmr_funding_scan_v24: Mutex<f7_anchor_authority::DomFundingScanProgressV24>,
     funding_finality_scan_v23: Mutex<BTreeMap<[u8; 32], terminal_finality::FundingFinalityScanV23>>,
@@ -1205,7 +1206,9 @@ impl RealDomRpcRuntimeV1 {
         let deadline = crate::route_step_deadline_v27::clamp_v27(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
-                .ok_or(RealDomError::Chain(ChainAdapterError::TemporarilyUnavailable))?,
+                .ok_or(RealDomError::Chain(
+                    ChainAdapterError::TemporarilyUnavailable,
+                ))?,
         );
         let snapshot = self.transaction_snapshot_until_v27(evidence, deadline)?;
         Ok((

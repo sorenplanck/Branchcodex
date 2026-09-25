@@ -2,6 +2,13 @@
 //! signing transcripts. Public nonce/partial parsing follows full Store audit.
 use super::*;
 use dom_adaptor::{BindingContextV1, ParticipantPublicNoncesV1};
+
+/// Public nonces and partial signatures of one completed round, plus its reveal.
+type CompletedGraphPublicRoundV23 = (
+    Vec<ParticipantPublicNoncesV1>,
+    Vec<PartialSignatureV1>,
+    [u8; 32],
+);
 use dom_scriptless_crypto::{
     begin_refund_adaptor_round_v1, RefundAdaptorRoundInputsV1, XmrOrdinaryRecoveryKindV12,
     XmrOrdinaryRecoveryRoundV12,
@@ -92,14 +99,7 @@ impl ContractsSessionStoreV1 {
         &self,
         session: [u8; 32],
         edge: XmrGraphRecoverySigningEdgeV23,
-    ) -> Result<
-        (
-            Vec<ParticipantPublicNoncesV1>,
-            Vec<PartialSignatureV1>,
-            [u8; 32],
-        ),
-        SessionStoreError,
-    > {
+    ) -> Result<CompletedGraphPublicRoundV23, SessionStoreError> {
         let binding = self.authenticate_xmr_graph_signing_session_v23(session, edge)?;
         let terminal_revision = binding
             .start

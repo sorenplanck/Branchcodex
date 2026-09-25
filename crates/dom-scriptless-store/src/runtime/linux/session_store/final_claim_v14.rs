@@ -817,7 +817,8 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::InvalidTransition);
         }
         let exposure = self.authenticate_f7_exposure_v14(admitted.session_id)?;
-        let admission = self.authenticate_f7_admission_against_v14(admitted.session_id, &exposure)?;
+        let admission =
+            self.authenticate_f7_admission_against_v14(admitted.session_id, &exposure)?;
         if admission.digest != admitted.admission_digest
             || exposure.digest != admitted.exposure_digest
             || admission.txid != admitted.tx_hash
@@ -1121,9 +1122,9 @@ impl ContractsSessionStoreV1 {
             Err(error) => return Err(error),
             Ok(_) => {}
         }
-        let (_, request) = match self.authenticate_f7_final_transport_against_v14(
-            chain, session, &exposure,
-        ) {
+        let (_, request) = match self
+            .authenticate_f7_final_transport_against_v14(chain, session, &exposure)
+        {
             Err(SessionStoreError::SessionNotFound) => {
                 if self.load_session_locked(session)?.phase() != SessionPhaseV1::FundingConfirmed {
                     return Err(SessionStoreError::Quarantined);

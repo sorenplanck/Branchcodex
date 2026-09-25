@@ -925,13 +925,16 @@ mod tests {
     fn observation_refresh_retries_without_relaxing_scope_or_consumed_custody() {
         assert!(ProductionF7RuntimeErrorV12::Claim(
             ProductionDomClaimRuntimeErrorV12::RefreshRequired,
-        ).retryable_v20());
-        assert!(!ProductionF7RuntimeErrorV12::Claim(
-            ProductionDomClaimRuntimeErrorV12::Scope,
-        ).retryable_v20());
+        )
+        .retryable_v20());
+        assert!(
+            !ProductionF7RuntimeErrorV12::Claim(ProductionDomClaimRuntimeErrorV12::Scope,)
+                .retryable_v20()
+        );
         assert!(!ProductionF7RuntimeErrorV12::RequiresRestart(Some(
             ProductionDomClaimRuntimeErrorV12::RefreshRequired,
-        )).retryable_v20());
+        ))
+        .retryable_v20());
     }
 
     #[test]

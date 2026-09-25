@@ -110,8 +110,8 @@ const KDF_MEMO_CAPACITY: usize = 16;
 /// run in this process. Entries hold the same 32-byte key an open envelope
 /// already keeps in process memory while in use, are zeroized on eviction,
 /// and grant no authority a process holding the passphrase lacks.
-static KDF_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
-    std::sync::Mutex::new(Vec::new());
+type KdfMemoEntryV1 = ([u8; 32], Zeroizing<[u8; 32]>);
+static KDF_MEMO: std::sync::Mutex<Vec<KdfMemoEntryV1>> = std::sync::Mutex::new(Vec::new());
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);

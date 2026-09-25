@@ -146,7 +146,7 @@ pub fn verify_f7_xmr_bounded_anchor_authorization_with_progress_v24(
     if snapshot
         .observed_tip_height
         .checked_add(reserve)
-        .is_none_or(|height| height >= deadline)
+        .map_or(true, |height| height >= deadline)
     {
         return Err(Error::WindowClosed);
     }

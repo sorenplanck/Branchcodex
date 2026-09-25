@@ -82,16 +82,16 @@ pub use session_store::{
     ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
     DurableContractsReservationLookupV1, DurableTransportOutcomeV1, DurableTransportReceiptV1,
     ExactDomFundingBroadcasterV1, ExactDomRefundBroadcasterV1, F7AnchorRequestBindingV12,
-    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, F7FinalClaimActionV14, F7FinalClaimFactsV14, F7FinalClaimProgressV14,
-    F7FundingAuthorizationV12, F7FundingGatePreparationV12, F7RecoveryPreparationV12,
-    FinalClaimTransactionSinkRefV2, FundingAuthorizationRefV1, FundingAuthorizationV1,
-    FundingBroadcastV1, FundingRetransmissionV1, FundingTransactionSinkRefV1,
-    M8FundingAuthorizationRefV1, M8FundingTransactionSinkRefV1, M8FundingTransactionSinkRefV2,
-    ObservedF7FinalClaimV15, ObservedFinalClaimExposureV2, OperationalBpContinuationStageV1,
-    OperationalFundingGateVerificationRequestV1, OperationalM8BackupParticipantAuditV2,
-    OperationalM8BackupProvenanceAuditV2, OperationalM8FundingGatePreparationV2,
-    OperationalM8FundingGateVerificationRequestV1, OutboundDsc1RecoveryV1,
-    PreparedContractsSessionStoreOpenV1, PreparedDsc1SigningRequestV1,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, F7FinalClaimActionV14, F7FinalClaimFactsV14,
+    F7FinalClaimProgressV14, F7FundingAuthorizationV12, F7FundingGatePreparationV12,
+    F7RecoveryPreparationV12, FinalClaimTransactionSinkRefV2, FundingAuthorizationRefV1,
+    FundingAuthorizationV1, FundingBroadcastV1, FundingRetransmissionV1,
+    FundingTransactionSinkRefV1, M8FundingAuthorizationRefV1, M8FundingTransactionSinkRefV1,
+    M8FundingTransactionSinkRefV2, ObservedF7FinalClaimV15, ObservedFinalClaimExposureV2,
+    OperationalBpContinuationStageV1, OperationalFundingGateVerificationRequestV1,
+    OperationalM8BackupParticipantAuditV2, OperationalM8BackupProvenanceAuditV2,
+    OperationalM8FundingGatePreparationV2, OperationalM8FundingGateVerificationRequestV1,
+    OutboundDsc1RecoveryV1, PreparedContractsSessionStoreOpenV1, PreparedDsc1SigningRequestV1,
     PreparedEarlyTransportAuthorityV1, PreparedEvmSignedActionImportV1,
     PreparedF7ClaimPreSignatureTransportV12, PreparedF7FinalClaimIngressV15,
     PreparedF7FinalClaimSubmissionV14, PreparedF7FundingGateV12, PreparedF7FundingSubmissionV12,
@@ -129,6 +129,7 @@ const DIRECTORY_SCAN_BUFFER_LEN: usize = 8_192;
 // inventory takes the unchanged lexical scanner before any caller is visited.
 const READONLY_SCAN_ENTRIES_V25: usize = 16_384;
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "linux/unordered_readonly_scan_v25_tests.rs"]
 mod unordered_readonly_scan_v25_tests;
@@ -1499,9 +1500,7 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         ),
     ];
     for (suffix, staging) in WRAPPED_V12_NAMES {
-        if exact_wrapped_hex(value, "", 64, suffix)
-            || exact_wrapped_hex(value, ".", 64, staging)
-        {
+        if exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging) {
             return Some(ExpectedNodeType::RegularFile);
         }
     }
@@ -1650,9 +1649,12 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         || XMR_GRAPH_EDGE_NAMES_V23.iter().any(|(suffix, staging)| {
             exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
-        || XMR_GRAPH_RESOURCE_NAMES_V23.iter().any(|(suffix, staging)| {
-            exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
-        })
+        || XMR_GRAPH_RESOURCE_NAMES_V23
+            .iter()
+            .any(|(suffix, staging)| {
+                exact_wrapped_hex(value, "", 64, suffix)
+                    || exact_wrapped_hex(value, ".", 64, staging)
+            })
         || XMR_GRAPH_STATE_NAMES_V23.iter().any(|(suffix, staging)| {
             exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
@@ -2036,7 +2038,9 @@ mod tests {
             ".xmr-graph-custody-done-v23",
         ] {
             assert!(ValidatedComponent::registered(&format!("{session}{suffix}")).is_err());
-            assert!(ValidatedComponent::registered(&format!(".{session}{suffix}.staging")).is_err());
+            assert!(
+                ValidatedComponent::registered(&format!(".{session}{suffix}.staging")).is_err()
+            );
         }
 
         for invalid in [

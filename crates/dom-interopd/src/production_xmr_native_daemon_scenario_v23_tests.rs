@@ -993,7 +993,11 @@ fn run_noncooperative_exit_v23(
                             // absent. The GPL pool verifies proof/conservation;
                             // the controller supplies neither U nor a LOAD grant.
                             retained_refund_without_peer = Some((action.aggregate_id, id));
-                            control.pump_expected_xmr(&mut running, boundary.survivor, &snapshot)?;
+                            control.pump_expected_xmr(
+                                &mut running,
+                                boundary.survivor,
+                                &snapshot,
+                            )?;
                         }
                     }
                 }

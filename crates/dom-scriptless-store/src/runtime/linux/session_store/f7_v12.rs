@@ -42,7 +42,8 @@ mod claim_receiver_v15;
 mod final_claim_v14;
 use claim_receiver_v15::{validate_f7_observation_bytes_v15, OBSERVATION_PREFIX_V15};
 pub use claim_receiver_v15::{
-    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, ObservedF7FinalClaimV15, PreparedF7FinalClaimIngressV15,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, ObservedF7FinalClaimV15,
+    PreparedF7FinalClaimIngressV15,
 };
 pub(super) const OBSERVATION_MAX_V15: usize = claim_receiver_v15::OBSERVATION_MAX_V15;
 use super::super::xmr_recovery::XmrRecoveryCustodyV11;
@@ -2008,6 +2009,7 @@ fn require_f7_funding_windows_v23(
     Ok(())
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "f7_xmr_funding_window_v23_tests.rs"]
 mod xmr_funding_window_v23_tests;
@@ -2573,10 +2575,8 @@ impl ContractsSessionStoreV1 {
                 // its immutable ancestry a second time. The session helper
                 // still authenticates the binding and audits the current round.
                 authorization.require_recent_observation()?;
-                return self.resume_xmr_bounded_claim_session_locked_v23(
-                    chain,
-                    authorization.session_id,
-                );
+                return self
+                    .resume_xmr_bounded_claim_session_locked_v23(chain, authorization.session_id);
             }
             self.load_signing_binding(authorization.session_id, PurposeV1::ClaimAdaptor)?
                 .decode(&chain)?
@@ -3828,6 +3828,7 @@ impl ContractsSessionStoreV1 {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4006,22 +4007,14 @@ pub(super) enum F7ArtifactKindV12 {
     ObservationV15,
     RefundTransportV23,
 }
+/// Per-session artifact kinds plus the total artifact count and byte size.
+type F7ArtifactCensusV12 = (
+    BTreeMap<[u8; 32], BTreeSet<F7ArtifactKindV12>>,
+    usize,
+    usize,
+);
+
 impl F7ArtifactKindV12 {
-    fn suffix(self) -> &'static str {
-        match self {
-            Self::Gate => "gate",
-            Self::Funding => "funding",
-            Self::FundingSigningV20 => "funding-signing-v20",
-            Self::Issued => "claim-issued",
-            Self::Consumed => "claim-consumed",
-            Self::Binding => "claim-binding",
-            Self::Pre => "claim-pre",
-            Self::ExposureV14 => "claim-exposure-v14",
-            Self::AdmissionV14 => "claim-admission-v14",
-            Self::ObservationV15 => "claim-observation-v15",
-            Self::RefundTransportV23 => "refund-transport-v23",
-        }
-    }
     fn maximum_length(self) -> usize {
         match self {
             Self::Gate => GATE_MAX,
@@ -4198,16 +4191,7 @@ impl ContractsSessionStoreV1 {
         }
     }
 
-    fn census_f7_artifacts_v12(
-        &self,
-    ) -> Result<
-        (
-            BTreeMap<[u8; 32], BTreeSet<F7ArtifactKindV12>>,
-            usize,
-            usize,
-        ),
-        SessionStoreError,
-    > {
+    fn census_f7_artifacts_v12(&self) -> Result<F7ArtifactCensusV12, SessionStoreError> {
         let mut sessions = BTreeMap::<[u8; 32], BTreeSet<F7ArtifactKindV12>>::new();
         let mut count = 0usize;
         let mut total = 0usize;

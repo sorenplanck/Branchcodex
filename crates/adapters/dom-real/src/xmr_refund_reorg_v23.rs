@@ -370,7 +370,7 @@ fn prove_native_refund_fork_v23(
         if height
             .checked_sub(prior.height)
             .and_then(|v| v.checked_add(1))
-            .is_none_or(|depth| depth < u64::from(prior.minimum))
+            .map_or(true, |depth| depth < u64::from(prior.minimum))
         {
             return Err(RealDomError::InsufficientConfirmations);
         }

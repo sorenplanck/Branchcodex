@@ -80,9 +80,11 @@ pub fn xmr_payout_value_statement_v12(
         .iter()
         .position(|participant| participant == &recipient)
         .ok_or(Refusal::GraphMismatch)?;
-    let actual =
-        BpStatementV1::aggregate_commitment_from_shares(std::slice::from_ref(&payout_blinding_point), amount)
-            .map_err(|_| Refusal::GraphMismatch)?;
+    let actual = BpStatementV1::aggregate_commitment_from_shares(
+        std::slice::from_ref(&payout_blinding_point),
+        amount,
+    )
+    .map_err(|_| Refusal::GraphMismatch)?;
     if actual.to_compressed_bytes() != commitment {
         return Err(Refusal::GraphMismatch);
     }

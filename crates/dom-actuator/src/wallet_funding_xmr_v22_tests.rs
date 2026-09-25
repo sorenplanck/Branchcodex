@@ -122,7 +122,7 @@ fn xmr_funding_budget_uses_collateral_and_rejects_missing_or_substituted_policy(
     changed_fee.fee_limit.dom_max += 1;
     assert!(funding_budget(&changed_fee, Some(&validated)).is_err());
 
-    let mut changed_policy = policy.clone();
+    let mut changed_policy = policy;
     changed_policy.volatility_margin_bps += 100;
     let mut changed_terms = terms.clone();
     changed_terms.assurance_policy_hash = Some(changed_policy.policy_hash().unwrap());

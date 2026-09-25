@@ -158,7 +158,7 @@ fn accepted_before_expiry_recovers_lost_acks_after_all_stores_reopen_v23() -> Te
         &cursor,
         DeliveryPageLimitsV3::new(1, relay::MAX_ENVELOPE_BYTES as u32)?,
     )?;
-    assert_eq!(page.envelopes(), [exact.clone()]);
+    assert_eq!(page.envelopes(), std::slice::from_ref(&exact));
     let next_cursor = *page.next_cursor();
     // Exercise the same durable ingest_one authority while deliberately NOT
     // acknowledging the pinned production page. This test seam models the

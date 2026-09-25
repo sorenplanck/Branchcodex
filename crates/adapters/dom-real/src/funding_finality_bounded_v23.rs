@@ -200,39 +200,6 @@ impl RealDomRpcRuntimeV1 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn funding_scan_cache_evicts_old_scope_and_never_invents_a_transaction_v23() {
-        let mut cache = BTreeMap::new();
-        let now = Instant::now();
-        for tag in 1..=8 {
-            reserve_scope(
-                &mut cache,
-                [tag; 32],
-                now + Duration::from_millis(u64::from(tag)),
-            );
-            assert!(cache.len() <= MAX_FUNDING_SCOPES_V23);
-        }
-        assert!(!cache.contains_key(&[1; 32]));
-        assert!(cache.contains_key(&[8; 32]));
-        assert!(cache
-            .values()
-            .all(|entry| entry.transaction.is_none() && entry.state.next_height == 0));
-    }
-
-    #[test]
-    fn funding_scan_expired_budget_never_yields_authority_v23() {
-        assert!(matches!(
-            require_live(Instant::now()),
-            Err(RealDomError::Chain(
-                ChainAdapterError::TemporarilyUnavailable
-            ))
-        ));
-    }
-}
-
 impl RealDomRpcRuntimeV1 {
     /// Bounded, resumable canonical snapshot for the F7 claim observation.
     ///
@@ -311,5 +278,38 @@ impl RealDomRpcRuntimeV1 {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn funding_scan_cache_evicts_old_scope_and_never_invents_a_transaction_v23() {
+        let mut cache = BTreeMap::new();
+        let now = Instant::now();
+        for tag in 1..=8 {
+            reserve_scope(
+                &mut cache,
+                [tag; 32],
+                now + Duration::from_millis(u64::from(tag)),
+            );
+            assert!(cache.len() <= MAX_FUNDING_SCOPES_V23);
+        }
+        assert!(!cache.contains_key(&[1; 32]));
+        assert!(cache.contains_key(&[8; 32]));
+        assert!(cache
+            .values()
+            .all(|entry| entry.transaction.is_none() && entry.state.next_height == 0));
+    }
+
+    #[test]
+    fn funding_scan_expired_budget_never_yields_authority_v23() {
+        assert!(matches!(
+            require_live(Instant::now()),
+            Err(RealDomError::Chain(
+                ChainAdapterError::TemporarilyUnavailable
+            ))
+        ));
     }
 }

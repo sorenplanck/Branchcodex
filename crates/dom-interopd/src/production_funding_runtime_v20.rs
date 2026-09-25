@@ -55,11 +55,9 @@ impl ProductionFundingErrorV20 {
                     | SessionStoreError::Filesystem
                     | SessionStoreError::FundingAuthorityUnavailable
                     | SessionStoreError::ClaimSigningAuthorityUnavailable
-            )
-                | Self::Observation(adapter_dom_real::RealDomError::Chain(
-                    dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
-                ))
-                | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
+            ) | Self::Observation(adapter_dom_real::RealDomError::Chain(
+                dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
+            )) | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
         )
     }
 }

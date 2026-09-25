@@ -255,12 +255,11 @@ impl XmrRecoveryCustodyV11 {
             XmrRecoveryObservedExitV12::DomRefundShareRevealed => XmrRecoveryOperationV12::Refund,
             XmrRecoveryObservedExitV12::DomCompensated => XmrRecoveryOperationV12::Compensate,
         };
-        if operation == XmrRecoveryOperationV12::Compensate
-            || self.scope.role == XmrRecoveryCustodyRoleV11::PrivateRefundOwner
+        if (operation == XmrRecoveryOperationV12::Compensate
+            || self.scope.role == XmrRecoveryCustodyRoleV11::PrivateRefundOwner)
+            && transaction_hash != self.recovery_transaction_hash_v12(operation)?
         {
-            if transaction_hash != self.recovery_transaction_hash_v12(operation)? {
-                return Err(XmrRecoveryCustodyErrorV11::Conflict);
-            }
+            return Err(XmrRecoveryCustodyErrorV11::Conflict);
         }
         let attempt = PreparedXmrRecoveryAttemptV12 {
             scope: self.scope,
@@ -465,6 +464,7 @@ fn parse_refund_exit_checkpoint_v23(bytes: &[u8], expected: &[u8]) -> Result<([u
     Ok((transaction, digest))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod refund_checkpoint_tests_v23 {
     use super::*;
@@ -572,6 +572,7 @@ pub(super) fn is_execution_component_v12(name: &str) -> bool {
     })
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     use super::*;

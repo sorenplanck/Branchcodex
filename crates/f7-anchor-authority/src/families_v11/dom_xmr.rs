@@ -10,9 +10,7 @@ use super::{
     verify_xmr_funding_v11, F7FamilyAuthorityErrorV11 as Error, VerifiedXmrFundingV11,
     XmrFundingObservationRequestV11,
 };
-use crate::{
-    verify_dom_funding_evidence_inner, F7AnchorAuthorityError, VerifiedDomFundingEvidenceV1,
-};
+use crate::{F7AnchorAuthorityError, VerifiedDomFundingEvidenceV1};
 use dom_final_claim_binding::{FinalClaimRoleBindingV1, OperationalM8ReadyBindingV2};
 use dom_scriptless_chain_adapter::DomHttpChainAdapterV1;
 use dom_scriptless_crypto::{FrozenSharedOutputV1, VerifiedXmrRecoveryGraphV11};

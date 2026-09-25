@@ -434,20 +434,28 @@ impl ConcreteProductionDomActionAuthorityV1 {
                 if refund_context.is_some() {
                     return Err(child_conflict_at_v25(426));
                 }
-                if crate::production_relay_stage12::step_segment_v28("claim_receiver_observation", || {
-                    contracts.f7_receiver_observation_v25(trusted_chain_id)
-                })
+                if crate::production_relay_stage12::step_segment_v28(
+                    "claim_receiver_observation",
+                    || contracts.f7_receiver_observation_v25(trusted_chain_id),
+                )
                 .map_err(map_actuator_error)?
                 .is_some()
                 {
-                    return match crate::production_relay_stage12::step_segment_v28("claim_receiver_verify", || {
-                        contracts.verified_f7_receiver_claim_v25(
-                            runtime, trusted_chain_id, binding.transaction_id(),
-                        )
-                    }) {
+                    return match crate::production_relay_stage12::step_segment_v28(
+                        "claim_receiver_verify",
+                        || {
+                            contracts.verified_f7_receiver_claim_v25(
+                                runtime,
+                                trusted_chain_id,
+                                binding.transaction_id(),
+                            )
+                        },
+                    ) {
                         Ok(_) => Ok(ProductionDomActionResultV1::Externalized),
-                        Err(DomActuatorError::FinalityPending | DomActuatorError::RpcAuthorityUnavailable)
-                            => Ok(ProductionDomActionResultV1::Unknown),
+                        Err(
+                            DomActuatorError::FinalityPending
+                            | DomActuatorError::RpcAuthorityUnavailable,
+                        ) => Ok(ProductionDomActionResultV1::Unknown),
                         Err(error) => Err(map_actuator_error(error)),
                     };
                 }
@@ -474,15 +482,16 @@ impl ConcreteProductionDomActionAuthorityV1 {
                                     recovery,
                                 )
                                 .map_err(map_actuator_error)?;
-                            let receipt = match crate::production_relay_stage12::step_segment_v28("claim_dispatch_f7_submit", || {
-                                contracts.dispatch_f7_final_claim_v14(runtime, &submission)
-                            }) {
-                                    Ok(receipt) => receipt,
-                                    Err(DomActuatorError::RpcAuthorityUnavailable) => {
-                                        return Ok(ProductionDomActionResultV1::Unknown)
-                                    }
-                                    Err(error) => return Err(map_actuator_error(error)),
-                                };
+                            let receipt = match crate::production_relay_stage12::step_segment_v28(
+                                "claim_dispatch_f7_submit",
+                                || contracts.dispatch_f7_final_claim_v14(runtime, &submission),
+                            ) {
+                                Ok(receipt) => receipt,
+                                Err(DomActuatorError::RpcAuthorityUnavailable) => {
+                                    return Ok(ProductionDomActionResultV1::Unknown)
+                                }
+                                Err(error) => return Err(map_actuator_error(error)),
+                            };
                             let after_rpc = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .ok()
@@ -1785,10 +1794,9 @@ where
                     .min(60_000);
                 // The lease-derived figure bounds this call alone; the armed
                 // route-step ceiling bounds the step all such calls share.
-                let budget = route_step_deadline::remaining(
-                    std::time::Duration::from_millis(budget_ms),
-                )
-                .ok_or(DomActuatorError::RpcAuthorityUnavailable)?;
+                let budget =
+                    route_step_deadline::remaining(std::time::Duration::from_millis(budget_ms))
+                        .ok_or(DomActuatorError::RpcAuthorityUnavailable)?;
                 let observed = driver.observe_refund_reorg_v23(
                     &checkpoint,
                     validated.binding.transaction_id(),
@@ -1984,7 +1992,6 @@ where
         SettlementFaceV1::Dom
     }
 
-
     fn renew_actuator_lease_v12(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
         let Some(duration) = self.lease_renewal_ms_v12 else {
             return Ok(());
@@ -2024,9 +2031,7 @@ where
     /// 106 s once cost the step that then legitimately ran 113 s. One extra
     /// single-row write per route step is the entire cost. A lapsed lease is
     /// still refused, exactly as above.
-    fn renew_actuator_lease_before_step_v27(
-        &mut self,
-    ) -> Result<(), ChildAuthorityRefusalV1> {
+    fn renew_actuator_lease_before_step_v27(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
         let Some(duration) = self.lease_renewal_ms_v12 else {
             return Ok(());
         };
@@ -2323,10 +2328,10 @@ where
         {
             return Err(ChildAuthorityRefusalV1::Unavailable);
         }
-        let validated = crate::production_relay_stage12::step_segment_v28(
-            "dom_validate_dispatch",
-            || self.validate_dispatch(request, now),
-        )?;
+        let validated =
+            crate::production_relay_stage12::step_segment_v28("dom_validate_dispatch", || {
+                self.validate_dispatch(request, now)
+            })?;
         self.renew_actuator_lease_v12()?;
         let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = dispatch_request_digest(request)?;
@@ -2406,16 +2411,14 @@ where
         }
         self.renew_actuator_lease_v12()?;
         let session = &mut self.sessions[validated.session_index];
-        let returned = crate::production_relay_stage12::step_segment_v28(
-            "dom_stage_claim_transport",
-            || {
+        let returned =
+            crate::production_relay_stage12::step_segment_v28("dom_stage_claim_transport", || {
                 stage_final_claim_transport_v1(
                     &mut session.contracts,
                     &self.trusted_chain_id,
                     returned,
                 )
-            },
-        )?;
+            })?;
         let outcome = Self::dispatch_authority_outcome(request, returned)?;
         self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
@@ -3296,13 +3299,13 @@ fn renew_dom_lease_v12(
     if now >= lease.lease_until_unix_ms() {
         return Err(ChildAuthorityRefusalV1::Unavailable);
     }
-    actuator
-        .renew_lease(lease, now, duration)
-        .map_err(|error| {
-            eprintln!("DOM_RENEW_SITE_V26 site=dom_store_renew error={error:?} until={} now={now}",
-                lease.lease_until_unix_ms());
-            map_actuator_error(error)
-        })
+    actuator.renew_lease(lease, now, duration).map_err(|error| {
+        eprintln!(
+            "DOM_RENEW_SITE_V26 site=dom_store_renew error={error:?} until={} now={now}",
+            lease.lease_until_unix_ms()
+        );
+        map_actuator_error(error)
+    })
 }
 
 fn map_actuator_error(error: DomActuatorError) -> ChildAuthorityRefusalV1 {

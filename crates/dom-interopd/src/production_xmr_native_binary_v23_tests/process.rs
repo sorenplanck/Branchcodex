@@ -108,8 +108,7 @@ fn drain(stream: impl Read + Send + 'static) -> Capture {
 
 fn drain_live(mut stream: impl Read + Send + 'static) -> (Capture, LiveCapture) {
     let (send, receive) = mpsc::sync_channel(1);
-    let live: LiveCapture =
-        std::sync::Arc::new(std::sync::Mutex::new(RetainedCaptureV25::new()));
+    let live: LiveCapture = std::sync::Arc::new(std::sync::Mutex::new(RetainedCaptureV25::new()));
     let writer = std::sync::Arc::clone(&live);
     thread::spawn(move || {
         let result = (|| {

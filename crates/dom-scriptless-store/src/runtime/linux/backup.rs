@@ -35,7 +35,7 @@ use dom_scriptless_crypto::{
     Passphrase, VaultMasterKey, VaultMasterKeyEnvelopeV1, VaultObjectEnvelopeV1,
 };
 #[cfg(any(test, feature = "evidence-only"))]
-use rustix::fs::{fsync, renameat_with, AtFlags, RenameFlags};
+use rustix::fs::{renameat_with, AtFlags, RenameFlags};
 #[cfg(any(test, feature = "evidence-only"))]
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(any(test, feature = "evidence-only"))]

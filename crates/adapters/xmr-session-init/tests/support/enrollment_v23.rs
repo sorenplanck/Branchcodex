@@ -37,11 +37,11 @@ fn enrolled_custody_replays_without_nonce_and_never_repairs_partial_pairs() {
     enrollment.require_setup(&f.setup, &f.refund).unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = EncryptedSqliteSecretStore::open(
-        &root.path().join("secrets.sqlite"),
+        root.path().join("secrets.sqlite"),
         SecretStoreMasterKey::new([31; 32]).unwrap(),
     )
     .unwrap();
-    let nullifiers = DleqNullifierStore::open(&root.path().join("nullifiers.sqlite")).unwrap();
+    let nullifiers = DleqNullifierStore::open(root.path().join("nullifiers.sqlite")).unwrap();
     let mut rng = CountedRng::default();
     let role = XmrLocalShareRoleV11::ClaimReceiver;
     assert!(initialize_enrolled_session_for_role_v23(
@@ -93,12 +93,12 @@ fn enrolled_custody_replays_without_nonce_and_never_repairs_partial_pairs() {
     drop(store);
     drop(nullifiers);
     let store = EncryptedSqliteSecretStore::open_existing(
-        &root.path().join("secrets.sqlite"),
+        root.path().join("secrets.sqlite"),
         SecretStoreMasterKey::new([31; 32]).unwrap(),
     )
     .unwrap();
     let nullifiers =
-        DleqNullifierStore::open_existing(&root.path().join("nullifiers.sqlite")).unwrap();
+        DleqNullifierStore::open_existing(root.path().join("nullifiers.sqlite")).unwrap();
     resume_enrolled_session_for_role_v23(&enrollment, &store, &nullifiers, role).unwrap();
     assert!(resume_enrolled_session_for_role_v23(
         &enrollment,
@@ -111,12 +111,12 @@ fn enrolled_custody_replays_without_nonce_and_never_repairs_partial_pairs() {
     // Deliberately incomplete registrations are made by the real API, not
     // raw SQLite editing. Enrollment does not repair this crash cut.
     let partial_store = EncryptedSqliteSecretStore::open(
-        &root.path().join("partial-secrets.sqlite"),
+        root.path().join("partial-secrets.sqlite"),
         SecretStoreMasterKey::new([32; 32]).unwrap(),
     )
     .unwrap();
     let partial_nullifiers =
-        DleqNullifierStore::open(&root.path().join("partial-nullifiers.sqlite")).unwrap();
+        DleqNullifierStore::open(root.path().join("partial-nullifiers.sqlite")).unwrap();
     partial_nullifiers
         .register(
             f.setup.settlement_id(),
@@ -139,7 +139,7 @@ fn enrolled_custody_replays_without_nonce_and_never_repairs_partial_pairs() {
     ));
 
     let missing_nullifiers =
-        DleqNullifierStore::open(&root.path().join("missing-nullifiers.sqlite")).unwrap();
+        DleqNullifierStore::open(root.path().join("missing-nullifiers.sqlite")).unwrap();
     assert!(initialize_enrolled_session_for_role_v23(
         &enrollment,
         &store,

@@ -87,9 +87,9 @@ impl ProductionRelayStage12OwnerV1 {
             .contracts
             .retained_xmr_graph_ready_for_activation_v23(owner.trusted_chain_id)
             .map_err(|error| match error {
-                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(
-                    store,
-                ) => Error::Store(store),
+                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(store) => {
+                    Error::Store(store)
+                }
                 _ => Error::Binding,
             })?
         {
@@ -261,9 +261,9 @@ impl ProductionRelayStage12OwnerV1 {
                 return Ok(());
             }
             custody.revalidate().map_err(|error| match error {
-                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(
-                    store,
-                ) => Error::Store(store),
+                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(store) => {
+                    Error::Store(store)
+                }
                 _ => Error::Binding,
             })?;
             self.xmr_custody_revalidated_v25[index] = true;

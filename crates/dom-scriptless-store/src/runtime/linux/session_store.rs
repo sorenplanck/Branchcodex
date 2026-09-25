@@ -4126,6 +4126,9 @@ pub(crate) type XmrGraphReconstructionV24 = std::sync::Arc<(
 
 /// Retained-capability operational store for authenticated session records.
 ///
+/// One audited Started record and its optional Ready companion.
+type AuditedCustodyPairV26 = (Vec<u8>, Option<Vec<u8>>);
+
 /// This is a sibling authority to the nonce vault. It never derives, stores,
 /// exports, or recreates a nonce.
 pub struct ContractsSessionStoreV1 {
@@ -4159,7 +4162,7 @@ pub struct ContractsSessionStoreV1 {
     /// stops being repeated. The two writers of these records invalidate their
     /// entry, so this process's own Started -> Ready transition is re-audited
     /// in full rather than mistaken for tampering.
-    audited_custody_pairs_v26: Mutex<BTreeMap<[u8; 32], (Vec<u8>, Option<Vec<u8>>)>>,
+    audited_custody_pairs_v26: Mutex<BTreeMap<[u8; 32], AuditedCustodyPairV26>>,
 }
 
 /// Move-only, locked production Store opening authenticated before recovery.
@@ -20165,8 +20168,8 @@ impl ContractsSessionStoreV1 {
         // Opt-in development profiling prints only classes, counts and time.
         // It does not change any authentication or failure path.
         #[cfg(debug_assertions)]
-        let profile_v26 = std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26")
-            .map(|_| std::time::Instant::now());
+        let profile_v26 =
+            std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26").map(|_| std::time::Instant::now());
         #[cfg(debug_assertions)]
         let mut roster_cost_v26: BTreeMap<&str, (usize, u128)> = BTreeMap::new();
         #[cfg(debug_assertions)]
@@ -20400,7 +20403,8 @@ impl ContractsSessionStoreV1 {
                     self.recheck_xmr_graph_custody_records_v26(parent, audited)
                         .map_err(|error| capture_host_failure(&mut host_failure, error))?;
                 } else {
-                    let audited = self.audit_xmr_graph_custody_provisioning_v23(parent)
+                    let audited = self
+                        .audit_xmr_graph_custody_provisioning_v23(parent)
                         .map_err(|error| capture_host_failure(&mut host_failure, error))?;
                     audited_custody_pairs_v26.insert(parent, audited);
                 }
@@ -39143,6 +39147,7 @@ fn require_transport_identity_binding(
 }
 
 impl ContractsSessionStoreV1 {
+    #[allow(clippy::too_many_arguments)]
     fn validate_signing_roster_and_kernel_ancestry(
         &self,
         trusted_chain_id: &TrustedChainIdV1,
@@ -40266,7 +40271,7 @@ fn encode_canonical_unsigned_dsc1(
     {
         return Err(SessionStoreError::Canonical);
     }
-    if matches!(fields.message_type, 0x17 | 0x18 | 0x19 | 0x1a) {
+    if matches!(fields.message_type, 0x17..=0x1a) {
         validate_registered_transport_payload(fields.message_type, fields.payload)?;
     }
     let payload_len =
@@ -43078,6 +43083,7 @@ pub(crate) mod evidence_only_staging {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     include!("session_store/session_head_scan_v25_tests.rs");

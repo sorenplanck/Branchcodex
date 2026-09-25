@@ -959,7 +959,8 @@ where
                     // commits the exact 0x12. The TransportCommitted branch
                     // will reauthenticate and stage it on the next route step;
                     // do not combine signing and relay staging in this lease.
-                    let _committed = self.identity
+                    let _committed = self
+                        .identity
                         .sign_and_commit_store_prepared_dsc1(self.store.as_ref(), request)?;
                     return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
                 }

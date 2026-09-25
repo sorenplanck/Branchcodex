@@ -264,7 +264,7 @@ mod tests {
             F7ExternalFamilyV11::Solana,
             F7ExternalFamilyV11::Monero,
         ] {
-            let origin = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+            let origin = Instant::now() - Duration::from_secs(30);
             // These are private test facts, not a public authorization
             // constructor. Bitcoin's real M.8 token remains a separate path.
             let mut facts = ExternalFundingEvidenceV11 {
@@ -285,12 +285,17 @@ mod tests {
                 evidence_digest: [7; 32],
                 observed_at: origin,
             };
-            assert_eq!(retain_external_observation_origin(&facts).unwrap(), origin);
+            assert_eq!(
+                retain_external_observation_origin(&facts).ok(),
+                Some(origin)
+            );
             // Repeated promotion is not re-observation, even in the same process.
-            assert_eq!(retain_external_observation_origin(&facts).unwrap(), origin);
-            facts.observed_at = Instant::now()
-                .checked_sub(MAX_V11_EXTERNAL_ANCHOR_AGE + Duration::from_secs(1))
-                .unwrap();
+            assert_eq!(
+                retain_external_observation_origin(&facts).ok(),
+                Some(origin)
+            );
+            facts.observed_at =
+                Instant::now() - (MAX_V11_EXTERNAL_ANCHOR_AGE + Duration::from_secs(1));
             assert_eq!(
                 retain_external_observation_origin(&facts),
                 Err(Error::WindowClosed)

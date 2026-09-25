@@ -116,8 +116,7 @@ impl ProductionHeightDeadlineAuthorityV23 {
                     .spawn_scoped(scope, move || {
                         let _armed = route_step_deadline::Armed::new(ceiling_v28);
                         self.observe_xmr_v23(source)
-                    })
-                {
+                    }) {
                     Ok(worker) => workers.push(worker),
                     Err(_) => observations.push(Err(Error::Unavailable)),
                 }
