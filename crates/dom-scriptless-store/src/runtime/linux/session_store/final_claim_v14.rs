@@ -505,6 +505,21 @@ impl ContractsSessionStoreV1 {
         &self,
         session: [u8; 32],
     ) -> Result<ExposureV14, SessionStoreError> {
+        self.authenticate_f7_exposure_with_claim_v14(session)
+            .map(|(exposure, _, _)| exposure)
+    }
+
+    /// One full exposure authentication, returning the claim records it
+    /// already authenticated so the caller never re-derives them. Every
+    /// caller inside one operation authenticates the exposure exactly once
+    /// and passes the result down; a perf record of run 90 attributed 24 s of
+    /// a single `f7_final_claim_progress_v14` to twelve nested repetitions of
+    /// this function (gate ancestry, graph reconstruction and both auxiliary
+    /// rounds each time), and one DOM child reconcile ran three such queries.
+    fn authenticate_f7_exposure_with_claim_v14(
+        &self,
+        session: [u8; 32],
+    ) -> Result<(ExposureV14, F7GateRecordV12, F7ClaimRecordV12), SessionStoreError> {
         let exposure = ExposureV14::decode(&self.read_f7_v12(
             session,
             "claim-exposure-v14",
@@ -550,7 +565,7 @@ impl ContractsSessionStoreV1 {
                 return Err(SessionStoreError::Quarantined);
             }
         }
-        Ok(exposure)
+        Ok((exposure, gate, issued))
     }
 
     /// Recover an exposed claim without new nonces, secret access or fresh
@@ -573,7 +588,7 @@ impl ContractsSessionStoreV1 {
         }
         match self.read_f7_v12(session, "claim-admission-v14", ADMISSION_LEN_V14) {
             Ok(_) => {
-                self.authenticate_f7_admission_v14(session)?;
+                self.authenticate_f7_admission_against_v14(session, &exposure)?;
                 return Err(SessionStoreError::Conflict);
             }
             Err(SessionStoreError::SessionNotFound) => {}
@@ -623,7 +638,7 @@ impl ContractsSessionStoreV1 {
             "claim-admission-v14",
             ADMISSION_LEN_V14,
         ) {
-            Ok(_) => return self.admitted_f7_handle_v14(prepared.session_id),
+            Ok(_) => return self.admitted_f7_handle_against_v14(prepared.session_id, &exposure),
             Err(SessionStoreError::SessionNotFound) => {}
             Err(e) => return Err(e),
         }
@@ -648,18 +663,28 @@ impl ContractsSessionStoreV1 {
             ADMISSION_LEN_V14,
         )?;
         test_crash_hook("f7-v14-final-after-admission");
-        self.admitted_f7_handle_v14(prepared.session_id)
+        self.admitted_f7_handle_against_v14(prepared.session_id, &exposure)
     }
     fn authenticate_f7_admission_v14(
         &self,
         session: [u8; 32],
+    ) -> Result<AdmissionV14, SessionStoreError> {
+        let exposure = self.authenticate_f7_exposure_v14(session)?;
+        self.authenticate_f7_admission_against_v14(session, &exposure)
+    }
+
+    /// Same checks as `authenticate_f7_admission_v14` against an exposure the
+    /// caller authenticated in this same operation.
+    fn authenticate_f7_admission_against_v14(
+        &self,
+        session: [u8; 32],
+        exposure: &ExposureV14,
     ) -> Result<AdmissionV14, SessionStoreError> {
         let admission = AdmissionV14::decode(&self.read_f7_v12(
             session,
             "claim-admission-v14",
             ADMISSION_LEN_V14,
         )?)?;
-        let exposure = self.authenticate_f7_exposure_v14(session)?;
         if admission.session != session
             || admission.exposure != exposure.digest
             || admission.txid != exposure.hashes[7]
@@ -673,7 +698,15 @@ impl ContractsSessionStoreV1 {
         &self,
         session: [u8; 32],
     ) -> Result<AdmittedF7FinalClaimV14, SessionStoreError> {
-        let a = self.authenticate_f7_admission_v14(session)?;
+        let exposure = self.authenticate_f7_exposure_v14(session)?;
+        self.admitted_f7_handle_against_v14(session, &exposure)
+    }
+    fn admitted_f7_handle_against_v14(
+        &self,
+        session: [u8; 32],
+        exposure: &ExposureV14,
+    ) -> Result<AdmittedF7FinalClaimV14, SessionStoreError> {
+        let a = self.authenticate_f7_admission_against_v14(session, exposure)?;
         Ok(AdmittedF7FinalClaimV14 {
             session_id: session,
             tx_hash: a.txid,
@@ -701,7 +734,7 @@ impl ContractsSessionStoreV1 {
         if chain.as_bytes() != &exposure.hashes[1] {
             return Err(SessionStoreError::InvalidTransition);
         }
-        self.admitted_f7_handle_v14(session)
+        self.admitted_f7_handle_against_v14(session, &exposure)
     }
 
     pub(super) fn audit_f7_final_claim_inventory_v14(
@@ -719,17 +752,19 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::Quarantined);
         }
-        if kinds.contains(&K::ExposureV14) {
+        let exposure = if kinds.contains(&K::ExposureV14) {
             if !kinds.contains(&K::Pre) {
                 return Err(SessionStoreError::Quarantined);
             }
-            self.authenticate_f7_exposure_v14(session)?;
-        }
+            Some(self.authenticate_f7_exposure_v14(session)?)
+        } else {
+            None
+        };
         if kinds.contains(&K::AdmissionV14) {
-            if !kinds.contains(&K::ExposureV14) {
+            let Some(exposure) = exposure.as_ref() else {
                 return Err(SessionStoreError::Quarantined);
-            }
-            self.authenticate_f7_admission_v14(session)?;
+            };
+            self.authenticate_f7_admission_against_v14(session, exposure)?;
         }
         Ok(())
     }
@@ -796,8 +831,8 @@ impl ContractsSessionStoreV1 {
         if admitted.open_instance_id != self.open_instance_id {
             return Err(SessionStoreError::InvalidTransition);
         }
-        let admission = self.authenticate_f7_admission_v14(admitted.session_id)?;
         let exposure = self.authenticate_f7_exposure_v14(admitted.session_id)?;
+        let admission = self.authenticate_f7_admission_against_v14(admitted.session_id, &exposure)?;
         if admission.digest != admitted.admission_digest
             || exposure.digest != admitted.exposure_digest
             || admission.txid != admitted.tx_hash
@@ -844,8 +879,21 @@ impl ContractsSessionStoreV1 {
         current: &SessionRecordV1,
     ) -> Result<(), SessionStoreError> {
         let exposure = self.authenticate_f7_exposure_v14(request.session_id)?;
-        self.authenticate_f7_admission_v14(request.session_id)?;
+        self.authenticate_f7_admission_against_v14(request.session_id, &exposure)?;
         let signer = self.authenticate_local_transport_signer_binding(request.session_id)?;
+        self.audit_f7_final_claim_request_against_v14(request, current, &exposure, &signer)
+    }
+
+    /// Same checks as `audit_f7_final_claim_request_v14` against an exposure,
+    /// admission and signer binding the caller authenticated in this same
+    /// operation.
+    fn audit_f7_final_claim_request_against_v14(
+        &self,
+        request: &OutboundDsc1SigningRequestRecordV1,
+        current: &SessionRecordV1,
+        exposure: &ExposureV14,
+        signer: &LocalTransportSignerBindingRecordV1,
+    ) -> Result<(), SessionStoreError> {
         if request.authority_class != OutboundDsc1AuthorityClassV1::UniversalFinalClaimV14
             || request.chain_id != exposure.hashes[1]
             || request.authority_digest != exposure.digest
@@ -854,7 +902,7 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::InvalidTransition);
         }
-        self.require_f7_final_claim_send_head_v14(&exposure, current)
+        self.require_f7_final_claim_send_head_v14(exposure, current)
     }
 
     pub(in super::super) fn expected_f7_final_claim_request_v14(
@@ -889,7 +937,7 @@ impl ContractsSessionStoreV1 {
             );
         }
         let exposure = self.authenticate_f7_exposure_v14(session)?;
-        self.authenticate_f7_admission_v14(session)?;
+        self.authenticate_f7_admission_against_v14(session, &exposure)?;
         self.require_f7_final_claim_send_head_v14(&exposure, current)?;
         let gate = self.load_f7_gate_v12(session)?;
         let roster = self.load_transport_roster(session)?;
@@ -1039,11 +1087,10 @@ impl ContractsSessionStoreV1 {
         session: [u8; 32],
     ) -> Result<F7FinalClaimFactsV14, SessionStoreError> {
         let _guard = self.operation_lock()?;
-        let exposure = self.authenticate_f7_exposure_v14(session)?;
+        let (exposure, gate, issued) = self.authenticate_f7_exposure_with_claim_v14(session)?;
         if chain.as_bytes() != &exposure.hashes[1] {
             return Err(SessionStoreError::InvalidTransition);
         }
-        let (gate, issued, _) = self.authenticate_f7_claim_v12(session)?;
         Ok(final_claim_facts_v14(&gate, &issued))
     }
 }
@@ -1083,13 +1130,15 @@ impl ContractsSessionStoreV1 {
         if !self.f7_final_claim_exposure_exists_v14(session)? {
             return Ok(F7FinalClaimProgressV14::NeedsAdaptation);
         }
-        self.authenticate_f7_exposure_v14(session)?;
-        match self.authenticate_f7_admission_v14(session) {
+        let exposure = self.authenticate_f7_exposure_v14(session)?;
+        match self.authenticate_f7_admission_against_v14(session, &exposure) {
             Err(SessionStoreError::SessionNotFound) => return Ok(F7FinalClaimProgressV14::Exposed),
             Err(error) => return Err(error),
             Ok(_) => {}
         }
-        let (_, request) = match self.authenticate_f7_final_transport_v14(chain, session) {
+        let (_, request) = match self.authenticate_f7_final_transport_against_v14(
+            chain, session, &exposure,
+        ) {
             Err(SessionStoreError::SessionNotFound) => {
                 if self.load_session_locked(session)?.phase() != SessionPhaseV1::FundingConfirmed {
                     return Err(SessionStoreError::Quarantined);
@@ -1155,7 +1204,24 @@ impl ContractsSessionStoreV1 {
         SessionStoreError,
     > {
         let exposure = self.authenticate_f7_exposure_v14(session)?;
-        self.authenticate_f7_admission_v14(session)?;
+        self.authenticate_f7_final_transport_against_v14(chain, session, &exposure)
+    }
+
+    /// Same checks as `authenticate_f7_final_transport_v14` against an
+    /// exposure the caller authenticated in this same operation.
+    fn authenticate_f7_final_transport_against_v14(
+        &self,
+        chain: TrustedChainIdV1,
+        session: [u8; 32],
+        exposure: &ExposureV14,
+    ) -> Result<
+        (
+            CommittedOutboundDsc1RecordV1,
+            OutboundDsc1SigningRequestRecordV1,
+        ),
+        SessionStoreError,
+    > {
+        self.authenticate_f7_admission_against_v14(session, exposure)?;
         if exposure.hashes[1] != *chain.as_bytes() {
             return Err(SessionStoreError::InvalidTransition);
         }
@@ -1167,7 +1233,7 @@ impl ContractsSessionStoreV1 {
         )?;
         let request = self.load_outbound_dsc1_request(session, signer.participant_id, sequence)?;
         let predecessor = self.load_session_revision(session, request.predecessor_revision)?;
-        self.audit_f7_final_claim_request_v14(&request, &predecessor)?;
+        self.audit_f7_final_claim_request_against_v14(&request, &predecessor, exposure, &signer)?;
         let committed =
             self.load_committed_outbound_dsc1(session, signer.participant_id, sequence)?;
         self.authenticate_committed_outbound_dsc1_record_locked(&committed, &request)?;
