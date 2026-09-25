@@ -43,10 +43,33 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             if facts.receiver_id() == self.local_participant {
                 return Ok(());
             }
-            if self
+            // Not being this observation's receiver does not make the local
+            // opening the claim sender: the frozen sender is named by the
+            // gate role, and `f7_final_claim_progress_v14` refuses anyone
+            // else with `InvalidTransition`. Round 93 died exactly there --
+            // the refusal is not in `retryable_v20`, so a legitimate
+            // non-sender opening killed the route. `f7_claim_receiver_state_v25`
+            // is the query written for this decision; its own documentation
+            // says to select receiver handling before a sender-only
+            // publication. No check is dropped: a non-sender simply does not
+            // ask a sender-only question, and continues exactly as a sender
+            // whose claim still needs adaptation does.
+            let local_is_claim_sender = match self
                 .store
-                .f7_final_claim_progress_v14(chain, binding.session_id())?
-                != dom_scriptless_store::F7FinalClaimProgressV14::NeedsAdaptation
+                .retained_f7_funding_gate_v19(chain, binding.session_id())?
+            {
+                Some(gate) => matches!(
+                    self.store
+                        .f7_claim_receiver_state_v25(&gate, chain, self.local_participant,)?,
+                    dom_scriptless_store::F7ClaimReceiverStateV25::Sender
+                ),
+                None => false,
+            };
+            if local_is_claim_sender
+                && self
+                    .store
+                    .f7_final_claim_progress_v14(chain, binding.session_id())?
+                    != dom_scriptless_store::F7FinalClaimProgressV14::NeedsAdaptation
             {
                 return Ok(());
             }
