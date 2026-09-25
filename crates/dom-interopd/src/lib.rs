@@ -8,6 +8,7 @@
 
 mod admission;
 mod driver;
+mod route_step_segment_v28;
 #[cfg(feature = "production")]
 mod production_bitcoin_prebroadcast;
 #[cfg(feature = "production")]
