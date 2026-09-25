@@ -1359,6 +1359,109 @@ fn classify_registered_component(value: &str) -> Option<ExpectedNodeType> {
     static_type.or_else(|| classify_dynamic_component(value))
 }
 
+// Same names, same order and same result as the `format!` closures they
+// replace. Those closures built up to twenty-two Strings per classified
+// component (three signing edges, five resource scopes times two states and
+// three custody/vault kinds times two states), and a component is classified
+// for every entry of every directory scan the Store performs. A perf record of
+// run 90 attributed 17% of the daemon's CPU to this formatting alone.
+const XMR_GRAPH_EDGE_NAMES_V23: [(&str, &str); 6] = [
+    (
+        "-02.xmr-graph-signing-session-v23",
+        "-02.xmr-graph-signing-session-v23.staging",
+    ),
+    (
+        "-03.xmr-graph-signing-session-v23",
+        "-03.xmr-graph-signing-session-v23.staging",
+    ),
+    (
+        "-04.xmr-graph-signing-session-v23",
+        "-04.xmr-graph-signing-session-v23.staging",
+    ),
+    (
+        "-02.xmr-graph-signing-origin-v23",
+        "-02.xmr-graph-signing-origin-v23.staging",
+    ),
+    (
+        "-03.xmr-graph-signing-origin-v23",
+        "-03.xmr-graph-signing-origin-v23.staging",
+    ),
+    (
+        "-04.xmr-graph-signing-origin-v23",
+        "-04.xmr-graph-signing-origin-v23.staging",
+    ),
+];
+
+const XMR_GRAPH_RESOURCE_NAMES_V23: [(&str, &str); 10] = [
+    (
+        "-02-01.xmr-graph-resource-started-v23",
+        "-02-01.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-02-01.xmr-graph-resource-ready-v23",
+        "-02-01.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-02-02.xmr-graph-resource-started-v23",
+        "-02-02.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-02-02.xmr-graph-resource-ready-v23",
+        "-02-02.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-03-01.xmr-graph-resource-started-v23",
+        "-03-01.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-03-01.xmr-graph-resource-ready-v23",
+        "-03-01.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-04-01.xmr-graph-resource-started-v23",
+        "-04-01.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-04-01.xmr-graph-resource-ready-v23",
+        "-04-01.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-04-02.xmr-graph-resource-started-v23",
+        "-04-02.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-04-02.xmr-graph-resource-ready-v23",
+        "-04-02.xmr-graph-resource-ready-v23.staging",
+    ),
+];
+
+const XMR_GRAPH_STATE_NAMES_V23: [(&str, &str); 6] = [
+    (
+        ".xmr-graph-custody-started-v23",
+        ".xmr-graph-custody-started-v23.staging",
+    ),
+    (
+        ".xmr-graph-custody-ready-v23",
+        ".xmr-graph-custody-ready-v23.staging",
+    ),
+    (
+        ".xmr-funding-vault-started-v23",
+        ".xmr-funding-vault-started-v23.staging",
+    ),
+    (
+        ".xmr-funding-vault-ready-v23",
+        ".xmr-funding-vault-ready-v23.staging",
+    ),
+    (
+        ".xmr-claim-vault-started-v23",
+        ".xmr-claim-vault-started-v23.staging",
+    ),
+    (
+        ".xmr-claim-vault-ready-v23",
+        ".xmr-claim-vault-ready-v23.staging",
+    ),
+];
+
 fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
     // Both names are constants, so they are written as constants. Building the
     // staging one with `format!` inside this loop allocated up to eleven
@@ -1544,73 +1647,14 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         || exact_wrapped_hex(value, ".", 64, ".template-transport-authority.staging")
         || exact_wrapped_hex(value, "", 64, ".bootstrap-wallet-keys-v18")
         || exact_wrapped_hex(value, ".", 64, ".bootstrap-wallet-keys-v18.staging")
-        || ["02", "03", "04"].iter().any(|edge| {
-            exact_wrapped_hex(
-                value,
-                "",
-                64,
-                &format!("-{edge}.xmr-graph-signing-session-v23"),
-            ) || exact_wrapped_hex(
-                value,
-                ".",
-                64,
-                &format!("-{edge}.xmr-graph-signing-session-v23.staging"),
-            )
+        || XMR_GRAPH_EDGE_NAMES_V23.iter().any(|(suffix, staging)| {
+            exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
-        || ["02", "03", "04"].iter().any(|edge| {
-            exact_wrapped_hex(
-                value,
-                "",
-                64,
-                &format!("-{edge}.xmr-graph-signing-origin-v23"),
-            ) || exact_wrapped_hex(
-                value,
-                ".",
-                64,
-                &format!("-{edge}.xmr-graph-signing-origin-v23.staging"),
-            )
+        || XMR_GRAPH_RESOURCE_NAMES_V23.iter().any(|(suffix, staging)| {
+            exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
-        || ["02-01", "02-02", "03-01", "04-01", "04-02"]
-            .iter()
-            .any(|scope| {
-                ["started", "ready"].iter().any(|state| {
-                    exact_wrapped_hex(
-                        value,
-                        "",
-                        64,
-                        &format!("-{scope}.xmr-graph-resource-{state}-v23"),
-                    ) || exact_wrapped_hex(
-                        value,
-                        ".",
-                        64,
-                        &format!("-{scope}.xmr-graph-resource-{state}-v23.staging"),
-                    )
-                })
-            })
-        || ["started", "ready"].iter().any(|state| {
-            exact_wrapped_hex(value, "", 64, &format!(".xmr-graph-custody-{state}-v23"))
-                || exact_wrapped_hex(
-                    value,
-                    ".",
-                    64,
-                    &format!(".xmr-graph-custody-{state}-v23.staging"),
-                )
-        })
-        || ["started", "ready"].iter().any(|state| {
-            exact_wrapped_hex(value, "", 64, &format!(".xmr-funding-vault-{state}-v23"))
-                || exact_wrapped_hex(
-                    value,
-                    ".",
-                    64,
-                    &format!(".xmr-funding-vault-{state}-v23.staging"),
-                )
-                || exact_wrapped_hex(value, "", 64, &format!(".xmr-claim-vault-{state}-v23"))
-                || exact_wrapped_hex(
-                    value,
-                    ".",
-                    64,
-                    &format!(".xmr-claim-vault-{state}-v23.staging"),
-                )
+        || XMR_GRAPH_STATE_NAMES_V23.iter().any(|(suffix, staging)| {
+            exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
         || exact_wrapped_hex(value, "", 64, ".xmr-graph-commit-context-v23")
         || exact_wrapped_hex(value, ".", 64, ".xmr-graph-commit-context-v23.staging")
@@ -1957,11 +2001,42 @@ mod tests {
             ".f7-v12-claim-admission-v14",
             ".f7-v12-claim-observation-v15",
             ".f7-v12-refund-transport-v23",
+            "-02.xmr-graph-signing-session-v23",
+            "-03.xmr-graph-signing-session-v23",
+            "-04.xmr-graph-signing-session-v23",
+            "-02.xmr-graph-signing-origin-v23",
+            "-03.xmr-graph-signing-origin-v23",
+            "-04.xmr-graph-signing-origin-v23",
+            "-02-01.xmr-graph-resource-started-v23",
+            "-02-01.xmr-graph-resource-ready-v23",
+            "-02-02.xmr-graph-resource-started-v23",
+            "-02-02.xmr-graph-resource-ready-v23",
+            "-03-01.xmr-graph-resource-started-v23",
+            "-03-01.xmr-graph-resource-ready-v23",
+            "-04-01.xmr-graph-resource-started-v23",
+            "-04-01.xmr-graph-resource-ready-v23",
+            "-04-02.xmr-graph-resource-started-v23",
+            "-04-02.xmr-graph-resource-ready-v23",
+            ".xmr-graph-custody-started-v23",
+            ".xmr-graph-custody-ready-v23",
+            ".xmr-funding-vault-started-v23",
+            ".xmr-funding-vault-ready-v23",
+            ".xmr-claim-vault-started-v23",
+            ".xmr-claim-vault-ready-v23",
         ] {
             let final_name = format!("{session}{suffix}");
             let staging_name = format!(".{session}{suffix}.staging");
             assert!(ValidatedComponent::registered(&final_name).is_ok());
             assert!(ValidatedComponent::registered(&staging_name).is_ok());
+        }
+
+        for suffix in [
+            "-05.xmr-graph-signing-session-v23",
+            "-03-02.xmr-graph-resource-started-v23",
+            ".xmr-graph-custody-done-v23",
+        ] {
+            assert!(ValidatedComponent::registered(&format!("{session}{suffix}")).is_err());
+            assert!(ValidatedComponent::registered(&format!(".{session}{suffix}.staging")).is_err());
         }
 
         for invalid in [
