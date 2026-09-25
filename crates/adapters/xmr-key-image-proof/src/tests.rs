@@ -71,7 +71,8 @@ fn equations_roundtrip_and_fresh_nonce() {
 #[test]
 fn every_scope_field_and_both_statement_points_are_bound() {
     let (ctx, p, i, proof) = fixture();
-    let mutations: Vec<Box<dyn Fn(&mut InputSpendContextV23)>> = vec![
+    type ContextMutation = Box<dyn Fn(&mut InputSpendContextV23)>;
+    let mutations: Vec<ContextMutation> = vec![
         Box::new(|v| v.network_genesis[0] ^= 1),
         Box::new(|v| v.route[0] ^= 1),
         Box::new(|v| v.session[0] ^= 1),
