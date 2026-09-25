@@ -6,9 +6,7 @@ use super::*;
 mod enrollment_wire_v23;
 #[path = "production_native_xmr_bundle_entrypoints_v23_tests.rs"]
 mod entrypoints_v23;
-pub(crate) use entrypoints_v23::{
-    encode_native_xmr_bundle_from_plan_v23, encode_native_xmr_bundle_v23,
-};
+pub(crate) use entrypoints_v23::encode_native_xmr_bundle_from_plan_v23;
 
 pub(crate) struct NativeXmrBundleResourcesV23 {
     pub local_participant_id: [u8; 32],

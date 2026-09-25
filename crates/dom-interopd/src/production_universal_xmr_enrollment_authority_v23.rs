@@ -3,7 +3,7 @@
 use super::*;
 #[path = "production_xmr_enrollment_resources_v23.rs"]
 mod resources_v23;
-pub(crate) use resources_v23::{ProductionOpenedXmrEnrollmentV23, ProductionXmrEnrolledFundingV23};
+pub(crate) use resources_v23::ProductionOpenedXmrEnrollmentV23;
 #[cfg(test)]
 #[path = "production_xmr_enrollment_authority_codec_v23_tests.rs"]
 mod codec_tests;

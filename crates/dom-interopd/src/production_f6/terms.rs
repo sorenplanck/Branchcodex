@@ -37,9 +37,7 @@ pub(crate) use native_xmr_dom_face_v25::ProductionNativeXmrDomFaceOwnerV25;
 #[path = "terms/native_reconfirmation_terms_v25.rs"]
 mod native_reconfirmation_terms_v25;
 #[cfg(test)]
-pub(crate) use native_reconfirmation_terms_v25::tests::{
-    native_terms_proposal_fixture_v25, NativeTermsProposalFixtureV25,
-};
+pub(crate) use native_reconfirmation_terms_v25::tests::native_terms_proposal_fixture_v25;
 pub(crate) use native_reconfirmation_terms_v25::{
     PreparedNativeF6TermsProposalV25, ProductionNativeF6TermsProposalOwnerV25,
 };

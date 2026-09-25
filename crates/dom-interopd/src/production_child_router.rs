@@ -640,9 +640,18 @@ impl ProductionSettlementChildRouterV1 {
         if port.face() != face {
             return Err(child_conflict_at_v25(559));
         }
-        measure_child_operation_v27("materialize", face, || {
+        let outcome = measure_child_operation_v27("materialize", face, || {
             port.materialize(request, public_scalar)
-        })
+        });
+        if let Err(refusal) = &outcome {
+            // Names the face whose port refused, which the caller's
+            // `Conflict -> Inconsistent` mapping otherwise erases. Static
+            // face and refusal class only; no identifier or digest.
+            eprintln!(
+                "DOM_REFUSAL_ORIGIN_V26 site=port.materialize face={face:?} refusal={refusal:?}"
+            );
+        }
+        outcome
     }
 
     pub(crate) fn take_bitcoin_public_extraction_handoff(

@@ -8,8 +8,7 @@ use route_executor::{ActionIntentV1, ActionKindV1};
 use settlement_coordinator::{
     ChildAuthorityRefusalV1, ChildDispatchRequestV1, ChildExecutionOutcomeV1,
     ChildObservationOutcomeV1, ChildObservationRequestV1, ChildReconciliationOutcomeV1,
-    ChildReconciliationRequestV1, SettlementActionV1, SettlementChildAuthorityV1,
-    SettlementChildObserverV1,
+    ChildReconciliationRequestV1, SettlementChildAuthorityV1, SettlementChildObserverV1,
 };
 use std::{
     cell::Cell,

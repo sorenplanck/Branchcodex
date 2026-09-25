@@ -2986,7 +2986,10 @@ fn map_contracts_outbound_error(
             | IdentityStoreError::AuthenticationFailed
             | IdentityStoreError::InvalidKey
             | IdentityStoreError::StoreRejected,
-        ) => ChildAuthorityRefusalV1::Conflict,
+        ) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_outbound variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
         ProductionContractsOutboundErrorV1::Store(
             SessionStoreError::Filesystem
             | SessionStoreError::StoreBusy
@@ -3005,7 +3008,10 @@ fn map_contracts_outbound_error(
             | SessionStoreError::FundingAuthorityUnavailable
             | SessionStoreError::ClaimSigningAuthorityUnavailable
             | SessionStoreError::LegacyV1RecoveryOnly,
-        ) => ChildAuthorityRefusalV1::Conflict,
+        ) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_outbound variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
         ProductionContractsOutboundErrorV1::Relay(
             RelayWorkerOutboundErrorV1::OwnerBusy | RelayWorkerOutboundErrorV1::EntropyUnavailable,
         ) => ChildAuthorityRefusalV1::Unavailable,
@@ -3027,7 +3033,10 @@ fn map_contracts_outbound_error(
             | RelayWorkerOutboundErrorV1::StoreRejected(_)
             | RelayWorkerOutboundErrorV1::InvalidDsc1
             | RelayWorkerOutboundErrorV1::WrongDsc1Scope,
-        ) => ChildAuthorityRefusalV1::Conflict,
+        ) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_outbound variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 
@@ -3345,7 +3354,10 @@ fn map_actuator_error(error: DomActuatorError) -> ChildAuthorityRefusalV1 {
         | DomActuatorError::SecretReuseDetected
         | DomActuatorError::FinalityEvidenceInvalid
         | DomActuatorError::FinalityPolicyUnsupported
-        | DomActuatorError::ReorgBeyondPolicy => ChildAuthorityRefusalV1::Conflict,
+        | DomActuatorError::ReorgBeyondPolicy => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_actuator variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 
@@ -3375,7 +3387,18 @@ fn map_f7_claim_error_v21(
         Error::Anchors(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
             f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed,
         )) => ChildAuthorityRefusalV1::Unavailable,
-        Error::Scope | Error::Store(_) | Error::Anchors(_) => ChildAuthorityRefusalV1::Conflict,
+        Error::Scope => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=f7_claim variant=scope");
+            ChildAuthorityRefusalV1::Conflict
+        }
+        Error::Store(store) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=f7_claim variant=store.{store:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
+        Error::Anchors(_) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=f7_claim variant=anchors");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 

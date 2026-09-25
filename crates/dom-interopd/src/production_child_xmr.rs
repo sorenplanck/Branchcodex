@@ -524,7 +524,10 @@ pub(crate) fn map_actuator_error(error: XmrActuatorErrorV1) -> ChildAuthorityRef
         | XmrActuatorErrorV1::Corrupt
         | XmrActuatorErrorV1::Conflict
         | XmrActuatorErrorV1::InvalidInput
-        | XmrActuatorErrorV1::InvalidTime => ChildAuthorityRefusalV1::Conflict,
+        | XmrActuatorErrorV1::InvalidTime => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=xmr_actuator variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 

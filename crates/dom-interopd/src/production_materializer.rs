@@ -1781,11 +1781,14 @@ const fn face_tag(face: SettlementFaceV1) -> u8 {
     }
 }
 
-const fn map_child_refusal(error: ChildAuthorityRefusalV1) -> AuthorityRefusalV1 {
+fn map_child_refusal(error: ChildAuthorityRefusalV1) -> AuthorityRefusalV1 {
     match error {
         ChildAuthorityRefusalV1::Unavailable => AuthorityRefusalV1::Unavailable,
         ChildAuthorityRefusalV1::Refused => AuthorityRefusalV1::Refused,
-        ChildAuthorityRefusalV1::Conflict => AuthorityRefusalV1::Inconsistent,
+        ChildAuthorityRefusalV1::Conflict => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=materialize_child_conflict");
+            AuthorityRefusalV1::Inconsistent
+        }
     }
 }
 

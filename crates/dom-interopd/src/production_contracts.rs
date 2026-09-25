@@ -52,8 +52,7 @@ pub(crate) use f7_readiness_v19::ProductionF7ReadinessErrorV19;
 mod f7_runtime_v12;
 pub(crate) use f7_runtime_v12::{
     ProductionF7ObserverPlanV20, ProductionF7RuntimeErrorV12, ProductionF7RuntimeV12,
-    ProductionF7StepV12, ProductionSelectedF7ObserverV12, ProductionXmrF7GraphV23,
-    ProductionXmrF7InputsV12,
+    ProductionSelectedF7ObserverV12, ProductionXmrF7GraphV23, ProductionXmrF7InputsV12,
 };
 
 #[path = "production_post_m8_claim_v22.rs"]
@@ -74,9 +73,6 @@ pub(crate) use final_claim_v14::{
 
 #[path = "production_claim_receiver_v15.rs"]
 mod claim_receiver_v15;
-pub(crate) use claim_receiver_v15::{
-    ProductionClaimReceiverErrorV15, ProductionClaimReceiverStepV15,
-};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -571,7 +567,10 @@ fn map_remote_transport_error(
         ProductionContractsOutboundErrorV1::Relay(_)
         | ProductionContractsOutboundErrorV1::OwnerBusy => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Identity(_)
-        | ProductionContractsOutboundErrorV1::Store(_) => ChildAuthorityRefusalV1::Conflict,
+        | ProductionContractsOutboundErrorV1::Store(_) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=remote_transport variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 

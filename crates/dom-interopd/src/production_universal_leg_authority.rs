@@ -7,7 +7,6 @@
 mod xmr_enrollment_authority_v23;
 pub(crate) use xmr_enrollment_authority_v23::{
     ProductionOpenedXmrEnrollmentV23, ProductionUniversalXmrEnrollmentAuthorityV23,
-    ProductionXmrEnrolledFundingV23,
 };
 
 #[path = "production_xmr_enrollment_bundle_writer_v23.rs"]
