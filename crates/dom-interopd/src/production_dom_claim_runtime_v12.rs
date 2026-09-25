@@ -210,8 +210,11 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         &self,
         binding: DomSessionBindingV1,
         chain: TrustedChainIdV1,
-        vault: Vault,
-        share: DomParticipantSigningShareV1,
+        // Borrowed, not moved: every refusal below happens before the signing
+        // material becomes unrecoverable, and the caller holds the only copy.
+        // Taking it up front destroyed it on refusals that had consumed
+        // nothing, which left the route with no signer and no way back.
+        signer_material: &mut Option<(Vault, DomParticipantSigningShareV1)>,
         gate: &PreparedF7FundingGateV12,
         anchors: VerifiedF7AnchorAuthorizationV12,
     ) -> Result<ProductionDomClaimRuntimeV12<Vault>, ProductionDomClaimRuntimeErrorV12>
@@ -232,6 +235,11 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             .consume_f7_claim_authorization_v12(gate, anchors)?;
         self.store
             .bind_retained_f7_claim_signing_session_v12(&authorization, chain)?;
+        // Point of no return: the authorization is consumed and the signing
+        // session is bound, so the material is committed to this attempt.
+        let (vault, share) = signer_material
+            .take()
+            .ok_or(ProductionDomClaimRuntimeErrorV12::Wallet)?;
         let signer = participant_retained_vault_signer_v12(
             vault,
             Rc::clone(&self.store),

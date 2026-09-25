@@ -699,24 +699,43 @@ where
             let anchors = anchors.ok_or(ProductionF7RuntimeErrorV12::Scope)?;
             // Arm the terminal state before moving either capability. Only a
             // successful retained native owner may clear it. Earlier observer
-            // failures leave both the state and original custody untouched.
+            // failures leave both the state and original custody untouched —
+            // which taking the signer here broke: a refusal raised before
+            // anything was consumed still destroyed the only signing
+            // material. The start now borrows it and takes it at its own
+            // point of no return, so this comment holds again.
+            if self.initial_signer.is_none() {
+                return Err(ProductionF7RuntimeErrorV12::RequiresRestart(None));
+            }
             self.restart_required = true;
-            let (vault, share) = self
-                .initial_signer
-                .take()
-                .ok_or(ProductionF7RuntimeErrorV12::RequiresRestart(None))?;
-            self.claim = Some(
-                owner
-                    .start_dom_claim_runtime_v12(
-                        self.binding,
-                        self.chain,
-                        vault,
-                        share,
-                        &self.gate,
-                        anchors,
-                    )
-                    .map_err(|error| ProductionF7RuntimeErrorV12::RequiresRestart(Some(error)))?,
-            );
+            match owner.start_dom_claim_runtime_v12(
+                self.binding,
+                self.chain,
+                &mut self.initial_signer,
+                &self.gate,
+                anchors,
+            ) {
+                Ok(claim) => self.claim = Some(claim),
+                // The signer survived, so nothing was consumed: the downstream
+                // claim gate answered with a retained observation older than
+                // its sixty seconds. Observe again next turn. Run 89 ended
+                // here instead, as an unrecoverable RequiresRestart.
+                Err(error) if self.initial_signer.is_some() => {
+                    self.restart_required = false;
+                    if matches!(
+                        error,
+                        ProductionDomClaimRuntimeErrorV12::Store(
+                            SessionStoreError::ClaimSigningAuthorityUnavailable
+                        )
+                    ) {
+                        return Ok(ProductionF7StepV12::TemporarilyUnavailable);
+                    }
+                    return Err(ProductionF7RuntimeErrorV12::Claim(error));
+                }
+                Err(error) => {
+                    return Err(ProductionF7RuntimeErrorV12::RequiresRestart(Some(error)))
+                }
+            }
             self.restart_required = false;
             return Ok(ProductionF7StepV12::Started);
         }
