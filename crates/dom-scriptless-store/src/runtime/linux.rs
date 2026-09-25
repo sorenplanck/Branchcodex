@@ -1360,21 +1360,44 @@ fn classify_registered_component(value: &str) -> Option<ExpectedNodeType> {
 }
 
 fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
-    for suffix in [
-        ".f7-v12-gate",
-        ".f7-v12-funding",
-        ".f7-v12-funding-signing-v20",
-        ".f7-v12-claim-issued",
-        ".f7-v12-claim-consumed",
-        ".f7-v12-claim-binding",
-        ".f7-v12-claim-pre",
-        ".f7-v12-claim-exposure-v14",
-        ".f7-v12-claim-admission-v14",
-        ".f7-v12-claim-observation-v15",
-        ".f7-v12-refund-transport-v23",
-    ] {
+    // Both names are constants, so they are written as constants. Building the
+    // staging one with `format!` inside this loop allocated up to eleven
+    // Strings per classified component, and `ValidatedComponent::registered`
+    // classifies every path component of every Store operation: a perf record
+    // of run 89 attributed 16.9% of the daemon's CPU to this function, 12.4
+    // points of it inside format/realloc under exactly this call. Same names,
+    // same order, same result.
+    const WRAPPED_V12_NAMES: [(&str, &str); 11] = [
+        (".f7-v12-gate", ".f7-v12-gate.staging"),
+        (".f7-v12-funding", ".f7-v12-funding.staging"),
+        (
+            ".f7-v12-funding-signing-v20",
+            ".f7-v12-funding-signing-v20.staging",
+        ),
+        (".f7-v12-claim-issued", ".f7-v12-claim-issued.staging"),
+        (".f7-v12-claim-consumed", ".f7-v12-claim-consumed.staging"),
+        (".f7-v12-claim-binding", ".f7-v12-claim-binding.staging"),
+        (".f7-v12-claim-pre", ".f7-v12-claim-pre.staging"),
+        (
+            ".f7-v12-claim-exposure-v14",
+            ".f7-v12-claim-exposure-v14.staging",
+        ),
+        (
+            ".f7-v12-claim-admission-v14",
+            ".f7-v12-claim-admission-v14.staging",
+        ),
+        (
+            ".f7-v12-claim-observation-v15",
+            ".f7-v12-claim-observation-v15.staging",
+        ),
+        (
+            ".f7-v12-refund-transport-v23",
+            ".f7-v12-refund-transport-v23.staging",
+        ),
+    ];
+    for (suffix, staging) in WRAPPED_V12_NAMES {
         if exact_wrapped_hex(value, "", 64, suffix)
-            || exact_wrapped_hex(value, ".", 64, &format!("{suffix}.staging"))
+            || exact_wrapped_hex(value, ".", 64, staging)
         {
             return Some(ExpectedNodeType::RegularFile);
         }
