@@ -669,7 +669,7 @@ fn acquire_lock(
         .map_err(|_| RouteSecretVaultError::StoreBusy)?;
     lock.sync_all()
         .map_err(|_| RouteSecretVaultError::Filesystem)?;
-    fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)?;
+    fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)?;
     Ok((lock, identity))
 }
 
@@ -955,7 +955,7 @@ fn recover_authenticated_tombstone_staging(
         target_name.as_str(),
         RenameFlags::NOREPLACE,
     ) {
-        Ok(()) => fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem),
+        Ok(()) => fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem),
         Err(error) if error == rustix::io::Errno::EXIST => {
             let target = read_tombstone(root, &target_name)?;
             authenticate_tombstone(&target, key)?;
@@ -964,7 +964,7 @@ fn recover_authenticated_tombstone_staging(
             }
             unlinkat(root.as_fd(), staging_name, AtFlags::empty())
                 .map_err(|_| RouteSecretVaultError::Filesystem)?;
-            fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)
+            fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)
         }
         Err(_) => Err(RouteSecretVaultError::Filesystem),
     }
@@ -1034,7 +1034,7 @@ fn recover_authenticated_staging(
         RenameFlags::NOREPLACE,
     ) {
         Ok(()) => {
-            fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)?;
+            fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)?;
             Ok(())
         }
         Err(error) if error == rustix::io::Errno::EXIST => {
@@ -1046,7 +1046,7 @@ fn recover_authenticated_staging(
             }
             unlinkat(root.as_fd(), staging_name, AtFlags::empty())
                 .map_err(|_| RouteSecretVaultError::Filesystem)?;
-            fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)?;
+            fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)?;
             Ok(())
         }
         Err(_) => Err(RouteSecretVaultError::Filesystem),
@@ -1150,7 +1150,7 @@ fn retire_record(
                     }
                     unlinkat(root.as_fd(), sealed_name.as_str(), AtFlags::empty())
                         .map_err(|_| RouteSecretVaultError::Filesystem)?;
-                    fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)?;
+                    fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)?;
                 }
                 Err(RouteSecretVaultError::NotFound) => {}
                 Err(error) => return Err(error),
@@ -1168,7 +1168,7 @@ fn retire_record(
             publish_tombstone(root, &retired_name, &tombstone)?;
             unlinkat(root.as_fd(), sealed_name.as_str(), AtFlags::empty())
                 .map_err(|_| RouteSecretVaultError::Filesystem)?;
-            fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)?;
+            fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)?;
             Ok(RouteSecretRetireOutcomeV1::Retired)
         }
         Err(error) => Err(error),
@@ -1567,12 +1567,12 @@ fn publish_bytes(
                 RouteSecretVaultError::Filesystem
             }
         })?;
-        fsync_capability_dir(&root).map_err(|_| RouteSecretVaultError::Filesystem)?;
+        fsync_capability_dir(root).map_err(|_| RouteSecretVaultError::Filesystem)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = unlinkat(root.as_fd(), staging_name.as_str(), AtFlags::empty());
-        let _ = fsync_capability_dir(&root);
+        let _ = fsync_capability_dir(root);
     }
     result
 }

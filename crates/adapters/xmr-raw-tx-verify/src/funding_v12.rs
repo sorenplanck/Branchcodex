@@ -192,10 +192,10 @@ pub fn derive_owned_funding_key_image_v23(
         put_varint(index as u64, &mut bytes);
         let shared = hash_scalar(&bytes)?;
         let candidate = Zeroizing::new(*spend + *shared);
-        if (ED25519_BASEPOINT_POINT * *candidate).compress().to_bytes() == output_key {
-            if owned_secret.replace(candidate).is_some() {
-                return Err(FundingVerificationErrorV12::Economics);
-            }
+        if (ED25519_BASEPOINT_POINT * *candidate).compress().to_bytes() == output_key
+            && owned_secret.replace(candidate).is_some()
+        {
+            return Err(FundingVerificationErrorV12::Economics);
         }
     }
     let owned_secret = owned_secret.ok_or(FundingVerificationErrorV12::Economics)?;
@@ -343,10 +343,8 @@ pub(super) fn verify_recipient_with_derivations_v23(
             }
             output_matched = true;
         }
-        if output_matched {
-            if match_index.replace(index as u32).is_some() {
-                return Err(FundingVerificationErrorV12::Economics);
-            }
+        if output_matched && match_index.replace(index as u32).is_some() {
+            return Err(FundingVerificationErrorV12::Economics);
         }
     }
     match_index.ok_or(FundingVerificationErrorV12::Economics)
@@ -355,10 +353,13 @@ pub(super) fn verify_recipient_with_derivations_v23(
 // Strict narrow extra profile: one primary key, optional one additional-key
 // vector matching output count, optional one bounded nonce, trailing zero padding.
 // Never silently stop parsing on unknown data as wallet scanners often do.
+/// Primary transaction key plus the optional per-output additional keys.
+pub(super) type ExtraKeysV12 = ([u8; 32], Option<Vec<[u8; 32]>>);
+
 pub(super) fn extra_keys(
     extra: &[u8],
     outputs: usize,
-) -> Result<([u8; 32], Option<Vec<[u8; 32]>>), FundingVerificationErrorV12> {
+) -> Result<ExtraKeysV12, FundingVerificationErrorV12> {
     if extra.is_empty() || extra.len() > 4096 {
         return Err(FundingVerificationErrorV12::Extra);
     }

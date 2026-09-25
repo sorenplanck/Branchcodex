@@ -141,7 +141,7 @@ pub fn seal_xmr_recovery_archive_v11(
     let cipher = XChaCha20Poly1305::new_from_slice(key.0.as_ref())
         .map_err(|_| XmrRecoveryArchiveErrorV11::InvalidScope)?;
     let tag = cipher
-        .encrypt_in_place_detached(XNonce::from_slice(&nonce), &aad, &mut payload)
+        .encrypt_in_place_detached(&XNonce::from(nonce), &aad, &mut payload)
         .map_err(|_| XmrRecoveryArchiveErrorV11::AuthenticationFailed)?;
     let length =
         u32::try_from(payload.len()).map_err(|_| XmrRecoveryArchiveErrorV11::InvalidEncoding)?;
@@ -184,12 +184,7 @@ pub fn open_xmr_recovery_archive_v11(
     let cipher = XChaCha20Poly1305::new_from_slice(key.0.as_ref())
         .map_err(|_| XmrRecoveryArchiveErrorV11::InvalidScope)?;
     cipher
-        .decrypt_in_place_detached(
-            XNonce::from_slice(&nonce),
-            &aad,
-            &mut plaintext,
-            Tag::from_slice(&tag),
-        )
+        .decrypt_in_place_detached(&XNonce::from(nonce), &aad, &mut plaintext, &Tag::from(tag))
         .map_err(|_| XmrRecoveryArchiveErrorV11::AuthenticationFailed)?;
     decode_payload(binding, expected_graph_digest, &plaintext)
 }

@@ -377,6 +377,9 @@ pub fn require_distinct_xmr_recovery_nonces_v12(
 /// Its public constructor does not verify funding and confers no authority.
 /// The retired conditional kernel grants nothing: compensation admission is
 /// refused even when this marker is present.
+// The scope fields are validated at construction and never read afterwards:
+// the marker exists only so V22 callers keep compiling.
+#[allow(dead_code)]
 pub struct XmrCompensationFundingWitnessV22 {
     chain_id: [u8; 32],
     session_id: [u8; 32],

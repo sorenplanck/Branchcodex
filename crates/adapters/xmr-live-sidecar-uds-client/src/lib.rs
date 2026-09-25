@@ -628,7 +628,7 @@ mod tests {
                 return;
             }
             for _ in 0..100 {
-                if peer.write_all(&[b'a']).is_err() {
+                if peer.write_all(b"a").is_err() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));

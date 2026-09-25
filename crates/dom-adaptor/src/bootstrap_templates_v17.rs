@@ -162,7 +162,10 @@ impl DomBootstrapOfferV17 {
         let offsets = [reader.array()?, reader.array()?, reader.array()?];
         let payout = reader.output()?;
         let count = usize::from(u16::from_le_bytes(reader.array()?));
-        if count > MAX_INPUTS_PER_TX || count.checked_mul(33).is_none_or(|n| n > reader.remaining())
+        if count > MAX_INPUTS_PER_TX
+            || count
+                .checked_mul(33)
+                .map_or(true, |n| n > reader.remaining())
         {
             return Err(invalid_offer());
         }
@@ -246,6 +249,7 @@ impl DomBootstrapTemplatesV17 {
     /// `dom_funder` is taken from `refund_to` in the signed terms by the caller.
     /// The collaborative statement, all offer scopes, fee totals, proofs,
     /// offsets and balance equations are checked before returning anything.
+    #[allow(clippy::too_many_arguments)]
     pub fn assemble(
         budget: DomBootstrapBudgetV17,
         statement: &BpStatementV1,

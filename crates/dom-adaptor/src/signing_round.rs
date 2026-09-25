@@ -184,6 +184,7 @@ pub struct ValidatedAcceptedSessionMessageV1 {
 }
 
 impl ValidatedAcceptedSessionMessageV1 {
+    #[cfg(test)]
     fn parse(
         bytes: &[u8],
         trusted_chain_id: &TrustedChainIdV1,

@@ -1902,7 +1902,7 @@ impl DurableBitcoinActuatorV1 {
             || participant.as_slice() != context.authority.participant_id()
             || authority.as_slice() != context.authority.authority_digest()
             || nonce.as_deref() != Some(remote_nonce.as_slice())
-            || partial.as_ref().is_none_or(|value| value.len() != 32)
+            || partial.as_ref().map_or(true, |value| value.len() != 32)
         {
             return Err(BitcoinActuatorErrorV1::ClaimAuthorityMismatch);
         }
@@ -4417,7 +4417,7 @@ static TEST_AUTHORITY_LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(()
 fn test_authority_lifecycle() -> std::sync::MutexGuard<'static, ()> {
     TEST_AUTHORITY_LIFECYCLE
         .lock()
-        .expect("authority lifecycle test mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

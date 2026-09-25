@@ -1043,7 +1043,6 @@ fn authenticated_v3_round_replays_and_recovers_final_claim_without_scalar() -> T
     }
     drop(maker_store);
     drop(maker_vault);
-    drop(extraction);
     let mut maker_store = DurableBitcoinActuatorV1::open_existing(&maker_store_path, [0xe6; 32])?;
     let mut maker_vault = BitcoinParticipantNonceVaultV1::open_existing(&maker_vault_path, &maker)?;
     assert_eq!(maker_store.acquire_lease(1152, 1000)?.fence_epoch(), 3);
