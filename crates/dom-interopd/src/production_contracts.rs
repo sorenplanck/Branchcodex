@@ -15,6 +15,7 @@ pub(crate) use xmr_auxiliary_relay_v23::XmrAuxiliaryRelayOpenModeV23;
 mod bootstrap_runtime_v16;
 #[path = "production_xmr_graph_custody_v23.rs"]
 mod graph_custody_v23;
+pub(crate) use graph_custody_v23::ProductionXmrGraphCustodyErrorV23;
 #[path = "production_contracts_xmr_remote_v23.rs"]
 mod xmr_remote_v23;
 pub(crate) use xmr_remote_v23::ProductionXmrRemoteContractsAuthorityV23;

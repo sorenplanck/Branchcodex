@@ -86,7 +86,12 @@ impl ProductionRelayStage12OwnerV1 {
         if let Some((produced, role)) = owner
             .contracts
             .retained_xmr_graph_ready_for_activation_v23(owner.trusted_chain_id)
-            .map_err(|_| Error::Binding)?
+            .map_err(|error| match error {
+                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(
+                    store,
+                ) => Error::Store(store),
+                _ => Error::Binding,
+            })?
         {
             if self.xmr_graph_setup_v22[index]
                 .as_ref()
@@ -255,7 +260,12 @@ impl ProductionRelayStage12OwnerV1 {
             if self.xmr_custody_revalidated_v25[index] {
                 return Ok(());
             }
-            custody.revalidate().map_err(|_| Error::Binding)?;
+            custody.revalidate().map_err(|error| match error {
+                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(
+                    store,
+                ) => Error::Store(store),
+                _ => Error::Binding,
+            })?;
             self.xmr_custody_revalidated_v25[index] = true;
             return Ok(());
         }

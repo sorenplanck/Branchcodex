@@ -64,7 +64,14 @@ impl ProductionXmrGraphCustodyV23 {
             deferred.require_driver().map_err(|_| Error::Binding)?;
             return Ok(());
         }
-        self.revalidate().map_err(|_| Error::Binding)?;
+        // A Store that is busy or cannot read is not a binding fault: the
+        // caller already retries Store(StoreBusy | Filesystem) and the other
+        // "not yet" answers. Erasing them into Binding ended the route on the
+        // first busy revalidation after every reopen.
+        self.revalidate().map_err(|error| match error {
+            ProductionXmrGraphCustodyErrorV23::Store(store) => Error::Store(store),
+            _ => Error::Binding,
+        })?;
         // Bounded like every other per-tick use of this context. The unbounded
         // form walks the chain to the tip with no ceiling at all, and this gate
         // is prepared once per round inside the route step that holds the DOM

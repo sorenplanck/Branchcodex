@@ -567,12 +567,21 @@ impl ProductionCompositeRelayLoopV1 {
         let TimelockSpec::TimestampSeconds { value: now } = self.fresh_relay_time()? else {
             return Err(ProductionCompositeLoopErrorV1::ClockUnavailable);
         };
-        self.owner
+        if let Err(error) = self
+            .owner
             .step_bootstrap_with_renewal_v25(leg, now, renew_actuator_lease)
-            .map_err(|error| ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+        {
+            let error = ProductionCompositeLoopErrorV1::BootstrapAtV25 {
                 context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
                 error,
-            })?;
+            };
+            // A busy or unreadable Store applied nothing; the next turn
+            // repeats this bootstrap step, as the inbound path already does.
+            if is_bootstrap_store_busy_v29(&error) {
+                return Ok(());
+            }
+            return Err(error);
+        }
         if self
             .owner
             .recovery_mounted_for_readiness_v23(leg)
@@ -725,7 +734,11 @@ impl ProductionCompositeRelayLoopV1 {
                     context: ProductionCompositeBootstrapContextV25::PostExchangeBootstrap,
                     error,
                 };
-                if !terminal_relay_drain || !is_terminal_relay_bootstrap_awaiting_v24(&error) {
+                if is_bootstrap_store_busy_v29(&error) {
+                    // Nothing was applied; repeat on the next turn.
+                } else if !terminal_relay_drain
+                    || !is_terminal_relay_bootstrap_awaiting_v24(&error)
+                {
                     return Err(error);
                 }
             }
@@ -924,6 +937,24 @@ fn is_inbound_store_busy_v29(error: &ProductionCompositeLoopErrorV1) -> bool {
                 | crate::relay_worker::ContractsRelayIngressErrorV1::Store(
                     dom_scriptless_store::SessionStoreError::StoreBusy
                 )))))))
+}
+
+/// A bootstrap step refused by a Store that was busy or could not read. The
+/// Store refuses before it applies anything, so the step is simply repeated
+/// on the next turn — the same rule the inbound path and every funding
+/// classifier already apply to these two answers.
+fn is_bootstrap_store_busy_v29(error: &ProductionCompositeLoopErrorV1) -> bool {
+    use crate::production_contracts::ProductionBootstrapRuntimeErrorV16 as Bootstrap;
+    use dom_scriptless_store::SessionStoreError as Store;
+    matches!(
+        error,
+        ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+            error: Bootstrap::Store(Store::StoreBusy | Store::Filesystem),
+            ..
+        } | ProductionCompositeLoopErrorV1::Bootstrap(Bootstrap::Store(
+            Store::StoreBusy | Store::Filesystem
+        ))
+    )
 }
 
 fn is_peer_temporarily_unavailable_v23(error: &ProductionCompositeLoopErrorV1) -> bool {
