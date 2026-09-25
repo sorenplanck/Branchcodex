@@ -292,6 +292,7 @@ impl NativeDaemonProcessV23 {
                         || line.contains("DOM_SIGBUS_DIAG_V25")
                         || line.contains("DOM_ACTION_AUTH_DIAG_V25")
                         || line.contains("DOM_MATERIALIZER_DIAG_V25")
+                        || line.contains("DOM_REFUSAL_ORIGIN_V26")
                         || line.contains("DOM_CHILD_CONFLICT_V25")
                         || line.contains("DOM_CHILD_MATERIALIZE_PIN_V25")
                         || line.contains("DOM_CHILD_STATIC_PIN_V25")
