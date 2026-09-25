@@ -62,6 +62,7 @@ closed_tags!(Cause {
     NativeRefund => "awaiting_native_refund_transport",
     ReadinessGate => "awaiting_native_readiness_gate",
     ClaimSigningHandoff => "awaiting_claim_signing_handoff",
+    ClaimPreSignatureHandoff => "awaiting_claim_pre_signature_handoff",
     FundingHandoff => "awaiting_native_funding_handoff", WrongAuthority => "wrong_authority",
     GraphCandidateNoiseOffer => "graph_candidate_noise_offer_absent",
     GraphCandidateSetup => "graph_candidate_setup_absent",
@@ -194,6 +195,7 @@ fn ingress(error: &ContractsRelayIngressErrorV1) -> Cause {
         E::AwaitingNativeXmrFundingHandoffV25 => Cause::FundingHandoff,
         E::AwaitingNativeXmrReadinessGateV25 => Cause::ReadinessGate,
         E::AwaitingClaimSigningHandoffV29 => Cause::ClaimSigningHandoff,
+        E::AwaitingClaimPreSignatureHandoffV29 => Cause::ClaimPreSignatureHandoff,
         E::WrongAuthority => Cause::WrongAuthority,
         E::AuthorityAlreadyInstalled => Cause::AlreadyInstalled,
         E::InvalidReceipt => Cause::Receipt,
@@ -467,6 +469,7 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                 | C::Unprepared
                 | C::ClaimObservation
                 | C::ClaimSigningHandoff
+                | C::ClaimPreSignatureHandoff
                 | C::Templates
                 | C::RefundHandoff
                 | C::NativeRefund

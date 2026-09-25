@@ -2067,7 +2067,8 @@ fn is_template_construction_awaiting_v17(error: &ProductionCompositeLoopErrorV1)
                 crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingTemplateConstructionV17
                 | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingBootstrapRefundHandoffV18
                 | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingNativeXmrRefundTransportV23
-                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingClaimSigningHandoffV29))))))
+                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingClaimSigningHandoffV29
+                | crate::relay_worker::ContractsRelayIngressErrorV1::AwaitingClaimPreSignatureHandoffV29))))))
 }
 
 fn is_funding_handoff_awaiting_v25(error: &ProductionCompositeLoopErrorV1) -> bool {
@@ -3049,6 +3050,9 @@ mod tests {
         )));
         assert!(is_template_construction_awaiting_v17(&wrap(
             Ingress::AwaitingClaimSigningHandoffV29
+        )));
+        assert!(is_template_construction_awaiting_v17(&wrap(
+            Ingress::AwaitingClaimPreSignatureHandoffV29
         )));
         assert!(is_funding_handoff_awaiting_v25(&wrap(
             Ingress::AwaitingNativeXmrFundingHandoffV25

@@ -699,6 +699,12 @@ pub enum ContractsRelayIngressErrorV1 {
     /// to it, so the message waits for that step instead of ending the route.
     #[error("claim signing round is awaiting its ingress handoff")]
     AwaitingClaimSigningHandoffV29,
+    /// The peer's adaptor pre-signature arrived before this side's claim step
+    /// reconstructed its own record and installed the pre-signature ingress
+    /// authority. The durable journal already holds the complete round, so the
+    /// message waits for that step instead of ending the route.
+    #[error("claim pre-signature is awaiting its ingress handoff")]
+    AwaitingClaimPreSignatureHandoffV29,
     /// The peer's authenticated first funding edge arrived in the same Relay
     /// batch that completed bilateral readiness. Keep it pending until the
     /// native owner observes the chain and installs its linear authority.
@@ -1835,6 +1841,15 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                     )?
                 {
                     return Err(ContractsRelayIngressErrorV1::AwaitingClaimSigningHandoffV29);
+                }
+                if !matches!(
+                    self.authority.as_ref().map(|value| &value.inner),
+                    Some(PreparedContractsIngressKindV1::UniversalClaimPreSignatureV12(_))
+                ) && self.store.f7_claim_pre_signature_awaits_handoff_v29(
+                    self.session_id,
+                    delivery.signed_dsc1(),
+                )? {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingClaimPreSignatureHandoffV29);
                 }
                 if self.store.xmr_funding_commitment_awaits_handoff_v25(
                     self.session_id,

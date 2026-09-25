@@ -3263,6 +3263,66 @@ impl ContractsSessionStoreV1 {
             .max()
             .ok_or(SessionStoreError::ClaimSigningAuthorityUnavailable)
     }
+    /// The peer's adaptor pre-signature (`0x0f`) reached this side before its
+    /// own claim step reconstructed the pre-signature record and installed the
+    /// `UniversalClaimPreSignatureV12` ingress authority.
+    ///
+    /// Both happen inside the local claim step, on the pass after the sixth
+    /// signing message is accepted, and that pass waits for a Verified funding
+    /// observation unless the consumed authority is still recent. The peer
+    /// finishes as soon as it has accepted this side's last signing message,
+    /// so its `0x0f` can be dispatched here while the ingress authority is
+    /// still the signing one, whose acceptor admits only `0x0c`-`0x0e` and
+    /// answers InvalidTransition — fatal at the route.
+    ///
+    /// Answer true only for a message the acceptor will take once that step
+    /// runs: the round is complete in the durable journal (six accepted, the
+    /// same terminal `derive_xmr_bounded_claim_pre_v23` requires), and the
+    /// envelope is exactly what `accept_prepared_f7_claim_pre_signature_transport_v12`
+    /// checks against the derived record — canonical sender, sequence, terminal
+    /// transcript, chain, session and a verifying signature. Every entitlement
+    /// check answers false rather than raising, so anything outside this exact
+    /// shape keeps the behaviour it had.
+    pub fn f7_claim_pre_signature_awaits_handoff_v29(
+        &self,
+        session: [u8; 32],
+        signed_bytes: &[u8],
+    ) -> Result<bool, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+        if envelope.message_type != 0x0f
+            || envelope.session_id != session
+            || !self.xmr_bounded_funding_profile_locked_v23(session)?
+        {
+            return Ok(false);
+        }
+        let current = self.load_session_locked(session)?;
+        let Ok(terminal) = self.f7_signing_terminal_revision_v12(session, current.revision())
+        else {
+            return Ok(false);
+        };
+        let Ok(record) = self.derive_xmr_bounded_claim_pre_v23(session, terminal, None) else {
+            return Ok(false);
+        };
+        if envelope.chain_id != record.chain_id
+            || envelope.sender_id != record.canonical_sender_id
+            || envelope.sequence != record.canonical_sender_sequence
+            || envelope.previous_transcript_hash != record.terminal_transcript_hash
+        {
+            return Ok(false);
+        }
+        let roster = self.load_transport_roster(session)?;
+        let identities = self.load_transport_identity_binding(session)?;
+        require_transport_identity_binding(&roster, &identities)?;
+        let Some(participant) = roster
+            .participants
+            .iter()
+            .find(|p| p.participant_id == record.canonical_sender_id)
+        else {
+            return Ok(false);
+        };
+        Ok(envelope.verify(&participant.identity_key).is_ok())
+    }
     fn load_f7_pre_v12(&self, session: [u8; 32]) -> Result<F7PreRecordV12, SessionStoreError> {
         let bytes = self.read_f7_v12(session, "claim-pre", 4096)?;
         if bytes.len() < 24 || &bytes[..8] != b"DOMFCP12" {
