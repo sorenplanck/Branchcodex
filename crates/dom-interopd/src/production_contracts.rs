@@ -566,6 +566,22 @@ fn map_remote_transport_error(
     match error {
         ProductionContractsOutboundErrorV1::Relay(_)
         | ProductionContractsOutboundErrorV1::OwnerBusy => ChildAuthorityRefusalV1::Unavailable,
+        // "Observe again", not "this route is broken". The downstream claim
+        // gate answers ClaimSigningAuthorityUnavailable while its retained
+        // observation lease is absent or older than sixty seconds, and the
+        // Store answers Filesystem/StoreBusy while another opening holds it.
+        // Nothing is authorized, signed or staged from any of the three, so
+        // the next turn simply asks again. production_f7_runtime_v12's
+        // retryable_v20 already classifies exactly these three this way --
+        // run 84 died because that one path treated the gate answer as fatal.
+        // This converter kept turning all of them into Conflict, which
+        // map_child_refusal then reports as an inconsistent authority, and
+        // that is what killed runs 91, 94 and 95 in the upstream claim.
+        ProductionContractsOutboundErrorV1::Store(
+            dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable
+            | dom_scriptless_store::SessionStoreError::Filesystem
+            | dom_scriptless_store::SessionStoreError::StoreBusy,
+        ) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Identity(_)
         | ProductionContractsOutboundErrorV1::Store(_) => {
             eprintln!("DOM_REFUSAL_ORIGIN_V26 site=remote_transport variant={error:?}");
