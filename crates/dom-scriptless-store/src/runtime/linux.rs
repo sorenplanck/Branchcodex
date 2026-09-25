@@ -2077,25 +2077,43 @@ mod tests {
         Ok(())
     }
 
+    // procfs has no fsync operation (EINVAL, which `map_errno` classifies as
+    // an unsupported filesystem), so it is a parent that can be opened and
+    // read but never synchronized. A path-only handle to an ordinary
+    // directory is not such a parent: `fsync_capability_dir` reopens "."
+    // read-only before fsync, which is how the daemon's ambient state
+    // directory (opened O_PATH by cap-std) passes this same preflight.
     #[test]
     fn unsynchronizable_parent_fails_before_mutation() -> Result<(), Box<dyn Error>> {
+        let unsynchronizable = Arc::new(Dir::open_ambient_dir(
+            "/proc",
+            cap_std::ambient_authority(),
+        )?);
+        let error = RetainedDirectory::create_under(
+            unsynchronizable,
+            ValidatedComponent::operator_selected_root("must-not-exist")?,
+        )
+        .err();
+        assert!(
+            matches!(error, Some(LinuxCapabilityError::UnsupportedFilesystem)),
+            "{error:?}"
+        );
+        assert!(!Path::new("/proc/must-not-exist").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn path_only_parent_is_synchronized_through_reopen() -> Result<(), Box<dyn Error>> {
         let temporary = TestDirectory::create()?;
         let path_only = Arc::new(Dir::open_ambient_dir(
             temporary.path(),
             cap_std::ambient_authority(),
         )?);
-        let result = RetainedDirectory::create_under(
+        RetainedDirectory::create_under(
             path_only,
-            ValidatedComponent::operator_selected_root("must-not-exist")?,
-        );
-        assert!(matches!(
-            result,
-            Err(LinuxCapabilityError::OperationFailed {
-                operation: "fsync-directory-preflight",
-                ..
-            })
-        ));
-        assert!(!temporary.path().join("must-not-exist").exists());
+            ValidatedComponent::operator_selected_root("created-under-path-only")?,
+        )?;
+        assert!(temporary.path().join("created-under-path-only").is_dir());
         Ok(())
     }
 

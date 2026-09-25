@@ -62987,15 +62987,29 @@ mod tests {
         // Deliberately exact: adding any outbound authority class must break
         // this census until the new class is reviewed against 0x14 and the
         // role-scoped EVM classes and the V12 readiness/pre-signature classes.
-        assert_eq!(registered, (1_u8..=25).collect::<BTreeSet<_>>());
-        assert_eq!(
-            OutboundDsc1AuthorityClassV1::try_from(24)?.message_type(),
-            0x17
-        );
-        assert_eq!(
-            OutboundDsc1AuthorityClassV1::try_from(25)?.message_type(),
-            0x0f
-        );
+        // Classes 26..=32 (the V14 final claim and the V23 XMR graph and
+        // remote-sweep classes) were reviewed: none maps to 0x14, and the EVM
+        // classes 22 and 23 keep 0x15 and 0x16.
+        assert_eq!(registered, (1_u8..=32).collect::<BTreeSet<_>>());
+        for (encoded, message_type) in [
+            (22_u8, 0x15_u8),
+            (23, 0x16),
+            (24, 0x17),
+            (25, 0x0f),
+            (26, 0x12),
+            (27, 0x18),
+            (28, 0x0c),
+            (29, 0x0d),
+            (30, 0x0e),
+            (31, 0x19),
+            (32, 0x1a),
+        ] {
+            assert_eq!(
+                OutboundDsc1AuthorityClassV1::try_from(encoded)?.message_type(),
+                message_type,
+                "class {encoded}"
+            );
+        }
 
         let temporary = TestDirectory::create()?;
         let evidence_policy = policy(BudgetPolicyProfileV1::EvidenceOnly)?;
