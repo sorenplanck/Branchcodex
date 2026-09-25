@@ -62555,7 +62555,19 @@ mod tests {
         use xmr_remote_sweep_wire::*;
         let original = store.load_session(session_id)?;
         assert_eq!(original.phase(), SessionPhaseV1::FundingConfirmed);
-        store.bind_local_transport_signer(session_id, [0x31; 32])?;
+        // The request below is sent by participant 1, so the response signer
+        // is participant 0. Bind that participant's own key reference rather
+        // than the initiator's fixed reference: in the crypto-real fixture
+        // participant 0 is the Responder, and binding the initiator's key
+        // made the Store correctly refuse to prepare the response.
+        let signer_key_reference = store
+            .load_transport_identity_binding(session_id)?
+            .references
+            .iter()
+            .find(|reference| reference.participant_id == fixture.participant_ids[0])
+            .map(|reference| reference.key_reference)
+            .ok_or(SessionStoreError::Quarantined)?;
+        store.bind_local_transport_signer(session_id, signer_key_reference)?;
         let request = RemoteSweepRequestV23 {
             network_genesis: [1; 32],
             route_id: [2; 32],
