@@ -58,8 +58,8 @@ const KDF_MEMO_CAPACITY: usize = 16;
 /// whose derivation already completed in this process can reuse its key. The
 /// bounded entries are zeroized on eviction and lock failure takes the normal
 /// uncached path.
-static KDF_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
-    std::sync::Mutex::new(Vec::new());
+type KdfMemoEntryV1 = ([u8; 32], Zeroizing<[u8; 32]>);
+static KDF_MEMO: std::sync::Mutex<Vec<KdfMemoEntryV1>> = std::sync::Mutex::new(Vec::new());
 
 /// Length of the magic field in the header.
 pub const MAGIC_LEN: usize = 14;
