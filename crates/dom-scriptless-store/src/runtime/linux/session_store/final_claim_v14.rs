@@ -665,16 +665,8 @@ impl ContractsSessionStoreV1 {
         test_crash_hook("f7-v14-final-after-admission");
         self.admitted_f7_handle_against_v14(prepared.session_id, &exposure)
     }
-    fn authenticate_f7_admission_v14(
-        &self,
-        session: [u8; 32],
-    ) -> Result<AdmissionV14, SessionStoreError> {
-        let exposure = self.authenticate_f7_exposure_v14(session)?;
-        self.authenticate_f7_admission_against_v14(session, &exposure)
-    }
-
-    /// Same checks as `authenticate_f7_admission_v14` against an exposure the
-    /// caller authenticated in this same operation.
+    /// Authenticate the durable admission against an exposure the caller
+    /// authenticated in this same operation.
     fn authenticate_f7_admission_against_v14(
         &self,
         session: [u8; 32],
@@ -693,13 +685,6 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::Quarantined);
         }
         Ok(admission)
-    }
-    fn admitted_f7_handle_v14(
-        &self,
-        session: [u8; 32],
-    ) -> Result<AdmittedF7FinalClaimV14, SessionStoreError> {
-        let exposure = self.authenticate_f7_exposure_v14(session)?;
-        self.admitted_f7_handle_against_v14(session, &exposure)
     }
     fn admitted_f7_handle_against_v14(
         &self,
