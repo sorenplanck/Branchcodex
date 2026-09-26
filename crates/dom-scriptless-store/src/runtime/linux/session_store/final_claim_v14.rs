@@ -775,6 +775,20 @@ impl ContractsSessionStoreV1 {
         Ok(successors)
     }
 
+    /// Whether this session retains the accepted claim pre-signature artifact,
+    /// the one whose `0x0f` edge must stay the session head until the claim is
+    /// exposed or observed.
+    pub(in super::super) fn f7_claim_pre_exists_v26(
+        &self,
+        session: [u8; 32],
+    ) -> Result<bool, SessionStoreError> {
+        match self.read_f7_v12(session, "claim-pre", 4096) {
+            Ok(_) => Ok(true),
+            Err(SessionStoreError::SessionNotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(in super::super) fn f7_final_claim_exposure_exists_v14(
         &self,
         session: [u8; 32],

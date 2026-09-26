@@ -260,6 +260,38 @@ impl ContractsSessionStoreV1 {
         }
     }
 
+    /// A Claim sweep edge advances this session's DSC1 transcript. Between the
+    /// accepted `0x0f` claim pre-signature edge and the retained claim exposure
+    /// or observation, that advance is unrecoverable: `require_f7_pre_accepted_v14`
+    /// admits only a projection-only descendant of the `0x0f` successor, so
+    /// `finalize_and_persist_f7_claim_v14`, `persist_f7_claim_exposure_v14` and
+    /// `f7_claim_verification_facts_v15` would all refuse from then on and the
+    /// DOM final Claim could never be adapted, exposed or verified again.
+    ///
+    /// The request carries the already revealed DOM secret, so the local
+    /// opening has nothing to gain from sweeping before its own claim artifact
+    /// is retained: it waits, exactly as the native refund transport waits.
+    /// A session with no retained claim pre-signature has no such edge to
+    /// protect and is unaffected.
+    fn require_f7_claim_edge_free_v26(
+        &self,
+        request: &RemoteSweepRequestV23,
+        session_id: [u8; 32],
+    ) -> Result<(), SessionStoreError> {
+        if request.action != RemoteSweepActionV23::Claim {
+            return Ok(());
+        }
+        if !self.f7_claim_pre_exists_v26(session_id)? {
+            return Ok(());
+        }
+        if self.f7_final_claim_exposure_exists_v14(session_id)?
+            || self.f7_final_claim_observation_exists_v15(session_id)?
+        {
+            return Ok(());
+        }
+        Err(SessionStoreError::NativeXmrRefundTransportPendingV23)
+    }
+
     /// Persists the exact outbound DSC1 `0x19` request selected by the local
     /// transport identity.  The request carries only public facts and a
     /// public-on-DOM scalar; the remote signer must reconstruct policy from
@@ -276,6 +308,7 @@ impl ContractsSessionStoreV1 {
         let _guard = self.operation_lock()?;
         let current = self.load_session_locked(session_id)?;
         self.require_xmr_remote_sweep_phase_v23(&decoded, current.phase())?;
+        self.require_f7_claim_edge_free_v26(&decoded, session_id)?;
         let roster = self.load_transport_roster(session_id)?;
         let local = self.authenticate_local_transport_signer_binding(session_id)?;
         let _ = xmr_counterparty(&roster, local.participant_id)?;
@@ -331,6 +364,7 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::InvalidTransition);
         }
         self.require_xmr_remote_sweep_phase_v23(&request, current.phase())?;
+        self.require_f7_claim_edge_free_v26(&request, envelope.session_id)?;
         let _signer_id = xmr_counterparty(&roster, requester.participant_id)?;
         self.require_unique_xmr_remote_sweep_request(
             envelope.session_id,

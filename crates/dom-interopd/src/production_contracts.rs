@@ -577,10 +577,14 @@ fn map_remote_transport_error(
         // This converter kept turning all of them into Conflict, which
         // map_child_refusal then reports as an inconsistent authority, and
         // that is what killed runs 91, 94 and 95 in the upstream claim.
+        // A native XMR sweep the Store reports as still pending is a wait by
+        // its own definition, and production_xmr_recovery_driver_v12 already
+        // classes that variant as Unavailable.
         ProductionContractsOutboundErrorV1::Store(
             dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable
             | dom_scriptless_store::SessionStoreError::Filesystem
-            | dom_scriptless_store::SessionStoreError::StoreBusy,
+            | dom_scriptless_store::SessionStoreError::StoreBusy
+            | dom_scriptless_store::SessionStoreError::NativeXmrRefundTransportPendingV23,
         ) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Identity(_)
         | ProductionContractsOutboundErrorV1::Store(_) => {
