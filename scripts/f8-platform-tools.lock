@@ -1,0 +1,9 @@
+# Measured digests of the Anza platform-tools archives this repository builds
+# the escrow program with. One line per version: "<version> <sha256>".
+#
+# A line here is enforced: `scripts/f8-install-platform-tools.sh` refuses an
+# archive whose digest differs and deletes it. The value below was measured by
+# the establishing run of the dom-solana-leg workflow
+# (run 36278893819, job 108506825354, 2026-09-26) and is not a transcribed
+# upstream claim.
+v1.48 a9d3157f937d5f6faf4321a35a8035e0f827114a663b0150db492e893ec27597

@@ -101,6 +101,14 @@ jobs:
         run: |
           cargo test --manifest-path labs/dom-solana-direct/Cargo.toml --lib
 
+      # Type-check the live scenario in the cheap job too. It also runs in the
+      # live job, but that one needs the program build first, so a type error in
+      # the scenario would otherwise only surface after a full sbf build.
+      - name: Compile the live scenario without running it
+        run: |
+          cargo test --manifest-path labs/dom-solana-direct/Cargo.toml \
+            --test solana_leg_live --no-run
+
       # The lockfile the resolution above produced: commit it and every later run
       # of this laboratory is fully pinned.
       - name: Publish the laboratory lockfile
@@ -153,8 +161,30 @@ jobs:
 
       # The host `cargo test` builds the dalek fallback of `multiply_edwards`;
       # only this target compiles the syscall path the deployed program runs.
+      #
+      # `$PLATFORM_TOOLS/rust/bin/cargo` resolves a bare `rustc` through PATH,
+      # and on this runner PATH starts with rustup's shims, which then honour
+      # `rust-toolchain.toml` and hand back host stable -- a rustc with no
+      # `sbf-solana-solana` target spec. Run 36278893819 failed exactly there.
+      # So the matching rustc is named outright, its directory goes first for
+      # anything cargo spawns, and RUSTUP_TOOLCHAIN is cleared so no shim
+      # reached from a child process can override it back. The assertion below
+      # is the property that failed, checked before the build instead of being
+      # rediscovered inside it.
       - name: Build for the real target
-        run: bash scripts/build-solana-program-v8.sh
+        run: |
+          set -euo pipefail
+          test -x "$PLATFORM_TOOLS/rust/bin/rustc"
+          export RUSTC="$PLATFORM_TOOLS/rust/bin/rustc"
+          export PATH="$PLATFORM_TOOLS/rust/bin:$PATH"
+          unset RUSTUP_TOOLCHAIN
+          resolved="$(command -v rustc)"
+          if [ "$resolved" != "$PLATFORM_TOOLS/rust/bin/rustc" ]; then
+            echo "rustc still resolves to $resolved, not the platform-tools one" >&2
+            exit 1
+          fi
+          echo "building with $resolved: $("$RUSTC" --version)"
+          bash scripts/build-solana-program-v8.sh
 
       - name: Record the built object
         id: object

@@ -104,10 +104,17 @@ rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 tar -xjf "$work/$ARCHIVE" -C "$PREFIX"
 
-[ -x "$PREFIX/rust/bin/cargo" ] || {
-  log "unpacked tree has no rust/bin/cargo"
-  exit 1
-}
+# Both are required, and the second is the one that matters: the custom target
+# `sbf-solana-solana` exists only in THIS rustc. A tree with cargo but no rustc
+# would pass a check for cargo alone and then fail inside the build with an
+# unhelpful "could not find specification for target" — which is exactly how the
+# establishing run failed when the host rustc was reached through PATH instead.
+for tool in cargo rustc; do
+  [ -x "$PREFIX/rust/bin/$tool" ] || {
+    log "unpacked tree has no rust/bin/$tool"
+    exit 1
+  }
+done
 printf '%s\n' "$VERSION" >"$PREFIX/.dom-version"
 
 log "installed $VERSION"

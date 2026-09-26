@@ -213,8 +213,10 @@ impl LegPlanInputV1 {
             },
             adaptor_point_sec1,
             fee_limit: FeeLimitV1 {
-                dom_max: self.dom_fee_max,
-                counterparty_max: self.solana_fee_max,
+                // The terms carry fee ceilings as u128; the input keeps them in
+                // each chain's own smallest unit, which is u64 on both.
+                dom_max: u128::from(self.dom_fee_max),
+                counterparty_max: u128::from(self.solana_fee_max),
             },
             recovery: RecoveryPolicyV1 {
                 refund_before_funding: true,
