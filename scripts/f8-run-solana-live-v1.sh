@@ -59,6 +59,7 @@ write_evidence() {
   "genesis_hash": "${GENESIS:-}",
   "upgrade_authority_revoked": ${REVOKED:-false},
   "curve_syscall_enabled": ${CURVE_OK:-false},
+  "curve_syscall_gate": "${CURVE_GATE_STATE:-unknown}",
   "validator_log": "$VALIDATOR_LOG",
   "limits": [
     "A local cluster is not mainnet-beta: fees, congestion and validator set differ.",
@@ -137,16 +138,39 @@ done
   exit 1
 }
 
-# The design does not run without this syscall, so refuse early and loudly
-# rather than fail later inside a claim.
-if solana --url "$RPC_URL" feature status 2>/dev/null | grep -qiE "curve25519.*(enabled|active)"; then
+# The escrow claim verifies `secret * G` through `sol_curve_group_op`, so a
+# cluster without that syscall cannot run this leg at all. Refuse early rather
+# than fail later inside a claim, where the cause would be ambiguous.
+#
+# Read the gate carefully, because two shapes are both healthy and only one of
+# them is a refusal:
+#
+#   * a gate line that says inactive  -> refuse, the syscall really is off;
+#   * a gate line that says active    -> proceed;
+#   * NO gate line at all             -> proceed. A feature gate is deleted from
+#     the client once its activation is permanent, so an absent gate on a modern
+#     cluster means the syscall is unconditionally on, not missing. Refusing here
+#     would be refusing the newest clusters.
+#
+# The match is also order-insensitive: `feature status` prints the status in its
+# first column and the description in its last, so a single regexp expecting
+# "curve25519" before "active" would never match.
+CURVE_GATE="$(solana --url "$RPC_URL" feature status 2>/dev/null | grep -i curve25519 || true)"
+if [ -z "$CURVE_GATE" ]; then
   CURVE_OK=true
-  log "curve25519 syscall reported enabled"
-else
+  CURVE_GATE_STATE="absent"
+  log "no curve25519 feature gate is listed; the syscall is permanently enabled"
+elif printf '%s\n' "$CURVE_GATE" | grep -qiE "inactive|pending"; then
   CURVE_OK=false
-  log "curve25519 syscall is NOT reported enabled on this cluster"
+  CURVE_GATE_STATE="inactive"
+  log "the curve25519 feature gate is NOT active on this cluster:"
+  printf '%s\n' "$CURVE_GATE" >&2
   log "the escrow claim verifies secret*G through sol_curve_group_op and cannot run here"
   exit 1
+else
+  CURVE_OK=true
+  CURVE_GATE_STATE="active"
+  log "curve25519 feature gate reported active"
 fi
 
 GENESIS="$(solana --url "$RPC_URL" genesis-hash)"
@@ -154,7 +178,11 @@ log "genesis hash $GENESIS"
 
 solana --url "$RPC_URL" config set --keypair "$PAYER" >/dev/null 2>&1 || true
 log "funding the deploy payer and the three settlement roles"
-solana --url "$RPC_URL" airdrop 500 "$PAYER" >/dev/null
+# `airdrop` takes a recipient ADDRESS. Resolve every keypair to its pubkey
+# rather than relying on the CLI to accept a path in that position.
+PAYER_ADDRESS="$(solana-keygen pubkey "$PAYER")"
+solana --url "$RPC_URL" airdrop 500 "$PAYER_ADDRESS" >/dev/null
+log "funded payer $PAYER_ADDRESS"
 for keypair in "$FUNDER" "$BENEFICIARY" "$REFUND"; do
   address="$(solana-keygen pubkey "$keypair")"
   solana --url "$RPC_URL" airdrop 100 "$address" >/dev/null
@@ -173,9 +201,11 @@ PROGRAM_ID="$(solana-keygen pubkey "$PROGRAM_KEYPAIR")"
 log "deployed program $PROGRAM_ID"
 
 log "revoking the upgrade authority"
+# No `--skip-new-upgrade-authority-signer-check`: `--final` sets no new
+# authority, so there is no new signer to skip checking, and passing both risks
+# being refused as a conflicting argument.
 solana --url "$RPC_URL" program set-upgrade-authority \
   --keypair "$PAYER" \
-  --skip-new-upgrade-authority-signer-check \
   --final "$PROGRAM_ID" >"$WORK/finalize.log" 2>&1 || {
   log "could not revoke the upgrade authority; see $WORK/finalize.log"
   exit 1
@@ -206,10 +236,17 @@ log "programdata account $PROGRAMDATA"
 # value is reported for the record; the scenario measures the same account over
 # RPC itself and binds ITS OWN measurement into the setup, so a difference in how
 # the CLI serializes its dump can never silently become the pinned hash.
-solana --url "$RPC_URL" account "$PROGRAMDATA" \
-  --output-file "$WORK/programdata.bin" >/dev/null
-PROGRAMDATA_SHA256="$(sha256sum "$WORK/programdata.bin" | awk '{print $1}')"
-log "programdata sha256 $PROGRAMDATA_SHA256"
+if solana --url "$RPC_URL" account "$PROGRAMDATA" \
+  --output-file "$WORK/programdata.bin" >/dev/null 2>&1; then
+  PROGRAMDATA_SHA256="$(sha256sum "$WORK/programdata.bin" | awk '{print $1}')"
+  log "programdata sha256 $PROGRAMDATA_SHA256"
+else
+  # Not fatal: the scenario measures this account over RPC itself and binds its
+  # own measurement, so a CLI that cannot dump an account costs a record entry,
+  # not the run.
+  PROGRAMDATA_SHA256=""
+  log "could not dump the programdata account; the scenario measures it itself"
+fi
 
 export DOM_SOLANA_LIVE_RPC_V1="$RPC_URL"
 export DOM_SOLANA_LIVE_PROGRAM_V1="$PROGRAM_ID"
