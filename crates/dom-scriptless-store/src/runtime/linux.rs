@@ -24,7 +24,10 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     mem::MaybeUninit,
     os::fd::AsFd,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 /// Durability barrier through a real descriptor.
@@ -335,6 +338,13 @@ struct RetainedDirectory {
     identity: NodeIdentity,
     reopen: ReopenAuthority,
     scan_exclusions: Arc<Mutex<BTreeMap<String, NodeIdentity>>>,
+    /// Count of mutations this process has applied through this directory
+    /// capability, shared by every retained alias of it. Every mutator bumps
+    /// it before its first effect, so a caller that remembers the count can
+    /// tell whether anything it audited through this capability may have
+    /// changed since. It says nothing about writers outside this process; the
+    /// Store's exclusive lock is what excludes those.
+    mutations: Arc<AtomicU64>,
 }
 
 impl RetainedDirectory {
@@ -350,7 +360,17 @@ impl RetainedDirectory {
                 component: self.reopen.component.clone(),
             },
             scan_exclusions: Arc::clone(&self.scan_exclusions),
+            mutations: Arc::clone(&self.mutations),
         })
+    }
+
+    /// Mutations applied through this capability (and its aliases) so far.
+    fn mutation_count(&self) -> u64 {
+        self.mutations.load(Ordering::SeqCst)
+    }
+
+    fn note_mutation(&self) {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
     }
 
     fn create_under(
@@ -386,6 +406,7 @@ impl RetainedDirectory {
             identity,
             reopen: ReopenAuthority { parent, component },
             scan_exclusions: Arc::new(Mutex::new(BTreeMap::new())),
+            mutations: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -406,6 +427,7 @@ impl RetainedDirectory {
             identity,
             reopen: ReopenAuthority { parent, component },
             scan_exclusions: Arc::new(Mutex::new(BTreeMap::new())),
+            mutations: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -413,6 +435,7 @@ impl RetainedDirectory {
         &self,
         component: ValidatedComponent,
     ) -> Result<Self, LinuxCapabilityError> {
+        self.note_mutation();
         self.revalidate()?;
         Self::create_under(Arc::clone(&self.descriptor), component)
     }
@@ -434,6 +457,7 @@ impl RetainedDirectory {
         component: &ValidatedComponent,
         exact_bytes: &[u8],
     ) -> Result<RetainedFile, LinuxCapabilityError> {
+        self.note_mutation();
         if component.expected_type != ExpectedNodeType::RegularFile {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
@@ -512,6 +536,7 @@ impl RetainedDirectory {
         destination: &ValidatedComponent,
         retained_source: &RetainedFile,
     ) -> Result<(), LinuxCapabilityError> {
+        self.note_mutation();
         if source.expected_type != ExpectedNodeType::RegularFile
             || destination.expected_type != ExpectedNodeType::RegularFile
         {
@@ -546,6 +571,7 @@ impl RetainedDirectory {
         destination: &ValidatedComponent,
         retained_staging: &RetainedDirectory,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         if staging.expected_type != ExpectedNodeType::Directory
             || destination.expected_type != ExpectedNodeType::Directory
             || !generation_component(destination.as_str(), false)
@@ -595,6 +621,7 @@ impl RetainedDirectory {
         staging: &ValidatedComponent,
         retained_staging: &RetainedDirectory,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         let pending = ValidatedComponent::registered("restore-pending")?;
         if staging.expected_type != ExpectedNodeType::Directory
             || !exact_wrapped_hex(staging.as_str(), ".restore-", 32, ".staging")
@@ -640,6 +667,7 @@ impl RetainedDirectory {
         successor: &RetainedDirectory,
         destination: &ValidatedComponent,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         if pending.reopen.component.as_str() != "restore-pending"
             || !Arc::ptr_eq(&pending.reopen.parent, &self.descriptor)
             || successor.reopen.component.as_str() != "successor-generation"
@@ -731,6 +759,7 @@ impl RetainedDirectory {
         pending: &RetainedDirectory,
         completed: &ValidatedComponent,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         if pending.reopen.component.as_str() != "restore-pending"
             || !Arc::ptr_eq(&pending.reopen.parent, &self.descriptor)
             || completed.expected_type != ExpectedNodeType::Directory
@@ -771,6 +800,7 @@ impl RetainedDirectory {
         destination: &ValidatedComponent,
         retained_staging: &RetainedFile,
     ) -> Result<(), LinuxCapabilityError> {
+        self.note_mutation();
         if staging.as_str() != ".active-vault-generation.staging"
             || destination.as_str() != "active-vault-generation"
             || staging.expected_type != ExpectedNodeType::RegularFile
@@ -807,6 +837,7 @@ impl RetainedDirectory {
         component: &ValidatedComponent,
         retained: &RetainedFile,
     ) -> Result<(), LinuxCapabilityError> {
+        self.note_mutation();
         if component.expected_type != ExpectedNodeType::RegularFile {
             return Err(LinuxCapabilityError::InvalidComponent);
         }

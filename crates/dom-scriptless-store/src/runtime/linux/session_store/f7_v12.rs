@@ -4192,9 +4192,18 @@ impl ContractsSessionStoreV1 {
     }
 
     fn census_f7_artifacts_v12(&self) -> Result<F7ArtifactCensusV12, SessionStoreError> {
+        Ok(self.census_f7_artifacts_with_digest_v26()?.0)
+    }
+
+    /// The census plus a digest over every artifact's name and exact bytes in
+    /// scan order, so a later call can prove it read the same inventory.
+    fn census_f7_artifacts_with_digest_v26(
+        &self,
+    ) -> Result<(F7ArtifactCensusV12, [u8; 32]), SessionStoreError> {
         let mut sessions = BTreeMap::<[u8; 32], BTreeSet<F7ArtifactKindV12>>::new();
         let mut count = 0usize;
         let mut total = 0usize;
+        let mut transcript = Vec::new();
         for (directory_kind, directory) in self.durable_profile_directories() {
             let mut names = Vec::new();
             directory.scan_lexicographic(|name, node| {
@@ -4229,9 +4238,14 @@ impl ContractsSessionStoreV1 {
                 if !sessions.entry(session).or_default().insert(kind) {
                     return Err(SessionStoreError::Quarantined);
                 }
+                transcript.extend_from_slice(&(name.len() as u64).to_le_bytes());
+                transcript.extend_from_slice(name.as_bytes());
+                transcript.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                transcript.extend_from_slice(&bytes);
             }
         }
-        Ok((sessions, count, total))
+        let digest = tagged_hash("DOM:f7-artifact-inventory-census:v26", &transcript);
+        Ok(((sessions, count, total), digest))
     }
 
     fn require_f7_artifact_publication_budget_v12(
@@ -4263,7 +4277,20 @@ impl ContractsSessionStoreV1 {
     /// prefixes. Missing authority ancestors are corruption; a final's absent
     /// next publication is a legitimate prefix and never synthesized here.
     pub(super) fn audit_f7_artifact_inventory_v12(&self) -> Result<(), SessionStoreError> {
-        let (sessions, _, _) = self.census_f7_artifacts_v12()?;
+        let ((sessions, _, _), artifact_digest) = self.census_f7_artifacts_with_digest_v26()?;
+        // Every artifact above was just reread and revalidated byte for byte.
+        // The ancestry derivations below are pure functions of those bytes and
+        // of records only this process writes (the Store lock is exclusive),
+        // so when nothing was written since the last complete audit and no
+        // artifact byte differs, that audit's verdict still holds.
+        let generation = self.store_mutation_generation_v26();
+        if let Ok(audited) = self.f7_inventory_audit_v26.lock() {
+            if audited.is_some_and(|last| {
+                last.generation == generation && last.artifact_digest == artifact_digest
+            }) {
+                return Ok(());
+            }
+        }
         for (session, kinds) in sessions {
             use F7ArtifactKindV12 as K;
             if !kinds.contains(&K::Gate) {
@@ -4366,6 +4393,12 @@ impl ContractsSessionStoreV1 {
             }
             self.audit_f7_final_claim_inventory_v14(session, &kinds)?;
             self.audit_f7_observation_inventory_v15(session, &kinds)?;
+        }
+        if let Ok(mut audited) = self.f7_inventory_audit_v26.lock() {
+            *audited = Some(AuditedF7InventoryV26 {
+                generation,
+                artifact_digest,
+            });
         }
         Ok(())
     }

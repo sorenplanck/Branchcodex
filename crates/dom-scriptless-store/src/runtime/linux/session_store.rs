@@ -4163,6 +4163,21 @@ pub struct ContractsSessionStoreV1 {
     /// entry, so this process's own Started -> Ready transition is re-audited
     /// in full rather than mistaken for tampering.
     audited_custody_pairs_v26: Mutex<BTreeMap<[u8; 32], AuditedCustodyPairV26>>,
+    /// The last complete F7 inventory audit this opening performed, named by
+    /// the Store mutation generation it ran at and by the digest of every
+    /// artifact's exact bytes it read. `audit_f7_artifact_inventory_v12`
+    /// still rereads and revalidates every artifact on every call and only
+    /// skips re-deriving the ancestry it already authenticated when both
+    /// names match: nothing this process wrote since, and no artifact byte
+    /// differs. The exclusive Store lock excludes other writers.
+    f7_inventory_audit_v26: Mutex<Option<AuditedF7InventoryV26>>,
+}
+
+/// One complete F7 inventory audit, named by when and over what it ran.
+#[derive(Clone, Copy)]
+pub(super) struct AuditedF7InventoryV26 {
+    pub(super) generation: u64,
+    pub(super) artifact_digest: [u8; 32],
 }
 
 /// Move-only, locked production Store opening authenticated before recovery.
@@ -4710,6 +4725,7 @@ impl ContractsSessionStoreV1 {
             recovery_projection: Mutex::new(None),
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
             audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
+            f7_inventory_audit_v26: Mutex::new(None),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4888,6 +4904,7 @@ impl ContractsSessionStoreV1 {
             recovery_projection: Mutex::new(None),
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
             audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
+            f7_inventory_audit_v26: Mutex::new(None),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4910,6 +4927,22 @@ impl ContractsSessionStoreV1 {
             staging_inventory,
             recovery_plan,
         })
+    }
+
+    /// Sum of the mutations this process applied through every directory of
+    /// this opening. Any Store write changes it; nothing else does.
+    pub(super) fn store_mutation_generation_v26(&self) -> u64 {
+        [
+            &self.root,
+            &self.records,
+            &self.artifacts,
+            &self.consumptions,
+            &self.rosters,
+            &self.messages,
+            &self.reservation_lookups,
+        ]
+        .iter()
+        .fold(0u64, |sum, directory| sum.wrapping_add(directory.mutation_count()))
     }
 
     fn durable_profile_directories(&self) -> [(M8F7DurableDirectory, &RetainedDirectory); 6] {
