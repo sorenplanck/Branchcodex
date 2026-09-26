@@ -624,7 +624,29 @@ impl ContractsSessionStoreV1 {
         Ok((gate, graph))
     }
 
+    /// The verdict below is a pure function of the gate bytes and of records
+    /// only this process writes (the Store lock is exclusive), so a verdict
+    /// already derived for this exact gate digest at this mutation generation
+    /// is the verdict. The gate itself was just reread and decoded by the
+    /// caller; only the derivation is not repeated.
     fn authenticate_f7_gate_ancestry_v12(
+        &self,
+        gate: &F7GateRecordV12,
+    ) -> Result<(), SessionStoreError> {
+        let generation = self.store_mutation_generation_v26();
+        if let Ok(verdicts) = self.f7_gate_ancestry_v26.lock() {
+            if verdicts.get(&gate.session_id) == Some(&(generation, gate.digest)) {
+                return Ok(());
+            }
+        }
+        self.authenticate_f7_gate_ancestry_uncached_v26(gate)?;
+        if let Ok(mut verdicts) = self.f7_gate_ancestry_v26.lock() {
+            verdicts.insert(gate.session_id, (generation, gate.digest));
+        }
+        Ok(())
+    }
+
+    fn authenticate_f7_gate_ancestry_uncached_v26(
         &self,
         gate: &F7GateRecordV12,
     ) -> Result<(), SessionStoreError> {

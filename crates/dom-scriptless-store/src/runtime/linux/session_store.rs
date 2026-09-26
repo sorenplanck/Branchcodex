@@ -4171,6 +4171,26 @@ pub struct ContractsSessionStoreV1 {
     /// names match: nothing this process wrote since, and no artifact byte
     /// differs. The exclusive Store lock excludes other writers.
     f7_inventory_audit_v26: Mutex<Option<AuditedF7InventoryV26>>,
+    /// Gate ancestry verdicts this opening already derived, per session,
+    /// named by the mutation generation and the exact gate digest they were
+    /// derived for. `authenticate_f7_gate_ancestry_v12` is a pure verdict
+    /// over the gate bytes and over records only this process writes.
+    f7_gate_ancestry_v26: Mutex<BTreeMap<[u8; 32], (u64, [u8; 32])>>,
+    /// Funding-signing audits this opening already completed, per session,
+    /// named by the mutation generation and by the exact gate, signing
+    /// record and session record bytes they were completed over.
+    f7_funding_signing_audit_v26: Mutex<BTreeMap<[u8; 32], F7FundingSigningAuditV26>>,
+}
+
+/// One completed funding-signing audit and every byte it was computed over.
+#[derive(Clone)]
+pub(super) struct F7FundingSigningAuditV26 {
+    pub(super) generation: u64,
+    pub(super) gate_digest: [u8; 32],
+    pub(super) record_digest: [u8; 32],
+    pub(super) current_digest: [u8; 32],
+    pub(super) complete: bool,
+    pub(super) signature: Option<SchnorrSignature>,
 }
 
 /// One complete F7 inventory audit, named by when and over what it ran.
@@ -4726,6 +4746,8 @@ impl ContractsSessionStoreV1 {
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
             audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
             f7_inventory_audit_v26: Mutex::new(None),
+            f7_gate_ancestry_v26: Mutex::new(BTreeMap::new()),
+            f7_funding_signing_audit_v26: Mutex::new(BTreeMap::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4905,6 +4927,8 @@ impl ContractsSessionStoreV1 {
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
             audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
             f7_inventory_audit_v26: Mutex::new(None),
+            f7_gate_ancestry_v26: Mutex::new(BTreeMap::new()),
+            f7_funding_signing_audit_v26: Mutex::new(BTreeMap::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
