@@ -208,7 +208,12 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'live' }}
     needs: [program]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # `solana-cli` and `solana-test-validator` are compiled from source to keep
+    # the content pin, which costs far more than unpacking a release. That cost
+    # is deliberate and is paid here rather than on a developer's machine; the
+    # three live scenarios themselves take minutes, one of which waits on two
+    # real deadlines.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -228,8 +233,22 @@ jobs:
       - name: Verify frozen consensus sources
         run: bash scripts/check-consensus-unchanged.sh
 
+      # Agave is built from source here, so this job needs Anza's documented
+      # build prerequisites, not just the workspace's. The first attempt failed
+      # in `hidapi`'s build script for want of libudev: `solana-cli` carries
+      # hardware-wallet support, and hidapi finds libudev through pkg-config.
+      # protobuf is listed for the same reason -- several storage crates in the
+      # validator's tree generate code with protoc -- so that a missing package
+      # is not rediscovered half an hour into a build.
       - name: Build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang cmake make pkg-config \
+            libssl-dev libudev-dev zlib1g-dev llvm libclang-dev \
+            protobuf-compiler libprotobuf-dev
+          pkg-config --exists libudev
+          protoc --version
 
       - name: Install pinned Agave toolchain
         run: |

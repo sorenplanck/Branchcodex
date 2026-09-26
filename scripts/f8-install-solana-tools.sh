@@ -57,13 +57,18 @@ if [ -x "$BIN/solana" ] && [ "${FORCE:-0}" != "1" ]; then
   exit 1
 fi
 
-# The validator links native libraries; a missing one fails the build late, so
-# name the requirement instead of letting cargo report it obscurely.
-for header in /usr/include/udev.h /usr/include/libudev.h; do
-  [ -f "$header" ] && found_udev=1
-done
-if [ "${found_udev:-0}" != "1" ]; then
-  log "note: libudev headers not found; on Debian/Ubuntu install libudev-dev"
+# `solana-cli` carries hardware-wallet support through `hidapi`, whose build
+# script finds libudev with pkg-config and panics without it. A note was not
+# enough: the establishing run printed the note, built for three minutes and
+# then died in that build script. Refuse up front, and name the package.
+if ! command -v pkg-config >/dev/null 2>&1; then
+  log "pkg-config is required to locate libudev (Debian/Ubuntu: pkg-config)"
+  exit 1
+fi
+if ! pkg-config --exists libudev; then
+  log "libudev not found by pkg-config; hidapi's build script will panic"
+  log "install it first (Debian/Ubuntu: sudo apt-get install -y libudev-dev)"
+  exit 1
 fi
 
 mkdir -p "$PREFIX"
