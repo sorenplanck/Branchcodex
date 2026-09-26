@@ -1,0 +1,12 @@
+{
+  "sha256": {
+    "target/release/examples/regtest_claim": "747200b7ff6675ddd4b191c06bd7459f2011ff36a6a2705952ed28dcaf044826",
+    "target/recovery-research/direct-dlog-bridge": "94be42247ce8e12b4c098335b450dca1993c0692db28f3f406ab95ee3eea7b27",
+    "examples/regtest_claim.rs": "e9072c7c119024782f8737ebadf841b1881ad5e71bd6fe3ab87d218a400731b3",
+    "examples/support/dom_regtest.rs": "dd95624b9afdd3a559d6587bd833430decc20f3c4982088c22401fd7527c7568",
+    "examples/support/direct_recovery_bridge.rs": "710b2e2a928b0dae44c653c4754a95eb14b47bf43db5a16298e9ca02f2175336",
+    "src/time_bounds.rs": "4ceabfc83cbac5f1a5824a270bd990d57ed27673fd8268c6f026b07aa57ebaf4",
+    "tests/recovery_time_bounds.rs": "147cc0e5fb7f8eef0af3ecb0c9c16353461c32eee08b006c6eb61cc45632b062"
+  },
+  "scope": "DOM-first regression with pre-publication conditional initial-claim checks; owned offline regtest, not production or timing proof."
+}

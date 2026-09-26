@@ -1,0 +1,17 @@
+{
+  "experiment": "single-verification session, first delayed puzzle invalid, 198 puzzles",
+  "result": "experiment_timeout",
+  "exit_code": 101,
+  "timeout_message": "regtest exceeded 240 seconds: Elapsed(())",
+  "timeout_is_not_a_wall_clock_measurement": true,
+  "artifact_directory": "target/regtest-820895-1790452112540606676",
+  "rejected_offers_before_accepted_offer": 2,
+  "accepted_offer_observed": true,
+  "producer_exit_observed": true,
+  "funding_started": true,
+  "complete_funding_observed": false,
+  "recovery_demonstrated": false,
+  "atomic_swap_proven": false,
+  "mainnet_latency_measurement": false,
+  "note": "Preparation was synchronous; Tokio reported timeout only after it yielded. This run does not measure the session recovery stage."
+}

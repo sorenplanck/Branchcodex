@@ -1298,11 +1298,20 @@ pub fn bulletproof_mpc_finalize(
         )));
     }
     let proof = proof[..proof_length].to_vec();
-    if !bp_verify_with_extra_commit(
-        &state.state.commitments[0],
-        &proof,
-        &state.state.extra_commit,
-    )? {
+    // The proving phases accept empty extra_commit for native plain outputs.
+    // The explicit with-extra verifier rejects empty application data, so use
+    // the matching plain verifier in that case. Both paths enforce the same
+    // bounded proof and H_DOM; no consensus checks are bypassed.
+    let valid = if state.state.extra_commit.is_empty() {
+        bp_verify(&state.state.commitments[0], &proof)?
+    } else {
+        bp_verify_with_extra_commit(
+            &state.state.commitments[0],
+            &proof,
+            &state.state.extra_commit,
+        )?
+    };
+    if !valid {
         return Err(DomError::Invalid(
             "collaborative Bulletproof failed the unchanged DOM verifier".into(),
         ));

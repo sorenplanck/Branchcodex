@@ -1,0 +1,109 @@
+{
+  "experiment": "direct-pair-xmr-first",
+  "pid": 854413,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 101,
+  "wall_seconds": 240.1780715349887,
+  "compilation_included": false,
+  "log": "target/direct-pair-xmr-first-1790460852079410729.log",
+  "artifact_directory": "target/regtest-854413-1790460852081761223",
+  "internal_timeout_seconds": 240,
+  "internal_timeout_reached": true,
+  "full_result_report_written": false,
+  "atomic_swap": false,
+  "safe_bilateral_window_proven": false,
+  "last_completed_phase": "onward_spends_included",
+  "phases": [
+    {
+      "elapsed_seconds": 8.353e-05,
+      "evidence": {
+        "atomic_swap": false
+      },
+      "outcome": "XmrFirst",
+      "phase": "started",
+      "unix_seconds": 1790460852
+    },
+    {
+      "elapsed_seconds": 16.458228352,
+      "evidence": {
+        "shared_reserves_funded": false
+      },
+      "outcome": "XmrFirst",
+      "phase": "individual_balances_prepared",
+      "unix_seconds": 1790460868
+    },
+    {
+      "elapsed_seconds": 75.439800532,
+      "evidence": {
+        "capsule_seconds": 58.981473493
+      },
+      "outcome": "XmrFirst",
+      "phase": "capsule_verified",
+      "unix_seconds": 1790460927
+    },
+    {
+      "elapsed_seconds": 77.235199524,
+      "evidence": {
+        "height": 6,
+        "refund_height": 214,
+        "timing": {
+          "conditional_first_claim_order": "XMR-first",
+          "conditional_observation_seconds": 1,
+          "conditional_offers_ready_by_unix": 1790460940,
+          "conditional_resolution_seconds_each": 1,
+          "conditional_validator_clock_ahead_seconds": 0,
+          "dom_refund_conditional_earliest_unix": 1790461016,
+          "dom_timing_anchor_hash": "df6c3dd81059de94ebe72d55f6b8f03b070d29b5e847dd9af29dba367a928cf3",
+          "dom_timing_anchor_height": 5,
+          "dom_timing_anchor_timestamp": 1790460927,
+          "timing_bounds_proven": false,
+          "timing_capsule_link_binding": "ea1fdc5a9448570fa48337d45fe5757945af51553ab2cb1f66abf74bbb22e930fdf4d60c1991deeddc779a77c8dceeb52a4906f98fdca974fce30ac59a02b6f0",
+          "xmr_conditional_earliest_adversarial_unix": 1790460942,
+          "xmr_conditional_latest_recovery_unix": 1790461012
+        }
+      },
+      "outcome": "XmrFirst",
+      "phase": "dom_reserve_funded",
+      "unix_seconds": 1790460929
+    },
+    {
+      "elapsed_seconds": 78.012033632,
+      "evidence": {
+        "height": 151
+      },
+      "outcome": "XmrFirst",
+      "phase": "xmr_reserve_funded_and_mature",
+      "unix_seconds": 1790460930
+    },
+    {
+      "elapsed_seconds": 78.316658395,
+      "evidence": {
+        "capsule_receipt_elapsed_seconds": 17.408758764
+      },
+      "outcome": "XmrFirst",
+      "phase": "paired_offers_ready",
+      "unix_seconds": 1790460930
+    },
+    {
+      "elapsed_seconds": 79.334578783,
+      "evidence": {
+        "dom_claim_height": 7
+      },
+      "outcome": "XmrFirst",
+      "phase": "both_claims_included",
+      "unix_seconds": 1790460931
+    },
+    {
+      "elapsed_seconds": 81.063891364,
+      "evidence": {
+        "dom_height": 8,
+        "dom_refund_height": 214
+      },
+      "outcome": "XmrFirst",
+      "phase": "onward_spends_included",
+      "unix_seconds": 1790460933
+    }
+  ],
+  "evidence_scope": "Both claims and onward spends observed; timed out while mining to conservative DOM refund height. No completed late-refund assertion."
+}

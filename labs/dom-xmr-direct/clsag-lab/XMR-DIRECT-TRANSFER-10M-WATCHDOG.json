@@ -1,0 +1,9 @@
+{
+  "experiment": "direct XMR recovery after native reserve transfer with 10000000 squarings",
+  "pid": 846654,
+  "timeout_seconds": 240,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 131.97372807000647,
+  "compilation_included": false
+}

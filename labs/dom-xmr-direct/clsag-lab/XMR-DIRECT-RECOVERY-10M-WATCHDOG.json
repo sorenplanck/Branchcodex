@@ -1,0 +1,9 @@
+{
+  "experiment": "direct XMR refund with 10000000 squarings",
+  "pid": 844460,
+  "timeout_seconds": 240,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 130.76434693898773,
+  "compilation_included": false
+}

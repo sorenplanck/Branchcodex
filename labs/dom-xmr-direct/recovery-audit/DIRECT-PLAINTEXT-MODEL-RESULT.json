@@ -1,0 +1,17 @@
+{
+  "checked_statements": 1155,
+  "bounded_responses_per_challenge": 192,
+  "accepting_pairs_checked": 7488,
+  "false_accepting_pairs": 0,
+  "cryptographic_security_proven": false,
+  "fiat_shamir_exercised": false,
+  "curve_exercised": false,
+  "parameters": {
+    "n": 77,
+    "g": 4,
+    "steps": 3,
+    "q": 5,
+    "message_response_limit": 12,
+    "nonce_response_limit": 16
+  }
+}

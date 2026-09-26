@@ -1,0 +1,12 @@
+{
+  "pid": 839690,
+  "external_group_deadline_seconds": 120,
+  "external_timeout": false,
+  "exit_code": 0,
+  "observed_wall_seconds": 42.01620654002181,
+  "args": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/direct_recovery_bridge",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge"
+  ],
+  "compilation_included": false
+}

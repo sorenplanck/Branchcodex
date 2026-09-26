@@ -1,0 +1,17 @@
+{
+  "experiment": "XMR recovery with first delayed puzzle invalid, 198 puzzles",
+  "result": "experiment_timeout",
+  "exit_code": 101,
+  "timeout_message": "regtest exceeded 240 seconds: Elapsed(())",
+  "timeout_is_not_a_wall_clock_measurement": true,
+  "artifact_directory": "target/regtest-806944-1790450529291114714",
+  "rejected_offers_before_accepted_offer": 3,
+  "accepted_offer_observed": true,
+  "producer_exit_observed": true,
+  "funding_started": true,
+  "complete_funding_observed": false,
+  "recovery_demonstrated": false,
+  "atomic_swap_proven": false,
+  "mainnet_latency_measurement": false,
+  "note": "The timeout was reported after synchronous preparation yielded back to Tokio. No successful funded recovery report was produced by this run."
+}

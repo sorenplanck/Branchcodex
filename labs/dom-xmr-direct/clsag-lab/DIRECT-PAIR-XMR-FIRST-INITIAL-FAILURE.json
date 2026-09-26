@@ -1,0 +1,18 @@
+{
+  "experiment": "direct-pair-xmr-first before separating DOM staging preparation",
+  "pid": 851210,
+  "exit_code": 101,
+  "timed_out": false,
+  "wall_seconds": 88.29452790299547,
+  "assertion": "conditional test preparation budget exhausted before XMR deposit",
+  "assertion_source_at_execution": "examples/regtest_claim.rs:502",
+  "artifact_directory": "target/regtest-851210-1790459614639661346",
+  "watchdog_source": "target/direct-pair-xmr-first-watchdog-851210.json",
+  "full_result_report_written": false,
+  "shared_dom_funding_preceded_assertion": true,
+  "shared_xmr_funding_not_reached": true,
+  "evidence_scope": "process result and assertion location in the executed fixture",
+  "atomic_swap": false,
+  "safe_bilateral_window_proven": false,
+  "compilation_included": false
+}

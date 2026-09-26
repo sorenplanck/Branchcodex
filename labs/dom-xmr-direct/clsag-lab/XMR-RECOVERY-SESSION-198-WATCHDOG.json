@@ -1,0 +1,16 @@
+{
+  "experiment": "bounded funded single-verification recovery session",
+  "pid": 827843,
+  "external_group_deadline_seconds": 240,
+  "external_timeout": false,
+  "exit_code": 0,
+  "observed_wall_seconds": 187.08003118500346,
+  "args": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "xmr-recovery-bad-first",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/lhtlp-bridge",
+    "198"
+  ],
+  "compilation_included": false
+}

@@ -1,0 +1,10 @@
+{
+  "experiment": "direct-pair-abandon",
+  "pid": 855909,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 204.9008576530032,
+  "compilation_included": false,
+  "log": "target/direct-pair-abandon-1790461507408734587.log"
+}
