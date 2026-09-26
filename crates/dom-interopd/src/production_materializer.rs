@@ -1050,17 +1050,37 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
         );
         counterparty.public_secret_evidence_digest = first_exposure.evidence_digest;
         dom.public_secret_evidence_digest = first_exposure.evidence_digest;
+        let first_face = public_secret_first_face_v23(leg.counterparty_face);
         let children = self
             .router
             .with_router(|router| {
-                let counterparty_plan =
-                    router.materialize_child(leg.counterparty_face, counterparty, Some(&scalar))?;
-                let dom_plan =
-                    router.materialize_child(SettlementFaceV1::Dom, dom, Some(&scalar))?;
-                Ok([counterparty_plan, dom_plan])
+                if first_face == SettlementFaceV1::Dom {
+                    let first = router
+                        .materialize_child(SettlementFaceV1::Dom, dom, Some(&scalar))
+                        .inspect_err(|_| {
+                            eprintln!("DOM_CHILD_FACE_DIAG_V25 face=dom_first_public_secret")
+                        })?;
+                    let second = router
+                        .materialize_child(leg.counterparty_face, counterparty, Some(&scalar))
+                        .inspect_err(|_| {
+                            eprintln!(
+                                "DOM_CHILD_FACE_DIAG_V25 face=counterparty_second_public_secret"
+                            )
+                        })?;
+                    return Ok([first, second]);
+                }
+                let first = router
+                    .materialize_child(leg.counterparty_face, counterparty, Some(&scalar))?;
+                let second = router.materialize_child(SettlementFaceV1::Dom, dom, Some(&scalar))?;
+                Ok([first, second])
             })
             .map_err(map_child_refusal)?;
-        self.install_bitcoin_secret_handoff_if_required(&counterparty, &children[0], leg)?;
+        let counterparty_plan = if first_face == SettlementFaceV1::Dom {
+            &children[1]
+        } else {
+            &children[0]
+        };
+        self.install_bitcoin_secret_handoff_if_required(&counterparty, counterparty_plan, leg)?;
         self.validate_pair(
             leg,
             &children,
@@ -1068,7 +1088,7 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
                 ChildExposureV1::UsesPublicSecret,
                 ChildExposureV1::UsesPublicSecret,
             ],
-            leg.counterparty_face,
+            first_face,
         )?;
         self.draft(
             leg,
@@ -1730,6 +1750,20 @@ const fn settlement_leg(leg: LegIdV1) -> SettlementLegV1 {
 /// coordinator dispatches children in order, so putting XMR first deadlocks
 /// that prerequisite. Only new funding plans change order; no retained plan,
 /// claim ordering, secret rule, or other family's sequence is rewritten here.
+/// Adapting and exposing the DOM final Claim both require the accepted `0x0f`
+/// pre-signature edge to still be the session head: `persist_f7_claim_exposure_v14`
+/// and `finalize_and_persist_f7_claim_v14` each call `require_f7_pre_accepted_v14`
+/// against the live record. The Monero face's Claim materialization stages a
+/// DSC1 `0x19` remote-sweep request into that same session, which advances the
+/// transcript and leaves the DOM Claim permanently unexposable. Expose the DOM
+/// leg first, exactly as Monero funding already materializes the DOM face first.
+const fn public_secret_first_face_v23(counterparty: SettlementFaceV1) -> SettlementFaceV1 {
+    match counterparty {
+        SettlementFaceV1::Monero => SettlementFaceV1::Dom,
+        _ => counterparty,
+    }
+}
+
 const fn nonsecret_first_face_v23(
     counterparty: SettlementFaceV1,
     action: SettlementActionV1,
