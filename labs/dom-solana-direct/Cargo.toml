@@ -1,0 +1,77 @@
+# DOM<->Solana direct leg laboratory.
+#
+# Its own workspace, exactly like `labs/dom-bp-migration-lab`: nothing here is
+# a member of the root workspace, so no pre-existing crate's build, lint regime
+# or test selection changes because this directory exists.
+#
+# Why a laboratory and not a `dom-interopd` scenario: the daemon's Solana
+# settlement face already exists (`production_child_solana`,
+# `AuthenticatedSolanaSessionBindingsV1`), but the DOM side of a route can only
+# be *planned* through a fixture that is hard-coded to
+# `[AuthenticatedXmrSessionBindingsV1; 2]`
+# (`production_native_daemon_planning_v23_tests.rs:46`). This lab supplies the
+# DOM side directly — joint 2-of-2 reserve, adapted claim, height-locked refund
+# — against a real DOM node, so the Solana leg can execute the real operation
+# now instead of waiting on that fixture to become asset-neutral.
+#
+# NOTE ON `--locked`: a separate workspace has its own lockfile, and this one is
+# resolved for the first time on CI. The direct dependencies below are pinned
+# exactly (`=x.y.z`) so that resolution is deterministic at the level this
+# directory controls; the transitive set is whatever the registry resolves on
+# the establishing run, which then produces the lockfile to commit.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "dom-solana-direct-lab"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "DOM<->Solana condition-lock leg against a real DOM node and a real Solana cluster"
+
+[dependencies]
+# ── DOM side ────────────────────────────────────────────────────────────────
+dom-core = { path = "../../crates/dom-core" }
+dom-consensus = { path = "../../crates/dom-consensus" }
+dom-crypto = { path = "../../crates/dom-crypto" }
+dom-serialization = { path = "../../crates/dom-serialization" }
+dom-scriptless-primitives = { path = "../../crates/dom-scriptless-primitives" }
+dom-scriptless-bulletproof = { path = "../../crates/dom-scriptless-bulletproof" }
+# ── the cross-curve role registry (the crate is named for its first user; the
+#    role byte ROLE_SOLANA_CONDITION_LOCK lives in its closed registry) ──────
+xmr-dleq-sigma = { path = "../../crates/adapters/xmr-dleq-sigma" }
+# ── Solana side ─────────────────────────────────────────────────────────────
+solana-types = { path = "../../crates/adapters/solana-types" }
+solana-pda = { path = "../../crates/adapters/solana-pda" }
+solana-escrow-wire = { path = "../../crates/adapters/solana-escrow-wire" }
+solana-profile = { path = "../../crates/adapters/solana-profile" }
+solana-route-secret = { path = "../../crates/adapters/solana-route-secret" }
+solana-session-init = { path = "../../crates/adapters/solana-session-init" }
+solana-setup-store = { path = "../../crates/adapters/solana-setup-store" }
+solana-program-client = { path = "../../crates/adapters/solana-program-client" }
+solana-transaction-builder = { path = "../../crates/adapters/solana-transaction-builder" }
+solana-rpc = { path = "../../crates/adapters/solana-rpc" }
+# ── shared terms ────────────────────────────────────────────────────────────
+kaystra-core = { path = "../../crates/kaystra-core" }
+counterparty-api = { path = "../../crates/counterparty-api" }
+# ── crates.io, pinned to the versions the root workspace already resolves ───
+curve25519-dalek = { version = "=4.1.3", features = ["zeroize"] }
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
+rand = "=0.8.6"
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+# Reads the `solana-keygen` keypair file and writes the leg evidence record.
+serde_json = "=1.0.151"
+sha2 = "=0.10.8"
+thiserror = "=1.0.69"
+zeroize = { version = "=1.8.2", features = ["derive"] }
+
+[dev-dependencies]
+dom-node = { path = "../../crates/dom-node" }
+dom-config = { path = "../../crates/dom-config" }
+dom-wallet = { path = "../../crates/dom-wallet" }
+dom-rpc = { path = "../../crates/dom-rpc" }
+
+tempfile = "=3.24.0"
+tokio = { version = "=1.52.3", features = ["macros", "rt", "time"] }

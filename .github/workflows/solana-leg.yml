@@ -1,0 +1,287 @@
+# DOM<->Solana leg. Owns exactly one counterparty family and never installs the
+# Monero sidecar, Bitcoin Core or anvil, so it can run while the other legs are
+# being worked on elsewhere.
+#
+# What it proves, in order of strength:
+#   1. the adapters and the escrow program still pass their own suites;
+#   2. the program compiles for its real target, sbf-solana-solana, which is the
+#      only build that contains the `sol_curve_group_op` syscall path;
+#   3. a real cluster accepts an upgradeable deployment, the upgrade authority is
+#      revoked, and the programdata hash is measured from the node;
+#   4. a complete DOM<->Solana leg settles against that cluster and against a
+#      real DOM node, in both claim orders, and both timeout refunds execute.
+#
+# What it does not prove: mainnet-beta economics; any route that mixes this leg
+# with Bitcoin, EVM or Monero (cross-leg composition is integrated later); and
+# execution through `dom-interopd` itself. The daemon's Solana settlement face is
+# covered by the offline units here, but the DOM side of a route can only be
+# planned through a fixture pinned to two Monero session bindings
+# (crates/dom-interopd/src/production_native_daemon_planning_v23_tests.rs:46), so
+# the live leg drives the DOM side directly against the node instead.
+name: dom-solana-leg
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: which part of the leg to run
+        required: true
+        default: all
+        type: choice
+        options: [all, offline, program, live]
+  push:
+    branches:
+      - 'feat/solana-leg**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dom-solana-leg-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+
+jobs:
+  offline:
+    name: "Solana adapters and escrow host suite"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'offline' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dom-solana-leg-offline
+          cache-on-failure: 'true'
+          workspaces: |
+            . -> target
+            programs/dom-solana-escrow -> target
+            labs/dom-solana-direct -> target
+
+      - name: Verify frozen consensus sources
+        run: bash scripts/check-consensus-unchanged.sh
+
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+
+      - name: Solana adapter crates
+        run: |
+          cargo test --locked --no-fail-fast --profile crypto-test \
+            -p solana-types -p solana-pda -p solana-escrow-wire -p solana-profile \
+            -p solana-route-secret -p solana-session-init -p solana-setup-store \
+            -p solana-program-client -p solana-transaction-builder -p solana-rpc \
+            -p solana-observation-store -p solana-observer -p solana-secret-store \
+            -p solana-kaystra-bridge -p solana-kaystra-source -p solana-actuator \
+            -p f8-solana-model -p f8-solana-e2e
+
+      - name: Escrow program host suite
+        run: |
+          cargo test --manifest-path programs/dom-solana-escrow/Cargo.toml \
+            --locked --no-fail-fast
+
+      - name: Daemon Solana face, offline units
+        run: |
+          cargo test --locked -p dom-interopd --no-default-features --features production \
+            --lib --profile crypto-test production_child_solana
+
+      # The leg laboratory is its own workspace, so its lockfile is resolved for
+      # the first time here and `--locked` cannot apply yet. Its direct
+      # dependencies are pinned exactly in its manifest; commit the lockfile this
+      # step produces to close the transitive set too.
+      - name: DOM<->Solana leg laboratory, offline units
+        run: |
+          cargo test --manifest-path labs/dom-solana-direct/Cargo.toml --lib
+
+      # The lockfile the resolution above produced: commit it and every later run
+      # of this laboratory is fully pinned.
+      - name: Publish the laboratory lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-solana-leg-lab-lockfile-${{ github.sha }}
+          path: labs/dom-solana-direct/Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
+
+  program:
+    name: "escrow program for sbf-solana-solana"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'program' || inputs.suite == 'live' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dom-solana-leg-program
+          cache-on-failure: 'true'
+          workspaces: programs/dom-solana-escrow -> target
+
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+
+      # The one archive cargo cannot content-verify. The installer enforces the
+      # committed digest, or records it and prints the line to commit.
+      - name: Install pinned platform-tools
+        run: |
+          set -euo pipefail
+          PT="$(bash scripts/f8-install-platform-tools.sh)"
+          echo "PLATFORM_TOOLS=$PT" >> "$GITHUB_ENV"
+
+      - name: Publish the platform-tools pin as it now stands
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-solana-platform-tools-lock-${{ github.sha }}
+          path: scripts/f8-platform-tools.lock
+          if-no-files-found: warn
+          retention-days: 7
+
+      # The host `cargo test` builds the dalek fallback of `multiply_edwards`;
+      # only this target compiles the syscall path the deployed program runs.
+      - name: Build for the real target
+        run: bash scripts/build-solana-program-v8.sh
+
+      - name: Record the built object
+        id: object
+        run: |
+          set -euo pipefail
+          SO="programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so"
+          test -f "$SO"
+          echo "sha256=$(sha256sum "$SO" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c %s "$SO")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the object for the live job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-solana-escrow-so-${{ github.sha }}
+          path: programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so
+          if-no-files-found: error
+          retention-days: 7
+
+  live:
+    name: "DOM<->Solana on a real cluster, both directions"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'live' }}
+    needs: [program]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dom-solana-leg-live
+          cache-on-failure: 'true'
+          workspaces: |
+            . -> target
+            labs/dom-solana-direct -> target
+
+      - name: Verify frozen consensus sources
+        run: bash scripts/check-consensus-unchanged.sh
+
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+
+      - name: Install pinned Agave toolchain
+        run: |
+          set -euo pipefail
+          BIN="$(bash scripts/f8-install-solana-tools.sh)"
+          echo "$BIN" >> "$GITHUB_PATH"
+
+      - name: Fetch the object built for the real target
+        uses: actions/download-artifact@v4
+        with:
+          name: dom-solana-escrow-so-${{ github.sha }}
+          path: programs/dom-solana-escrow/target/sbf-solana-solana/release
+
+      - name: Initialize explicit not-run evidence
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/dom-solana-live-evidence"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'dom-solana-live-evidence'
+          (root / 'campaign.json').write_text(json.dumps({
+              'schema': 'DOM-SOLANA-LIVE-CAMPAIGN-V1',
+              'status': 'not-run',
+              'reason': 'the live harness has not reported yet',
+          }, indent=2) + '\n')
+          PY
+
+      # Compiled before the validator starts, so a compile failure never burns
+      # cluster time and never looks like a settlement failure.
+      - name: Compile the live scenario without running it
+        run: |
+          cargo test --manifest-path labs/dom-solana-direct/Cargo.toml \
+            --test solana_leg_live --no-run
+
+      - name: DOM<->Solana both directions on a live cluster
+        env:
+          DOM_SOLANA_LIVE_DIR_V1: ${{ runner.temp }}/dom-solana-live
+          DOM_SOLANA_LIVE_EVIDENCE_V1: ${{ runner.temp }}/dom-solana-live-evidence/harness.json
+          DOM_SOLANA_LIVE_CAMPAIGN_V1: ${{ runner.temp }}/dom-solana-live-evidence/campaign.json
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOM_SOLANA_LIVE_DIR_V1"
+          # One thread: the three scenarios share one cluster and one set of
+          # funded roles, and the refund scenario waits on that cluster's clock.
+          bash scripts/f8-run-solana-live-v1.sh \
+            cargo test --manifest-path labs/dom-solana-direct/Cargo.toml \
+              --test solana_leg_live \
+              -- --ignored --nocapture --test-threads=1
+
+      - name: Preserve the live outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dom-solana-live-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dom-solana-live-evidence/campaign.json
+            ${{ runner.temp }}/dom-solana-live-evidence/harness.json
+            ${{ runner.temp }}/dom-solana-live/validator.log
+            ${{ runner.temp }}/dom-solana-live/deploy.log
+            ${{ runner.temp }}/dom-solana-live/finalize.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  solana-leg-gate:
+    name: Solana leg gate
+    runs-on: ubuntu-latest
+    needs: [offline, program, live]
+    if: always()
+    steps:
+      # skipped is acceptable when a dispatch selects one suite; failure and
+      # cancellation are not.
+      - name: Require every selected suite to pass
+        run: |
+          for r in "${{ needs.offline.result }}" "${{ needs.program.result }}" "${{ needs.live.result }}"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "a selected Solana leg suite did not pass: $r"; exit 1 ;;
+            esac
+          done
+          if [[ "${{ github.event_name == 'push' || inputs.suite == 'all' }}" == "true" ]]; then
+            [[ "${{ needs.offline.result }}" == success ]]
+            [[ "${{ needs.program.result }}" == success ]]
+            [[ "${{ needs.live.result }}" == success ]]
+          fi
