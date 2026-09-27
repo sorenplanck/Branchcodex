@@ -53,6 +53,12 @@ solana-setup-store = { path = "../../crates/adapters/solana-setup-store" }
 solana-program-client = { path = "../../crates/adapters/solana-program-client" }
 solana-transaction-builder = { path = "../../crates/adapters/solana-transaction-builder" }
 solana-rpc = { path = "../../crates/adapters/solana-rpc" }
+# Reads through the quorum the profile declares, instead of one node the leg
+# happened to be handed.
+solana-rpc-pool = { path = "../../crates/adapters/solana-rpc-pool" }
+# This project's own rule for what an immutable program is, and the canonical
+# code hash to bind. The leg used to hand-roll both.
+solana-program-attestation = { path = "../../crates/adapters/solana-program-attestation" }
 # ── shared terms ────────────────────────────────────────────────────────────
 kaystra-core = { path = "../../crates/kaystra-core" }
 counterparty-api = { path = "../../crates/counterparty-api" }

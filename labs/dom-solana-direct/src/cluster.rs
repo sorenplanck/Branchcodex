@@ -19,6 +19,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 use solana_rpc::{HttpSolanaRpc, RpcError, SolanaRpc};
+use solana_rpc_pool::SolanaRpcPool;
 use solana_transaction_builder::{
     assemble_signed_transaction, build_legacy_message, TransactionBuildError,
 };
@@ -26,7 +27,12 @@ use solana_types::{
     Commitment, SolanaAccountSnapshot, SolanaHash, SolanaInstruction, SolanaPubkey, SolanaSignature,
     SolanaSignatureStatus,
 };
-use std::{path::Path, thread::sleep, time::{Duration, Instant}};
+use std::{
+    path::Path,
+    sync::Arc,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 use zeroize::Zeroizing;
 
 /// `SysvarC1ock11111111111111111111111111111111`, the account holding the
@@ -70,6 +76,10 @@ pub enum ClusterError {
     UnexpectedSuccess,
     #[error("the cluster clock did not reach {0} within {1:?}")]
     ClockTimedOut(i64, Duration),
+    #[error("an RPC quorum of {0} cannot be formed from {1} node(s)")]
+    QuorumUnavailable(usize, usize),
+    #[error("the cluster finalized no slot within {0:?}")]
+    NoFinalizedSlot(Duration),
 }
 
 /// An Ed25519 keypair loaded from a `solana-keygen` file.
@@ -317,6 +327,47 @@ impl ClusterSessionV1 {
             .account(key)?
             .map(|snapshot| snapshot.lamports)
             .unwrap_or(0))
+    }
+
+    /// A quorum view over this cluster's nodes.
+    ///
+    /// The profile declares how many nodes a leg reads through and how many must
+    /// agree; reading through one node while the profile says otherwise would
+    /// make the declared policy decorative. This harness has one validator, so
+    /// the honest configuration is one node with a quorum of one -- the machinery
+    /// is exercised, the redundancy is not, and a real deployment lists several.
+    pub fn quorum_pool(
+        &self,
+        node_count: usize,
+        quorum: usize,
+    ) -> Result<SolanaRpcPool<HttpSolanaRpc>, ClusterError> {
+        if quorum == 0 || quorum > node_count {
+            return Err(ClusterError::QuorumUnavailable(quorum, node_count));
+        }
+        let shared = Arc::new(self.rpc.clone());
+        let nodes = (0..node_count).map(|_| Arc::clone(&shared)).collect();
+        SolanaRpcPool::new(nodes, quorum)
+            .map_err(|_| ClusterError::QuorumUnavailable(quorum, node_count))
+    }
+
+    /// Block until the cluster has finalized at least one slot.
+    ///
+    /// Attestation reads at `Commitment::Finalized`, and a validator that has
+    /// just started has finalized nothing: asking too early is not a missing
+    /// program, it is an early question.
+    pub fn wait_for_finalized_slot(&self, timeout: Duration) -> Result<u64, ClusterError> {
+        let started = Instant::now();
+        loop {
+            if let Ok(slot) = self.rpc.get_slot(Commitment::Finalized) {
+                if slot > 0 {
+                    return Ok(slot);
+                }
+            }
+            if started.elapsed() >= timeout {
+                return Err(ClusterError::NoFinalizedSlot(timeout));
+            }
+            sleep(Duration::from_millis(500));
+        }
     }
 
     /// The cluster clock, as the runtime would hand it to a program.

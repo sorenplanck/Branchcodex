@@ -29,6 +29,9 @@ pub struct LiveEnvironment {
     pub refund: PathBuf,
     pub directory: PathBuf,
     pub campaign: PathBuf,
+    /// The object the program job built and the harness loaded, so a scenario can
+    /// prove the bytes on chain are those bytes rather than trust that they are.
+    pub program_so: PathBuf,
 }
 
 fn require(name: &str) -> String {
@@ -75,6 +78,7 @@ impl LiveEnvironment {
             funder: PathBuf::from(require("DOM_SOLANA_LIVE_FUNDER_V1")),
             beneficiary: PathBuf::from(require("DOM_SOLANA_LIVE_BENEFICIARY_V1")),
             refund: PathBuf::from(require("DOM_SOLANA_LIVE_REFUND_V1")),
+            program_so: PathBuf::from(require("DOM_SOLANA_LIVE_PROGRAM_SO_V1")),
             directory,
             campaign,
         }

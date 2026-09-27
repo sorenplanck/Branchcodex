@@ -81,6 +81,7 @@ jobs:
             -p solana-program-client -p solana-transaction-builder -p solana-rpc \
             -p solana-observation-store -p solana-observer -p solana-secret-store \
             -p solana-kaystra-bridge -p solana-kaystra-source -p solana-actuator \
+            -p solana-rpc-pool -p solana-program-attestation \
             -p f8-solana-model -p f8-solana-e2e
 
       - name: Escrow program host suite

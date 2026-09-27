@@ -49,6 +49,9 @@ use dom_solana_direct_lab::{
 use kaystra_core::types::{FinalityPolicyV1, ParticipantId};
 use sha2::{Digest, Sha256};
 use solana_profile::{SolanaAdapterProfileV1, SolanaNetwork};
+use solana_program_attestation::{
+    attest_immutable_program, code_hash, PROGRAM_DATA_METADATA_LEN,
+};
 use solana_setup_store::SolanaSetupStore;
 // The trait must be in scope to call `get_transaction` on the HTTP client.
 use solana_rpc::SolanaRpc as _;
@@ -105,81 +108,103 @@ fn profile(program_id: SolanaPubkey) -> SolanaAdapterProfileV1 {
     profile
 }
 
-/// What the programdata account itself says, measured in this process rather
-/// than taken from the harness.
-struct ProgramDataFacts {
-    sha256: [u8; 32],
-    slot: u64,
-    /// Which of the two unsignable authority shapes was found.
-    authority: &'static str,
+/// What attestation established about the deployed program.
+struct AttestedProgram {
+    /// The canonical hash this project binds for a Solana program: `code_hash`
+    /// over the program's code region, with its domain tag and length. This is the value
+    /// the setup binding carries, not a hash of the whole account.
+    code_hash: [u8; 32],
+    deployment_slot: u64,
+    observed_context_slot: u64,
+    padding_bytes: usize,
 }
 
-/// Read the programdata account and establish here that no upgrade can ever be
-/// authorized, and what its bytes hash to.
+/// Establish, through this project's own attestation, that the deployed program
+/// is the one that was built and that nobody can replace it.
 ///
-/// The bincode `UpgradeableLoaderState::ProgramData` layout is a u32
-/// discriminant (3), a u64 slot, then `Option<Pubkey>`: one tag byte and, when
-/// the tag is 1, the 32-byte authority.
+/// Three things are checked here and none of them is assumed:
 ///
-/// Two shapes are accepted, and only these two. An absent authority (tag 0) is
-/// the shape a revoked mainnet deployment has. The all-zero address (tag 1 with
-/// a zero key) is what `solana-test-validator --upgradeable-program ... none`
-/// writes: it is the System Program's address, which nobody holds a key for and
-/// which the runtime never presents as a transaction signer, so no upgrade can
-/// be authorized under it either. Any other address is a real authority and
-/// fails the test, naming the key.
-fn programdata_facts(cluster: &ClusterSessionV1, programdata: SolanaPubkey) -> ProgramDataFacts {
-    let data = cluster
-        .account_data(programdata)
-        .expect("the programdata account the loader created");
+/// 1. the bytes in the programdata account's code region are byte-for-byte the
+///    object the `program` job built, and everything past them is zero padding.
+///    This is the only non-circular link between the artifact and the chain: the
+///    expected hash below is then determined by the built file plus the account's
+///    length, so nothing about the on-chain content is taken on trust;
+/// 2. `attest_immutable_program` re-reads both accounts THROUGH THE QUORUM the
+///    profile declares, at `Finalized`, and enforces this project's rule for an
+///    immutable program: loader ownership, both loader-state discriminants, an
+///    absent upgrade authority, and that code hash;
+/// 3. the programdata address the program account itself points at is the one the
+///    harness reported.
+///
+/// The leg used to hand-roll (2) and bind a sha256 of the entire account. Using
+/// the project's component instead means the leg binds what the rest of the system
+/// binds, and it was that component's rule -- `Option` tag must be 0 -- that
+/// forced the harness to revoke a real authority instead of loading one that
+/// cannot sign.
+fn attest_program(
+    cluster: &ClusterSessionV1,
+    environment: &LiveEnvironment,
+    profile: &SolanaAdapterProfileV1,
+) -> AttestedProgram {
+    cluster
+        .wait_for_finalized_slot(Duration::from_secs(120))
+        .expect("the cluster finalizes a slot");
+    let pool = cluster
+        .quorum_pool(
+            usize::from(profile.rpc_node_count),
+            usize::from(profile.rpc_quorum),
+        )
+        .expect("a pool matching the profile's declared quorum");
+
+    let account = cluster
+        .account_data(environment.programdata)
+        .expect("the programdata account");
     assert!(
-        data.len() > 45,
-        "programdata account holds {} bytes, too few for a header and a program",
-        data.len()
+        account.len() > PROGRAM_DATA_METADATA_LEN,
+        "programdata holds {} bytes, too few for the loader header and a program",
+        account.len()
     );
-    let discriminant = u32::from_le_bytes(
-        data[..4]
-            .try_into()
-            .expect("four bytes for the loader state discriminant"),
+    let region = &account[PROGRAM_DATA_METADATA_LEN..];
+    let built = std::fs::read(&environment.program_so).unwrap_or_else(|error| {
+        panic!(
+            "cannot read the built object at {}: {error}",
+            environment.program_so.display()
+        )
+    });
+    assert!(
+        region.len() >= built.len(),
+        "the on-chain code region is {} bytes, smaller than the {} byte object built",
+        region.len(),
+        built.len()
     );
     assert_eq!(
-        discriminant,
-        3,
-        "this is not a ProgramData account; its first 45 bytes are {}",
-        hex_bytes(&data[..45])
+        &region[..built.len()],
+        built.as_slice(),
+        "the bytes on chain are not the bytes the program job built"
     );
-    let slot = u64::from_le_bytes(
-        data[4..12]
-            .try_into()
-            .expect("eight bytes for the deployment slot"),
+    let padding = &region[built.len()..];
+    assert!(
+        padding.iter().all(|byte| *byte == 0),
+        "the {} bytes past the program are not zero padding; they begin {}",
+        padding.len(),
+        hex_bytes(&padding[..padding.len().min(16)])
     );
-    let authority = match data[12] {
-        0 => "absent",
-        1 => {
-            let key: [u8; 32] = data[13..45]
-                .try_into()
-                .expect("thirty-two bytes for the authority");
-            assert_eq!(
-                key,
-                [0u8; 32],
-                "the program has a real upgrade authority ({}); the daemon requires a \
-                 program nobody can replace",
-                SolanaPubkey(key).to_base58()
-            );
-            "unsignable-system-address"
-        }
-        other => panic!(
-            "the authority option tag is {other}, which is neither 0 nor 1; \
-             the first 45 bytes are {}",
-            hex_bytes(&data[..45])
-        ),
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    ProgramDataFacts {
-        sha256: hasher.finalize().into(),
-        slot,
-        authority,
+
+    let mut expected_region = built;
+    expected_region.resize(region.len(), 0);
+    let expected = code_hash(&expected_region);
+    let attestation = attest_immutable_program(&pool, environment.program_id, expected)
+        .expect("the deployed program attests as immutable and as the object built");
+    assert_eq!(
+        attestation.program_data_address, environment.programdata,
+        "the program points at a different programdata account than the harness reported"
+    );
+    assert_eq!(attestation.code_hash, expected);
+    AttestedProgram {
+        code_hash: attestation.code_hash,
+        deployment_slot: attestation.deployment_slot,
+        observed_context_slot: attestation.observed_context_slot,
+        padding_bytes: padding.len(),
     }
 }
 
@@ -191,9 +216,7 @@ struct Fixture {
     environment: LiveEnvironment,
     cluster: ClusterSessionV1,
     profile: SolanaAdapterProfileV1,
-    program_data_hash: [u8; 32],
-    deployment_slot: u64,
-    upgrade_authority: &'static str,
+    program: AttestedProgram,
 }
 
 impl Fixture {
@@ -210,14 +233,12 @@ impl Fixture {
             environment.genesis,
             "the cluster this test reached is not the one the harness started"
         );
-        let facts = programdata_facts(&cluster, environment.programdata);
+        let program = attest_program(&cluster, &environment, &profile);
         Self {
             environment,
             cluster,
             profile,
-            program_data_hash: facts.sha256,
-            deployment_slot: facts.slot,
-            upgrade_authority: facts.authority,
+            program,
         }
     }
 }
@@ -285,7 +306,7 @@ fn leg_input(
             max_reorg_depth: 32,
         },
         solana_fee_max: 100_000,
-        program_data_hash: fixture.program_data_hash,
+        program_data_hash: fixture.program.code_hash,
         anchor: dom.anchor(),
         now,
         network: DomClockNetwork::Regtest,
@@ -506,11 +527,13 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
             "dom_onward_spend_height": onward_height,
             "escrow_claim_signature": claim_signature.to_base58(),
             "revealed_scalar_matches": true,
-            "programdata_sha256_measured_in_process": hex32(&fixture.program_data_hash),
-            "programdata_sha256_reported_by_harness":
+            "program_code_hash_bound": hex32(&fixture.program.code_hash),
+            "program_code_padding_bytes": fixture.program.padding_bytes,
+            "programdata_account_sha256_reported_by_harness":
                 hex32(&fixture.environment.programdata_sha256),
-            "deployment_slot": fixture.deployment_slot,
-            "upgrade_authority": fixture.upgrade_authority,
+            "deployment_slot": fixture.program.deployment_slot,
+            "attestation_observed_slot": fixture.program.observed_context_slot,
+            "upgrade_authority": "revoked, attested absent",
             "timing_bounds_proven": false,
         }),
     );

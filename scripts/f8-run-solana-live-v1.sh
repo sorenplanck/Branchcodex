@@ -23,6 +23,8 @@
 #   DOM_SOLANA_LIVE_FUNDER_V1        funded escrow funder keypair path
 #   DOM_SOLANA_LIVE_BENEFICIARY_V1   funded beneficiary keypair path
 #   DOM_SOLANA_LIVE_REFUND_V1        funded refund-recipient keypair path
+#   DOM_SOLANA_LIVE_PROGRAM_SO_V1    the object that was loaded, so the scenario
+#                                    can prove the on-chain bytes are those bytes
 #
 # The scenario does not mint: the faucet is the cluster's, and these three keys
 # are funded here so the daemon's Solana face only ever pays fees it already
@@ -114,10 +116,16 @@ done
 
 mkdir -p "$WORK"
 PAYER="$WORK/payer.json"
+# Held only so the genesis-loaded program has an authority that CAN be revoked.
+# `--upgradeable-program ... none` writes Some(11111111111111111111111111111111),
+# and `solana-program-attestation` -- this project's own rule for an immutable
+# program -- requires the bincode Option tag to be 0, a real None. So the program
+# starts with an authority we hold and that authority is revoked below.
+UPGRADE_AUTHORITY_KEYPAIR="$WORK/upgrade-authority.json"
 FUNDER="$WORK/funder.json"
 BENEFICIARY="$WORK/beneficiary.json"
 REFUND="$WORK/refund.json"
-for keypair in "$PAYER" "$FUNDER" "$BENEFICIARY" "$REFUND"; do
+for keypair in "$PAYER" "$UPGRADE_AUTHORITY_KEYPAIR" "$FUNDER" "$BENEFICIARY" "$REFUND"; do
   solana-keygen new --no-bip39-passphrase --silent --force --outfile "$keypair" >/dev/null
 done
 
@@ -140,7 +148,7 @@ solana-test-validator \
   --ledger "$LEDGER" \
   --rpc-port "$RPC_PORT" \
   --faucet-port "$FAUCET_PORT" \
-  --upgradeable-program "$PROGRAM_ID" "$PROGRAM_SO" none \
+  --upgradeable-program "$PROGRAM_ID" "$PROGRAM_SO" "$UPGRADE_AUTHORITY_KEYPAIR" \
   --reset >"$VALIDATOR_LOG" 2>&1 &
 VALIDATOR_PID=$!
 
@@ -212,43 +220,44 @@ for keypair in "$FUNDER" "$BENEFICIARY" "$REFUND"; do
   solana --url "$RPC_URL" airdrop 100 "$address" >/dev/null
   log "funded $(basename "$keypair" .json) $address"
 done
+# The upgrade authority only signs the revocation and pays nothing, but a signer
+# whose account does not exist is a needless way for that step to fail.
+solana --url "$RPC_URL" airdrop 1 "$(solana-keygen pubkey "$UPGRADE_AUTHORITY_KEYPAIR")" >/dev/null
 
 log "verifying the genesis-loaded program $PROGRAM_ID"
 solana --url "$RPC_URL" program show "$PROGRAM_ID" >"$WORK/program-show.log" 2>&1 || {
   log "the program is not present at its declared id; see $WORK/program-show.log"
   exit 1
 }
-# What the authority must be: something that cannot ever authorize an upgrade.
-# Two shapes qualify, and run 36283102726 showed why both must be named:
-#
-#   * absent -- the CLI prints "Authority: none";
-#   * 11111111111111111111111111111111, the System Program's address, which is
-#     what `--upgradeable-program ... none` actually writes into the programdata
-#     account. It is not a key anyone holds and the runtime never presents the
-#     System Program as a transaction signer, so no upgrade can be authorized
-#     under it.
-#
-# Any OTHER address is a real authority and is refused. The scenario re-checks
-# the same fact in-process from the programdata account's own bytes, so this is
-# not the only place it is established.
-UNSIGNABLE_AUTHORITY="11111111111111111111111111111111"
+# Revoke for real. The authority is ours, so `--final` can be signed; the payer
+# stays the fee payer. This is the step that turns Some(<key>) into None, and
+# `solana-program-attestation` accepts nothing else.
+log "revoking the upgrade authority"
+solana --url "$RPC_URL" program set-upgrade-authority \
+  --keypair "$PAYER" \
+  --upgrade-authority "$UPGRADE_AUTHORITY_KEYPAIR" \
+  --final "$PROGRAM_ID" >"$WORK/finalize.log" 2>&1 || {
+  log "could not revoke the upgrade authority; see $WORK/finalize.log"
+  exit 1
+}
+solana --url "$RPC_URL" program show "$PROGRAM_ID" >"$WORK/program-show.log" 2>&1 || {
+  log "the program disappeared after revoking; see $WORK/program-show.log"
+  exit 1
+}
+
+# Only an absent authority passes. A line naming any key -- including
+# 11111111111111111111111111111111, which would mean the revoke did not take --
+# is refused. The scenario re-establishes the same fact through
+# `attest_immutable_program`, over an RPC quorum, from the account's own bytes.
 AUTHORITY_LINE="$(grep -i "^Authority:" "$WORK/program-show.log" | head -1 | sed 's/^[Aa]uthority: *//')"
-if [ -z "$AUTHORITY_LINE" ]; then
-  REVOKED=true
-  UPGRADE_AUTHORITY="absent"
-  log "the program has no upgrade authority line; upgrades are impossible"
-elif [ "$AUTHORITY_LINE" = "none" ] || [ "$AUTHORITY_LINE" = "None" ]; then
+if [ -z "$AUTHORITY_LINE" ] || [ "$AUTHORITY_LINE" = "none" ] || [ "$AUTHORITY_LINE" = "None" ]; then
   REVOKED=true
   UPGRADE_AUTHORITY="none"
-  log "the program has no upgrade authority; upgrades are impossible"
-elif [ "$AUTHORITY_LINE" = "$UNSIGNABLE_AUTHORITY" ]; then
-  REVOKED=true
-  UPGRADE_AUTHORITY="unsignable-system-address"
-  log "upgrade authority is the System Program address, which cannot sign"
+  log "upgrade authority revoked; the program is immutable"
 else
   REVOKED=false
   UPGRADE_AUTHORITY="$AUTHORITY_LINE"
-  log "the program has a real upgrade authority ($AUTHORITY_LINE); refusing"
+  log "the upgrade authority is still $AUTHORITY_LINE; refusing"
   sed -n '1,20p' "$WORK/program-show.log" >&2
   exit 1
 fi
@@ -286,6 +295,7 @@ export DOM_SOLANA_LIVE_PAYER_V1="$PAYER"
 export DOM_SOLANA_LIVE_FUNDER_V1="$FUNDER"
 export DOM_SOLANA_LIVE_BENEFICIARY_V1="$BENEFICIARY"
 export DOM_SOLANA_LIVE_REFUND_V1="$REFUND"
+export DOM_SOLANA_LIVE_PROGRAM_SO_V1="$PROGRAM_SO"
 export DOM_SOLANA_LIVE_DIR_V1="$WORK"
 
 if [ "$#" -eq 0 ]; then
