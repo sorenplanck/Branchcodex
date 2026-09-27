@@ -228,18 +228,20 @@ pub fn provision(
     // A participant id is NOT a label this crate may choose: `audit_retained_participant_id_v1`
     // recomputes it from the identity's Schnorr key and the DOM chain id and refuses anything
     // else. So the identities come before the terms, and the terms name what they derive.
-    let identity_stores = [state_dir.join(IDENTITY_PARTY_0), provisioning_dir.join(IDENTITY_PARTY_1)];
-    let mut parties = Vec::with_capacity(2);
-    for (index, path) in identity_stores.iter().enumerate() {
-        let root = if index == 0 { state_dir } else { provisioning_dir };
-        let relative = if index == 0 { IDENTITY_PARTY_0 } else { IDENTITY_PARTY_1 };
+    let mut pairs = Vec::with_capacity(2);
+    for (index, (root, relative)) in [
+        (state_dir, IDENTITY_PARTY_0),
+        (provisioning_dir, IDENTITY_PARTY_1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let key = declared_inputs::create_contracts_transport_identity(
             root,
             relative,
             IDENTITY_PASSPHRASE.as_bytes(),
         )?;
-        let _ = path;
-        parties.push(ParticipantId(declared_inputs::participant_id_for_identity(
+        let participant = ParticipantId(declared_inputs::participant_id_for_identity(
             registry.dom_genesis_hash,
             registry.dom_network_magic,
             &key,
@@ -249,17 +251,29 @@ pub fn provision(
             } else {
                 dom_adaptor::DirectionV1::Responder
             },
-        )?));
+        )?);
+        pairs.push((participant, root.join(relative)));
     }
-    // Ascending, because `SettlementTermsV1::validate` refuses an unsorted roster and the
-    // relay roster's shape check refuses members that do not ascend.
-    parties.sort();
-    let parties: [ParticipantId; 2] = parties
-        .try_into()
-        .map_err(|_| "two parties".to_owned())?;
-    if parties[0] == parties[1] {
+
+    // Sorted as PAIRS, never as two lists.
+    //
+    // The roster needs its members ascending -- `SettlementTermsV1::validate` refuses an
+    // unsorted roster and the relay bundle's shape check refuses members that do not ascend
+    // -- and a participant id is derived from an identity, so sorting the ids alone
+    // renumbers them out from under the authorities they came from. A plan would then pair
+    // one party's participant id with the other party's identity, and the ceremony would
+    // open that identity, derive its participant id and find the plan naming someone else.
+    //
+    // That refusal is `Binding`, and it is a COIN FLIP: the identities are generated fresh
+    // each run, so the sort swaps about half the time. The ceremony completed on one run and
+    // refused on the next with no relevant change between them, which is what sent this
+    // hunting through the intent hash and the adaptor point before the evidence named it.
+    pairs.sort_by_key(|(participant, _)| *participant);
+    if pairs[0].0 == pairs[1].0 {
         return Err("both identities derived the same participant".to_owned());
     }
+    let parties = [pairs[0].0, pairs[1].0];
+    let identity_stores = [pairs[0].1.clone(), pairs[1].1.clone()];
 
     let (terms, positions) = provision_terms(&RouteTermsInputV1 {
         state_dir,

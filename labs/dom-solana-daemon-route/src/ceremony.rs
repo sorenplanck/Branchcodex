@@ -127,6 +127,12 @@ pub fn write_plans(
     if input.parties[0] == input.parties[1] {
         return Err("a bilateral ceremony needs two distinct parties".to_owned());
     }
+    if input.identity_stores[0] == input.identity_stores[1] {
+        return Err(
+            "both parties were given one identity authority; each derives its own participant"
+                .to_owned(),
+        );
+    }
     crate::owner_only::directory(out_dir)?;
 
     let absolute = |relative: &str| -> String {
@@ -439,4 +445,44 @@ pub fn verify_ceremony_inputs(
     }
 
     verify_plan(plan_path, now_seconds)
+}
+
+/// Check that a plan's participant id is the one its own identity authority derives.
+///
+/// `audit_retained_participant_id_v1` recomputes the participant id from the identity the
+/// plan names and refuses anything else, with `Binding`. Pairing one party's participant id
+/// with the other party's authority therefore fails -- and it is the kind of mistake that
+/// survives every other check, because both halves are individually correct.
+pub fn verify_plan_names_its_own_identity(
+    plan_path: &Path,
+    identity_schnorr_public_key: &[u8; 33],
+    dom_genesis_hash: [u8; 32],
+    dom_network_magic: u32,
+    direction: dom_adaptor::DirectionV1,
+) -> Result<(), String> {
+    let plan: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(plan_path).map_err(|error| format!("read the plan: {error}"))?,
+    )
+    .map_err(|error| format!("parse the plan: {error}"))?;
+    let declared = plan["local_participant_id"]
+        .as_array()
+        .ok_or_else(|| "local_participant_id is not an array".to_owned())?;
+    let mut expected_bytes = [0u8; 32];
+    for (slot, value) in declared.iter().enumerate().take(32) {
+        expected_bytes[slot] =
+            u8::try_from(value.as_u64().unwrap_or(256)).map_err(|_| "not a byte".to_owned())?;
+    }
+    let derived = crate::declared_inputs::participant_id_for_identity(
+        dom_genesis_hash,
+        dom_network_magic,
+        identity_schnorr_public_key,
+        direction,
+    )?;
+    if derived != expected_bytes {
+        return Err(format!(
+            "the plan at {} names a participant its own identity authority does not derive",
+            plan_path.display()
+        ));
+    }
+    Ok(())
 }
