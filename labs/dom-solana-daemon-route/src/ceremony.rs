@@ -352,3 +352,84 @@ pub fn verify_plan(plan_path: &Path, now_seconds: u64) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Walk what `execute` walks before it loads the context, and name the step that fails.
+///
+/// The preamble has its own refusals, all of them `Binding` as well: a plan path that is not
+/// absolute, a secrets blob containing a backslash -- the fields are borrowed from the JSON,
+/// so an escape sequence cannot be borrowed and is refused outright -- an empty or oversized
+/// passphrase, a relay secret that is not sixty-four lowercase hex characters or is zero, and
+/// two relay secrets that are equal.
+///
+/// The plan is also read under a sixteen-kilobyte bound, which is checked here because a
+/// plan that grows past it fails as storage rather than as anything about the route.
+pub fn verify_ceremony_inputs(
+    plan_path: &Path,
+    secrets_path: &Path,
+    now_seconds: u64,
+) -> Result<(), String> {
+    if !plan_path.is_absolute() {
+        return Err(format!(
+            "the ceremony refuses a plan path that is not absolute: {}",
+            plan_path.display()
+        ));
+    }
+    let plan_bytes =
+        std::fs::read(plan_path).map_err(|error| format!("read the plan: {error}"))?;
+    if plan_bytes.len() > 16_384 {
+        return Err(format!(
+            "the plan is {} bytes and the ceremony reads at most 16384",
+            plan_bytes.len()
+        ));
+    }
+
+    let secret_bytes =
+        std::fs::read(secrets_path).map_err(|error| format!("read the secrets: {error}"))?;
+    if secret_bytes.contains(&b'\\') {
+        return Err(
+            "the secrets contain a backslash, which the ceremony refuses because it borrows \
+             its fields straight out of the JSON"
+                .to_owned(),
+        );
+    }
+    let secrets: serde_json::Value = serde_json::from_slice(&secret_bytes)
+        .map_err(|error| format!("the secrets do not parse: {error}"))?;
+    let passphrase = secrets["identity_passphrase"]
+        .as_str()
+        .ok_or_else(|| "identity_passphrase is not a string".to_owned())?;
+    if passphrase.is_empty() || passphrase.len() > 4096 {
+        return Err(format!(
+            "the passphrase is {} bytes; the ceremony takes 1 to 4096",
+            passphrase.len()
+        ));
+    }
+
+    let mut relay = Vec::new();
+    for field in ["upstream_relay_secret", "downstream_relay_secret"] {
+        let text = secrets[field]
+            .as_str()
+            .ok_or_else(|| format!("{field} is not a string"))?;
+        if text.len() != 64 {
+            return Err(format!("{field} is {} characters, not 64", text.len()));
+        }
+        if !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!("{field} is not lowercase hex"));
+        }
+        if text.bytes().all(|byte| byte == b'0') {
+            return Err(format!("{field} is zero, which the ceremony refuses"));
+        }
+        relay.push(text.to_owned());
+    }
+    if relay[0] == relay[1] {
+        return Err(
+            "both relay secrets are the same; the ceremony refuses a party holding one key \
+             for both positions"
+                .to_owned(),
+        );
+    }
+
+    verify_plan(plan_path, now_seconds)
+}

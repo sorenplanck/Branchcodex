@@ -51,7 +51,7 @@ fn main() -> Result<(), String> {
     let now_seconds = laboratory::now_seconds()?;
     let route = laboratory::provision(&state_dir, &provisioning_dir, now_seconds)?;
     let plans = ceremony::write_plans(&route.ceremony_input(&state_dir), &ceremony_dir)?;
-    let secrets = [
+    let secrets: [PathBuf; 2] = [
         ceremony::write_secrets(
             &laboratory::PARTY_A.0,
             laboratory::IDENTITY_PASSPHRASE,
@@ -78,9 +78,9 @@ fn main() -> Result<(), String> {
 
     // Walk what the ceremony walks, before handing it anything. It reports one word for
     // nine different disagreements across seven files; this names the step.
-    for path in &plans.paths {
-        ceremony::verify_plan(path, now_seconds)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+    for (index, path) in plans.paths.iter().enumerate() {
+        ceremony::verify_ceremony_inputs(path, &secrets[index], now_seconds)
+            .map_err(|error| format!("party {index}: {error}"))?;
     }
 
     println!("state_dir={}", state_dir.display());
