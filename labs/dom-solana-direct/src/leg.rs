@@ -46,7 +46,11 @@ use solana_profile::{
     SolanaProofContextV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
 };
 use solana_route_secret::{verify_counterparty_bundle, SolanaRouteSecret};
-use solana_session_init::{finalize_session, prepare_route_secret, InitializedSolanaSession};
+use solana_secret_store::WitnessMaterialStore;
+use solana_session_init::{
+    finalize_session, persist_route_witness, prepare_route_secret, resume_session,
+    InitializedSolanaSession,
+};
 use solana_setup_store::SolanaSetupStore;
 use solana_types::{SolanaInstruction, SolanaPubkey};
 use xmr_dleq_sigma::BoundCrossCurveProofV1;
@@ -91,6 +95,10 @@ pub enum LegError {
     NoRevealedSecret,
     #[error("the opening belongs to a different condition")]
     ForeignOpening,
+    #[error("witness storage: {0}")]
+    Witness(#[from] solana_secret_store::SecretStoreError),
+    #[error("no setup is registered for this settlement")]
+    UnknownSettlement,
 }
 
 impl From<TimingError> for LegError {
@@ -543,6 +551,74 @@ impl core::fmt::Debug for EstablishedLegV1 {
 impl EstablishedLegV1 {
     pub fn leg(&self) -> &SolanaLegV1 {
         &self.leg
+    }
+
+    /// Persist the witness, encrypted, so a restart can rebuild this session.
+    ///
+    /// Both durable halves must exist for that: the registered public binding,
+    /// which `establish` wrote, and this witness. With only the first, a restarted
+    /// leg knows what it agreed to and cannot act on it -- the settlement would
+    /// have to wait out its timelock instead of completing.
+    pub fn persist_witness<S: WitnessMaterialStore>(
+        &self,
+        witness_store: &S,
+        rng: &mut (impl rand::CryptoRng + rand::RngCore),
+    ) -> Result<(), LegError> {
+        Ok(persist_route_witness(&self.session, witness_store, rng)?)
+    }
+
+    /// Rebuild a leg and its session after a restart, from the registered binding
+    /// and the encrypted witness.
+    ///
+    /// Nothing is trusted because it was stored. The schedule is re-derived from
+    /// the same public input, the condition is taken from the DLEQ the binding
+    /// carries and verified against a context hash computed here, the terms are
+    /// rebuilt around it, and `resume_session` re-validates the binding under that
+    /// profile and those terms and refuses a witness that does not reproduce the
+    /// registered public claim. The setup is then derived independently once more
+    /// and must agree with the resumed one.
+    pub fn resume<S: WitnessMaterialStore>(
+        input: &LegPlanInputV1,
+        profile: &SolanaAdapterProfileV1,
+        setup_store: &SolanaSetupStore,
+        witness_store: &S,
+        rng: &mut (impl rand::CryptoRng + rand::RngCore),
+    ) -> Result<Self, LegError> {
+        let schedule = LegScheduleV1::plan(
+            &input.anchor,
+            input.chosen_deadline,
+            input.now,
+            input.network,
+            input.validator_clock_ahead_secs,
+            input.delays,
+        )?;
+        let binding = setup_store
+            .load(&input.settlement_id)
+            .map_err(|error| LegError::Store(error.to_string()))?
+            .ok_or(LegError::UnknownSettlement)?;
+        let proof = binding.dleq.clone();
+        let context = input.proof_context(&schedule);
+        let context_hash = proof_context_hash(profile, &context)?;
+        let claim = verify_counterparty_bundle(&proof, &input.settlement_id, &context_hash)?;
+        let lock = ConditionLockV1::from_verified_claim(claim)?;
+        let terms = SolanaLegV1::frozen_terms(input, profile, &schedule, lock.dom_adaptor_point())?;
+        let session = resume_session(profile, &terms, setup_store, witness_store, rng)?;
+        let derived = SolanaLegV1::derive_setup(input, profile, &terms, proof)?;
+        if derived.setup_id() != session.setup().setup_id()
+            || derived.binding_hash() != session.setup().binding_hash()
+        {
+            return Err(LegError::Setup(solana_profile::SetupError::BindingMismatch));
+        }
+        Ok(Self {
+            leg: SolanaLegV1 {
+                profile: *profile,
+                terms,
+                schedule,
+                lock,
+                setup: derived,
+            },
+            session,
+        })
     }
 
     /// The public proof to hand the counterparty. It carries no secret and it

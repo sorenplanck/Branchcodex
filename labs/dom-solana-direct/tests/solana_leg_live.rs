@@ -43,7 +43,7 @@ use dom_core::Timestamp;
 use dom_solana_direct_lab::{
     cluster::ClusterSessionV1,
     condition::ConditionOpeningV1,
-    leg::{LegPlanInputV1, SolanaLegV1},
+    leg::{EstablishedLegV1, LegPlanInputV1, SolanaLegV1},
     time_bounds::{AssumedLegDelaysV1, ClaimOrderV1, DomClockNetwork, RelativeDeadlineV1},
 };
 use kaystra_core::types::{FinalityPolicyV1, ParticipantId};
@@ -57,6 +57,7 @@ use solana_profile::{SolanaAdapterProfileV1, SolanaNetwork};
 use solana_program_attestation::{
     attest_immutable_program, code_hash, PROGRAM_DATA_METADATA_LEN,
 };
+use solana_secret_store::{EncryptedSqliteWitnessStore, SecretStoreMasterKey};
 use solana_setup_store::SolanaSetupStore;
 // The trait must be in scope to call `get_transaction` on the HTTP client.
 use solana_rpc::{HttpSolanaRpc, SolanaRpc as _};
@@ -354,6 +355,17 @@ fn leg_input(
 
 fn store(root: &Path, name: &str) -> SolanaSetupStore {
     SolanaSetupStore::open(root.join(name)).expect("a fresh setup store")
+}
+
+/// The encrypted witness store. Its master key comes from outside the store in a
+/// real deployment; here it is a fixed non-zero value, which is what makes this a
+/// laboratory and not a key-management scheme.
+fn witness_store(root: &Path, name: &str) -> EncryptedSqliteWitnessStore {
+    EncryptedSqliteWitnessStore::open(
+        root.join(name),
+        SecretStoreMasterKey::new([0x5a; 32]).expect("a non-zero master key"),
+    )
+    .expect("a fresh encrypted witness store")
 }
 
 /// Assert the escrow state account says exactly what this side of the leg
@@ -748,10 +760,16 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         sol_refund.public(),
         now,
     );
+    // Both durable halves live here: the registered binding in the setup store,
+    // the encrypted witness in the witness store. The session itself is dropped
+    // below, before anything is funded, so the claim later in this scenario can
+    // only be made by a leg that rebuilt itself from those two.
+    let receiver_store = store(directory.path(), "receiver-setup.sqlite");
+    let receiver_witness = witness_store(directory.path(), "receiver-witness.sqlite");
     let established = SolanaLegV1::establish(
         &input,
         &fixture.profile,
-        &store(directory.path(), "receiver-setup.sqlite"),
+        &receiver_store,
         &mut rand::thread_rng(),
     )
     .expect("the SOL receiver establishes the condition");
@@ -764,6 +782,16 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
     .expect("the SOL giver accepts the condition");
     assert_eq!(accepted.setup().setup_id(), established.leg().setup().setup_id());
     assert_eq!(accepted.schedule(), &schedule);
+
+    established
+        .persist_witness(&receiver_witness, &mut rand::thread_rng())
+        .expect("the witness is stored encrypted at rest");
+    let opening_before_restart = established
+        .opening()
+        .expect("the established opening")
+        .escrow_claim_bytes();
+    // The restart. Everything the secret holder had in memory is gone.
+    drop(established);
 
     fixture
         .cluster
@@ -800,8 +828,27 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         solana_escrow_wire::EscrowStatus::Funded
     );
 
-    // ── the escrow claim publishes the scalar ───────────────────────────────
-    let opening = established.opening().expect("the established opening");
+    // ── the restarted leg rebuilds its session and claims ───────────────────
+    let resumed = EstablishedLegV1::resume(
+        &input,
+        &fixture.profile,
+        &receiver_store,
+        &receiver_witness,
+        &mut rand::thread_rng(),
+    )
+    .expect("a restarted leg rebuilds its session from the two durable halves");
+    assert_eq!(
+        resumed.leg().setup().setup_id(),
+        accepted.setup().setup_id(),
+        "the resumed leg is not the settlement that was registered"
+    );
+    assert_eq!(resumed.leg().schedule(), &schedule);
+    let opening = resumed.opening().expect("the resumed opening");
+    assert_eq!(
+        opening.escrow_claim_bytes(),
+        opening_before_restart,
+        "the resumed session opens a different condition than the one registered"
+    );
     let before = fixture
         .cluster
         .lamports(sol_receiver.public())
@@ -809,7 +856,7 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
     let claim_signature = fixture
         .cluster
         .execute(
-            &[established
+            &[resumed
                 .leg()
                 .claim_instruction(&opening)
                 .expect("a native claim instruction")],
@@ -910,6 +957,7 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
             "dom_claim_height": dom_height,
             "dom_onward_spend_height": onward_height,
             "scalar_read_from_state_and_instruction": true,
+            "claimed_by_a_leg_resumed_from_durable_halves": true,
             "observed_min_confirmations":
                 accepted.terms().counterparty_leg.finality.min_confirmations,
             "funding_observed_slot": funding.slot,

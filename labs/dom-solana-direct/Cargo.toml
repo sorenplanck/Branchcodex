@@ -50,6 +50,9 @@ solana-profile = { path = "../../crates/adapters/solana-profile" }
 solana-route-secret = { path = "../../crates/adapters/solana-route-secret" }
 solana-session-init = { path = "../../crates/adapters/solana-session-init" }
 solana-setup-store = { path = "../../crates/adapters/solana-setup-store" }
+# The encrypted witness at rest, so a restarted leg rebuilds its session instead
+# of degrading the settlement to its timelock refund.
+solana-secret-store = { path = "../../crates/adapters/solana-secret-store" }
 solana-program-client = { path = "../../crates/adapters/solana-program-client" }
 solana-transaction-builder = { path = "../../crates/adapters/solana-transaction-builder" }
 solana-rpc = { path = "../../crates/adapters/solana-rpc" }
