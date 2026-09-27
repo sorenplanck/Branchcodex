@@ -115,6 +115,15 @@ faltam participantes/processos separados, reorg no ensaio cruzado e ativação
 segura das novas regras de consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
 
+O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
+um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
+oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund
+e Punish em paralelo com limite de 180 s por caso. Uma reprodução local dos
+mesmos comandos e do mesmo arquivo oficial passou em **98,73 s** de parede;
+desde `Ready`, os tempos foram **14,06 s**, **19,60 s** e **25,13 s**. A
+evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
+O workflow ainda não foi publicado nem medido em um runner remoto.
+
 ## Evidência obtida
 
 **Prioridade atual: corrigir uma premissa de segurança refutada.**

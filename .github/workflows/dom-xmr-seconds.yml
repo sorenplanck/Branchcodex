@@ -1,0 +1,95 @@
+name: Fast DOM XMR arbiter
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/dom-xmr-seconds.yml'
+      - 'crates/adapters/xmr-dleq-sigma/**'
+      - 'crates/dom-consensus/**'
+      - 'crates/dom-core/**'
+      - 'crates/dom-crypto/**'
+      - 'crates/dom-mempool/**'
+      - 'crates/dom-chain/**'
+      - 'crates/dom-node/**'
+      - 'crates/dom-rpc/**'
+      - 'crates/dom-scriptless-primitives/**'
+      - 'crates/dom-serialization/**'
+      - 'crates/dom-wallet/**'
+      - 'labs/dom-xmr-direct/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dom-xmr-seconds-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  funded-arbiter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+      MONERO_VERSION: 0.18.4.0
+      MONERO_ARCHIVE_SHA256: 16cb74c899922887827845a41d37c7f3121462792a540843f2fcabcc1603993f
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: labs/dom-xmr-direct/clsag-lab -> target
+          key: dxa1-funded-arbiter-v2
+          cache-on-failure: true
+
+      - name: Install pinned Monero daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/monero-linux-x64-v${MONERO_VERSION}.tar.bz2"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "$archive" \
+            "https://downloads.getmonero.org/cli/monero-linux-x64-v${MONERO_VERSION}.tar.bz2"
+          printf '%s  %s\n' "$MONERO_ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
+          tar -tjf "$archive" | awk '/\/monerod$/ { print; exit }' > "$RUNNER_TEMP/monerod-member"
+          IFS= read -r member < "$RUNNER_TEMP/monerod-member"
+          [[ -n "$member" && "$member" != /* ]]
+          [[ "$member" != ../* && "$member" != */../* && "$member" != */.. ]]
+          tar -xjf "$archive" -C "$RUNNER_TEMP" "$member"
+          monerod_path="$(realpath -e -- "$RUNNER_TEMP/$member")"
+          [[ -f "$monerod_path" && ! -L "$monerod_path" && -x "$monerod_path" ]]
+          "$monerod_path" --version
+          printf 'DXA1_MONEROD=%s\n' "$monerod_path" >> "$GITHUB_ENV"
+
+      - name: Build and verify the new arbiter
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked --test swap_arbiter_pair -j2
+          cargo clippy --locked --lib --test swap_arbiter_pair --example arbiter_regtest -- -D warnings
+          cargo build --locked --example arbiter_regtest
+
+      - name: Run Claim, Refund and Punish concurrently
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          python3 -B scripts/run_arbiter_matrix.py \
+            --binary target/debug/examples/arbiter_regtest \
+            --monerod "$DXA1_MONEROD" \
+            --evidence-dir "$RUNNER_TEMP/dxa1-arbiter-evidence" \
+            --case-timeout 180
+
+      - name: Preserve timing and daemon evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxa1-arbiter-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dxa1-arbiter-evidence/
+          if-no-files-found: warn
+          retention-days: 14

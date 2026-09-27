@@ -35,6 +35,11 @@ A campanha validada terminou em 95,33 s de parede. Claim, Refund e Punish
 levaram 13,42 s, 19,79 s e 24,46 s desde `Ready`. Os registros completos e os
 limites atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
+O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
+GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
+minutos para todo o job. A repetição local exata do workflow passou em 98,73 s
+de parede e preserva os resultados como artefato quando executada no GitHub.
+
 ## Construção experimental
 
 Para o membro real do anel, sejam `G` o gerador Ed25519 e `H = Hp(P_real)`.
