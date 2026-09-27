@@ -59,6 +59,11 @@ solana-rpc-pool = { path = "../../crates/adapters/solana-rpc-pool" }
 # This project's own rule for what an immutable program is, and the canonical
 # code hash to bind. The leg used to hand-roll both.
 solana-program-attestation = { path = "../../crates/adapters/solana-program-attestation" }
+# Enforces the finality policy the terms declare and turns a landed transaction
+# into evidence, instead of the leg reading an account at Confirmed and calling
+# the settlement done.
+solana-observer = { path = "../../crates/adapters/solana-observer" }
+solana-evidence = { path = "../../crates/adapters/solana-evidence" }
 # ── shared terms ────────────────────────────────────────────────────────────
 kaystra-core = { path = "../../crates/kaystra-core" }
 counterparty-api = { path = "../../crates/counterparty-api" }

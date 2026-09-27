@@ -48,14 +48,19 @@ use dom_solana_direct_lab::{
 };
 use kaystra_core::types::{FinalityPolicyV1, ParticipantId};
 use sha2::{Digest, Sha256};
+use solana_evidence::{
+    SolanaClaimEvidenceV1, SolanaEvidenceBodyV1, SolanaEvidenceEnvelopeV1, SolanaFundingEvidenceV1,
+    SolanaRefundEvidenceV1,
+};
+use solana_observer::{ObservationKind, ObserverError, SolanaSettlementObserver};
 use solana_profile::{SolanaAdapterProfileV1, SolanaNetwork};
 use solana_program_attestation::{
     attest_immutable_program, code_hash, PROGRAM_DATA_METADATA_LEN,
 };
 use solana_setup_store::SolanaSetupStore;
 // The trait must be in scope to call `get_transaction` on the HTTP client.
-use solana_rpc::SolanaRpc as _;
-use solana_types::{Commitment, SolanaPubkey};
+use solana_rpc::{HttpSolanaRpc, SolanaRpc as _};
+use solana_types::{Commitment, SolanaPubkey, SolanaSignature};
 use std::{
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -372,6 +377,105 @@ fn assert_opening_agrees(left: &ConditionOpeningV1, right: &ConditionOpeningV1) 
     );
 }
 
+// ── observation ─────────────────────────────────────────────────────────────
+
+/// An observer for this leg, under the finality policy the TERMS declare.
+///
+/// The leg used to read an escrow account at `Confirmed` and treat the
+/// settlement as done, while `min_confirmations` and `max_reorg_depth` sat in the
+/// frozen terms unread -- a declared policy that nothing enforced. The value is
+/// now read back out of the terms, so the policy enforced is demonstrably the
+/// policy agreed.
+fn observer_for(fixture: &Fixture, leg: &SolanaLegV1) -> SolanaSettlementObserver<HttpSolanaRpc> {
+    let pool = fixture
+        .cluster
+        .quorum_pool(
+            usize::from(fixture.profile.rpc_node_count),
+            usize::from(fixture.profile.rpc_quorum),
+        )
+        .expect("a pool matching the profile's declared quorum");
+    let min_confirmations = leg.terms().counterparty_leg.finality.min_confirmations;
+    SolanaSettlementObserver::new(
+        pool,
+        leg.setup().clone(),
+        *leg.profile(),
+        min_confirmations,
+    )
+    .expect("an observer for this leg's frozen setup")
+}
+
+/// Observe a landed transaction once it satisfies the declared finality.
+///
+/// Only two outcomes are waited on: not yet finalized, and not yet deep enough.
+/// Everything else is a disagreement between the chain and what this leg
+/// believes, and is raised immediately rather than retried until a timeout turns
+/// it into a vague one.
+fn observe_when_final(
+    observer: &SolanaSettlementObserver<HttpSolanaRpc>,
+    signature: SolanaSignature,
+    kind: ObservationKind,
+) -> SolanaEvidenceEnvelopeV1 {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    loop {
+        match observer.observe(signature, kind) {
+            Ok(envelope) => return envelope,
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error,
+                        ObserverError::NotFinalized | ObserverError::InsufficientDepth
+                    ),
+                    "observing {kind:?} for {}: {error}",
+                    signature.to_base58()
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "{kind:?} for {} never reached the declared finality: {error}",
+                    signature.to_base58()
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+fn funding_evidence(envelope: &SolanaEvidenceEnvelopeV1) -> &SolanaFundingEvidenceV1 {
+    match &envelope.body {
+        SolanaEvidenceBodyV1::Funding(body) => body,
+        other => panic!("expected funding evidence, got {other:?}"),
+    }
+}
+
+fn claim_evidence(envelope: &SolanaEvidenceEnvelopeV1) -> &SolanaClaimEvidenceV1 {
+    match &envelope.body {
+        SolanaEvidenceBodyV1::Claim(body) => body,
+        other => panic!("expected claim evidence, got {other:?}"),
+    }
+}
+
+fn refund_evidence(envelope: &SolanaEvidenceEnvelopeV1) -> &SolanaRefundEvidenceV1 {
+    match &envelope.body {
+        SolanaEvidenceBodyV1::Refund(body) => body,
+        other => panic!("expected refund evidence, got {other:?}"),
+    }
+}
+
+/// Every evidence body carries the same frozen identifiers; checking them once
+/// per observation is what makes the envelope evidence about THIS settlement.
+fn assert_binds_leg(
+    leg: &SolanaLegV1,
+    program_code_hash: &[u8; 32],
+    settlement_id: &[u8; 32],
+    terms_hash: &[u8; 32],
+    program_data_hash: &[u8; 32],
+    amount: u64,
+) {
+    assert_eq!(settlement_id, &leg.setup().settlement_id());
+    assert_eq!(terms_hash, &leg.setup().terms_hash());
+    assert_eq!(program_data_hash, program_code_hash);
+    assert_eq!(amount, leg.setup().amount());
+}
+
 // ── SOL -> DOM ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -448,7 +552,7 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
             CONFIRM_TIMEOUT,
         )
         .expect("initialize the escrow");
-    fixture
+    let fund_signature = fixture
         .cluster
         .execute(
             &[accepted.fund_instruction().expect("a native fund instruction")],
@@ -457,6 +561,18 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
             CONFIRM_TIMEOUT,
         )
         .expect("fund the escrow");
+    // Funding is settled only once it satisfies the finality the terms declare.
+    let observer = observer_for(&fixture, &accepted);
+    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let funding = funding_evidence(&funding_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &funding.settlement_id,
+        &funding.terms_hash,
+        &funding.program_data_hash,
+        funding.amount,
+    );
     let funded = escrow_state(&fixture.cluster, &accepted);
     assert_eq!(funded.status, solana_escrow_wire::EscrowStatus::Funded);
     assert_eq!(funded.funded_amount, LAMPORTS);
@@ -540,6 +656,22 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
         .expect("the vault balance");
     assert_eq!(vault_before - vault_after, LAMPORTS);
 
+    // Independent confirmation, through the quorum and at the declared depth:
+    // the scalar the escrow accepted is the one the DOM claim disclosed. The
+    // observer re-derives it from the claim instruction and re-checks it against
+    // the cross-curve claim, so this is not the leg agreeing with itself.
+    let claim_envelope = observe_when_final(&observer, claim_signature, ObservationKind::Claim);
+    let claim = claim_evidence(&claim_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &claim.settlement_id,
+        &claim.terms_hash,
+        &claim.program_data_hash,
+        claim.amount,
+    );
+    assert_eq!(claim.revealed_secret_be, opening.escrow_claim_bytes());
+
     // The DOM output is spendable and the reserve cannot be spent twice.
     let onward_height = runtime.block_on(dom.prove_onward_spend_and_reject_double_spend());
 
@@ -556,6 +688,13 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
             "dom_onward_spend_height": onward_height,
             "escrow_claim_signature": claim_signature.to_base58(),
             "revealed_scalar_matches": true,
+            "observed_min_confirmations":
+                accepted.terms().counterparty_leg.finality.min_confirmations,
+            "funding_observed_slot": funding.slot,
+            "claim_observed_slot": claim.slot,
+            "claim_instruction_index": claim.instruction_index,
+            "claim_terminal_state_hash": hex32(&claim.terminal_state_hash),
+            "claim_vault_hash": hex32(&claim.vault_hash),
             "program_code_hash_bound": hex32(&fixture.program.code_hash),
             "program_code_padding_bytes": fixture.program.padding_bytes,
             "programdata_account_sha256_reported_by_harness":
@@ -635,7 +774,7 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
             CONFIRM_TIMEOUT,
         )
         .expect("initialize the escrow");
-    fixture
+    let fund_signature = fixture
         .cluster
         .execute(
             &[accepted.fund_instruction().expect("a native fund instruction")],
@@ -644,6 +783,18 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
             CONFIRM_TIMEOUT,
         )
         .expect("fund the escrow");
+    // Funding is settled only once it satisfies the finality the terms declare.
+    let observer = observer_for(&fixture, &accepted);
+    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let funding = funding_evidence(&funding_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &funding.settlement_id,
+        &funding.terms_hash,
+        &funding.program_data_hash,
+        funding.amount,
+    );
     assert_eq!(
         escrow_state(&fixture.cluster, &accepted).status,
         solana_escrow_wire::EscrowStatus::Funded
@@ -672,6 +823,22 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         .lamports(sol_receiver.public())
         .expect("the receiver balance");
     assert!(after - before >= LAMPORTS - 1_000_000);
+
+    // Observed at the declared depth before the DOM side acts on it: in this
+    // direction the escrow claim is what discloses the scalar, so acting on a
+    // claim that had not yet finalized would be acting on a disclosure the chain
+    // could still take back.
+    let claim_envelope = observe_when_final(&observer, claim_signature, ObservationKind::Claim);
+    let claim = claim_evidence(&claim_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &claim.settlement_id,
+        &claim.terms_hash,
+        &claim.program_data_hash,
+        claim.amount,
+    );
+    assert_eq!(claim.revealed_secret_be, opening.escrow_claim_bytes());
 
     // ── the DOM side reads the scalar off the cluster, two ways ─────────────
     let from_state = accepted
@@ -743,6 +910,11 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
             "dom_claim_height": dom_height,
             "dom_onward_spend_height": onward_height,
             "scalar_read_from_state_and_instruction": true,
+            "observed_min_confirmations":
+                accepted.terms().counterparty_leg.finality.min_confirmations,
+            "funding_observed_slot": funding.slot,
+            "claim_observed_slot": claim.slot,
+            "claim_terminal_state_hash": hex32(&claim.terminal_state_hash),
             "timing_bounds_proven": false,
         }),
     );
@@ -812,7 +984,7 @@ fn solana_live_both_refunds_return_each_side() {
             CONFIRM_TIMEOUT,
         )
         .expect("initialize the escrow");
-    fixture
+    let fund_signature = fixture
         .cluster
         .execute(
             &[accepted.fund_instruction().expect("a native fund instruction")],
@@ -821,6 +993,18 @@ fn solana_live_both_refunds_return_each_side() {
             CONFIRM_TIMEOUT,
         )
         .expect("fund the escrow");
+    // Funding is settled only once it satisfies the finality the terms declare.
+    let observer = observer_for(&fixture, &accepted);
+    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let funding = funding_evidence(&funding_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &funding.settlement_id,
+        &funding.terms_hash,
+        &funding.program_data_hash,
+        funding.amount,
+    );
 
     // Build the adapted DOM claim now, while the shares are still available. It
     // is valid; it must still lose to the confirmed refund below.
@@ -889,6 +1073,16 @@ fn solana_live_both_refunds_return_each_side() {
         refunded.revealed_secret_be, [0; 32],
         "a refund must not publish the scalar"
     );
+    let refund_envelope = observe_when_final(&observer, refund_signature, ObservationKind::Refund);
+    let refund = refund_evidence(&refund_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &refund.settlement_id,
+        &refund.terms_hash,
+        &refund.program_data_hash,
+        refund.amount,
+    );
 
     // ── the DOM refund is refused before its height and accepted after ─────
     runtime.block_on(dom.assert_height_refund_locked());
@@ -911,6 +1105,11 @@ fn solana_live_both_refunds_return_each_side() {
             "dom_refund_included_at": refund_height,
             "dom_onward_spend_height": onward_height,
             "valid_adapted_claim_lost_to_refund": true,
+            "observed_min_confirmations":
+                accepted.terms().counterparty_leg.finality.min_confirmations,
+            "funding_observed_slot": funding.slot,
+            "refund_observed_slot": refund.slot,
+            "refund_terminal_state_hash": hex32(&refund.terminal_state_hash),
             "timing_bounds_proven": false,
         }),
     );
