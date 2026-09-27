@@ -6,6 +6,35 @@ origem de revelação: completar o claim **XMR** permite extrair o segredo e
 completar diretamente a assinatura DOM. O sentido DOM→XMR também é testado.
 BTC não participa desse fluxo.
 
+## Candidato rápido atual: DXA1
+
+O mecanismo novo não usa a cápsula temporizada descrita nas seções históricas
+abaixo. Um output DOM `DXA1` compromete três gastos exatos e exclusivos por
+altura: Claim, Refund e Punish. Duas shares provadas por DLEQ formam a chave da
+reserva XMR. Claim/Punish revelam a share do dono de XMR; Refund revela a share
+do dono de DOM. O lado econômico correto reconstrói a chave conjunta e gasta a
+reserva por uma transação Monero nativa.
+
+`examples/arbiter_regtest.rs` executa cada resultado através de um nó DOM e um
+`monerod` isolados. O journal durável exige recovery antes do funding, XMR
+confirmado e maduro antes de Claim, e grava os settlements canônicos das duas
+chains. O intervalo `Ready → Complete` falha automaticamente acima de 180 s.
+Monero bloqueia outputs novos por dez blocos; portanto essa meta exige uma
+reserva preparada e madura. O tempo de preparação é medido separadamente.
+
+Após compilar o exemplo, a matriz paralela é executada assim:
+
+```text
+python3 scripts/run_arbiter_matrix.py \
+  --binary target/debug/examples/arbiter_regtest \
+  --monerod /caminho/absoluto/monerod \
+  --evidence-dir /diretorio/novo/de/evidencia
+```
+
+A campanha validada terminou em 99,57 s de parede. Claim, Refund e Punish
+levaram 13,45 s, 19,16 s e 24,78 s desde `Ready`. Os registros completos e os
+limites atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
+
 ## Construção experimental
 
 Para o membro real do anel, sejam `G` o gerador Ed25519 e `H = Hp(P_real)`.

@@ -60,9 +60,9 @@ share e a reconstrução da chave XMR conjunta. O nó DOM aplica o contrato no
 mempool, bloco direto, reorganização e reconstrução após reinício. Um ensaio
 financiado isolado também executou Claim, Refund e Punish separadamente pelo
 nó DOM e pelo `monerod`: cada abertura extraída do bloco DOM canônico assinou
-um gasto XMR CLSAG/Bulletproof+ aceito e minerado pelo daemon. Com a ordem
-final de `Ready`, os tempos integrais foram 67,37 s, 71,39 s e 76,35 s,
-respectivamente, em Regtest sob demanda.
+um gasto XMR CLSAG/Bulletproof+ aceito e minerado pelo daemon. Uma campanha
+paralela dos três resultados terminou em 99,57 s de parede; Claim, Refund e
+Punish levaram 87,41 s, 93,99 s e 99,56 s completos, respectivamente.
 
 A ordem do protocolo importa. Refund e Punish ficam pré-assinados e duráveis
 antes do funding DOM. O Claim só é concluído e persistido depois que a reserva
@@ -83,8 +83,9 @@ Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 13,34 s para Claim, 18,33 s para Refund e 23,95 s para Punish.
-O teste falha se exceder 180 s; a preparação permanece declarada separadamente.
+intervalo mediu 13,45 s para Claim, 19,16 s para Refund e 24,78 s para Punish
+sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
+preparação permanece declarada separadamente.
 
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

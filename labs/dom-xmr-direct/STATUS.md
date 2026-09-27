@@ -84,8 +84,10 @@ Claim, que funciona como a transição `Ready`. Cada resultado atravessa mempool
 e bloco DOM; a share é extraída da transação canônica, combinada com a share
 local, e assina um gasto XMR CLSAG/Bulletproof+ aceito e minerado no `monerod`.
 
-Claim levou **67,37 s**, Refund **71,39 s** e Punish **76,35 s** em execuções
-isoladas. BTC não participa. Esses tempos incluem bootstrap e maturidade sob
+Uma campanha executa Claim, Refund e Punish em três processos paralelos, com
+nós e limites independentes, e valida o JSON produzido por cada um. Ela passou
+em **99,57 s** de parede; os casos completos levaram **87,41 s**, **93,99 s** e
+**99,56 s**. BTC não participa. Esses tempos incluem bootstrap e maturidade sob
 mineração Regtest solicitada pelo teste, portanto não estimam latência de rede
 real.
 
@@ -99,8 +101,9 @@ Ready. Truncamento/corrupção, repetição e transições fora de ordem são re
 Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos à
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
-da liquidação ativa. Medido desde `Ready`, Claim levou **13,34 s**, Refund
-**18,33 s** e Punish **23,95 s**. O exemplo impõe limite de 180 s nesse
+da liquidação ativa. Na campanha paralela, medido desde `Ready`, Claim levou
+**13,45 s**, Refund **19,16 s** e Punish **24,78 s**. O runner impõe limite de
+180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
 mainnet. Ainda
 faltam participantes/processos separados, reorg no ensaio cruzado e ativação
