@@ -51,14 +51,7 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     // the daemon refuses all four conditions the same way and mentions none of them.
     declared_inputs::create_parent_directories(&root, &Plan::path_relatives())
         .expect("every parent directory of every path in the layout");
-    declared_inputs::create_contracts_transport_identity(
-        &root,
-        Plan::contracts_transport_identity_relative(),
-        // A laboratory passphrase, stated as one. The ceremony reopens the authority with
-        // it, and a deployment's belongs to whoever holds the identity.
-        b"a laboratory contracts identity passphrase",
-    )
-    .expect("the transport identity authority");
+    // The identity authority is created by the shared fixture, with the route.
 
     declared_inputs::write_dom_wallet(
         &root,
@@ -197,7 +190,7 @@ fn staged_report() -> String {
             declared_inputs::create_contracts_transport_identity(
                 &root,
                 Plan::contracts_transport_identity_relative(),
-                b"a laboratory contracts identity passphrase",
+                common::IDENTITY_PASSPHRASE,
             )
             .expect("identity directory");
         }

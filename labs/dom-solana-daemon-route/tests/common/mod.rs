@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use dom_solana_daemon_route::{
+    declared_inputs,
     registry::{
         provision as provision_registry, ProvisionedSolanaRegistryV1,
         RegistryProvisioningInputV1, SolanaChainFactsV1,
@@ -72,6 +73,12 @@ pub const NOW_SECONDS: u64 = 1_800_000_000;
 /// DOM refund height six hundred blocks BEHIND the hub's own anchor -- and the route
 /// ladder refused it with `DeadlinePassed`, correctly.
 pub const DOM_ANCHOR_HEIGHT: u64 = 1;
+
+/// The laboratory passphrase that opens the Contracts transport identity authority.
+///
+/// A laboratory holds one and says so. A deployment's belongs to whoever holds the
+/// identity, and the ceremony reads it from stdin for exactly that reason.
+pub const IDENTITY_PASSPHRASE: &[u8] = b"a laboratory contracts identity passphrase";
 
 /// The two clusters, one per position.
 ///
@@ -319,6 +326,15 @@ pub fn provision_all() -> Provisioned {
     })
     .expect("the time policy and its evidence provision");
     let plan = plan.with_route_time(route_time);
+
+    // The Contracts transport identity authority. Part of provisioning the route, not of
+    // one test: the ceremony plans name it, and the layout requires it to exist.
+    declared_inputs::create_contracts_transport_identity(
+        directory.path(),
+        SolanaRouteBootstrapPlanV1::contracts_transport_identity_relative(),
+        IDENTITY_PASSPHRASE,
+    )
+    .expect("the transport identity authority");
 
     Provisioned {
         directory,
