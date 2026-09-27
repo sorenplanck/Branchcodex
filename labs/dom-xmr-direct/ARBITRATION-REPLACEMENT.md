@@ -41,6 +41,12 @@ outra primitiva existente com garantia equivalente. Isso é uma dependência
 real da nova perna DOM↔XMR, não uma mudança automática autorizada para outras
 pernas.
 
+O `unlock_time` existente no Monero não fornece o bloqueio ausente da
+devolução: a [documentação de RPC do Monero](https://web.getmonero.org/resources/developer-guides/daemon-rpc.html)
+o define como instante em que o **output produzido** pode ser gasto, não como
+primeira altura em que a transação assinada pode entrar num bloco. Usá-lo em
+uma devolução XMR não impediria a corrida que acabamos de reproduzir.
+
 ## Candidato a testar, sem cápsula de tempo
 
 Uma direção é uma reserva XMR com chave combinada de duas shares, sem
