@@ -125,15 +125,20 @@ fn the_two_positions_are_the_two_claim_orders() {
     let upstream_height = dom_height(&provisioned.upstream);
     let downstream_height = dom_height(&provisioned.downstream);
 
+    // The upstream deadlines are the LATER ones, on both chains. That is the route
+    // ladder's rule -- `prove_rung` refuses unless the upstream interval starts after the
+    // downstream interval ends -- and it is the same fact the claim orders encode: the
+    // downstream escrow claim discloses the scalar and the upstream DOM claim spends it,
+    // so whoever acts second needs the later deadline.
     assert!(
-        downstream_escrow > upstream_escrow,
-        "the downstream position chose its escrow deadline directly; the upstream derived a \
-         nearer one from its DOM height ({downstream_escrow} vs {upstream_escrow})"
+        upstream_escrow > downstream_escrow,
+        "the upstream position is claimed second and must outlast the downstream one \
+         ({upstream_escrow} vs {downstream_escrow})"
     );
     assert!(
-        downstream_height > upstream_height,
-        "the downstream DOM refund height is derived past its chosen escrow deadline, so it \
-         must sit beyond the upstream's chosen height ({downstream_height} vs {upstream_height})"
+        upstream_height > downstream_height,
+        "the same ordering holds on the hub: the upstream DOM refund height sits beyond the \
+         downstream's derived one ({upstream_height} vs {downstream_height})"
     );
 }
 

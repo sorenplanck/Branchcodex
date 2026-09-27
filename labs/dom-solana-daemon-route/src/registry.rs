@@ -153,7 +153,19 @@ fn asset_id(domain: &[u8], seed: &[u8; 32]) -> AssetId {
 fn dom_timing() -> ChainTimingBoundsV1 {
     ChainTimingBoundsV1 {
         min_block_seconds: 1,
-        max_block_seconds: 20,
+        // Two, not twenty. The route ladder projects a height deadline as
+        // `[time_lower + delta*min_block, time_upper + delta*max_block]`, so the spread
+        // between the two bounds multiplies the width of that interval by delta -- and the
+        // ladder then requires the upstream interval to start after the downstream one
+        // ENDS, plus the hub margin. At twenty seconds a five-hour route needed the
+        // upstream deadline three hundred thousand blocks out; at two it needs forty
+        // thousand.
+        //
+        // This is a declared bound, not a measurement, and it is honest only for a chain
+        // that produces blocks at or under two seconds -- which this laboratory's regtest
+        // node does. A deployment whose blocks are slower must widen it AND space its legs
+        // further apart, in that order.
+        max_block_seconds: 2,
         max_reorg_seconds: 240,
         observation_seconds: 30,
         broadcast_seconds: 20,
