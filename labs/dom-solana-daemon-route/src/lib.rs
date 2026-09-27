@@ -47,6 +47,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod registry;
+
 use std::path::{Path, PathBuf};
 
 use dom_interopd::{
@@ -59,6 +61,7 @@ use dom_interopd::{
     PRODUCTION_F6_PATH_ROLE_COUNT_V8, PRODUCTION_PATH_ROLE_COUNT_V1,
     PRODUCTION_REOPEN_CONFIG_FILE_V11,
 };
+use registry::ProvisionedSolanaRegistryV1;
 use sha2::{Digest, Sha256};
 
 /// Domain for every derived placeholder digest, so a value from this crate can
@@ -162,6 +165,9 @@ pub struct SolanaRouteBootstrapPlanV1 {
     pub route_id: [u8; 32],
     pub upstream: SolanaRoutePositionPlanV1,
     pub downstream: SolanaRoutePositionPlanV1,
+    /// The registry, once it has been provisioned. Present means four pins are
+    /// measurements of an artifact on disk instead of derived labels.
+    pub registry: Option<ProvisionedSolanaRegistryV1>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -184,24 +190,62 @@ impl SolanaRouteBootstrapPlanV1 {
                 session_id: placeholder("downstream-session-id"),
                 chain_id: cluster_genesis,
             },
+            registry: None,
         }
     }
 
-    /// True for every plan this crate can build today: the pins below are derived
-    /// labels, not digests of signed artifacts, so the manifest encodes and decodes
-    /// but authentication would refuse it. Kept as a method rather than a comment
-    /// so a caller cannot pretend otherwise.
+    /// Bind a provisioned registry, so the pins it determines stop being labels.
+    ///
+    /// The network id comes from the registry once one exists: every other artifact
+    /// is bound to that id, and a plan keeping its own would describe a different
+    /// interop network than the registry it points at.
+    pub fn with_registry(mut self, provisioned: ProvisionedSolanaRegistryV1) -> Self {
+        self.network_id = provisioned.network_id;
+        self.registry = Some(provisioned);
+        self
+    }
+
+    /// How many of the nineteen route pins are measurements of a real artifact.
+    ///
+    /// Reported as a number rather than a boolean because the bootstrap is built
+    /// one artifact at a time and "some are real" is not a useful thing to know.
+    pub const fn measured_pin_count(&self) -> usize {
+        match self.registry {
+            // network_id, registry_manifest_digest, registry_minimum_epoch and
+            // registry_authority_set_digest.
+            Some(_) => 4,
+            None => 0,
+        }
+    }
+
+    /// True while any pin is still a derived label rather than the digest of a
+    /// signed artifact. While it holds, the manifest encodes and decodes but
+    /// authentication would refuse the route. Kept as a method rather than a
+    /// comment so a caller cannot pretend otherwise.
     pub const fn pins_are_placeholders(&self) -> bool {
-        true
+        self.measured_pin_count() < 19
     }
 
     fn pins(&self) -> ProductionRoutePinsV1 {
+        // Measured where an artifact exists, derived where one does not yet.
+        let (manifest_digest, minimum_epoch, authority_set_digest) = match &self.registry {
+            Some(provisioned) => (
+                provisioned.manifest_digest,
+                provisioned.epoch,
+                provisioned.authority_set_digest,
+            ),
+            None => (
+                placeholder("registry-manifest"),
+                1,
+                placeholder("registry-authority-set"),
+            ),
+        };
         ProductionRoutePinsV1 {
             network_id: self.network_id,
             route_id: self.route_id,
-            registry_manifest_digest: placeholder("registry-manifest"),
-            registry_minimum_epoch: 1,
-            registry_authority_set_digest: placeholder("registry-authority-set"),
+            registry_manifest_digest: manifest_digest,
+            registry_minimum_epoch: minimum_epoch,
+            registry_authority_set_digest: authority_set_digest,
             time_policy_authority_set_digest: placeholder("time-policy-authority-set"),
             time_evidence_authority_set_digest: placeholder("time-evidence-authority-set"),
             upstream_terms_digest: placeholder("upstream-terms"),

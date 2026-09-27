@@ -23,6 +23,18 @@ description = "Bootstrap provisioning for a DOM daemon route with Solana counter
 
 [dependencies]
 dom-interopd = { path = "../../crates/dom-interopd", default-features = false, features = ["production"] }
+# The registry artifact and its authority sets. Used, never edited: teaching
+# `deploy-genconfig::manifest_from_mold` about Solana would be the better long-term
+# home for this and is the operator's call, not a change made from here.
+deployment-registry = { path = "../../crates/deployment-registry" }
+chain-profile = { path = "../../crates/chain-profile" }
+btc-crypto = { path = "../../crates/adapters/btc-crypto" }
+# Only for `ChainTimingBoundsV1`, which `chain-profile` takes from here and does
+# not re-export.
+adapter-btc = { path = "../../crates/adapters/btc" }
+kaystra-core = { path = "../../crates/kaystra-core" }
+dom-consensus = { path = "../../crates/dom-consensus" }
+dom-core = { path = "../../crates/dom-core" }
 sha2 = "=0.10.8"
 
 [dev-dependencies]
