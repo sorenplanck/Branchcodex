@@ -66,6 +66,7 @@ jobs:
             . -> target
             programs/dom-solana-escrow -> target
             labs/dom-solana-direct -> target
+            labs/dom-solana-daemon-route -> target
 
       - name: Verify frozen consensus sources
         run: bash scripts/check-consensus-unchanged.sh
@@ -110,6 +111,13 @@ jobs:
       - name: DOM<->Solana leg laboratory, offline units
         run: |
           cargo test --manifest-path labs/dom-solana-direct/Cargo.toml
+
+      # The daemon route provisioner. Its own workspace, because it depends on
+      # `dom-interopd` with `production` features and would otherwise slow every
+      # test in the leg laboratory down with the daemon's production tree.
+      - name: DOM route provisioning for Solana positions
+        run: |
+          cargo test --manifest-path labs/dom-solana-daemon-route/Cargo.toml
 
       # The lockfile the resolution above produced: commit it and every later run
       # of this laboratory is fully pinned.
