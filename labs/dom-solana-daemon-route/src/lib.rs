@@ -467,6 +467,21 @@ impl SolanaRouteBootstrapPlanV1 {
         F6_V4_PATHS[Self::position(&ProductionF6PathRoleV4::ALL, role)]
     }
 
+    /// The layout's own relative path for the Contracts transport identity directory.
+    pub const fn contracts_transport_identity_relative() -> &'static str {
+        CONTRACTS_IDENTITY_STORE
+    }
+
+    /// The layout's own relative path for the Contracts budget policy.
+    pub const fn contracts_budget_policy_relative() -> &'static str {
+        CONTRACTS_BUDGET_POLICY
+    }
+
+    /// The layout's own relative path for the Contracts bootstrap artifact.
+    pub const fn contracts_bootstrap_relative() -> &'static str {
+        CONTRACTS_BOOTSTRAP
+    }
+
     /// The layout's own relative path for one F6 V8 role.
     ///
     /// `ProductionF6PathRoleV8::AuthorityBundleV7` is the only input file among them.

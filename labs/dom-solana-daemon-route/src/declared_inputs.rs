@@ -66,6 +66,83 @@ pub fn write_dom_wallet(state_dir: &Path, relative: &str, bytes: &[u8]) -> Resul
     owner_only::write(&state_dir.join(relative), bytes)
 }
 
+/// Exactly the byte length the daemon requires of a Contracts bootstrap artifact.
+///
+/// `CONTRACTS_BOOTSTRAP_BYTES_V1` is `pub(crate)` in `dom-interopd`, so it cannot be
+/// referenced. It is restated here from the constants the module lists beside it, with
+/// the arithmetic written out so a reader can check it rather than trust it:
+///
+/// * `COMMIT_UNSIGNED_BYTES_V1` = 1194, plus
+/// * `STAGE_SIGNATURE_BYTES_V1` = `SIGNATURE_COUNT_V1` (4) * `SIGNATURE_BYTES_V1` (64)
+///   = 256, which is `REVEAL_STAGE_OFFSET_V1` = 1450, plus
+/// * `REVEAL_UNSIGNED_BYTES_V1` = 832, plus another 256.
+///
+/// A wrong value here is refused by `read_retained_contracts_bootstrap_v5` before the
+/// loader reads anything else, which is exactly how it would be noticed.
+pub const CONTRACTS_BOOTSTRAP_BYTES: usize = 1_194 + 256 + 832 + 256;
+
+/// Place the Contracts bootstrap artifact the two-party ceremony produced.
+///
+/// # Why this places an artifact rather than producing one
+///
+/// The Contracts bootstrap is not something a route provisioner can write. It is a
+/// two-stage artifact -- a commit stage and a reveal stage, four signatures each, with
+/// Schnorr keys, share points and recovery capsules -- bound to the composition, the
+/// registry and both relay rosters, and it is the output of a ceremony BETWEEN THE TWO
+/// PARTICIPANTS. The daemon ships the driver for it: `bootstrap_command_v13`, whose own
+/// documentation is "advance only the bootstrap ceremony using public files and a
+/// bounded private stdin; repeat with the same plan/custody after copying the missing
+/// peer files". It reads secrets from stdin and refuses a terminal.
+///
+/// Both the producer and `authenticate_contracts_bootstrap_v1` are `pub(crate)`, so this
+/// crate could not build one even if it should. It should not: driving both custodies
+/// from one process would collapse a two-party protocol into a single party holding
+/// everything, which is the opposite of what the artifact exists to prove.
+///
+/// So this function writes the bytes it is handed, checks only the length the daemon
+/// checks first, and says plainly that the ceremony is the operator's step.
+pub fn place_contracts_bootstrap(
+    state_dir: &Path,
+    relative: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if bytes.len() != CONTRACTS_BOOTSTRAP_BYTES {
+        return Err(format!(
+            "a Contracts bootstrap artifact is exactly {CONTRACTS_BOOTSTRAP_BYTES} bytes, not {}",
+            bytes.len()
+        ));
+    }
+    owner_only::write(&state_dir.join(relative), bytes)
+}
+
+/// Write the Contracts budget policy.
+///
+/// An input file the layout requires in create and in reopen alike. Its bytes are a
+/// policy the deployment decides, so they are the caller's.
+pub fn write_contracts_budget_policy(
+    state_dir: &Path,
+    relative: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("the layout refuses an empty input file".to_owned());
+    }
+    owner_only::write(&state_dir.join(relative), bytes)
+}
+
+/// Create the Contracts transport identity authority directory.
+///
+/// A directory, and one the layout requires to exist in create and in reopen alike:
+/// "provisioned outside the daemon, never created and never repaired here". Creating it
+/// empty is what a provisioner can do; what goes in it belongs to the identity
+/// authority.
+pub fn create_contracts_transport_identity(
+    state_dir: &Path,
+    relative: &str,
+) -> Result<(), String> {
+    owner_only::directory(&state_dir.join(relative))
+}
+
 /// Create the parent directory of every path in the layout, and nothing else.
 ///
 /// Parents only. Creating any of the managed paths themselves would make `Create` mode
