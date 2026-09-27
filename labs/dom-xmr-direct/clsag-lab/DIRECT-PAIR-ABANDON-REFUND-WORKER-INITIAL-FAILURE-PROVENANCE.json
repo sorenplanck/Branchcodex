@@ -1,0 +1,34 @@
+{
+  "sha256": {
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "8df248264e60d8f3282dd9c4fa6d7ae33c8b2241c744cc718fe43b582bf398f4",
+    "src/native.rs": "81fcc947f8dc09a22723d48ab996ff37e3308c4f3d3eb1a3783f691fb3297c24",
+    "src/native/recovery_checkpoint.rs": "b3fa3ae5920e01dcca1773ec359a17b91efae79a94c387c4d00a1354a063b85e",
+    "src/joint.rs": "cbfda4e91cb99b16d5b56c872aa1b89ac1dc6415a29ab5811411e56179bb1872",
+    "src/capsule_checkpoint.rs": "1de9add49121ffecfc30a2625066fd020c841ab449ab85cc781a3022beb6b69f",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "src/xmr_recovery.rs": "96c3a6646f1809444ec03e0d6a4b2d1cea14ecc26fd06df2ebbb8ec96a39669b",
+    "src/xmr_recovery/checkpoint.rs": "fa062eee8da3a2468d29e81a4de386bb1d9f4abbe5bf5e91669b5e8f5c112d8f",
+    "examples/regtest_claim.rs": "0b964594df817cf1c5e33cabed5c0c91e2265b3fa617eb76c7c700f3dbd0e5f1",
+    "examples/support/refund_recovery_worker.rs": "d749ec882481e5fedad29f757e6dd59baf3fd24cd1bb064122ac1c640427be0f",
+    "examples/support/direct_recovery_bridge.rs": "dfed746e0ada114ff764e0a32d5c071219100b866384a0e60232627c74b34339",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "tests/native.rs": "9687d712389c54c8ab3419394bb94a91111601e151ee477d5c3c067e44cb7bbe",
+    "target/release/examples/regtest_claim": "1c52158f38d9d7a011bcdf60dcaa9439aaddde032dd6e8f788501cb99104b7b9",
+    "target/recovery-research/direct-dlog-bridge": "a8ef8155e2e2542af1cb7630d40d5a300e7208ca77db38c2421fbe3610e81858",
+    "../recovery-audit/direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "../recovery-audit/direct_dlog_cli.go": "3c264cb1af6406eb1636834b962cf9104400cf705366fec2bbbb33f47bd6c70c",
+    "../recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b"
+  },
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "resource_pressure_before": {
+    "io": "some avg10=80.17 avg60=33.56 avg300=18.26 total=22496922198\nfull avg10=78.95 avg60=32.88 avg300=17.62 total=21425266497\n",
+    "memory": "some avg10=0.00 avg60=0.00 avg300=0.18 total=1393349526\nfull avg10=0.00 avg60=0.00 avg300=0.17 total=1322500398\n",
+    "cpu": "some avg10=0.00 avg60=0.14 avg300=0.31 total=1118276205\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+  },
+  "scope": "Own offline nodes. Original Rust keys dropped; fresh Rust worker loads pinned private recovery job, local share, capsule and original deadline. Fresh Go verifier authenticates cached setup, rechecks proof and opens. Rust worker signs frozen unsigned refund and returns transaction, never spend shares. Parent remains node host, publisher and chain observer; not full coordinator restart or worker RPC publication."
+}

@@ -13,6 +13,8 @@ mod direct_recovery_bridge;
 mod dom_regtest;
 #[path = "support/recovery_bridge.rs"]
 mod recovery_bridge;
+#[path = "support/refund_recovery_worker.rs"]
+mod refund_recovery_worker;
 #[path = "support/settlement_resume.rs"]
 mod settlement_resume;
 
@@ -967,7 +969,64 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         };
     let reserve_amount = output.commitment().amount;
     checkpoint("xmr_reserve_funded_and_mature", json!({"height":height}));
-    let offset = output.key_offset().into();
+    let offset: Scalar = output.key_offset().into();
+    let mut worker_refund = None;
+    let mut worker_plan = if use_local_receipt {
+        let (_, link, capsule) = direct_recovery.as_ref().unwrap();
+        let h: curve25519_dalek::edwards::EdwardsPoint =
+            Point::biased_hash(output.key().compress().to_bytes()).into();
+        let image = keys
+            .iter()
+            .map(|key| {
+                let derived = key.clone().offset(offset);
+                h * **derived.view(ids.to_vec()).unwrap().secret_share()
+            })
+            .sum();
+        let input = OutputWithDecoys::new(&mut OsRng, &rpc, 16, height, output.clone())
+            .await
+            .unwrap();
+        let fee_rate = rpc
+            .fee_rate(FeePriority::Normal, 1_000_000_000)
+            .await
+            .unwrap();
+        let change = ViewPair::new(
+            Point::from((*recipient_spend).into() * G),
+            Zeroizing::new(MoneroScalar::random(&mut OsRng)),
+        )
+        .unwrap();
+        let prepared = PreparedClaim::new(
+            input,
+            image,
+            ClaimTerms {
+                recipient: recipient_address,
+                amount: 1_000_000_000_000,
+                change: change.clone(),
+                fee_rate,
+                max_fee: 1_000_000_000_000,
+            },
+            fresh_secret(),
+            Sha256::digest(link.binding()).into(),
+            &mut OsRng,
+        )
+        .unwrap();
+        let job = refund_recovery_worker::Job {
+            local_identity: local_state_identity.unwrap(),
+            capsule: capsule.binding(),
+            link: link.binding(),
+            received: capsule.received_unix_seconds(),
+            latest: paired.as_ref().unwrap().window.latest_honest().0,
+            offset: Zeroizing::new(offset),
+            unsigned: prepared.to_recovery_bytes().unwrap(),
+        };
+        let identity = job.persist(&root);
+        checkpoint(
+            "unsigned_refund_persisted_before_recovery",
+            json!({"no_signature":true}),
+        );
+        Some((identity, change))
+    } else {
+        None
+    };
     let mut paired_height_miner = None;
     let (keys, recovery_evidence) = if let Some((
         roster,
@@ -996,7 +1055,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             .unwrap();
         let recovery_seconds = recovery_start.elapsed().as_secs_f64();
         (
-            [local, recovered],
+            Some([local, recovered]),
             Some(RefundEvidence {
                 binding: link.binding(),
                 seconds: recovery_seconds,
@@ -1016,6 +1075,91 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                     "public_offer_verified_before_funding":solve_evidence.public_offer_verified_before_funding,
                     "public_verifier_started_before_offer":true,
                 }),
+            }),
+        )
+    } else if use_local_receipt {
+        let (roster, link, capsule) = direct_recovery.take().unwrap();
+        let binding = link.binding();
+        let received = capsule.received_unix_seconds();
+        let state = paired.as_mut().unwrap();
+        assert!(unix_seconds() <= state.ready_by.0);
+        state.dom.discard_reserve_signing_material();
+        state.dom.assert_height_refund_locked().await;
+        paired_height_miner = Some(state.dom.start_refund_height_mining());
+        drop(keys);
+        let _original_public_state = (roster, link);
+        let start_by = received.checked_add(35).unwrap();
+        checkpoint(
+            "waiting_original_honest_start",
+            json!({"original_start_by_unix":start_by}),
+        );
+        while unix_seconds() < start_by {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(unix_seconds(), start_by);
+        let started_unix = unix_seconds();
+        let started = Instant::now();
+        checkpoint("xmr_recovery_started", json!({"started_unix":started_unix}));
+        let killed = capsule.kill_for_restart();
+        let (identity, change) = worker_plan.take().unwrap();
+        let protected = [
+            "direct-capsule.record",
+            "direct-capsule.setup-receipt",
+            "local-verifier-authority.key",
+            "local-xmr-recovery.record",
+            "refund-recovery.job",
+        ];
+        let before = protected
+            .map(|name| Sha256::digest(&*Zeroizing::new(fs::read(root.join(name)).unwrap())));
+        let worker_root = root.clone();
+        let bridge = solver_restart_bridge.clone().unwrap();
+        let (prepared, tx, mut details) = tokio::task::spawn_blocking(move || {
+            refund_recovery_worker::run(worker_root, bridge, identity)
+        })
+        .await
+        .unwrap();
+        for (name, expected) in protected.into_iter().zip(before) {
+            assert_eq!(
+                Sha256::digest(&*Zeroizing::new(fs::read(root.join(name)).unwrap())),
+                expected
+            );
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        assert!(seconds <= 65.0 && unix_seconds() <= state.window.latest_honest().0);
+        details
+            .as_object_mut()
+            .unwrap()
+            .extend(killed.as_object().unwrap().clone());
+        details["recovery_started_unix_seconds"] = json!(started_unix);
+        details["recovery_waited_until_original_latest_start"] = json!(true);
+        details["observed_recovery_within_assumed_cost"] = json!(true);
+        details["local_xmr_state_persisted_before_funding"] = json!(true);
+        details["local_xmr_state_restored_after_dropping_original"] = json!(true);
+        details["capsule_record_persisted_before_funding"] = json!(true);
+        details["local_setup_receipt_persisted_before_funding"] = json!(true);
+        details["unsigned_refund_persisted_before_recovery"] = json!(true);
+        details["capsule_record_unchanged_after_restart"] = json!(true);
+        details["local_setup_receipt_and_authority_unchanged"] = json!(true);
+        details["local_state_and_unsigned_refund_job_unchanged"] = json!(true);
+        details["refund_publication_by_parent"] = json!(true);
+        details["recovery_backend"] = json!("experimental-direct-dlog");
+        details["puzzles"] = json!(1);
+        details["proof_rounds"] = json!(256);
+        details["forged_recovery_share_rejected"] = json!(true);
+        details["public_offer_verified_before_funding"] = json!(true);
+        details["dom_height_at_xmr_recovery_completion"] =
+            json!(state.dom.context().await.current_height.0);
+        checkpoint(
+            "xmr_recovery_verified",
+            json!({"recovery_seconds":seconds,"signed_by_worker":true}),
+        );
+        worker_refund = Some((prepared, tx, change));
+        (
+            None,
+            Some(RefundEvidence {
+                binding,
+                seconds,
+                details,
             }),
         )
     } else if let Some((roster, link, capsule)) =
@@ -1185,7 +1329,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         details["forged_recovery_share_rejected"] = json!(true);
         details["public_offer_verified_before_funding"] = json!(true);
         (
-            [local, recovered],
+            Some([local, recovered]),
             Some(RefundEvidence {
                 binding: link.binding(),
                 seconds: recovery_start.elapsed().as_secs_f64(),
@@ -1193,18 +1337,29 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             }),
         )
     } else {
-        (keys, None)
+        (Some(keys), None)
     };
-    let keys = keys.map(|key| key.offset(offset));
-    assert_eq!(keys[0].group_key().0, output.key().into());
+    let keys = keys.map(|keys| keys.map(|key| key.offset(offset)));
+    if let Some(keys) = &keys {
+        assert_eq!(keys[0].group_key().0, output.key().into());
+    }
     let h = Point::biased_hash(output.key().compress().to_bytes()).into();
-    let image = keys
-        .iter()
-        .map(|key| h * **key.view(ids.to_vec()).unwrap().secret_share())
-        .sum();
-    let input = OutputWithDecoys::new(&mut OsRng, &rpc, 16, height, output)
-        .await
-        .unwrap();
+    let image = if let Some(keys) = &keys {
+        keys.iter()
+            .map(|key| h * **key.view(ids.to_vec()).unwrap().secret_share())
+            .sum()
+    } else {
+        worker_refund.as_ref().unwrap().0.context().image
+    };
+    let input = if worker_refund.is_none() {
+        Some(
+            OutputWithDecoys::new(&mut OsRng, &rpc, 16, height, output)
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     // A fresh fakechain has a different emission/fee regime from today's
     // mainnet. Keep explicit caps in test-coin units and record the actual fee.
     let fee_rate = rpc
@@ -1222,30 +1377,35 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         // Both destinations belong to the simulated remaining participant.
         // Use distinct view keys so the restrictive native builder has two
         // distinct addresses, while all refunded value leaves the shared key.
-        let refund_change = ViewPair::new(
-            Point::from((*recipient_spend).into() * G),
-            Zeroizing::new(MoneroScalar::random(&mut OsRng)),
-        )
-        .unwrap();
-        let prepared = PreparedClaim::new(
-            input,
-            image,
-            ClaimTerms {
-                recipient: recipient_address,
-                amount: AMOUNT,
-                change: refund_change.clone(),
-                fee_rate,
-                max_fee: 1_000_000_000_000,
-            },
-            fresh_secret(),
-            Sha256::digest(recovery_binding).into(),
-            &mut OsRng,
-        )
-        .unwrap();
-        let witness = Zeroizing::new(Scalar::random(&mut OsRng));
-        let statement = Statement::prove(prepared.context(), &witness, &mut OsRng).unwrap();
-        let pre = presign(&prepared, statement, keys, [93; 32]);
-        let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+        let (prepared, tx, refund_change) = if let Some(result) = worker_refund.take() {
+            result
+        } else {
+            let refund_change = ViewPair::new(
+                Point::from((*recipient_spend).into() * G),
+                Zeroizing::new(MoneroScalar::random(&mut OsRng)),
+            )
+            .unwrap();
+            let prepared = PreparedClaim::new(
+                input.unwrap(),
+                image,
+                ClaimTerms {
+                    recipient: recipient_address,
+                    amount: AMOUNT,
+                    change: refund_change.clone(),
+                    fee_rate,
+                    max_fee: 1_000_000_000_000,
+                },
+                fresh_secret(),
+                Sha256::digest(recovery_binding).into(),
+                &mut OsRng,
+            )
+            .unwrap();
+            let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+            let statement = Statement::prove(prepared.context(), &witness, &mut OsRng).unwrap();
+            let pre = presign(&prepared, statement, keys.unwrap(), [93; 32]);
+            let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+            (prepared, tx, refund_change)
+        };
         publish_local(&tx).await;
         let (refund_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
         let block = rpc.scannable_block(refund_blocks[0]).await.unwrap();
@@ -1399,6 +1559,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
         return;
     }
+    let keys = keys.unwrap();
+    let input = input.unwrap();
     let dom_preparation = Instant::now();
     let paired_preparation_seconds = paired.as_ref().map(|state| state.preparation_seconds);
     let paired_ready_by = paired.as_ref().map(|state| state.ready_by);
@@ -2853,6 +3015,14 @@ async fn exercise(binary: PathBuf, mode: Mode) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args_os().skip(1);
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--xmr-refund-recovery-worker")
+    {
+        args.next();
+        refund_recovery_worker::worker(args);
+        return;
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--settlement-resume-worker")

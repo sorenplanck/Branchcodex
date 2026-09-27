@@ -1,0 +1,66 @@
+{
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--release",
+        "--locked",
+        "--test",
+        "native",
+        "--test",
+        "local_xmr_checkpoint",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/refund-worker-corrected-tests.log",
+      "results": [
+        "test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.42s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s",
+        "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "--release",
+        "--locked",
+        "--all-targets",
+        "-j2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "target/refund-worker-corrected-clippy.log",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--offline",
+        "--release",
+        "--locked",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/refund-worker-corrected-build.log",
+      "results": []
+    }
+  ],
+  "sha256": {
+    "src/native.rs": "81fcc947f8dc09a22723d48ab996ff37e3308c4f3d3eb1a3783f691fb3297c24",
+    "src/native/recovery_checkpoint.rs": "e8f63c3710ef7b7ab61fe6b3b612a8bf10d8a3cf171ed503c2ea5ffb69761d87",
+    "tests/native.rs": "9687d712389c54c8ab3419394bb94a91111601e151ee477d5c3c067e44cb7bbe",
+    "examples/regtest_claim.rs": "0b964594df817cf1c5e33cabed5c0c91e2265b3fa617eb76c7c700f3dbd0e5f1",
+    "examples/support/refund_recovery_worker.rs": "04ded210c55df97e07d2077c7cce1a05f9c2ce566866b40ca8fe81eca477c338"
+  }
+}

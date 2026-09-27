@@ -13,6 +13,23 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Recuperação e assinatura da devolução XMR passaram em um Rust novo.**
+O supervisor descarta suas shares originais e encerra o verificador. O worker
+carrega a intenção sem assinatura e o estado local aprovados, preserva o prazo,
+restaura o Go, abre a cápsula e assina. Retorna transação e métricas, sem shares.
+O pai ainda publica no monerod e hospeda/observa os nós; não é restart integral.
+
+Ensaio corrigido **168,992 s** total / **39,318 s** recuperação integral,
+incluindo assinatura e verificações. XMR devolvido 26 s antes do limite; DOM
+lock221/refund222/gasto223, outputs gastos e registros inalterados. Primeira
+tentativa falhou após depósitos por hash de intenção com domínio incorreto;
+preservada, corrigida e coberta por teste específico. Passaram 31 testes Rust,
+Clippy/build. Notas `clsag-lab/REFUND-RECOVERY-WORKER.md`; resultado isolado de
+laboratório, sem comprovação de segurança ou garantia de três minutos.
+Próximo: ligar o worker aos journals originais de entrega/exposição e à
+observação/publicação nativa independente, preservando envio e recuperação
+após queda. O cenário atual é abandono antes de entregar adaptors.
+
 **Share local e roster agora persistem antes dos depósitos.** O novo registro
 privado, fixo e imutável conserva papel/chaves/cápsula/recebimento/dificuldade,
 recusa shares derivadas e exige identidade pública aprovada. Não guarda chave

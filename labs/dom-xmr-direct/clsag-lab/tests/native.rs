@@ -30,6 +30,86 @@ use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
 #[test]
+fn unsigned_recovery_intent_restores_exact_body_and_still_requires_signing() {
+    use dxp1_clsag_lab::claim_resume::digest;
+    for real in [0, 7, 15] {
+        let fixture = Fixture::new(real);
+        let prepared = fixture.prepare();
+        let bytes = prepared.to_recovery_bytes().unwrap();
+        let message = prepared.context().message;
+        let fee = prepared.fee();
+        let offsets = prepared.offsets().to_vec();
+        drop(prepared);
+        let restored =
+            PreparedClaim::from_recovery_bytes(&bytes, digest(&bytes), &mut OsRng).unwrap();
+        assert_eq!(restored.context().message, message);
+        assert_eq!(restored.offsets(), offsets);
+        assert_eq!(restored.fee(), fee);
+        assert_eq!(restored.to_recovery_bytes().unwrap(), bytes);
+        let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+        let pre = fixture.presign(&restored, &witness);
+        let tx = restored.complete(&pre, &witness, &mut OsRng).unwrap();
+        assert_eq!(tx.signature_hash(), Some(message));
+        restored.verify_final(&tx, &mut OsRng).unwrap();
+    }
+}
+
+#[test]
+fn unsigned_recovery_intent_rejects_damage_and_inconsistent_openings() {
+    use dxp1_clsag_lab::claim_resume::digest;
+    let fixture = Fixture::new(7);
+    let bytes = fixture.prepare().to_recovery_bytes().unwrap();
+    let expected = digest(&bytes);
+    for i in 0..bytes.len() {
+        let mut changed = bytes.clone();
+        changed[i] ^= 1;
+        assert!(PreparedClaim::from_recovery_bytes(&changed, expected, &mut OsRng).is_err());
+        assert!(PreparedClaim::from_recovery_bytes(&bytes[..i], expected, &mut OsRng).is_err());
+    }
+    let mut changed = bytes.clone();
+    changed.push(0);
+    assert!(PreparedClaim::from_recovery_bytes(&changed, expected, &mut OsRng).is_err());
+    // Deliberately supply a fresh digest: integrity alone must not substitute
+    // for validating the ring, input opening, pseudo-output and native body.
+    let magic = b"DXP1/unsigned-xmr-recovery/v1\0".len();
+    let opening = magic + 32 + 1 + RING_SIZE * 64 + 96;
+    for (at, length, value) in [
+        (magic, 32, 0),
+        (magic + 32, 1, 255),
+        (magic + 33, 32, 0),
+        (opening - 32, 32, 0),
+        (opening, 32, 255),
+        (opening + 32, 8, 0),
+        (opening + 40, 32, 255),
+        (opening + 40, 32, 0),
+        (opening + 72, 4, 255),
+    ] {
+        let mut changed = bytes.clone();
+        changed[at..at + length].fill(value);
+        assert!(
+            PreparedClaim::from_recovery_bytes(&changed, digest(&changed), &mut OsRng).is_err()
+        );
+    }
+}
+
+#[test]
+fn unsigned_checkpoint_cannot_smuggle_a_complete_signature() {
+    use dxp1_clsag_lab::claim_resume::digest;
+    let fixture = Fixture::new(7);
+    let prepared = fixture.prepare();
+    let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+    let pre = fixture.presign(&prepared, &witness);
+    let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+    let mut bytes = prepared.to_recovery_bytes().unwrap();
+    let len_offset = b"DXP1/unsigned-xmr-recovery/v1\0".len() + 32 + 1 + RING_SIZE * 64 + 96 + 72;
+    bytes.truncate(len_offset);
+    let raw = tx.serialize();
+    bytes.extend((raw.len() as u32).to_le_bytes());
+    bytes.extend(raw);
+    assert!(PreparedClaim::from_recovery_bytes(&bytes, digest(&bytes), &mut OsRng).is_err());
+}
+
+#[test]
 fn frozen_xmr_envelope_restores_exact_claim_without_signing_openings() {
     use dxp1_clsag_lab::{claim_resume::digest, native::XmrClaimEnvelope};
     for real in [0, 7, 15] {

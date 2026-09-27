@@ -27,6 +27,8 @@ use crate::{
     claim_resume, joint::InputOpening, Context, Error, PreSignature, Statement, G, RING_SIZE,
 };
 
+mod recovery_checkpoint;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeError {
     ResumeEncoding,

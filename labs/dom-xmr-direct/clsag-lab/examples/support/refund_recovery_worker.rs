@@ -1,0 +1,373 @@
+//! Owned-regtest recovery/signing worker. No spend shares are returned to the
+//! supervisor. The parent still hosts nodes, publishes and observes the refund.
+use super::{direct_recovery_bridge, fresh_secret, presign, unix_seconds};
+use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
+use dxp1_clsag_lab::{
+    capsule_checkpoint::CapsuleCheckpoint, native::PreparedClaim,
+    xmr_recovery::checkpoint::LocalXmrRecoveryCheckpoint, Statement,
+};
+use frost::Participant;
+use monero_wallet::{ed25519::Point, transaction::Transaction};
+use rand_core::OsRng;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    process::Command,
+    time::Instant,
+};
+use zeroize::Zeroizing;
+
+const MAGIC: &[u8] = b"DXP1/owned-refund-worker/v1\0";
+const LIMIT: usize = 2 * 1024 * 1024;
+
+pub fn write_private(path: &Path, bytes: &[u8]) {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+    File::open(path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+}
+fn read_private(path: &Path) -> Zeroizing<Vec<u8>> {
+    let meta = fs::symlink_metadata(path).unwrap();
+    assert!(
+        meta.is_file() && meta.permissions().mode() & 0o777 == 0o600 && meta.len() <= LIMIT as u64
+    );
+    let mut bytes = Zeroizing::new(Vec::new());
+    File::open(path)
+        .unwrap()
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(bytes.len() <= LIMIT);
+    bytes
+}
+fn take<const N: usize>(input: &mut &[u8]) -> [u8; N] {
+    let (value, rest) = input.split_at(N);
+    *input = rest;
+    value.try_into().unwrap()
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub struct Job {
+    pub local_identity: [u8; 32],
+    pub capsule: [u8; 32],
+    pub link: [u8; 64],
+    pub received: u64,
+    pub latest: u64,
+    pub offset: Zeroizing<Scalar>,
+    pub unsigned: Zeroizing<Vec<u8>>,
+}
+impl Job {
+    pub fn persist(&self, root: &Path) -> [u8; 32] {
+        let mut bytes = Zeroizing::new(MAGIC.to_vec());
+        bytes.extend(self.local_identity);
+        bytes.extend(self.capsule);
+        bytes.extend(self.link);
+        bytes.extend(self.received.to_le_bytes());
+        bytes.extend(self.latest.to_le_bytes());
+        let offset = Zeroizing::new(self.offset.to_bytes());
+        bytes.extend_from_slice(&*offset);
+        bytes.extend_from_slice(&self.unsigned);
+        assert!(bytes.len() <= LIMIT);
+        write_private(&root.join("refund-recovery.job"), &bytes);
+        Sha256::digest(&*bytes).into()
+    }
+    fn load(root: &Path, expected: [u8; 32]) -> Self {
+        let bytes = read_private(&root.join("refund-recovery.job"));
+        assert_ne!(expected, [0; 32]);
+        assert_eq!(<[u8; 32]>::from(Sha256::digest(&*bytes)), expected);
+        let mut input = bytes.strip_prefix(MAGIC).unwrap();
+        let local_identity = take(&mut input);
+        let capsule = take(&mut input);
+        let link = take(&mut input);
+        let received = u64::from_le_bytes(take(&mut input));
+        let latest = u64::from_le_bytes(take(&mut input));
+        let encoded = Zeroizing::new(take(&mut input));
+        let offset =
+            Zeroizing::new(Option::<Scalar>::from(Scalar::from_canonical_bytes(*encoded)).unwrap());
+        // Exact current LAB assumption; never recompute a deadline from now.
+        assert_eq!(received.checked_add(100), Some(latest));
+        assert_ne!(local_identity, [0; 32]);
+        assert_ne!(capsule, [0; 32]);
+        assert_ne!(link, [0; 64]);
+        Self {
+            local_identity,
+            capsule,
+            link,
+            received,
+            latest,
+            offset,
+            unsigned: Zeroizing::new(input.to_vec()),
+        }
+    }
+    fn prepared(&self) -> PreparedClaim {
+        let value = PreparedClaim::from_recovery_bytes(
+            &self.unsigned,
+            dxp1_clsag_lab::claim_resume::digest(&self.unsigned),
+            &mut OsRng,
+        )
+        .unwrap();
+        assert_eq!(
+            value.context().route_binding,
+            <[u8; 32]>::from(Sha256::digest(self.link))
+        );
+        value
+    }
+}
+
+pub fn run(
+    root: PathBuf,
+    bridge: PathBuf,
+    expected: [u8; 32],
+) -> (PreparedClaim, Transaction, Value) {
+    let mut process = super::ManagedDaemon(
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--xmr-refund-recovery-worker")
+            .arg(&root)
+            .arg(bridge)
+            .arg(hex(&expected))
+            .spawn()
+            .unwrap(),
+    );
+    let pid = process.0.id();
+    assert!(process.0.wait().unwrap().success());
+    let job = Job::load(&root, expected);
+    let prepared = job.prepared();
+    let bytes = read_private(&root.join("refund-signed.tx"));
+    let mut input = bytes.as_slice();
+    let tx = Transaction::read(&mut input).unwrap();
+    assert!(input.is_empty());
+    assert_eq!(tx.serialize(), *bytes);
+    prepared.verify_final(&tx, &mut OsRng).unwrap();
+    let mut report: Value =
+        serde_json::from_slice(&read_private(&root.join("refund-worker-report.json"))).unwrap();
+    report["refund_recovery_worker_pid"] = json!(pid);
+    (prepared, tx, report)
+}
+
+pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
+    let began = Instant::now();
+    let root = PathBuf::from(args.next().unwrap());
+    let bridge = PathBuf::from(args.next().unwrap());
+    let raw = args.next().unwrap().into_string().unwrap();
+    assert_eq!(raw.len(), 64);
+    let expected = std::array::from_fn(|i| u8::from_str_radix(&raw[2 * i..2 * i + 2], 16).unwrap());
+    assert_eq!(hex(&expected), raw);
+    assert!(args.next().is_none());
+    let job = Job::load(&root, expected);
+    assert!(unix_seconds() >= job.received && unix_seconds() <= job.latest);
+    let capsule =
+        CapsuleCheckpoint::read(&root.join("direct-capsule.record"), job.capsule).unwrap();
+    assert_eq!(capsule.received_unix_seconds, job.received);
+    let state = LocalXmrRecoveryCheckpoint::read(
+        &root.join("local-xmr-recovery.record"),
+        job.local_identity,
+    )
+    .unwrap();
+    let (local, roster, link) = state.restore(&capsule).unwrap();
+    assert_eq!(link.binding(), job.link);
+    let prepared = job.prepared();
+    assert_eq!(
+        roster.spend_key() + *job.offset * G,
+        prepared.context().ring[prepared.context().real][0]
+    );
+    let public = direct_recovery_bridge::DirectPublicCapsule::restore_with_local_receipt(
+        &bridge,
+        &root.join("direct-capsule.record"),
+        job.capsule,
+        &root.join("local-verifier-authority.key"),
+    );
+    let (opening, mut details) = public.open();
+    let peer = Participant::new(3 - u16::from(local.params().i())).unwrap();
+    assert!(link
+        .recover_after_opening(
+            &roster,
+            peer,
+            job.capsule,
+            Zeroizing::new(*opening + Scalar::ONE)
+        )
+        .is_err());
+    let recovered = link
+        .recover_after_opening(&roster, peer, job.capsule, opening)
+        .unwrap();
+    let mut keys = [local, recovered];
+    keys.sort_by_key(|key| u16::from(key.params().i()));
+    let keys = keys.map(|key| key.offset(*job.offset));
+    let ids = [Participant::new(1).unwrap(), Participant::new(2).unwrap()];
+    let h: curve25519_dalek::edwards::EdwardsPoint = Point::biased_hash(
+        prepared.context().ring[prepared.context().real][0]
+            .compress()
+            .to_bytes(),
+    )
+    .into();
+    assert_eq!(
+        keys.iter()
+            .map(|key| h * **key.view(ids.to_vec()).unwrap().secret_share())
+            .sum::<curve25519_dalek::edwards::EdwardsPoint>(),
+        prepared.context().image
+    );
+    let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+    let statement = Statement::prove(prepared.context(), &witness, &mut OsRng).unwrap();
+    let pre = presign(&prepared, statement, keys, *fresh_secret());
+    let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+    assert!(
+        unix_seconds() <= job.latest,
+        "original recovery deadline exceeded"
+    );
+    write_private(&root.join("refund-signed.tx"), &tx.serialize());
+    details["refund_signed_in_fresh_rust_process"] = json!(true);
+    details["local_xmr_state_restored_in_fresh_process"] = json!(true);
+    details["worker_exports_spend_shares"] = json!(false);
+    details["worker_recovery_and_signing_seconds"] = json!(began.elapsed().as_secs_f64());
+    details["worker_preserves_original_deadline"] = json!(true);
+    write_private(
+        &root.join("refund-worker-report.json"),
+        &serde_json::to_vec(&details).unwrap(),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_restores_real_unsigned_intent_with_the_codec_digest_domain() {
+        use dxp1_clsag_lab::{native::ClaimTerms, RING_SIZE};
+        use monero_wallet::{
+            address::Network,
+            ed25519::{Commitment, Scalar as MoneroScalar},
+            interface::FeeRate,
+            OutputWithDecoys, ViewPair,
+        };
+        let key = Point::from(Scalar::from(3u64) * G);
+        let commitment = Commitment::new(MoneroScalar::from(Scalar::from(2u64)), 5_000_000_000_000);
+        let mut ring = (0..RING_SIZE)
+            .map(|i| {
+                [
+                    Point::from(Scalar::from(100 + i as u64) * G),
+                    Commitment::new(MoneroScalar::from(Scalar::from(200 + i as u64)), 1000)
+                        .commit(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        ring[7] = [key, commitment.commit()];
+        let decoys = monero_clsag::Decoys::new(vec![1; RING_SIZE], 7, ring).unwrap();
+        let mut encoded = Zeroizing::new(key.compress().to_bytes().to_vec());
+        MoneroScalar::from(Scalar::ZERO)
+            .write(&mut *encoded)
+            .unwrap();
+        commitment.write(&mut *encoded).unwrap();
+        decoys.write(&mut *encoded).unwrap();
+        let input = OutputWithDecoys::read(&mut encoded.as_slice()).unwrap();
+        let view = |spend: u64, secret: u64| {
+            ViewPair::new(
+                Point::from(Scalar::from(spend) * G),
+                Zeroizing::new(MoneroScalar::from(Scalar::from(secret))),
+            )
+            .unwrap()
+        };
+        let link = [3; 64];
+        let h: curve25519_dalek::edwards::EdwardsPoint =
+            Point::biased_hash(key.compress().to_bytes()).into();
+        let prepared = PreparedClaim::new(
+            input,
+            h * Scalar::from(3u64),
+            ClaimTerms {
+                recipient: view(4, 5).legacy_address(Network::Testnet),
+                amount: 1_000_000_000_000,
+                change: view(6, 7),
+                fee_rate: FeeRate::new(1500, 10000).unwrap(),
+                max_fee: 1_000_000_000_000,
+            },
+            Zeroizing::new([1; 32]),
+            Sha256::digest(link).into(),
+            &mut OsRng,
+        )
+        .unwrap();
+        let bytes = prepared.to_recovery_bytes().unwrap();
+        assert!(PreparedClaim::from_recovery_bytes(
+            &bytes,
+            Sha256::digest(&*bytes).into(),
+            &mut OsRng
+        )
+        .is_err());
+        let expected_message = prepared.context().message;
+        drop(prepared);
+        let job = Job {
+            local_identity: [1; 32],
+            capsule: [2; 32],
+            link,
+            received: 1000,
+            latest: 1100,
+            offset: Zeroizing::new(Scalar::ZERO),
+            unsigned: bytes,
+        };
+        let root = std::env::temp_dir().join(format!("dxp1-refund-intent-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let identity = job.persist(&root);
+        drop(job);
+        let restored = Job::load(&root, identity).prepared();
+        assert_eq!(restored.context().message, expected_message);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn immutable_job_rejects_substitution_and_deadline_renewal() {
+        let root = std::env::temp_dir().join(format!("dxp1-refund-job-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let job = Job {
+            local_identity: [1; 32],
+            capsule: [2; 32],
+            link: [3; 64],
+            received: 1000,
+            latest: 1100,
+            offset: Zeroizing::new(Scalar::ONE),
+            unsigned: Zeroizing::new(vec![7; 16]),
+        };
+        let identity = job.persist(&root);
+        let restored = Job::load(&root, identity);
+        assert_eq!(restored.received, 1000);
+        assert_eq!(restored.latest, 1100);
+        assert_eq!(restored.local_identity, job.local_identity);
+        let before = read_private(&root.join("refund-recovery.job"));
+        assert!(std::panic::catch_unwind(|| job.persist(&root)).is_err());
+        for offset in [
+            MAGIC.len(),
+            MAGIC.len() + 32,
+            MAGIC.len() + 64,
+            MAGIC.len() + 128,
+            MAGIC.len() + 136,
+            MAGIC.len() + 144,
+            before.len() - 1,
+        ] {
+            let mut changed = before.clone();
+            changed[offset] ^= 1;
+            fs::write(root.join("refund-recovery.job"), &*changed).unwrap();
+            assert!(std::panic::catch_unwind(|| Job::load(&root, identity)).is_err());
+        }
+        // Deliberately approving a new digest still cannot silently renew the
+        // original fixture's deadline relative to its recorded receipt.
+        let mut changed = before.clone();
+        let latest = MAGIC.len() + 128 + 8;
+        changed[latest..latest + 8].copy_from_slice(&1101u64.to_le_bytes());
+        fs::write(root.join("refund-recovery.job"), &*changed).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| Job::load(&root, Sha256::digest(&*changed).into()))
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

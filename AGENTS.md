@@ -719,5 +719,48 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   de sessões cooperativas, quedas globais, preparação independente, provas
   criptográficas/temporais e dom-interopd continuam abertas.
 
+- PreparedClaim agora exporta/restaura intenção SEM assinatura em
+  src/native/recovery_checkpoint.rs. Conserva corpo/contexto/aberturas privadas,
+  sem spend shares/nonces; marcador CLSAG fixo inválido para satisfazer wire.
+  Revalida digest COM DOMÍNIO claim_resume::digest, pontos/commitments/offsets/
+  corpo/Bulletproof/balanço/canonicalidade; recusa assinatura completa embutida.
+  Não usar SHA256 simples como expected deste codec (job externo usa SHA256).
+- direct-pair-abandon-local-receipt agora persiste refund-recovery.job depois
+  dos depósitos e antes de esperar recuperação. Contém identidade local/cápsula/
+  link/recebimento/limite original/offset/intenção sem assinatura. Pai descarta
+  ambas shares, mata Go; Rust novo --xmr-refund-recovery-worker carrega tudo,
+  confere links, restaura Go/prova, abre cápsula, aplica offset, confere key
+  image e assina com nonces novos. Retorna TX e métricas, nunca spend shares.
+  Pai confere, publica no monerod e observa; ainda host dos nós/minerador DOM.
+  Sem full coordinator restart ou publicação/observação independente do worker.
+- Primeira tentativa PID1331232/Rust1331589 exit101 em136,145s após depósitos
+  e kill do Go: job usava hash simples no decoder de intenção. Falhou antes
+  de Go novo/abertura/assinatura. Corrigido domínio, teste novo passa por job
+  com intenção nativa real. Falha *REFUND-WORKER-INITIAL-FAILURE-* preservada,
+  fontes/binários anteriores conferidos e grupo encerrado. Não renovou prazo
+  nem retomou essa operação expirada. Novo ensaio usa outra reserva própria.
+- Após correção 31 testes Rust (12 native,4 local state,15 example), Clippy
+  all-targets -D warnings/build passaram; REFUND-RECOVERY-WORKER-CHECKS.json.
+  Versão anterior 30 testes em INITIAL-CHECKS. Sem mudança/novo teste Go.
+- Corrigido PID1346571/session23347 exit0: total168,992s/parede169,012s,
+  recuperação integral39,318s/worker39,229s, restauração7,517s/abertura31,467s.
+  Recebimento1790481710/início1745 (+35), XMR observado1784 antes de1810
+  (todos no prefixo179048). DOM lock221/refund222/gasto223, outputs gastos.
+  Cinco arquivos de entrada iguais; Rust1346866/Goantigo1346649/novo1346867.
+  Hashes/PIDs/grupo conferidos. *ABANDON-REFUND-WORKER-* e
+  REFUND-RECOVERY-WORKER-VERIFICATION.json; notas REFUND-RECOVERY-WORKER.md.
+- Regressão height-dom-first PID1348011/session69362 exit0: total32,265s,
+  claims/gastos nativos e refund conflitante recusado. Artefatos
+  HEIGHT-DOM-FIRST-REFUND-WORKER-REGRESSION-*, hashes/processo/grupo conferidos.
+  Nenhum ensaio pendente. Metas observadas passaram no cenário corrigido;
+  manter falha inicial e resultados anteriores mais lentos, sem SLA.
+- Próximo: ligar worker aos journals originais de entrega/exposição e à
+  observação/publicação nativa independente com retomada do envio. Job atual
+  é restrito a abandono ANTES da entrega de adaptors, não tem barreira durável
+  dessa entrega e sozinho não autoriza generalizar para claims possivelmente
+  expostas. Queda antes de gravar intenção após funding, quedas durante
+  assinatura/envio, limite global de retomadas, preparação independente,
+  provas temporais/criptográficas e dom-interopd continuam abertos.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.
