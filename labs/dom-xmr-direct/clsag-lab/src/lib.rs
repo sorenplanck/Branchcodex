@@ -25,6 +25,8 @@ use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod arbiter_pair;
+#[cfg(unix)]
+pub mod arbiter_session;
 pub mod capsule_checkpoint;
 pub mod claim_resume;
 #[cfg(unix)]

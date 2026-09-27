@@ -61,7 +61,7 @@ mempool, bloco direto, reorganização e reconstrução após reinício. Um ensa
 financiado isolado também executou Claim, Refund e Punish separadamente pelo
 nó DOM e pelo `monerod`: cada abertura extraída do bloco DOM canônico assinou
 um gasto XMR CLSAG/Bulletproof+ aceito e minerado pelo daemon. Com a ordem
-final de `Ready`, os tempos foram 70,54 s, 74,92 s e 80,85 s,
+final de `Ready`, os tempos integrais foram 67,37 s, 71,39 s e 76,35 s,
 respectivamente, em Regtest sob demanda.
 
 A ordem do protocolo importa. Refund e Punish ficam pré-assinados e duráveis
@@ -69,12 +69,26 @@ antes do funding DOM. O Claim só é concluído e persistido depois que a reserv
 XMR conjunta está confirmada e utilizável; essa entrega representa `Ready`.
 Se a parte DOM se recusar nesse ponto, Refund revela a share que devolve XMR
 ao depositante. Entregar Claim antes do depósito XMR permitiria capturar DOM
-sem contrapartida e é proibido pelo fluxo, embora a regra ainda dependa do
-coordenador e precise virar uma máquina de estados durável.
+sem contrapartida e é proibido pelo fluxo e pelo journal. A autenticidade da
+observação XMR que alimenta esse estado ainda depende do coordenador.
 
-Uma direção é uma reserva XMR com chave combinada de duas shares, sem
+Essa máquina de estados agora existe como journal append-only. Ela fixa o
+contrato, os adaptors de recuperação e a chave XMR antes do funding, recusa
+Claim antes de XMR Ready, valida a fase do settlement e grava os identificadores
+das duas chains. O ensaio a reabre duas vezes antes de completar, e testes
+recusam corrupção, repetição e ordem inválida. A próxima integração deve ligar
+as observações independentes do coordenador a esses mesmos eventos.
+
+Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto.
+Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
+normal. A meta rápida é tecnicamente possível somente no intervalo
+`Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
+intervalo mediu 13,34 s para Claim, 18,33 s para Refund e 23,95 s para Punish.
+O teste falha se exceder 180 s; a preparação permanece declarada separadamente.
+
+A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único
-compromisso DOM de arbitragem teria duas fases: antes de `Ready`, o dono DOM
+compromisso DOM de arbitragem possui três caminhos: antes de `Ready`, o dono DOM
 pode recuperar DOM somente expondo a share que permite ao dono XMR recuperar
 XMR; depois de `Ready`, o dono XMR pode receber DOM expondo sua share, que
 permite ao dono DOM receber XMR. Se não houver claim, o refund DOM posterior

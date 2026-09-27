@@ -3,8 +3,8 @@
 //! Output commitments must be approved with their amounts by the participants.
 
 use dom_consensus::{
-    validate_balance_equation, validate_range_proofs, validate_transaction,
-    validate_transaction_structure, Transaction, ValidationContext,
+    swap_arbiter_intent, validate_balance_equation, validate_range_proofs, validate_transaction,
+    validate_transaction_structure, SwapArbiterPath, Transaction, ValidationContext,
 };
 use dom_core::{DomError, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG};
 use dom_crypto::{hash::blake2b_256_tagged, PartialSig, PublicKey, SchnorrSignature};
@@ -176,6 +176,28 @@ pub struct DomClaimOffer {
 }
 
 impl DomClaimOffer {
+    pub fn chain_id(&self) -> &[u8; 32] {
+        self.claim.chain()
+    }
+
+    pub fn adaptor_point(&self) -> &PublicKey {
+        &self.adaptor
+    }
+
+    pub fn swap_arbiter_path(&self) -> Result<SwapArbiterPath, DomError> {
+        match self.claim.transaction.kernels[0].features {
+            dom_core::KERNEL_FEAT_SWAP_CLAIM => Ok(SwapArbiterPath::Claim),
+            dom_core::KERNEL_FEAT_SWAP_REFUND => Ok(SwapArbiterPath::Refund),
+            dom_core::KERNEL_FEAT_SWAP_PUNISH => Ok(SwapArbiterPath::Punish),
+            _ => Err(invalid("offer is not a swap arbiter path")),
+        }
+    }
+
+    pub fn swap_arbiter_intent(&self) -> Result<[u8; 32], DomError> {
+        self.swap_arbiter_path()?;
+        swap_arbiter_intent(&self.claim.transaction)
+    }
+
     /// Participant-private, immutable resumption artifact. No nonce scalar,
     /// reserve share or adaptor witness is stored. Only plain claims supported.
     pub fn to_resume_bytes(&self) -> Result<Vec<u8>, DomError> {

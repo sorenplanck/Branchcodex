@@ -12,6 +12,7 @@ use dom_crypto::SecretKey;
 use dom_scriptless_primitives::SecretScalar;
 use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
+    arbiter_session::{ArbiterSessionBinding, ArbiterSessionJournal},
     claim_resume::digest,
     dom_joint::{DomCommitment, DomSigner, DomSigningIntent, DomSigningPlan},
     native_dom::{DomClaimOffer, PreparedDomClaim},
@@ -273,26 +274,110 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         joint_xmr_key.compress().to_bytes()
     );
 
-    for (path, branch, height, secret, local_share, session) in [
-        (SwapArbiterPath::Claim, &claim, 10, &xmr_owner, dom_xmr, 71),
+    let claim_offer = offer(
+        &claim,
+        shares.adaptor_point(SwapArbiterPath::Claim).unwrap(),
+        71,
+    );
+    let refund_offer = offer(
+        &refund,
+        shares.adaptor_point(SwapArbiterPath::Refund).unwrap(),
+        72,
+    );
+    let punish_offer = offer(
+        &punish,
+        shares.adaptor_point(SwapArbiterPath::Punish).unwrap(),
+        73,
+    );
+    let mut wrong_adaptor_bytes = [0; 32];
+    wrong_adaptor_bytes[31] = 74;
+    let wrong_adaptor = SecretScalar::from_be_bytes(wrong_adaptor_bytes)
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let wrong_claim_offer = offer(&claim, wrong_adaptor, 74);
+
+    let binding =
+        ArbiterSessionBinding::new(CHAIN_ID, &contract, &shares, &refund_offer, &punish_offer)
+            .unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "dxa1-session-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let journal_path = directory.join("session.wal");
+    let mut journal = ArbiterSessionJournal::create(&journal_path, binding.clone()).unwrap();
+    assert!(journal.record_claim_ready(&refund_offer).is_err());
+    assert!(journal.record_claim_ready(&claim_offer).is_err());
+    journal.record_dom_funding([1; 32], 9).unwrap();
+    assert!(journal.record_claim_ready(&claim_offer).is_err());
+    journal.record_xmr_ready([2; 32], 140).unwrap();
+    assert!(journal.record_claim_ready(&wrong_claim_offer).is_err());
+    let claim_digest = journal.record_claim_ready(&claim_offer).unwrap();
+    assert_eq!(journal.state().unwrap().claim_offer, Some(claim_digest));
+    drop(journal);
+    let mut journal = ArbiterSessionJournal::open(&journal_path, binding.clone()).unwrap();
+    let session_claim = claim_offer
+        .complete(
+            &SecretScalar::from_be_bytes(xmr_owner.dom_secret_big_endian()).unwrap(),
+            &context(10),
+        )
+        .unwrap();
+    journal.record_dom_settlement(&session_claim, 10).unwrap();
+    journal.record_xmr_settlement([4; 32]).unwrap();
+    assert!(journal.record_xmr_settlement([5; 32]).is_err());
+    drop(journal);
+    let journal = ArbiterSessionJournal::open(&journal_path, binding.clone()).unwrap();
+    assert_eq!(journal.state().unwrap().xmr_settlement, Some([4; 32]));
+    drop(journal);
+
+    let recovery_path = directory.join("recovery.wal");
+    let mut recovery = ArbiterSessionJournal::create(&recovery_path, binding.clone()).unwrap();
+    recovery.record_dom_funding([6; 32], 9).unwrap();
+    let session_refund = refund_offer
+        .complete(
+            &SecretScalar::from_be_bytes(dom_owner.dom_secret_big_endian()).unwrap(),
+            &context(11),
+        )
+        .unwrap();
+    assert!(recovery.record_dom_settlement(&session_refund, 10).is_err());
+    recovery.record_dom_settlement(&session_refund, 11).unwrap();
+    assert!(recovery.record_xmr_settlement([8; 32]).is_err());
+    drop(recovery);
+
+    let mut corrupted = std::fs::read(&journal_path).unwrap();
+    *corrupted.last_mut().unwrap() ^= 1;
+    std::fs::write(&journal_path, corrupted).unwrap();
+    assert!(ArbiterSessionJournal::open(&journal_path, binding).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+
+    for (path, offer, height, secret, local_share) in [
+        (
+            SwapArbiterPath::Claim,
+            &claim_offer,
+            10,
+            &xmr_owner,
+            dom_xmr,
+        ),
         (
             SwapArbiterPath::Refund,
-            &refund,
+            &refund_offer,
             11,
             &dom_owner,
             xmr_xmr,
-            72,
         ),
         (
             SwapArbiterPath::Punish,
-            &punish,
+            &punish_offer,
             21,
             &xmr_owner,
             dom_xmr,
-            73,
         ),
     ] {
-        let offer = offer(branch, shares.adaptor_point(path).unwrap(), session);
         let resume = offer.to_swap_arbiter_resume_bytes().unwrap();
         assert!(DomClaimOffer::from_resume_bytes(&resume, digest(&resume)).is_err());
         let offer =

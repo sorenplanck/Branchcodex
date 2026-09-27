@@ -84,14 +84,28 @@ Claim, que funciona como a transição `Ready`. Cada resultado atravessa mempool
 e bloco DOM; a share é extraída da transação canônica, combinada com a share
 local, e assina um gasto XMR CLSAG/Bulletproof+ aceito e minerado no `monerod`.
 
-Claim levou **70,54 s**, Refund **74,92 s** e Punish **80,85 s** em execuções
+Claim levou **67,37 s**, Refund **71,39 s** e Punish **76,35 s** em execuções
 isoladas. BTC não participa. Esses tempos incluem bootstrap e maturidade sob
 mineração Regtest solicitada pelo teste, portanto não estimam latência de rede
-real. A ordem de `Ready` ainda está no executor de laboratório; precisa virar
-estado durável do coordenador. Também faltam progressão simultânea das cadeias,
-participantes/processos separados, reorg no ensaio cruzado e ativação segura
-das novas regras de consenso. O resultado comprova um ponta a ponta funcional
-de laboratório, não prontidão de produção nem garantia universal de 2–3 min.
+real.
+
+A ordem agora é mantida por um journal append-only, bloqueado, sincronizado e
+encadeado por hash. Ele fixa contrato, chave XMR verificada e ofertas de
+recuperação antes do funding; recusa Claim antes de funding DOM e XMR Ready;
+valida as alturas dos caminhos e grava os IDs observados dos settlements DOM e
+XMR. O ensaio fecha e reabre o journal após XMR Ready e novamente após Claim
+Ready. Truncamento/corrupção, repetição e transições fora de ordem são recusados.
+
+Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos à
+janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
+`Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
+da liquidação ativa. Medido desde `Ready`, Claim levou **13,34 s**, Refund
+**18,33 s** e Punish **23,95 s**. O exemplo impõe limite de 180 s nesse
+intervalo; a mineração acelerada de Regtest não é usada como promessa para
+mainnet. Ainda
+faltam participantes/processos separados, reorg no ensaio cruzado e ativação
+segura das novas regras de consenso. O resultado comprova um ponta a ponta
+funcional de laboratório, não prontidão de produção nem garantia universal.
 
 ## Evidência obtida
 

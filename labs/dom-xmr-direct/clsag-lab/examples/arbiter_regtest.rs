@@ -35,6 +35,7 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_wallet::{Bip39Seed, Network, WalletDir};
 use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
+    arbiter_session::{ArbiterSessionBinding, ArbiterSessionJournal},
     claim_resume::digest,
     dom_joint::{DomCommitment, DomSigner, DomSigningIntent},
     native_dom::{DomClaimOffer, PreparedDomClaim},
@@ -332,6 +333,8 @@ struct FundedArbiter {
     punish_offer: DomClaimOffer,
     claim_until: u64,
     refund_until: u64,
+    session_binding: ArbiterSessionBinding,
+    journal: ArbiterSessionJournal,
 }
 
 fn validation_context(chain_id: [u8; 32], height: u64) -> ValidationContext {
@@ -468,6 +471,12 @@ async fn funded_arbiter() -> FundedArbiter {
         swap_arbiter_intent(&punish.unsigned).unwrap(),
     )
     .unwrap();
+    let session_binding =
+        ArbiterSessionBinding::new(chain_id, &contract, &shares, &refund_offer, &punish_offer)
+            .unwrap();
+    let mut journal =
+        ArbiterSessionJournal::create(&root.0.join("arbiter-session.wal"), session_binding.clone())
+            .unwrap();
     let contract_bytes = contract.to_bytes();
     let (proof, commitment) = dom_crypto::range_proof_prove_bytes_with_extra_commit(
         ARBITER_VALUE,
@@ -488,15 +497,16 @@ async fn funded_arbiter() -> FundedArbiter {
         arbiter_output,
         &chain_id,
     );
-    assert_eq!(
-        handle.submit_tx(funding.to_bytes().unwrap()).unwrap().state,
-        TxAdmissionState::New
-    );
+    let funding_admission = handle.submit_tx(funding.to_bytes().unwrap()).unwrap();
+    assert_eq!(funding_admission.state, TxAdmissionState::New);
     let funding_height = mine(&node).await;
     assert_eq!(funding_height, staging_height + 1);
     assert!(handle
         .get_utxo(claim.unsigned.inputs[0].commitment.as_bytes())
         .is_some());
+    journal
+        .record_dom_funding(funding_admission.tx_hash, funding_height)
+        .unwrap();
 
     FundedArbiter {
         _root: root,
@@ -512,12 +522,14 @@ async fn funded_arbiter() -> FundedArbiter {
         punish_offer,
         claim_until,
         refund_until,
+        session_binding,
+        journal,
     }
 }
 
 async fn exercise(monerod: PathBuf, outcome: Outcome) {
     let started = Instant::now();
-    let setup = funded_arbiter().await;
+    let mut setup = funded_arbiter().await;
     let handle = NodeHandleImpl(setup.node.clone());
 
     let dom_share = Option::<Scalar>::from(Scalar::from_canonical_bytes(
@@ -645,6 +657,16 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
     assert_eq!(outputs.len(), 1);
     let reserve_output = outputs.remove(0);
     let reserve_amount = reserve_output.commitment().amount;
+    let xmr_output_id = reserve_output.key().compress().to_bytes();
+    setup
+        .journal
+        .record_xmr_ready(xmr_output_id, height.try_into().unwrap())
+        .unwrap();
+    let session_path = setup._root.0.join("arbiter-session.wal");
+    drop(setup.journal);
+    setup.journal =
+        ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
+    let active_settlement = Instant::now();
     let input = OutputWithDecoys::new(&mut OsRng, &rpc, 16, height, reserve_output)
         .await
         .unwrap();
@@ -671,6 +693,10 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
         digest(&claim_bytes),
     )
     .unwrap();
+    setup.journal.record_claim_ready(&claim_offer).unwrap();
+    drop(setup.journal);
+    setup.journal =
+        ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
 
     let (branch, offer, secret, settlement_height) = match outcome {
         Outcome::Claim => (
@@ -705,15 +731,15 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
             &validation_context(setup.chain_id, settlement_height),
         )
         .unwrap();
-    assert_eq!(
-        handle
-            .submit_tx(settlement.to_bytes().unwrap())
-            .unwrap()
-            .state,
-        TxAdmissionState::New
-    );
+    let settlement_admission = handle.submit_tx(settlement.to_bytes().unwrap()).unwrap();
+    assert_eq!(settlement_admission.state, TxAdmissionState::New);
     assert_eq!(mine(&setup.node).await, settlement_height);
     let observed = observed_transaction(&setup, settlement_height, &settlement).await;
+    let durable_dom_id = setup
+        .journal
+        .record_dom_settlement(&observed, settlement_height)
+        .unwrap();
+    assert_eq!(durable_dom_id, settlement_admission.tx_hash);
     let opening = offer
         .extract(
             &observed,
@@ -793,9 +819,22 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
     assert!(received
         .iter()
         .any(|output| output.commitment().amount == payment));
+    let xmr_transaction_id: [u8; 32] = xmr_transaction.hash().as_ref().try_into().unwrap();
+    setup
+        .journal
+        .record_xmr_settlement(xmr_transaction_id)
+        .unwrap();
+    let durable_state = setup.journal.state().unwrap();
+    assert_eq!(durable_state.dom_settlement.unwrap().path, outcome.path());
+    assert_eq!(durable_state.xmr_settlement, Some(xmr_transaction_id));
     assert!(handle
         .get_utxo(branch.unsigned.inputs[0].commitment.as_bytes())
         .is_none());
+    let active_settlement_seconds = active_settlement.elapsed().as_secs_f64();
+    assert!(
+        active_settlement.elapsed() <= Duration::from_secs(180),
+        "ready-to-complete settlement exceeded three minutes"
+    );
 
     println!(
         "{}",
@@ -807,10 +846,14 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
             "bitcoin_involved":false,
             "recovery_offers_persisted_before_dom_funding":true,
             "claim_offer_persisted_after_xmr_ready":true,
+            "durable_ordering_journal_complete":true,
             "dom_settlement_height":settlement_height,
             "xmr_reserve_amount":reserve_amount,
             "xmr_payment_amount":payment,
             "xmr_recipient_role":recipient_role,
+            "xmr_default_lock_window_blocks":monero_wallet::DEFAULT_LOCK_WINDOW,
+            "prepared_mature_reserve_required_for_three_minute_target":true,
+            "ready_to_complete_seconds":active_settlement_seconds,
             "total_seconds":started.elapsed().as_secs_f64(),
         })
     );

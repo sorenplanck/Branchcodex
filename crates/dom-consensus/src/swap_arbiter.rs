@@ -109,12 +109,22 @@ impl SwapArbiterContract {
         self.refund_until
     }
 
-    fn expected(&self, path: SwapArbiterPath) -> ([u8; 32], u64) {
+    /// Exact unsigned transaction intent committed for one terminal path.
+    pub const fn intent(&self, path: SwapArbiterPath) -> [u8; 32] {
         match path {
-            SwapArbiterPath::Claim => (self.claim_intent, self.claim_until),
-            SwapArbiterPath::Refund => (self.refund_intent, self.claim_until + 1),
-            SwapArbiterPath::Punish => (self.punish_intent, self.refund_until + 1),
+            SwapArbiterPath::Claim => self.claim_intent,
+            SwapArbiterPath::Refund => self.refund_intent,
+            SwapArbiterPath::Punish => self.punish_intent,
         }
+    }
+
+    fn expected(&self, path: SwapArbiterPath) -> ([u8; 32], u64) {
+        let height = match path {
+            SwapArbiterPath::Claim => self.claim_until,
+            SwapArbiterPath::Refund => self.claim_until + 1,
+            SwapArbiterPath::Punish => self.refund_until + 1,
+        };
+        (self.intent(path), height)
     }
 
     /// Validate a complete spend against its committed path and block height.
