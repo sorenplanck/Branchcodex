@@ -961,3 +961,13 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   declarar segurança. Próximo trabalho obrigatório: substituir/fundamentar
   mecanismo de recuperação e janelas, preservar a perna exclusiva DOM↔XMR,
   integrar daemons e participantes independentes e provar segurança/prazo.
+- `labs/dom-xmr-direct/ARBITRATION-REPLACEMENT.md` documenta a próxima direção
+  após consultar Farcaster, Athanor e COMIT: talvez retirar inteiramente a
+  devolução XMR antecipável e usar uma arbitragem DOM com Ready/Claim/Refund
+  excludentes. O consenso DOM ATUAL só tem kernel plain, coinbase e
+  height-locked; esse árbitro exige nova regra de consenso ou primitiva
+  equivalente, não flags locais. Ainda é pesquisa, não implementação.
+  `arbitration_model.py` + três testes demonstram outra corrida: segredo
+  divulgado por claim DOM perdedor pode permitir DOM+XMR ao mesmo ator.
+  Evitar a corrida depende de limite de inclusão DOM demonstrado; um bloco
+  além da hipótese a reproduz. Não alegar segurança nem meta de 2–3 minutos.

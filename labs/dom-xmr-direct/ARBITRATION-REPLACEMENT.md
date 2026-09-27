@@ -58,6 +58,17 @@ um lado receba os dois ativos. Antes de qualquer funding, o desenho precisa
 especificar janelas sem sobreposição, limites de inclusão/observação,
 tratamento de reorg, chave XMR e campos de consenso completos; depois deve
 enumerar escalonamentos adversariais e testar as transações nos daemons.
+
+O modelo finito [`arbitration_model.py`](arbitration_model.py) encontra a
+mesma falha na alternativa ingênua: claim honesto divulgado na altura 2 com
+atraso de 3 blocos perde o limite de claim na altura 4; refund entra na altura
+5 e a dona DOM já conhece as duas shares XMR. Com envio honesto até altura 1
+e uma **hipótese** de inclusão em até 3 blocos, o modelo não encontra essa
+corrida; um único atraso de 4 blocos volta a permiti-la. Três testes em
+[`test_arbitration_model.py`](test_arbitration_model.py) verificam ambos os
+casos e a exclusão das alturas. Isso mostra a dependência de liveness; não
+prova que DOM ou Monero oferecerão tal limite na rede real.
+
 Se a margem requerida ultrapassar a meta aproximada de 2–3 minutos, registrar
 isso como inviabilidade da meta sob essas hipóteses. Não esconder espera de
 maturidade XMR nem introduzir custódia, pré-funding obrigatório ou BTC.
