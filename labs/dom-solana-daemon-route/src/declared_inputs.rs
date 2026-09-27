@@ -30,6 +30,7 @@
 //! agree by construction, and says plainly that agreement is not authentication of the
 //! bundle's contents.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use dom_interopd::production_f6_authority_bundle_digest_v8;
@@ -155,6 +156,84 @@ pub fn create_parent_directories(state_dir: &Path, relatives: &[&str]) -> Result
             .parent()
             .ok_or_else(|| format!("{relative} has no parent inside the state directory"))?;
         owner_only::directory(parent)?;
+    }
+    verify_parent_chains(state_dir, relatives)
+}
+
+/// Check what `validate_parent_chain` checks, and name the path that fails.
+///
+/// The daemon walks from the state directory down to every path and requires each
+/// directory on the way to exist, to be a directory, to be owner-only and to be owned by
+/// the effective uid -- and it refuses all four the same way, with
+/// `InvalidStateAuthority` and no path. That refusal is unactionable: the first time it
+/// arrived it could have meant any of forty-six chains or the state directory itself.
+///
+/// So the same conditions are checked here, where the path is still in hand.
+pub fn verify_parent_chains(state_dir: &Path, relatives: &[&str]) -> Result<(), String> {
+    // The state directory must be canonical: `validate_state_dir` refuses a path whose
+    // `canonicalize` differs from itself, so a symlink anywhere above it is fatal.
+    let canonical = state_dir
+        .canonicalize()
+        .map_err(|error| format!("canonicalize {}: {error}", state_dir.display()))?;
+    if canonical != state_dir {
+        return Err(format!(
+            "the state directory must already be canonical: {} resolves to {}",
+            state_dir.display(),
+            canonical.display()
+        ));
+    }
+    // Every directory must be owned by the effective uid. Rather than reach for a libc
+    // call -- this crate forbids unsafe code -- the state directory's own owner is the
+    // reference: this process created it, so its uid IS the effective uid, and the
+    // daemon then checks that same directory against `geteuid` itself. A directory
+    // owned by anyone else therefore still fails here, by name.
+    let owner = owner_uid(state_dir)?;
+    owner_only_directory_is_valid(state_dir, owner)?;
+    for relative in relatives {
+        let mut current = state_dir.to_path_buf();
+        let path = state_dir.join(relative);
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("{relative} has no parent"))?;
+        let inside = parent
+            .strip_prefix(state_dir)
+            .map_err(|_| format!("{relative} is not inside the state directory"))?;
+        for component in inside.components() {
+            current.push(component);
+            owner_only_directory_is_valid(&current, owner)
+                .map_err(|error| format!("on the way to {relative}: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn owner_uid(path: &Path) -> Result<u32, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(std::fs::symlink_metadata(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?
+        .uid())
+}
+
+fn owner_only_directory_is_valid(path: &Path, owner: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("{} is a symlink", path.display()));
+    }
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode != DIRECTORY_MODE {
+        return Err(format!("{} is {mode:04o}, not 0700", path.display()));
+    }
+    if metadata.uid() != owner {
+        return Err(format!(
+            "{} is owned by {}, not by {owner}",
+            path.display(),
+            metadata.uid()
+        ));
     }
     Ok(())
 }

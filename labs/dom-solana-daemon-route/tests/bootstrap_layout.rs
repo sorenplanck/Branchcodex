@@ -48,13 +48,22 @@ fn identities() -> RouteIdentitiesV1 {
 /// Provision every input the layout requires, then write both manifests.
 fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     let provisioned = provision_all();
-    let root = provisioned.directory.path().to_path_buf();
+    // Canonical, because `validate_state_dir` refuses a state directory whose
+    // `canonicalize` differs from itself -- a symlink anywhere above it is fatal, and a
+    // temporary directory is reached through whatever `TMPDIR` happens to be.
+    let root = provisioned
+        .directory
+        .path()
+        .canonicalize()
+        .expect("a canonical state directory");
 
     // Parents first: `validate_parent_chain` walks from the state directory down to
     // every path and requires each directory on the way to exist and be owner-only --
     // including the parents of the managed paths it then demands be absent.
+    // This also verifies its own post-condition and names the path that fails, because
+    // the daemon refuses all four conditions the same way and mentions none of them.
     declared_inputs::create_parent_directories(&root, &Plan::path_relatives())
-        .expect("every parent directory");
+        .expect("every parent directory of every path in the layout");
     declared_inputs::create_contracts_transport_identity(
         &root,
         Plan::contracts_transport_identity_relative(),
@@ -91,6 +100,11 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
         b"an F6 authority bundle this crate did not build",
     )
     .expect("the F6 authority bundle");
+
+    // Re-verified after every writer has run: creating the contracts identity directory
+    // and the artifact files must not have left any chain invalid.
+    declared_inputs::verify_parent_chains(&root, &Plan::path_relatives())
+        .expect("every parent chain still valid after the inputs were written");
 
     let plan = provisioned
         .plan
