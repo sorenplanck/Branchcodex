@@ -67,6 +67,9 @@ solana-program-attestation = { path = "../../crates/adapters/solana-program-atte
 # the settlement done.
 solana-observer = { path = "../../crates/adapters/solana-observer" }
 solana-evidence = { path = "../../crates/adapters/solana-evidence" }
+# Turns an observed envelope into the neutral record the settlement layer
+# ingests, so the evidence this leg takes is evidence something can act on.
+solana-kaystra-records = { path = "../../crates/adapters/solana-kaystra-records" }
 # ── shared terms ────────────────────────────────────────────────────────────
 kaystra-core = { path = "../../crates/kaystra-core" }
 counterparty-api = { path = "../../crates/counterparty-api" }

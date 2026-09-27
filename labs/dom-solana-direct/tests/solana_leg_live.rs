@@ -46,12 +46,17 @@ use dom_solana_direct_lab::{
     leg::{EstablishedLegV1, LegPlanInputV1, SolanaLegV1},
     time_bounds::{AssumedLegDelaysV1, ClaimOrderV1, DomClockNetwork, RelativeDeadlineV1},
 };
-use kaystra_core::types::{FinalityPolicyV1, ParticipantId};
+use kaystra_core::{
+    settlement_engine::ChainRecordV1,
+    state::EvidenceRefV1,
+    types::{ChainId, FinalityPolicyV1, ParticipantId},
+};
 use sha2::{Digest, Sha256};
 use solana_evidence::{
     SolanaClaimEvidenceV1, SolanaEvidenceBodyV1, SolanaEvidenceEnvelopeV1, SolanaFundingEvidenceV1,
     SolanaRefundEvidenceV1,
 };
+use solana_kaystra_records::{claim_record, funding_record, refund_record};
 use solana_observer::{ObservationKind, ObserverError, SolanaSettlementObserver};
 use solana_profile::{SolanaAdapterProfileV1, SolanaNetwork};
 use solana_program_attestation::{
@@ -451,6 +456,47 @@ fn observe_when_final(
     }
 }
 
+/// The neutral record the observed evidence becomes, and the checks that make it
+/// a record about THIS settlement.
+///
+/// Evidence a settlement layer cannot ingest is evidence about nothing, so the
+/// conversion is part of observing, not a separate nicety. The converters
+/// re-validate the envelope and re-require its binding to the expected settlement
+/// and terms, so a mismatch is refused here rather than carried forward. What
+/// comes back is pinned to a block anchor, which is what makes a later reorg
+/// detectable at all.
+fn assert_record_pins_evidence(
+    record: &ChainRecordV1,
+    leg: &SolanaLegV1,
+    signature: SolanaSignature,
+    slot: u64,
+) -> EvidenceRefV1 {
+    let evidence = match record {
+        ChainRecordV1::Funding { evidence }
+        | ChainRecordV1::Claim { evidence }
+        | ChainRecordV1::Refund { evidence } => *evidence,
+        ChainRecordV1::Reorg { .. } => panic!("a settlement step became a reorg record"),
+    };
+    assert_eq!(
+        evidence.chain_id.0, leg.terms().counterparty_leg.chain_id.0,
+        "the record names a different chain than the terms froze"
+    );
+    assert_eq!(
+        evidence.tx_id, signature.digest32(),
+        "the record points at a different transaction"
+    );
+    assert_eq!(evidence.block_height, slot);
+    assert_ne!(
+        evidence.block_anchor, [0; 32],
+        "evidence with no block anchor cannot be reorg-checked"
+    );
+    evidence
+}
+
+fn solana_chain_id(leg: &SolanaLegV1) -> ChainId {
+    leg.terms().counterparty_leg.chain_id
+}
+
 fn funding_evidence(envelope: &SolanaEvidenceEnvelopeV1) -> &SolanaFundingEvidenceV1 {
     match &envelope.body {
         SolanaEvidenceBodyV1::Funding(body) => body,
@@ -585,6 +631,15 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
         &funding.program_data_hash,
         funding.amount,
     );
+    let funding_chain_record = funding_record(
+        solana_chain_id(&accepted),
+        funding,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the funding evidence converts to a neutral record");
+    let funding_ref =
+        assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
     let funded = escrow_state(&fixture.cluster, &accepted);
     assert_eq!(funded.status, solana_escrow_wire::EscrowStatus::Funded);
     assert_eq!(funded.funded_amount, LAMPORTS);
@@ -683,6 +738,19 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
         claim.amount,
     );
     assert_eq!(claim.revealed_secret_be, opening.escrow_claim_bytes());
+    let claim_chain_record = claim_record(
+        solana_chain_id(&accepted),
+        claim,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the claim evidence converts to a neutral record");
+    let claim_ref =
+        assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_ne!(
+        claim_ref.tx_id, funding_ref.tx_id,
+        "funding and claim must not resolve to the same transaction"
+    );
 
     // The DOM output is spendable and the reserve cannot be spent twice.
     let onward_height = runtime.block_on(dom.prove_onward_spend_and_reject_double_spend());
@@ -707,6 +775,8 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
             "claim_instruction_index": claim.instruction_index,
             "claim_terminal_state_hash": hex32(&claim.terminal_state_hash),
             "claim_vault_hash": hex32(&claim.vault_hash),
+            "funding_record_block_anchor": hex32(&funding_ref.block_anchor),
+            "claim_record_block_anchor": hex32(&claim_ref.block_anchor),
             "program_code_hash_bound": hex32(&fixture.program.code_hash),
             "program_code_padding_bytes": fixture.program.padding_bytes,
             "programdata_account_sha256_reported_by_harness":
@@ -823,6 +893,15 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         &funding.program_data_hash,
         funding.amount,
     );
+    let funding_chain_record = funding_record(
+        solana_chain_id(&accepted),
+        funding,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the funding evidence converts to a neutral record");
+    let funding_ref =
+        assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
     assert_eq!(
         escrow_state(&fixture.cluster, &accepted).status,
         solana_escrow_wire::EscrowStatus::Funded
@@ -886,6 +965,16 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         claim.amount,
     );
     assert_eq!(claim.revealed_secret_be, opening.escrow_claim_bytes());
+    let claim_chain_record = claim_record(
+        solana_chain_id(&accepted),
+        claim,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the claim evidence converts to a neutral record");
+    let claim_ref =
+        assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_ne!(claim_ref.tx_id, funding_ref.tx_id);
 
     // ── the DOM side reads the scalar off the cluster, two ways ─────────────
     let from_state = accepted
@@ -1053,6 +1142,15 @@ fn solana_live_both_refunds_return_each_side() {
         &funding.program_data_hash,
         funding.amount,
     );
+    let funding_chain_record = funding_record(
+        solana_chain_id(&accepted),
+        funding,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the funding evidence converts to a neutral record");
+    let funding_ref =
+        assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
 
     // Build the adapted DOM claim now, while the shares are still available. It
     // is valid; it must still lose to the confirmed refund below.
@@ -1131,6 +1229,16 @@ fn solana_live_both_refunds_return_each_side() {
         &refund.program_data_hash,
         refund.amount,
     );
+    let refund_chain_record = refund_record(
+        solana_chain_id(&accepted),
+        refund,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the refund evidence converts to a neutral record");
+    let refund_ref =
+        assert_record_pins_evidence(&refund_chain_record, &accepted, refund_signature, refund.slot);
+    assert_ne!(refund_ref.tx_id, funding_ref.tx_id);
 
     // ── the DOM refund is refused before its height and accepted after ─────
     runtime.block_on(dom.assert_height_refund_locked());
@@ -1158,6 +1266,7 @@ fn solana_live_both_refunds_return_each_side() {
             "funding_observed_slot": funding.slot,
             "refund_observed_slot": refund.slot,
             "refund_terminal_state_hash": hex32(&refund.terminal_state_hash),
+            "refund_record_block_anchor": hex32(&refund_ref.block_anchor),
             "timing_bounds_proven": false,
         }),
     );

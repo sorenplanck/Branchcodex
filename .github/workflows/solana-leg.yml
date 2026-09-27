@@ -80,7 +80,8 @@ jobs:
             -p solana-route-secret -p solana-session-init -p solana-setup-store \
             -p solana-program-client -p solana-transaction-builder -p solana-rpc \
             -p solana-observation-store -p solana-observer -p solana-secret-store \
-            -p solana-kaystra-bridge -p solana-kaystra-source -p solana-actuator \
+            -p solana-kaystra-bridge -p solana-kaystra-source -p solana-kaystra-records \
+            -p solana-actuator \
             -p solana-rpc-pool -p solana-program-attestation -p solana-evidence \
             -p f8-solana-model -p f8-solana-e2e
 
