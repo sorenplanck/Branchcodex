@@ -117,12 +117,64 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     (provisioned.directory, root)
 }
 
+/// Every entry under the root, with its mode and owner.
+///
+/// `InvalidStateAuthority` covers four conditions across the state directory and every
+/// parent chain and names none of them. The crate's own verification replicates all four
+/// and passes, so when the daemon still refuses, the only thing left to do is look at
+/// what is actually on disk -- and looking is cheaper than another round of reasoning.
+fn tree(root: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    fn walk(path: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        let mut sorted: Vec<_> = entries.filter_map(Result::ok).collect();
+        sorted.sort_by_key(std::fs::DirEntry::path);
+        for entry in sorted {
+            let entry_path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+                continue;
+            };
+            out.push(format!(
+                "  {:04o} uid={} {}{}",
+                metadata.permissions().mode() & 0o7777,
+                metadata.uid(),
+                entry_path
+                    .strip_prefix(root)
+                    .unwrap_or(&entry_path)
+                    .display(),
+                if metadata.is_dir() { "/" } else { "" }
+            ));
+            if metadata.is_dir() {
+                walk(&entry_path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let metadata = std::fs::symlink_metadata(root).expect("the root");
+    out.push(format!(
+        "  {:04o} uid={} . (root {})",
+        metadata.permissions().mode() & 0o7777,
+        metadata.uid(),
+        root.display()
+    ));
+    walk(root, root, &mut out);
+    out.join("\n")
+}
+
 /// The milestone: the daemon validates the whole directory.
 #[test]
 fn the_daemon_accepts_the_layout_this_crate_provisions() {
     let (_directory, root) = prepared();
     let bootstrap = load_production_bootstrap_v11(&root, ProductionBootstrapModeV1::Create)
-        .expect("the daemon validates the state directory, both manifests and the whole layout");
+        .unwrap_or_else(|error| {
+            panic!(
+                "the daemon refused the state directory, the manifests or the layout:                  {error:?}\n{}",
+                tree(&root)
+            )
+        });
 
     // Resolved against the daemon's own layout rather than against this crate's list:
     // role and path agree after a real load, not only in a table.
@@ -140,7 +192,7 @@ fn the_daemon_accepts_the_layout_this_crate_provisions() {
 fn authentication_reaches_the_two_party_ceremony_and_stops_there() {
     let (_directory, root) = prepared();
     let bootstrap = load_production_bootstrap_v11(&root, ProductionBootstrapModeV1::Create)
-        .expect("the validated bootstrap");
+        .unwrap_or_else(|error| panic!("the validated bootstrap: {error:?}\n{}", tree(&root)));
 
     let refusal = load_authenticated_production_inputs_v1(&bootstrap, NOW_SECONDS)
         .err()
