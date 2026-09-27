@@ -50,11 +50,21 @@ is the reason the hub is a hub.
 
 **Level 2 — solver-blind puzzles, A²L+ shape.** Removes the solver's *own* ability
 to link the two legs it serves. The record restricts its first version to routes
-whose two legs share a curve. A route containing this Solana leg does not qualify
-unless its other leg is also Solana: DOM signs on secp256k1, this leg's condition
-is verified on ed25519, and the counterparty curves of the two legs are what the
-restriction is about. So Level 2 is not a near-term property of a BTC↔DOM↔SOL
-route, and saying so now is cheaper than discovering it later.
+whose two legs share a curve, and the curve in question is the one each leg's
+counterparty lock is verified on, not DOM's. DOM signs on secp256k1 throughout;
+this leg's condition is checked on ed25519 by the curve25519 syscall.
+
+So a route qualifies when both counterparty locks sit on the same curve — this leg
+paired with a Monero leg would, since `CrossCurveSharedSpend` opens an ed25519
+spend key, and a Bitcoin leg paired with an EVM leg would, both being secp256k1 —
+and does not when they differ, which is the case for BTC↔DOM↔SOL. Level 2 is
+therefore not a near-term property of that particular route, and saying so now is
+cheaper than discovering it later.
+
+On the Bitcoin side this document claims only what its own sources say:
+`crates/adapters/btc` describes a Taproot contract with a MuSig2 2-of-2 adaptor,
+which is secp256k1. Which `LockMechanism` byte that leg carries is not recorded in
+those crates and is not asserted here; it belongs to whoever owns that leg.
 
 ## 2. What this leg must accept in order to participate
 
