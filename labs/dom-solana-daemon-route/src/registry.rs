@@ -163,7 +163,7 @@ pub fn manifest(
     solana: &SolanaChainFactsV1,
 ) -> Result<RegistryManifestV1, String> {
     let genesis = configured_genesis_hash_for_network_magic(NETWORK_MAGIC_REGTEST)
-        .ok_or_else(|| "canonical DOM regtest genesis".to_owned())?;
+        .map_err(|error| format!("canonical DOM regtest genesis: {error:?}"))?;
     let dom_chain = ChainId(*derive_chain_id(NETWORK_MAGIC_REGTEST, &genesis).as_bytes());
     let dom_asset = asset_id(b"DOM-SOLANA-DAEMON-ROUTE/DOM-NATIVE/V1\0", &dom_chain.0);
     let solana_chain = ChainId(solana.genesis_hash);
