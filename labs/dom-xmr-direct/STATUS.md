@@ -51,6 +51,20 @@ sintética; inclusão em `monerod` e funding do output `DXA1` pelo nó DOM ainda
 são a próxima fronteira. A corrida de divulgação perto da mudança de fase
 continua exigindo cutoff honesto e uma hipótese explícita de inclusão.
 
+**O árbitro também atravessou um nó DOM Regtest real nos três caminhos.** Cada
+caso criou sua reserva, financiou e minerou o output `DXA1`, submeteu o gasto ao
+mempool e leu a transação final do bloco canônico. Claim foi aceito na última
+altura de sua janela; refund foi recusado cedo e aceito na altura seguinte;
+punish foi recusado durante claim e refund e aceito somente depois das duas
+janelas. A abertura extraída de cada transação canônica reconstruiu a chave XMR
+conjunta esperada, e o UTXO do árbitro ficou gasto.
+
+Os três testes isolados passaram em **151,52 s**. Isso valida a execução do lado
+DOM em nó real, inclusive os limites de altura e a recuperação das shares. A
+reserva XMR continua sintética neste teste. Ainda faltam persistir as ofertas
+pré-assinadas dos três caminhos e executar a contraparte contra `monerod` antes
+de chamar o ensaio de ponta a ponta DOM↔XMR.
+
 ## Evidência obtida
 
 **Prioridade atual: corrigir uma premissa de segurança refutada.**
