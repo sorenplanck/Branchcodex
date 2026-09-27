@@ -114,12 +114,16 @@ enum PairOutcome {
     XmrFirstReinclude,
     XmrFirstNativeReplay,
     Abandon,
+    AbandonSolverRestart,
     ClaimWins,
     RefundWins,
     LateClaimLeakAudit,
 }
 
 impl PairOutcome {
+    fn abandons(self) -> bool {
+        matches!(self, Self::Abandon | Self::AbandonSolverRestart)
+    }
     fn resumes(self) -> bool {
         matches!(
             self,
@@ -401,6 +405,15 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 .as_nanos()
         ));
     fs::create_dir(&root).expect("fresh experiment directory");
+    if pair_outcome == Some(PairOutcome::AbandonSolverRestart) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::File::open(&root).unwrap().sync_all().unwrap();
+        fs::File::open(root.parent().unwrap())
+            .unwrap()
+            .sync_all()
+            .unwrap();
+    }
     // Persist completed phases even when the outer timeout prevents a final
     // report. Only public measurements go here, never keys or capsule bodies.
     let checkpoint = |phase: &str, evidence: serde_json::Value| {
@@ -716,7 +729,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     let direct_owner_wallet = direct_funding_source
         .as_ref()
         .map(|(spend, view, _, _, _)| (spend.clone(), view.clone()));
-    let (recipient_spend, recipient_view) = if pair_outcome == Some(PairOutcome::Abandon) {
+    let (recipient_spend, recipient_view) = if pair_outcome.is_some_and(PairOutcome::abandons) {
         direct_owner_wallet.as_ref().unwrap().clone()
     } else {
         (recipient_spend, recipient_view)
@@ -790,6 +803,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     } else {
         None
     };
+    let solver_restart_bridge = (pair_outcome == Some(PairOutcome::AbandonSolverRestart))
+        .then(|| direct_recovery_config.as_ref().unwrap().0.clone());
     let mut direct_recovery = direct_recovery_config.map(|(bridge, squarings)| {
         let mut reservation = Sha256::new();
         reservation.update(b"DXP1/XMR-direct-recovery/owned-offline-fakechain/v0");
@@ -804,6 +819,9 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             direct_recovery_bridge::DirectPublicCapsule::prepare_with_work(&bridge, material, squarings)
         };
         let link = XmrDirectRecoveryLink::new(&roster, ids[1], capsule.context(), capsule.public_key(), capsule.binding()).unwrap();
+        if solver_restart_bridge.is_some() {
+            capsule.persist(&root.join("direct-capsule.record"));
+        }
         println!("Direct XMR capsule verified; producer exited; funding isolated test reserve (no timing admission)");
         (roster, link, capsule)
     });
@@ -979,7 +997,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             }),
         )
     } else if let Some((roster, link, capsule)) =
-        if pair_outcome.is_none() || pair_outcome == Some(PairOutcome::Abandon) {
+        if pair_outcome.is_none() || pair_outcome.is_some_and(PairOutcome::abandons) {
             direct_recovery.take()
         } else {
             None
@@ -999,14 +1017,43 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let recovery_start = Instant::now();
         let binding = capsule.binding();
         checkpoint("xmr_recovery_started", json!({}));
+        let capsule_path = root.join("direct-capsule.record");
+        let open_capsule = move || {
+            let mut restarted = json!({});
+            let capsule = if let Some(binary) = solver_restart_bridge {
+                let original_receipt = capsule.received_unix_seconds();
+                let original_context = capsule.context();
+                let original_public = capsule.public_key();
+                let before = fs::read(&capsule_path).unwrap();
+                restarted = capsule.kill_for_restart();
+                let restored = direct_recovery_bridge::DirectPublicCapsule::restore(
+                    &binary,
+                    &capsule_path,
+                    binding,
+                );
+                assert_eq!(restored.received_unix_seconds(), original_receipt);
+                assert_eq!(restored.context(), original_context);
+                assert_eq!(restored.public_key(), original_public);
+                assert_eq!(fs::read(&capsule_path).unwrap(), before);
+                restarted["capsule_record_persisted_before_funding"] = json!(true);
+                restarted["capsule_record_unchanged_after_restart"] = json!(true);
+                restored
+            } else {
+                capsule
+            };
+            let (opening, mut details) = capsule.open();
+            details
+                .as_object_mut()
+                .unwrap()
+                .extend(restarted.as_object().unwrap().clone());
+            (opening, details)
+        };
         let (opening, mut details) = if paired_height_miner.is_some() {
             // A chain keeps progressing while a participant recovers XMR.
             // Blocking IPC must not freeze the fixture's native DOM miner.
-            tokio::task::spawn_blocking(move || capsule.open())
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(open_capsule).await.unwrap()
         } else {
-            capsule.open()
+            open_capsule()
         };
         assert!(link
             .recover_after_opening(
@@ -1197,7 +1244,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 .extend(evidence.as_object().unwrap().clone());
         }
         if let Some(state) = paired.take() {
-            assert_eq!(pair_outcome, Some(PairOutcome::Abandon));
+            assert!(pair_outcome.is_some_and(PairOutcome::abandons));
             let before = state.dom.height_refund_transaction().to_bytes().unwrap();
             checkpoint(
                 "xmr_refund_outputs_spent",
@@ -2756,6 +2803,7 @@ async fn main() {
                 || arg == "direct-pair-xmr-first-reinclude"
                 || arg == "direct-pair-xmr-first-native-replay"
                 || arg == "direct-pair-abandon"
+                || arg == "direct-pair-abandon-solver-restart"
                 || arg == "direct-pair-claim-wins"
                 || arg == "direct-pair-refund-wins"
                 || arg == "direct-pair-late-claim-audit" =>
@@ -2790,6 +2838,8 @@ async fn main() {
                 PairOutcome::RefundWins
             } else if arg == "direct-pair-late-claim-audit" {
                 PairOutcome::LateClaimLeakAudit
+            } else if arg == "direct-pair-abandon-solver-restart" {
+                PairOutcome::AbandonSolverRestart
             } else {
                 PairOutcome::Abandon
             };

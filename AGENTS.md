@@ -30,6 +30,10 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   observadas eram durante os testes no GitHub. Medir a execução do mecanismo
   separadamente de compilação, preparação e confirmações; não apresentar o
   tempo de uma simulação como tempo de uma troca real.
+- Esclarecimento mais recente: "pode exeder um pouco 2 min sem problemas".
+  Tratar dois minutos como meta com alguma margem; não inventar um novo teto
+  exato aceito. Essa tolerância de duração não altera por si só as hipóteses
+  de segurança ou o prazo original de uma operação já financiada.
 - Preparação antecipada de fundos e uma camada adicional de confiança ainda
   não foram aceitas pelo operador; são hipóteses de pesquisa, não requisitos
   aprovados ou justificativas para esconder espera.
@@ -613,6 +617,47 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   divulgação, restart completo, orçamento global, participantes independentes,
   fork-choice/ABA, provas temporais/criptográficas e dom-interopd permanecem
   abertos. Um resultado em 172 s não prova repetibilidade nem encerra missão.
+
+- Checkpoint local da cápsula em src/capsule_checkpoint.rs: formato v2,
+  setup/oferta opacos, contexto/ponto/binding aprovado/recebimento original/
+  dificuldade/medições, checksum e parser limitado. Arquivo 0600/create_new/
+  fsync arquivo+diretório, nenhum reparo automático. Caller estabelece parent
+  durável; novo cenário cria root 0700 e sincroniza também sua entrada no pai.
+  Não é aceitação criptográfica; helper novo revalida setup/prova completos.
+  Não protege metadados contra escritor local hostil/rollback. Payload inclui
+  números Go arbitrariamente grandes: NÃO parsear toda oferta com serde_json
+  Value só para obter setup. Formato v1 da tentativa falha não é migrado.
+- Modo direct-pair-abandon-solver-restart persiste cápsula ANTES dos depósitos,
+  mata Go verificador esperando pedido de abertura e restaura outro só do
+  registro + binding aprovado. Sem produtor/prova novos, recebe a mesma share,
+  preserva recebimento e janela. Pai Rust, nós, roster/share local continuam
+  vivos; não é restart completo, retomada de solve parcial ou dom-interopd.
+  Tempo restaurado usa segundo original floor (até 1s extra no relatório),
+  não cria primeira divulgação autenticada ou defesa de rollback de relógio.
+- Primeira tentativa PID 1057817 exit 101 em 76,667 s após os dois depósitos
+  e kill do Go antigo: Value recusou inteiro fora de faixa. Nenhuma abertura
+  ou nova verificação. Evidência *ABANDON-SOLVER-RESTART-INITIAL-FAILURE-*.
+  Correção v2 passou 35 testes Rust, Clippy all-targets -D warnings e build;
+  CAPSULE-COLD-RESTART-CHECKS.json. Grupo anterior encerrado.
+- Corrigido PID 1062947 terminou exit 0: total 194,762 s; revalidação setup
+  40,279 s, prova 8,989 s, restauração 49,304 s, abertura 35,939 s; recuperação
+  INTEGRAL 85,247 s. Falha nas metas de 180 s totais e 65 s de custo assumido.
+  XMR devolvido em 1790477485 antes do limite original 1790477488 porque
+  começou cedo; NÃO valida o início máximo admitido. DOM refund travado219,
+  incluído220/gasto221; outputs XMR gastos. Registro original inalterado.
+  PIDs Go 1063596 (SIGKILL) /1063912 (novo). Hashes/PIDs/grupo conferidos;
+  session70530 exit0, nenhum processo desta etapa pendente. Evidências
+  DIRECT-PAIR-ABANDON-SOLVER-RESTART-* e CAPSULE-COLD-RESTART-VERIFICATION.json;
+  notas CAPSULE-COLD-RESTART.md. Preservar também primeira falha e variação
+  de preparação individual38,766s (anterior19,399s), sem repetir por sorte.
+- Próximo: reduzir recomputação sequencial de setup na restauração mantendo
+  vínculo à oferta APROVADA antes do funding. Avaliar evidência/cache de estado
+  aceito sob a confiança local existente; não aceitar flag de peer dizendo
+  "já verificado", confundir cache com prova remota, renovar divulgação ou
+  ampliar orçamento para tornar teste verde. A recuperação nova é funcional,
+  mas o orçamento temporal ainda não a cobre. Persistência de roster/share
+  local/solve parcial, preparação independente, limite global de quedas,
+  autenticação/provas criptográficas/temporais e dom-interopd continuam abertos.
 
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

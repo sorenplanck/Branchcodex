@@ -3,12 +3,13 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as G, edwards::EdwardsPoint, scalar::Scalar,
 };
+use dxp1_clsag_lab::capsule_checkpoint::CapsuleCheckpoint;
 use dxp1_clsag_lab::xmr_recovery::XmrDirectRecoveryMaterial;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -75,6 +76,9 @@ pub struct DirectPublicCapsule {
     generation_seconds: f64,
     verification_seconds: f64,
     squarings: u64,
+    payload: String,
+    setup: String,
+    restoration_report: Value,
 }
 
 impl DirectPublicCapsule {
@@ -173,6 +177,108 @@ impl DirectPublicCapsule {
             generation_seconds,
             verification_seconds,
             squarings,
+            payload: payload.to_owned(),
+            setup: setup.to_owned(),
+            restoration_report: json!({}),
+        }
+    }
+
+    /// Call after verification and BEFORE either shared reserve is funded.
+    #[allow(dead_code)]
+    pub fn persist(&self, path: &Path) {
+        CapsuleCheckpoint {
+            context: self.expected_context,
+            public: self.expected_public.compress().to_bytes(),
+            binding: self.binding,
+            received_unix_seconds: self.received_unix_seconds,
+            squarings: self.squarings,
+            preparation_seconds: [
+                self.setup_seconds,
+                self.generation_seconds,
+                self.verification_seconds,
+            ],
+            payload: self.payload.clone(),
+            setup: self.setup.clone(),
+        }
+        .write_new(path)
+        .unwrap();
+    }
+
+    /// Abruptly terminate ONLY this verifier. This does not restart the Rust
+    /// supervisor, native nodes, roster or signing material.
+    #[allow(dead_code)]
+    pub fn kill_for_restart(mut self) -> Value {
+        use std::os::unix::process::ExitStatusExt;
+        let pid = self.process.0.id();
+        self.process.0.kill().unwrap();
+        let status = self.process.0.wait().unwrap();
+        assert_eq!(status.signal(), Some(9));
+        json!({"old_public_solver_pid":pid,"old_public_solver_signal":9})
+    }
+
+    /// Rebuild from the immutable record and approved link binding. Repeats
+    /// all setup/proof checks; no trusted "already verified" shortcut.
+    #[allow(dead_code)]
+    pub fn restore(binary: &Path, path: &Path, expected_binding: [u8; 32]) -> Self {
+        let began = Instant::now();
+        let saved = CapsuleCheckpoint::read(path, expected_binding).unwrap();
+        let setup = &saved.setup;
+        let (process, mut writer, mut reader) = spawn(binary, "direct-prepare");
+        let pid = process.0.id();
+        send(
+            &mut writer,
+            &json!({"setup":setup,"context":saved.context,
+            "public":saved.public,"squarings":saved.squarings}),
+        );
+        let prepared = frame(&mut reader);
+        assert_eq!(prepared["result"], "setup_ready");
+        assert_eq!(
+            prepared["setup_binding"],
+            hex(&Sha256::digest(setup.as_bytes()))
+        );
+        assert_eq!(prepared["squarings"], saved.squarings);
+        assert_eq!(prepared["setup_verifications"], 1);
+        send(&mut writer, &json!({"payload":saved.payload}));
+        let ready = frame(&mut reader);
+        assert_eq!(ready["result"], "ready");
+        assert_eq!(ready["offer_binding"], hex(&saved.binding));
+        assert_eq!(ready["context"], json!(saved.context));
+        assert_eq!(ready["public"], json!(saved.public));
+        assert_eq!(ready["squarings"], saved.squarings);
+        assert_eq!(ready["public_verifier_no_share_secret"], true);
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .checked_sub(Duration::from_secs(saved.received_unix_seconds))
+            .expect("clock predates original capsule receipt");
+        let received_at = Instant::now().checked_sub(elapsed).unwrap();
+        let restoration_report = json!({
+            "public_solver_restored_from_record":true,"restored_public_solver_pid":pid,
+            "restoration_seconds":began.elapsed().as_secs_f64(),
+            "restoration_setup_verification_seconds":seconds(&prepared,"setup_verification_seconds"),
+            "restoration_proof_verification_seconds":seconds(&ready,"proof_verification_seconds"),
+            "original_receipt_preserved":true,"restoration_repeats_full_public_verification":true,
+            "restored_elapsed_uses_original_floor_second":true,"new_producer_or_proof_generation":false,
+            "full_coordinator_restarted":false,
+        });
+        Self {
+            binding: saved.binding,
+            expected_context: saved.context,
+            expected_public: curve25519_dalek::edwards::CompressedEdwardsY(saved.public)
+                .decompress()
+                .unwrap(),
+            process,
+            writer,
+            reader,
+            received_at,
+            received_unix_seconds: saved.received_unix_seconds,
+            setup_seconds: saved.preparation_seconds[0],
+            generation_seconds: saved.preparation_seconds[1],
+            verification_seconds: saved.preparation_seconds[2],
+            squarings: saved.squarings,
+            payload: saved.payload,
+            setup: saved.setup,
+            restoration_report,
         }
     }
 
@@ -197,7 +303,7 @@ impl DirectPublicCapsule {
 
     #[allow(dead_code)]
     pub fn preparation_report(&self) -> Value {
-        json!({
+        let mut report = json!({
             "setup_verification_seconds":self.setup_seconds,
             "proof_generation_seconds":self.generation_seconds,
             "proof_verification_seconds":self.verification_seconds,
@@ -206,7 +312,12 @@ impl DirectPublicCapsule {
             "offer_received_elapsed_seconds":self.received_at.elapsed().as_secs_f64(),
             "setup_verified_before_offer":true,"producer_exited_before_opening":true,
             "public_verifier_no_share_secret":true,"exact_capsule_binding_checked":true,
-        })
+        });
+        report
+            .as_object_mut()
+            .unwrap()
+            .extend(self.restoration_report.as_object().unwrap().clone());
+        report
     }
 
     #[allow(dead_code)]
@@ -244,6 +355,9 @@ impl DirectPublicCapsule {
             generation_seconds,
             verification_seconds,
             squarings,
+            payload: _,
+            setup: _,
+            restoration_report,
         } = self;
         let elapsed_since_offer = received_at.elapsed().as_secs_f64();
         let started = Instant::now();
@@ -266,7 +380,7 @@ impl DirectPublicCapsule {
         assert_eq!(closed["completed"], 1);
         assert_eq!(closed["offer_binding"], hex(&binding));
         assert!(process.0.wait().unwrap().success());
-        let report = json!({
+        let mut report = json!({
             "setup_verification_seconds":setup_seconds, "proof_generation_seconds":generation_seconds,
             "proof_verification_seconds":verification_seconds, "opening_seconds":solve_seconds,
             "opening_session_seconds":started.elapsed().as_secs_f64(),
@@ -277,6 +391,10 @@ impl DirectPublicCapsule {
             "rust_ed25519_point_checked":true, "openings":1,
             "squarings":squarings,
         });
+        report
+            .as_object_mut()
+            .unwrap()
+            .extend(restoration_report.as_object().unwrap().clone());
         (scalar, report)
     }
 }

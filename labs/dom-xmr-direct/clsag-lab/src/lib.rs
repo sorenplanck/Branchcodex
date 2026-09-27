@@ -25,6 +25,7 @@ use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod claim_resume;
+pub mod capsule_checkpoint;
 pub mod operation_checkpoint;
 #[cfg(unix)]
 pub mod counterpart_delivery;

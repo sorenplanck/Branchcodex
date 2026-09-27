@@ -1,0 +1,9 @@
+{
+  "exit_code": 101,
+  "wall_seconds": 76.66676607599948,
+  "phase": "after both deposits and old Go verifier termination, before fresh verifier setup",
+  "reason": "Rust serde_json::Value cannot parse all arbitrary-precision proof integers merely to extract setup",
+  "full_reverification_started": false,
+  "opening_exercised": false,
+  "log": "target/abandon-solver-restart-native-1790477024603273431.log"
+}

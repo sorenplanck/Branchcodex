@@ -13,6 +13,32 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Verificador da cápsula restaurado após queda; custo excedeu o orçamento
+de recuperação do modelo.** O operador aceita alguma margem além de dois
+minutos, sem definir novo teto exato. Essa tolerância não renova os prazos de
+segurança de operações já financiadas.
+Novo modo `direct-pair-abandon-solver-restart` persiste setup/oferta/contexto/
+ponto/recebimento original antes dos dois depósitos. Depois encerra o Go
+verificador, restaura outro do arquivo e repete setup/prova/abertura. Rust,
+nós, roster e share local continuam vivos; não é restart integral.
+
+Primeira tentativa falhou após os depósitos porque o decoder JSON genérico
+Rust não suporta os inteiros grandes da prova; preservada em
+`clsag-lab/DIRECT-PAIR-ABANDON-SOLVER-RESTART-INITIAL-FAILURE-*`. Formato v2
+passa setup/oferta como strings opacas ao Go, que exige vínculo exato entre
+ambos. Passaram 35 testes Rust, Clippy e build.
+
+Ensaio corrigido PID 1062947: devoluções DOM/XMR e gastos posteriores passaram,
+total **194,762 s**; restauração **49,304 s** e recuperação completa **85,247 s**.
+Ultrapassa 180 s totais e os 65 s assumidos para recuperar. A devolução XMR
+precedeu o limite absoluto por três segundos porque começou cedo; isso NÃO
+valida começar no último instante permitido. Verificação do setup na retomada
+consumiu 40,279 s. Registros/prazos preservados, fontes/binário conferidos,
+processos encerrados. Notas e próximos passos em
+`clsag-lab/CAPSULE-COLD-RESTART.md`. Reduzir esse custo exige preservar a
+fronteira entre primeira aceitação e restauração de estado anteriormente
+aceito; não retirar verificações por um flag externo ou aumentar o prazo.
+
 **Republicação inicial por worker validada nativamente após reduzir o custo
 da verificação; primeira falha preservada.** O novo caminho restaura os bytes e a exposição,
 exige registro histórico da obrigação e consulta as duas cadeias antes de
