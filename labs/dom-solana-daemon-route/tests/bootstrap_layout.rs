@@ -173,7 +173,7 @@ fn tree(root: &std::path::Path) -> String {
 /// building the directory in stages and loading after each one.
 fn staged_report() -> String {
     let mut lines = Vec::new();
-    for stage in 0..4 {
+    for stage in 0..5 {
         let directory = tempfile::tempdir().expect("a working directory");
         let root = directory
             .path()
@@ -199,6 +199,37 @@ fn staged_report() -> String {
                 Plan::contracts_budget_policy_relative(),
             ] {
                 declared_inputs::write_dom_wallet(&root, relative, &[0x11; 8])
+                    .expect("an input file");
+            }
+        }
+        // Stage four adds every remaining declared input as filler, so the layout loop
+        // gets past every InputFile role and reaches the managed ones. If four is
+        // accepted and the full directory is not, the difference is what provision_all
+        // writes and nothing else.
+        if stage >= 4 {
+            declared_inputs::place_contracts_bootstrap(
+                &root,
+                Plan::contracts_bootstrap_relative(),
+                &vec![0x5c; declared_inputs::CONTRACTS_BOOTSTRAP_BYTES],
+            )
+            .expect("the Contracts bootstrap");
+            declared_inputs::write_f6_authority_bundle(
+                &root,
+                Plan::f6_v8_relative(dom_interopd::ProductionF6PathRoleV8::AuthorityBundleV7),
+                b"filler",
+            )
+            .expect("the F6 bundle");
+            for role in [
+                ProductionPathRoleV1::RegistryStore,
+                ProductionPathRoleV1::RegistryAuthorities,
+                ProductionPathRoleV1::UpstreamTerms,
+                ProductionPathRoleV1::DownstreamTerms,
+                ProductionPathRoleV1::ParticipantBindings,
+                ProductionPathRoleV1::RelayRoster,
+                ProductionPathRoleV1::TimePolicy,
+                ProductionPathRoleV1::TimeEvidence,
+            ] {
+                declared_inputs::write_dom_wallet(&root, Plan::relative(role), b"filler")
                     .expect("an input file");
             }
         }
