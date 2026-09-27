@@ -99,7 +99,10 @@ impl LiveEnvironment {
                 })
             });
         root["schema"] = serde_json::json!("DOM-SOLANA-LIVE-CAMPAIGN-V1");
-        root["status"] = serde_json::json!("running");
+        // Per-scenario `status` fields carry each outcome; the authoritative
+        // verdict for the campaign as a whole is the test binary's exit status,
+        // recorded by the harness in harness.json.
+        root["status"] = serde_json::json!("recorded");
         root["cluster"] = serde_json::json!({
             "rpc_url": self.rpc_url,
             "genesis": self.genesis.to_base58(),
@@ -114,8 +117,25 @@ impl LiveEnvironment {
             "The DOM chain is regtest with its own timestamp tolerance; the schedule \
              arithmetic is exercised, not a mainnet block interval.",
         ]);
-        if let Some(map) = root["scenarios"].as_object_mut() {
-            map.insert(scenario.to_string(), outcome);
+        // `root["scenarios"]` inserts Null for a missing key, and
+        // `as_object_mut()` on Null is None -- so the first recording silently
+        // wrote nothing and the campaign of the first green run said
+        // `"scenarios": null`. Establish the object before inserting into it.
+        if !root["scenarios"].is_object() {
+            root["scenarios"] = serde_json::json!({});
+        }
+        let recorded = match root["scenarios"].as_object_mut() {
+            Some(map) => {
+                map.insert(scenario.to_string(), outcome);
+                map.len()
+            }
+            None => 0,
+        };
+        root["scenarios_recorded"] = serde_json::json!(recorded);
+        if let Some(map) = root.as_object_mut() {
+            // Written by the workflow before the harness ran; it is no longer
+            // true once a scenario has reported.
+            map.remove("reason");
         }
         if let Some(parent) = self.campaign.parent() {
             let _ = fs::create_dir_all(parent);
