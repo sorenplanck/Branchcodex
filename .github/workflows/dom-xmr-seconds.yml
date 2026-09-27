@@ -16,6 +16,7 @@ on:
       - 'crates/dom-scriptless-primitives/**'
       - 'crates/dom-serialization/**'
       - 'crates/dom-wallet/**'
+      - 'crates/dom-wire/**'
       - 'labs/dom-xmr-direct/**'
 
 permissions:
@@ -71,6 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --all -- --check
+          cargo test --locked --lib -j2
           cargo test --locked --test swap_arbiter_pair -j2
           cargo clippy --locked --lib --test swap_arbiter_pair --example arbiter_regtest --example arbiter_party -- -D warnings
           cargo build --locked --example arbiter_regtest --example arbiter_party

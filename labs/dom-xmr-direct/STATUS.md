@@ -126,6 +126,15 @@ também continua coordenada pelo processo de teste. Isso demonstra isolamento
 operacional das shares XMR, não participantes de produção totalmente
 independentes nem transporte autenticado em rede.
 
+A base do transporte remoto agora reutiliza o Noise XX do próprio DOM. Ela
+exige a chave estática exata do peer, vincula o handshake ao `chain_id` e ao
+magic da rede e vincula cada mensagem ao settlement com sequência monotônica.
+Mensagens maiores que um frame foram fragmentadas e remontadas sob AEAD. Testes
+recusaram identidade inesperada e sessão divergente e confirmaram duas mensagens
+ordenadas, inclusive uma com mais de dois frames. Essa camada ainda precisa ser
+ligada ao `arbiter_party`; o ponta a ponta financiado abaixo continua usando
+stdio local e não conta como teste entre duas máquinas.
+
 Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
 sincronizado no disco e ligado a papel, settlement, contexto e chain id. O
 arquivo permanece bloqueado enquanto o processo está vivo. Um teste dedicado
@@ -143,7 +152,7 @@ da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
 Claim levou **30,25 s**, Refund **34,09 s** e Punish **40,00 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
-mainnet. Ainda faltam separar a pré-assinatura DOM, autenticar o transporte,
+mainnet. Ainda faltam separar a pré-assinatura DOM, ligar o transporte Noise,
 testar reorg no ensaio cruzado e ativar com segurança as novas regras de
 consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.

@@ -44,6 +44,7 @@ pub mod recovery;
 pub mod recovery_challenge;
 #[cfg(unix)]
 pub mod release_journal;
+pub mod swap_transport;
 pub mod time_bounds;
 pub mod xmr_recovery;
 

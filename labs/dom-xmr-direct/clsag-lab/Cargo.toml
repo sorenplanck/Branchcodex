@@ -28,7 +28,10 @@ dom-serialization = { path = "../../../crates/dom-serialization" }
 dom-crypto = { path = "../../../crates/dom-crypto" }
 dom-scriptless-primitives = { path = "../../../crates/dom-scriptless-primitives" }
 dom-scriptless-bulletproof = { path = "../../../crates/dom-scriptless-bulletproof" }
+dom-wire = { path = "../../../crates/dom-wire" }
 xmr-dleq-sigma = { path = "../../../crates/adapters/xmr-dleq-sigma" }
+snow = "=0.9.6"
+tokio = { version = "=1.52.3", features = ["macros", "net", "rt", "time"] }
 
 [dev-dependencies]
 dom-node = { path = "../../../crates/dom-node" }
@@ -36,7 +39,6 @@ dom-config = { path = "../../../crates/dom-config" }
 dom-wallet = { path = "../../../crates/dom-wallet" }
 dom-rpc = { path = "../../../crates/dom-rpc" }
 monero-simple-request-rpc = { git = "https://github.com/kayabaNerve/monero-oxide", rev = "c8be5d3d1287669946a83fbfcb296ce2a8852e47" }
-tokio = { version = "=1.52.3", features = ["macros", "rt", "time"] }
 serde_json = "=1.0.151"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
 

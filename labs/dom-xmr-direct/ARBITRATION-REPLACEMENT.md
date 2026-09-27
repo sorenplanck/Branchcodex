@@ -101,9 +101,12 @@ Claim/Punish são concluídos pelo dono de XMR e o gasto XMR pelo dono de DOM;
 Refund inverte essas duas responsabilidades. A chave XMR reconstruída existe
 somente no processo que assina. A matriz força operações com o papel errado e
 exige sua rejeição; também recusa outra oferta válida que não corresponda ao
-digest autorizado dentro do contrato fixado. Ainda é IPC local sem autenticação
-de rede, persistência da share privada ou pré-assinatura DOM totalmente
-distribuída.
+digest autorizado dentro do contrato fixado. O ensaio financiado ainda usa IPC
+local, embora uma camada separada de transporte Noise XX já exija identidade
+estática conhecida, `chain_id`, rede, sessão e sequência exatos. Os controles
+cobrem peer errado, sessão divergente, ordem e fragmentação. Falta substituir o
+stdio do `arbiter_party` por esse canal e distribuir integralmente a
+pré-assinatura DOM.
 
 O processo de share agora possui retomada durável. Seu arquivo exclusivo `0600`
 é sincronizado, bloqueado e vinculado a papel/operação/chain; outro processo,
