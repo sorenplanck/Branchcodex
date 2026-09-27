@@ -13,6 +13,34 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Republicação inicial por worker validada nativamente após reduzir o custo
+da verificação; primeira falha preservada.** O novo caminho restaura os bytes e a exposição,
+exige registro histórico da obrigação e consulta as duas cadeias antes de
+republicar. Exposição sozinha não basta. Não cria assinatura nem renova prazo.
+Passaram 67 testes Rust, Clippy e build (`INITIAL-NATIVE-REPLAY-CHECKS.json`).
+O primeiro ensaio terminou com exit 101 em 99,989 s, após financiar as duas
+reservas de teste, antes da liberação das claims. A janela original expirou;
+nenhum worker de recuperação foi exercitado. Falha preservada no prefixo
+`clsag-lab/DIRECT-PAIR-XMR-FIRST-NATIVE-REPLAY-INITIAL-FAILURE-*`.
+Notas e limites: `clsag-lab/INITIAL-NATIVE-REPLAY.md`.
+
+A verificação em pares das 256 equações passou em 21 testes Go, no teste real
+com detector de corridas, vet e build. Controle da mesma prova: 14,646 s com
+um worker, 7,422 s com dois. Mantém o atraso sequencial e a janela original.
+Ensaio nativo PID 1018508 passou: total **172,394 s**, claims **78,972 s**,
+trecho de retirada/reinclusão **2,002 s**, republicação/restauração **0,452 s**.
+Registros idênticos, nenhum novo nonce/assinatura na republicação, outputs
+gastos e devolução conflitante rejeitada em 221. Fontes/binários conferidos,
+processos encerrados. Evidências `clsag-lab/*NATIVE-REPLAY-PARALLEL-*`,
+`INITIAL-NATIVE-REPLAY-VERIFICATION.json` e
+`recovery-audit/DIRECT-PARALLEL-VERIFICATION.md`.
+
+Esse cenário não abre a cápsula, não reinicia o coordenador completo e não
+comprova prazo repetível/segurança. Primeiro envio ainda é do supervisor;
+worker controla a republicação de transação com histórico. Preparação/solver
+duráveis antes de depósitos e divulgação, participantes independentes,
+limites criptográficos/temporais e integração ao dom-interopd seguem pendentes.
+
 **Cenário que falhava por HTTP 429 agora passou com o burst padrão 100.**
 O worker reutiliza o pai do cabeçalho como sugestão validada pelo scan nativo,
 que lê âncora, identidade, bloco e transações sob um chain lock. A segunda
@@ -35,8 +63,8 @@ Outputs gastos e refunds conflitantes rejeitados, fontes/binário conferidos,
 processos encerrados. Evidências `*-RPC-READ-RECOVERY-*`. Primeiro total acima
 de três minutos; segundo sem margem suficiente para garantia de prazo.
 
-Próximo avanço estrutural: retirar do supervisor a republicação da primeira
-transação já exposta, com estado durável e verificação nativa independente.
+Essa etapa anterior apontou a necessidade de retirar do supervisor a
+republicação da primeira transação, validada no novo cenário descrito acima.
 Possível exposição sozinha não prova divulgação nem autoriza uma primeira
 liberação tardia. A contraparte comprovadamente devida tem política distinta;
 preservar essa distinção, a janela original e os bytes aprovados. Preparação

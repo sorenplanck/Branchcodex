@@ -122,6 +122,7 @@ pub struct InitialClaimJournal {
     file: File,
     policy: ReleasePolicy,
     prepared_at: Timestamp,
+    exposed_at: Option<Timestamp>,
     header_digest: [u8; 32],
     state: ReleaseState,
     poisoned: bool,
@@ -172,6 +173,7 @@ impl InitialClaimJournal {
             file,
             policy,
             prepared_at,
+            exposed_at: None,
             header_digest,
             state: ReleaseState::Private,
             poisoned: false,
@@ -211,6 +213,7 @@ impl InitialClaimJournal {
             .window
             .check_initial_claim_release(prepared_at, expected.order, expected.delays)
             .map_err(JournalError::Timing)?;
+        let mut exposed_at = None;
         let state = if bytes.len() == header_len {
             ReleaseState::Private
         } else {
@@ -232,6 +235,7 @@ impl InitialClaimJournal {
                         .window
                         .check_initial_claim_release(checked_at, expected.order, expected.delays)
                         .map_err(JournalError::Timing)?;
+                    exposed_at = Some(checked_at);
                     ReleaseState::ExposurePossible
                 }
                 2 => ReleaseState::InitialReleaseClosed,
@@ -248,6 +252,7 @@ impl InitialClaimJournal {
             file,
             policy: expected,
             prepared_at,
+            exposed_at,
             header_digest,
             state,
             poisoned: false,
@@ -260,6 +265,24 @@ impl InitialClaimJournal {
         } else {
             Ok(self.state)
         }
+    }
+
+    /// Timing check ONLY for a separate replay coordinator. Possible exposure
+    /// is not proof of publication and this method grants no send permission.
+    /// Historical publication, exact bytes, input state and counterpart state
+    /// must be independently verified. Never resets/closes the sticky journal.
+    pub fn check_exposed_replay_deadline(&self, now: Timestamp) -> Result<(), JournalError> {
+        if self.state()? != ReleaseState::ExposurePossible {
+            return Err(JournalError::NeedsReconciliation);
+        }
+        let exposed_at = self.exposed_at.ok_or(JournalError::InvalidRecord)?;
+        if now < exposed_at {
+            return Err(JournalError::Timing(TimingError::InvalidAssumption));
+        }
+        self.policy
+            .window
+            .check_initial_claim_release(now, self.policy.order, self.policy.delays)
+            .map_err(JournalError::Timing)
     }
 
     fn persist(&mut self, state: ReleaseState, now: Timestamp) -> Result<(), JournalError> {
@@ -278,6 +301,7 @@ impl InitialClaimJournal {
         self.file.write_all(&event)?;
         self.file.sync_all()?;
         self.state = state;
+        self.exposed_at = (state == ReleaseState::ExposurePossible).then_some(now);
         self.poisoned = false;
         Ok(())
     }

@@ -92,6 +92,39 @@ fn now() -> Timestamp {
 }
 
 #[tokio::test]
+async fn exposed_replay_timing_preserves_original_deadline_and_never_reopens_first_release() {
+    let s = Scratch::new();
+    let mut j = InitialClaimJournal::create(&s.path(), original(), now()).unwrap();
+    assert!(j.check_exposed_replay_deadline(now()).is_err());
+    j.release_once(PAYLOAD, || Timestamp(1008), || async {})
+        .await
+        .unwrap();
+    let bytes = fs::read(s.path()).unwrap();
+    drop(j);
+    let mut j = InitialClaimJournal::open(&s.path(), original()).unwrap();
+    assert!(j.check_exposed_replay_deadline(Timestamp(1009)).is_ok());
+    assert!(matches!(
+        j.check_exposed_replay_deadline(Timestamp(1007)),
+        Err(JournalError::Timing(TimingError::InvalidAssumption))
+    ));
+    assert!(matches!(
+        j.check_exposed_replay_deadline(Timestamp(1029)),
+        Err(JournalError::Timing(TimingError::InitiationWindowExhausted))
+    ));
+    assert_eq!(j.state().unwrap(), ReleaseState::ExposurePossible);
+    assert!(matches!(
+        j.release_once(
+            PAYLOAD,
+            || Timestamp(1009),
+            || async { panic!("not a replay authorization") }
+        )
+        .await,
+        Err(JournalError::NeedsReconciliation)
+    ));
+    assert_eq!(fs::read(s.path()).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn private_restart_keeps_original_deadline_and_closes_late_initiation() {
     let scratch = Scratch::new();
     drop(InitialClaimJournal::create(&scratch.path(), original(), now()).unwrap());

@@ -148,6 +148,7 @@ func serveDirectPrepared(input io.Reader, output io.Writer) error {
 	if err := encoder.Encode(map[string]any{
 		"result": "ready", "offer_binding": binding, "public": initial.Public, "context": initial.Context,
 		"proof_verification_seconds":  time.Since(started).Seconds(),
+		"proof_verification_workers":  directVerificationWorkers,
 		"setup_verified_before_offer": true, "public_verifier_no_share_secret": true,
 		"squarings": initial.Squarings,
 	}); err != nil {

@@ -112,6 +112,7 @@ enum PairOutcome {
     DomFirstNativeSend,
     DomFirstXmrDetach,
     XmrFirstReinclude,
+    XmrFirstNativeReplay,
     Abandon,
     ClaimWins,
     RefundWins,
@@ -130,6 +131,7 @@ impl PairOutcome {
                 | Self::DomFirstNativeSend
                 | Self::DomFirstXmrDetach
                 | Self::XmrFirstReinclude
+                | Self::XmrFirstNativeReplay
         )
     }
     fn loses_ack(self) -> bool {
@@ -142,6 +144,7 @@ impl PairOutcome {
                 | Self::DomFirstNativeSend
                 | Self::DomFirstXmrDetach
                 | Self::XmrFirstReinclude
+                | Self::XmrFirstNativeReplay
         )
     }
     fn native_send(self) -> bool {
@@ -151,6 +154,7 @@ impl PairOutcome {
                 | Self::DomFirstNativeSend
                 | Self::DomFirstXmrDetach
                 | Self::XmrFirstReinclude
+                | Self::XmrFirstNativeReplay
         )
     }
     fn races(self) -> bool {
@@ -1436,6 +1440,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     let mut native_send_probes = Vec::new();
     let mut xmr_detach_evidence = None;
     let mut first_reinclusion_evidence = None;
+    let mut initial_replay_without_history_probe = None;
     let mut initial_pending_probe = None;
     let mut settlement_rpc = if loses_ack {
         let mut token = [0; 32];
@@ -1936,6 +1941,15 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             .await,
         );
     }
+    if pair_outcome == Some(PairOutcome::XmrFirstNativeReplay) {
+        initial_replay_without_history_probe = Some(
+            settlement_resume::assert_exposure_alone_cannot_replay_first(
+                &root,
+                joint_operation_binding,
+            )
+            .await,
+        );
+    }
     let (claim_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
     let mut block = rpc.scannable_block(claim_blocks[0]).await.unwrap();
     assert!(
@@ -2123,7 +2137,11 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             checkpoint("claim_worker_restored_after_xmr_payment", json!({}));
         }
     }
-    if pair_outcome == Some(PairOutcome::XmrFirstReinclude) {
+    if matches!(
+        pair_outcome,
+        Some(PairOutcome::XmrFirstReinclude | PairOutcome::XmrFirstNativeReplay)
+    ) {
+        let native_first_replay = pair_outcome == Some(PairOutcome::XmrFirstNativeReplay);
         let began = Instant::now();
         let old_height = rpc.latest_block_number().await.unwrap();
         let old_block = block.block.hash();
@@ -2150,6 +2168,18 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         assert_eq!(popped["status"], "OK");
         assert_eq!(rpc.latest_block_number().await.unwrap() + 1, old_height);
         assert_eq!(observe_xmr(&tx).await, Observation::InPool);
+        let first_pool_monitor = if native_first_replay {
+            Some(
+                settlement_resume::assert_first_replay_suppressed(
+                    &root,
+                    joint_operation_binding,
+                    "MonitorFirstPool",
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         let in_pool = settlement_resume::assert_noncanonical_first_preserves_obligation(
             &root,
             joint_operation_binding,
@@ -2184,19 +2214,41 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             .unwrap()
             .transactions
             .contains(&tx.hash()));
-        // Fixture republishes the already-exposed INITIAL transaction exactly.
-        // This is not an independent initial-leg recovery coordinator yet.
         assert_eq!(
             fs::read(root.join("initial-claim.tx")).unwrap(),
             tx.serialize()
         );
-        publish_local(&tx).await;
+        let first_replay = if native_first_replay {
+            Some(
+                settlement_resume::replay_first_after_restart(&root, joint_operation_binding).await,
+            )
+        } else {
+            // Historical fixture path retained as its own explicit mode.
+            publish_local(&tx).await;
+            None
+        };
+        assert_eq!(
+            rpc.transactions(&[tx.hash()]).await.unwrap()[0].serialize(),
+            tx.serialize()
+        );
         let (reincluded_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
         block = rpc.scannable_block(reincluded_blocks[0]).await.unwrap();
         assert!(block.block.transactions.contains(&tx.hash()));
         let new_height = rpc.latest_block_number().await.unwrap();
         assert_eq!(new_height, old_height + 1);
         assert_ne!(reincluded_blocks[0], old_block);
+        let first_inclusion_monitor = if native_first_replay {
+            Some(
+                settlement_resume::assert_first_replay_suppressed(
+                    &root,
+                    joint_operation_binding,
+                    "MonitorFirstInclusion",
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         let restored = settlement_resume::assert_first_reincluded(
             &root,
             joint_operation_binding,
@@ -2216,7 +2268,9 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         );
         let evidence = json!({
             "native_detachment":true,"competing_peer_reorg":false,
-            "first_transaction_rebroadcast_by_fixture":true,
+            "first_transaction_rebroadcast_by_fixture":!native_first_replay,
+            "native_first_replay":first_replay,"first_pool_monitor":first_pool_monitor,
+            "first_inclusion_monitor":first_inclusion_monitor,
             "counterpart_exposure_before_detachment":crashed,
             "pool_reconciliation":in_pool,"absent_reconciliation":absent,
             "restored":restored,"original_block":settlement_resume::hex(&old_block),
@@ -2583,6 +2637,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         report["native_send_suppression_probes"] = json!(native_send_probes);
         report["xmr_native_detachment"] = json!(xmr_detach_evidence);
         report["first_payment_native_reinclusion"] = json!(first_reinclusion_evidence);
+        report["initial_replay_without_history_probe"] =
+            json!(initial_replay_without_history_probe);
         report["initial_pending_reconstruction_probe"] = json!(initial_pending_probe);
         report["settlement_observer_receives_parent_chain_interpretation"] = json!(false);
         report["operation_checkpoint_synced_before_initial_release"] = json!(true);
@@ -2698,6 +2754,7 @@ async fn main() {
                 || arg == "direct-pair-dom-first-native-send"
                 || arg == "direct-pair-dom-first-xmr-detach"
                 || arg == "direct-pair-xmr-first-reinclude"
+                || arg == "direct-pair-xmr-first-native-replay"
                 || arg == "direct-pair-abandon"
                 || arg == "direct-pair-claim-wins"
                 || arg == "direct-pair-refund-wins"
@@ -2705,7 +2762,9 @@ async fn main() {
         {
             let bridge = PathBuf::from(args.next().expect("absolute direct bridge path required"));
             assert!(bridge.is_absolute() && bridge.is_file());
-            let outcome = if arg == "direct-pair-xmr-first-reinclude" {
+            let outcome = if arg == "direct-pair-xmr-first-native-replay" {
+                PairOutcome::XmrFirstNativeReplay
+            } else if arg == "direct-pair-xmr-first-reinclude" {
                 PairOutcome::XmrFirstReinclude
             } else if arg == "direct-pair-dom-first-xmr-detach" {
                 PairOutcome::DomFirstXmrDetach

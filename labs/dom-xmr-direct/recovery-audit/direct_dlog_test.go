@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -84,6 +85,18 @@ func TestDirectRealPuzzleProofOpeningAndAdversarialMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	verificationSeconds := time.Since(started).Seconds()
+	started = time.Now()
+	serial, err := verifyDirectWithWorkers(setup, context, statement.Public, statement, proof, 1)
+	if err != nil || encode(serial.parameters) != encode(capsule.parameters) ||
+		encode(serial.ciphertext) != encode(capsule.ciphertext) || serial.public != capsule.public {
+		t.Fatal("sequential and concurrent verification differ", err)
+	}
+	serialVerificationSeconds := time.Since(started).Seconds()
+	for _, workers := range []int{-1, 0, directVerificationWorkers + 1} {
+		if _, err := verifyDirectWithWorkers(setup, context, statement.Public, statement, proof, workers); err == nil {
+			t.Fatal("unbounded verifier worker count accepted")
+		}
+	}
 	opened, solveSeconds, err := capsule.open()
 	if err != nil || opened != secret {
 		t.Fatal("direct opening failed", err)
@@ -134,8 +147,37 @@ func TestDirectRealPuzzleProofOpeningAndAdversarialMutations(t *testing.T) {
 				t.Fatal(err)
 			}
 			mutate(&candidate.Statement, candidate.Proof)
-			if _, err := verifyDirect(setup, context, statement.Public, candidate.Statement, candidate.Proof); err == nil {
-				t.Fatal("accepted mutation")
+			_, serialErr := verifyDirectWithWorkers(setup, context, statement.Public, candidate.Statement, candidate.Proof, 1)
+			_, parallelErr := verifyDirect(setup, context, statement.Public, candidate.Statement, candidate.Proof)
+			if serialErr == nil || parallelErr == nil || serialErr.Error() != parallelErr.Error() {
+				t.Fatal("mutation rejection differs", serialErr, parallelErr)
+			}
+		})
+	}
+	// Responses are not in the Fiat-Shamir commitment transcript. Corrupting
+	// late responses therefore reaches those exact equations; it cannot fail
+	// early merely because a changed commitment changed every challenge bit.
+	for _, indexes := range [][]int{{directRounds - 1}, {2, 3}} {
+		t.Run(fmt.Sprint("invalid_equations_", indexes), func(t *testing.T) {
+			var candidate struct {
+				Statement directStatement
+				Proof     *directProof
+			}
+			if err := json.Unmarshal(raw, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			for _, index := range indexes {
+				candidate.Proof.Rounds[index].MessageResponse.Add(candidate.Proof.Rounds[index].MessageResponse, big.NewInt(1))
+			}
+			before := encode(candidate)
+			for _, workers := range []int{1, directVerificationWorkers} {
+				_, err := verifyDirectWithWorkers(setup, context, statement.Public, candidate.Statement, candidate.Proof, workers)
+				if err == nil || err.Error() != fmt.Sprintf("direct relation failed at round %d", indexes[0]) {
+					t.Fatal("skipped equation or nondeterministic failure", workers, err)
+				}
+			}
+			if encode(candidate) != before {
+				t.Fatal("verification mutated its input")
 			}
 		})
 	}
@@ -166,7 +208,9 @@ func TestDirectRealPuzzleProofOpeningAndAdversarialMutations(t *testing.T) {
 		"proof_rounds": directRounds, "mask_bits": directMaskBits, "squarings": 200000,
 		"setup_and_verification_seconds": setupSeconds, "proof_generation_seconds": generationSeconds,
 		"proof_verification_seconds": verificationSeconds, "opening_seconds": solveSeconds,
-		"positive_total_seconds": positiveSeconds, "json_bytes": len(raw),
+		"proof_verification_workers": directVerificationWorkers, "sequential_verification_seconds": serialVerificationSeconds,
+		"positive_total_includes_sequential_control": true,
+		"positive_total_seconds":                     positiveSeconds, "json_bytes": len(raw),
 		"adversarial_mutations_rejected": len(mutations), "secret_recovered": true,
 		"funding_included": false, "process_ipc_included": false,
 		"protocol_security_proven": false, "minimum_adversarial_delay_proven": false,

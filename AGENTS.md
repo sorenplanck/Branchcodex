@@ -577,5 +577,42 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   de retomadas, setup/solver duráveis, participantes independentes, fundamentos
   temporais/criptográficos e dom-interopd continuam abertos.
 
+- Republicação inicial implementada: inspect-first/replay-first restauram
+  journal original ExposurePossible, bytes/envelopes e obrigação histórica.
+  Exposição sozinha não autoriza replay. Observam ambas as cadeias, exigem
+  ausência/input livre e janela original para contraparte ainda não paga;
+  contraparte canônica paga permite quitar dívida depois da janela. Histórico
+  depende de writer/storage local confiável, não prova contra storage hostil.
+  Conserva lock inicial e obrigação durante envio; não cria assinatura/prazo.
+  check_exposed_replay_deadline rejeita relógio abaixo do evento de exposição,
+  mas não persiste high-water de relógio nem fechamento da janela de replay.
+- Passaram 67 testes Rust, Clippy/build; INITIAL-NATIVE-REPLAY-CHECKS.json.
+  Primeiro ensaio PID 975550 exit 101 em 99,989 s: reservas financiadas,
+  janela expirou antes das claims. NENHUM worker exercitado. Preservado em
+  DIRECT-PAIR-XMR-FIRST-NATIVE-REPLAY-INITIAL-FAILURE-*. Grupo encerrado.
+  Não repetir mesma versão apenas por sorte nem ampliar prazo.
+- direct_dlog.go agora verifica duas equações independentes por vez; conserva
+  256 rodadas, transcript, bounds/subgrupo e abertura/setup sequenciais.
+  Erro determinístico por menor índice, todos os workers terminam antes do
+  retorno, no máximo uma equação extra em prova inválida. Não altera o backend
+  cut-and-choose. 21 testes Go, real proof com -race, vet/build passaram.
+  Mesma prova: 7,422 s concorrente, 14,646 s sequencial. Evidências em
+  recovery-audit/DIRECT-PARALLEL-{CHECKS,RACE,BUILD}.json e notas VERIFICATION.md.
+- Ensaio nativo com novo helper e mesmo Rust passou: PID 1018508, total
+  172,394 s / claims 78,972 s; retirada/reinclusão 2,002 s, replay/restauração
+  0,452 s. Worker republica XMR diretamente, recebe ACK e morre exit 79;
+  novo processo apenas monitora pool, depois inclusão 152→153. Primeira
+  emissão ainda do pai. Registros idênticos, contraparte por worker, outputs
+  gastos e refund conflitante rejeitado em 221. Burst DOM 100/GOMAXPROCS=2,
+  leituras workers públicas/auth 86/28, zero 429. Não abre cápsula neste caso.
+  Artefatos DIRECT-PAIR-XMR-FIRST-NATIVE-REPLAY-PARALLEL-*, notas
+  INITIAL-NATIVE-REPLAY.md e INITIAL-NATIVE-REPLAY-VERIFICATION.json. Session
+  14306 exit 0, hashes/PIDs/grupo conferidos, nenhum ensaio pendente.
+- Continuidade: replay inicial DOM e repagamento após janela com contraparte
+  canônica só têm cobertura unitária; setup/solver duráveis ANTES de funding/
+  divulgação, restart completo, orçamento global, participantes independentes,
+  fork-choice/ABA, provas temporais/criptográficas e dom-interopd permanecem
+  abertos. Um resultado em 172 s não prova repetibilidade nem encerra missão.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

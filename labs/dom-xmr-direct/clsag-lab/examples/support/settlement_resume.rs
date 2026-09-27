@@ -443,6 +443,51 @@ fn is_send(action: &str) -> bool {
         "send" | "send-crash-before-rpc" | "send-crash-after-admission"
     )
 }
+
+fn is_first_replay(action: &str) -> bool {
+    matches!(
+        action,
+        "inspect-first" | "replay-first" | "replay-first-crash-after-admission"
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstReplayDecision {
+    MonitorFirstPool,
+    MonitorFirstInclusion,
+    ReplayWhileWindowOpen,
+    RepayCanonicalCounterpart,
+    Reconcile,
+}
+impl FirstReplayDecision {
+    fn allows_send(self) -> bool {
+        matches!(
+            self,
+            Self::ReplayWhileWindowOpen | Self::RepayCanonicalCounterpart
+        )
+    }
+}
+// Called ONLY after independently restoring/validating historical publication
+// evidence, approved bodies and sticky exposure. An Observation is not a proof.
+fn first_replay_decision(
+    first: Observation,
+    counterpart: Observation,
+    original_window_open: bool,
+) -> FirstReplayDecision {
+    use FirstReplayDecision::*;
+    match first {
+        Observation::InPool => MonitorFirstPool,
+        Observation::Included { block, .. } if block != [0; 32] => MonitorFirstInclusion,
+        Observation::AbsentAndUnspent => match counterpart {
+            Observation::Included { block, .. } if block != [0; 32] => RepayCanonicalCounterpart,
+            Observation::InPool | Observation::AbsentAndUnspent if original_window_open => {
+                ReplayWhileWindowOpen
+            }
+            _ => Reconcile,
+        },
+        _ => Reconcile,
+    }
+}
 fn dom_unspent_matches(utxo: &Value, commitment: &str, tip: u64) -> bool {
     utxo["found"] == true
         && utxo["commitment"] == commitment
@@ -472,6 +517,7 @@ async fn recover(
     action: &str,
     progress: &SendProgress,
 ) -> Result<Value> {
+    let replay_first = is_first_replay(action);
     let inspect_unspent = is_send(action) || action == "inspect-delivery";
     let checkpoint =
         OperationCheckpoint::decode(&read(&root.join("operation.checkpoint"))?, operation)
@@ -503,7 +549,14 @@ async fn recover(
             == dxp1_clsag_lab::release_journal::ReleaseState::ExposurePossible,
         "initial exposure missing",
     )?;
-    drop(gate);
+    // Keep the original journal locked throughout an initial replay. Other
+    // settlement actions retain their previous separate-lock behavior.
+    let replay_gate = if replay_first {
+        Some(gate)
+    } else {
+        drop(gate);
+        None
+    };
     let dom_rpc = DomRpc {
         client: reqwest::Client::builder()
             .no_proxy()
@@ -653,15 +706,124 @@ async fn recover(
             )
             .ok_or("noncanonical extracted witness")?,
         );
-        let (observed, missing) = dom_rpc.observe(&tx, &identity, false).await?;
+        let (observed, missing) = dom_rpc.observe(&tx, &identity, replay_first).await?;
         (observed, missing, witness)
     } else {
         let tx = decode_xmr(&first)?;
         let witness = xmr
             .extract(&tx, &mut OsRng)
             .map_err(|_| "XMR first claim verification")?;
-        (observe_xmr(&tx, false).await?, false, witness)
+        (observe_xmr(&tx, replay_first).await?, false, witness)
     };
+    if replay_first {
+        // This immutable record was created only after a native canonical
+        // first payment. Within the trusted-local-writer model it is historical
+        // publication evidence, unlike an exposure-before-send marker alone.
+        let path = root.join("counterpart-delivery.wal");
+        ensure(
+            path.try_exists()
+                .map_err(|_| "historical obligation lookup")?,
+            "prior canonical obligation missing",
+        )?;
+        let historical = CounterpartDelivery::open_for_payment(
+            &path,
+            dxp1_clsag_lab::counterpart_delivery::DeliveryPayment {
+                manifest: checkpoint.manifest,
+                first_claim: digest(&first),
+                target_chain: if manifest.dom_first {
+                    checkpoint.xmr_genesis
+                } else {
+                    checkpoint.dom_chain
+                },
+            },
+        )
+        .map_err(|_| "historical obligation invalid")?;
+        validate_counterpart(
+            historical.payload(),
+            manifest.dom_first,
+            &xmr,
+            &dom,
+            &context,
+            &witness,
+        )?;
+        drop(witness);
+        let observe_counterpart = async || -> Result<Observation> {
+            if manifest.dom_first {
+                observe_xmr(&decode_xmr(historical.payload())?, true).await
+            } else {
+                Ok(dom_rpc
+                    .observe(&decode_dom(historical.payload())?, &identity, true)
+                    .await?
+                    .0)
+            }
+        };
+        let observe_first = async || -> Result<Observation> {
+            if manifest.dom_first {
+                Ok(dom_rpc
+                    .observe(&decode_dom(&first)?, &identity, true)
+                    .await?
+                    .0)
+            } else {
+                observe_xmr(&decode_xmr(&first)?, true).await
+            }
+        };
+        let original_window_open = || -> Result<bool> {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| "clock")?
+                .as_secs();
+            Ok(replay_gate
+                .as_ref()
+                .ok_or("initial replay lock missing")?
+                .check_exposed_replay_deadline(Timestamp(now))
+                .is_ok())
+        };
+        let mut first_seen = first_observation;
+        let mut counterpart_seen = observe_counterpart().await?;
+        stable_tips().await?;
+        let mut window_open = original_window_open()?;
+        let mut decision = first_replay_decision(first_seen, counterpart_seen, window_open);
+        let mut submitted = false;
+        if action != "inspect-first" && decision.allows_send() {
+            // Both journals have been strictly opened and fsynced. Query again
+            // after storage/verification latency, then check the ORIGINAL clock
+            // immediately before network IO. No new marker, nonce or deadline.
+            first_seen = observe_first().await?;
+            counterpart_seen = observe_counterpart().await?;
+            stable_tips().await?;
+            window_open = original_window_open()?;
+            decision = first_replay_decision(first_seen, counterpart_seen, window_open);
+            if decision.allows_send() {
+                progress.attempted.set(true);
+                if manifest.dom_first {
+                    dom_rpc.submit(&first).await?;
+                } else {
+                    let reply: Value = serde_json::from_str(&rpc.rpc_call("send_raw_transaction",
+                        Some(json!({"tx_as_hex":hex(&first),"do_not_relay":true,"do_sanity_checks":false}).to_string()),16384)
+                        .await.map_err(|_| "initial XMR submission result unknown")?).map_err(|_| "initial XMR admission JSON")?;
+                    ensure(reply["status"] == "OK", "initial XMR admission rejected")?;
+                }
+                progress.acknowledged.set(true);
+                submitted = true;
+                if action == "replay-first-crash-after-admission" {
+                    progress.dom_rpc.log();
+                    std::process::exit(79);
+                }
+            }
+        }
+        return Ok(
+            json!({"action":if submitted {"SubmittedFirst".to_string()} else {format!("{decision:?}")},
+            "first_replay_basis":format!("{decision:?}"),"first_observation":format!("{first_seen:?}"),
+            "counterpart_observation":format!("{counterpart_seen:?}"),"original_window_open":window_open,
+            "historical_canonical_obligation_verified":true,"historical_evidence_trust":"trusted local journal; not hostile-storage proof",
+            "original_first_block":hex(&historical.binding().first_block),"original_first_height":historical.binding().first_height,
+            "journal_verified":true,"initial_exposure_journal_verified":true,"initial_journal_lock_held_during_replay":true,
+            "operation_checkpoint_loaded":true,"native_rpc_queries_performed":true,
+            "original_disclosed_at":manifest.disclosed_at,"original_earliest_adversarial":manifest.earliest_adversarial,
+            "original_latest_honest":manifest.latest_honest,"transaction_subject":"first_claim",
+            "obligation_created":false,"fixed_adaptor_completed":false,"signature_created":false}),
+        );
+    }
     let Observation::Included { block, height } = first_observation else {
         return Err("first payment not canonical");
     };
@@ -724,12 +886,16 @@ async fn recover(
     };
     // Also validate a pre-existing journal against the approved envelope and
     // first payment. A checksum alone is never payment authorization.
+    validate_counterpart(
+        journal.payload(),
+        manifest.dom_first,
+        &xmr,
+        &dom,
+        &context,
+        &witness,
+    )?;
     let mut target_observation = if manifest.dom_first {
         let tx = decode_xmr(journal.payload())?;
-        let extracted = xmr
-            .extract(&tx, &mut OsRng)
-            .map_err(|_| "stored XMR counterpart verification")?;
-        ensure(*extracted == *witness, "counterpart witness mismatch")?;
         if action == "observe" || inspect_unspent {
             observe_xmr(&tx, inspect_unspent).await?
         } else {
@@ -737,14 +903,6 @@ async fn recover(
         }
     } else {
         let tx = decode_dom(journal.payload())?;
-        let mut extracted = dom
-            .extract(&tx, &context)
-            .map_err(|_| "stored DOM counterpart verification")?;
-        extracted.reverse();
-        ensure(
-            *extracted == witness.to_bytes(),
-            "counterpart witness mismatch",
-        )?;
         if action == "observe" || inspect_unspent {
             let (observed, missing) = dom_rpc.observe(&tx, &identity, inspect_unspent).await?;
             dom_index_missing |= missing;
@@ -863,6 +1021,31 @@ fn decode_dom(bytes: &[u8]) -> Result<DomTransaction> {
     )?;
     Ok(tx)
 }
+
+fn validate_counterpart(
+    payload: &[u8],
+    dom_first: bool,
+    xmr: &XmrClaimEnvelope,
+    dom: &DomClaimOffer,
+    context: &ValidationContext,
+    witness: &curve25519_dalek::scalar::Scalar,
+) -> Result<()> {
+    if dom_first {
+        let extracted = xmr
+            .extract(&decode_xmr(payload)?, &mut OsRng)
+            .map_err(|_| "stored XMR counterpart verification")?;
+        ensure(*extracted == *witness, "counterpart witness mismatch")
+    } else {
+        let mut extracted = dom
+            .extract(&decode_dom(payload)?, context)
+            .map_err(|_| "stored DOM counterpart verification")?;
+        extracted.reverse();
+        ensure(
+            *extracted == witness.to_bytes(),
+            "counterpart witness mismatch",
+        )
+    }
+}
 fn decode_xmr(bytes: &[u8]) -> Result<XmrTransaction> {
     let mut input = bytes;
     let tx = XmrTransaction::read(&mut input).map_err(|_| "XMR native decoding")?;
@@ -889,6 +1072,9 @@ pub async fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
             | "send"
             | "send-crash-before-rpc"
             | "send-crash-after-admission"
+            | "inspect-first"
+            | "replay-first"
+            | "replay-first-crash-after-admission"
     ));
     assert!(args.next().is_none());
     let progress = SendProgress::default();
@@ -967,6 +1153,67 @@ pub async fn assert_pending_first_cannot_create_obligation(
     assert_eq!(result["reason"], "first payment not canonical", "{result}");
     assert!(!root.join("counterpart-delivery.wal").exists());
     result
+}
+
+pub async fn assert_exposure_alone_cannot_replay_first(root: &Path, operation: [u8; 32]) -> Value {
+    assert!(!root.join("counterpart-delivery.wal").exists());
+    let before = read(&root.join("initial-claim.wal")).unwrap();
+    let result = run_worker(root, operation, "replay-first", 0).await;
+    assert_eq!(result["action"], "Reconcile", "{result}");
+    assert_eq!(
+        result["reason"], "prior canonical obligation missing",
+        "{result}"
+    );
+    assert_eq!(result["transaction_send_attempted"], false);
+    assert_eq!(read(&root.join("initial-claim.wal")).unwrap(), before);
+    assert!(!root.join("counterpart-delivery.wal").exists());
+    result
+}
+
+pub async fn assert_first_replay_suppressed(
+    root: &Path,
+    operation: [u8; 32],
+    expected: &str,
+) -> Value {
+    let paths = [
+        root.join("initial-claim.wal"),
+        root.join("counterpart-delivery.wal"),
+    ];
+    let before: Vec<_> = paths.iter().map(|p| read(p).unwrap()).collect();
+    let result = run_worker(root, operation, "replay-first", 0).await;
+    assert_eq!(result["action"], expected, "{result}");
+    assert_eq!(result["transaction_send_attempted"], false);
+    assert_eq!(result["signature_created"], false);
+    for (path, bytes) in paths.iter().zip(&before) {
+        assert_eq!(&read(path).unwrap(), bytes);
+    }
+    result
+}
+
+pub async fn replay_first_after_restart(root: &Path, operation: [u8; 32]) -> Value {
+    let started = Instant::now();
+    let paths = [
+        root.join("initial-claim.wal"),
+        root.join("counterpart-delivery.wal"),
+    ];
+    let before: Vec<_> = paths.iter().map(|p| read(p).unwrap()).collect();
+    let inspection = run_worker(root, operation, "inspect-first", 0).await;
+    assert_eq!(
+        inspection["action"], "ReplayWhileWindowOpen",
+        "{inspection}"
+    );
+    assert_eq!(inspection["first_observation"], "AbsentAndUnspent");
+    assert_eq!(inspection["counterpart_observation"], "AbsentAndUnspent");
+    assert_eq!(inspection["historical_canonical_obligation_verified"], true);
+    assert_eq!(inspection["transaction_send_attempted"], false);
+    let crashed = run_worker(root, operation, "replay-first-crash-after-admission", 79).await;
+    let pooled = assert_first_replay_suppressed(root, operation, "MonitorFirstPool").await;
+    for (path, bytes) in paths.iter().zip(&before) {
+        assert_eq!(&read(path).unwrap(), bytes);
+    }
+    json!({"inspection":inspection,"sender":crashed,"post_crash_pool":pooled,
+        "sender_received_native_ack_before_exit":true,"host_forwards_first_replay":false,
+        "original_journals_unchanged":true,"seconds":started.elapsed().as_secs_f64()})
 }
 
 /// The worker decides and performs both native RPC sends. The host supplies
@@ -1124,7 +1371,7 @@ async fn run_worker(root: &Path, operation: [u8; 32], action: &str, expected_exi
         "worker {action}: {}",
         String::from_utf8_lossy(&bytes)
     );
-    if matches!(expected_exit, 75..=77) {
+    if matches!(expected_exit, 75..=77 | 79) {
         assert!(bytes.is_empty());
         return json!({"pid":pid,"exit_code":expected_exit,"seconds":began.elapsed().as_secs_f64()});
     }
@@ -1183,6 +1430,65 @@ pub async fn crash_then_reconstruct(
 #[cfg(test)]
 mod native_observation_tests {
     use super::*;
+
+    #[test]
+    fn initial_replay_needs_unspent_input_and_live_window_or_paid_counterpart() {
+        use FirstReplayDecision::*;
+        let included = Observation::Included {
+            block: [1; 32],
+            height: 7,
+        };
+        let absent = Observation::AbsentAndUnspent;
+        assert_eq!(
+            first_replay_decision(absent, absent, true),
+            ReplayWhileWindowOpen
+        );
+        assert_eq!(
+            first_replay_decision(absent, Observation::InPool, true),
+            ReplayWhileWindowOpen
+        );
+        assert_eq!(first_replay_decision(absent, absent, false), Reconcile);
+        assert_eq!(
+            first_replay_decision(absent, Observation::InPool, false),
+            Reconcile
+        );
+        assert_eq!(
+            first_replay_decision(absent, included, false),
+            RepayCanonicalCounterpart
+        );
+        for first in [
+            Observation::Unknown,
+            Observation::ConflictingSpend {
+                transaction: [2; 32],
+            },
+            Observation::Included {
+                block: [0; 32],
+                height: 7,
+            },
+        ] {
+            assert_eq!(first_replay_decision(first, included, true), Reconcile);
+        }
+        for target in [
+            Observation::Unknown,
+            Observation::ConflictingSpend {
+                transaction: [2; 32],
+            },
+            Observation::Included {
+                block: [0; 32],
+                height: 7,
+            },
+        ] {
+            assert_eq!(first_replay_decision(absent, target, true), Reconcile);
+        }
+        assert_eq!(
+            first_replay_decision(Observation::InPool, included, true),
+            MonitorFirstPool
+        );
+        assert_eq!(
+            first_replay_decision(included, absent, false),
+            MonitorFirstInclusion
+        );
+    }
 
     #[test]
     fn coherent_dom_scan_rejects_stale_tip_parent_partial_range_and_changed_native_body() {

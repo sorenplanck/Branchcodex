@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"hash"
 	"math/big"
+	"sync"
 	"time"
 
 	"filippo.io/edwards25519"
@@ -23,6 +24,10 @@ import (
 
 const directRounds = 256
 const directMaskBits = 256
+
+// Bound CPU use independently of peer input. This changes only scheduling of
+// independent proof equations, never the sequential setup/opening work.
+const directVerificationWorkers = 2
 
 // Explicit, bounded laboratory profiles. Neither is a security/time guarantee.
 const directShortWork int64 = 200000
@@ -233,6 +238,15 @@ type verifiedDirectCapsule struct {
 }
 
 func verifyDirect(setup *verifiedDirectSetup, expectedContext, expectedPublic [32]byte, statement directStatement, proof *directProof) (*verifiedDirectCapsule, error) {
+	return verifyDirectWithWorkers(setup, expectedContext, expectedPublic, statement, proof, directVerificationWorkers)
+}
+
+// workers=1 retains a sequential control for equivalence/timing tests. Inputs
+// belong to the caller and must not be concurrently mutated during this call.
+func verifyDirectWithWorkers(setup *verifiedDirectSetup, expectedContext, expectedPublic [32]byte, statement directStatement, proof *directProof, workers int) (*verifiedDirectCapsule, error) {
+	if workers < 1 || workers > directVerificationWorkers {
+		return nil, fmt.Errorf("invalid direct verification worker count")
+	}
 	if setup == nil || setup.raw != statement.Setup || proof == nil || len(proof.Rounds) != directRounds {
 		return nil, fmt.Errorf("unverified/replaced setup or wrong proof size")
 	}
@@ -271,10 +285,11 @@ func verifyDirect(setup *verifiedDirectSetup, expectedContext, expectedPublic [3
 		}
 	}
 	challenge := directChallenge(statement, proof)
-	for i, round := range proof.Rounds {
+	verifyRound := func(i int) error {
+		round := proof.Rounds[i]
 		encoded, err := puzzle.GeneratePuzzleWithCustomNonce(p, round.NonceResponse, round.MessageResponse)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		u := new(big.Int).Set(round.Commitment.U)
 		v := new(big.Int).Set(round.Commitment.V)
@@ -286,7 +301,31 @@ func verifyDirect(setup *verifiedDirectSetup, expectedContext, expectedPublic [3
 		}
 		responsePoint := new(edwards25519.Point).ScalarBaseMult(directCurveScalar(round.MessageResponse))
 		if encoded.U.Cmp(u) != 0 || encoded.V.Cmp(v) != 0 || responsePoint.Equal(point) != 1 {
-			return nil, fmt.Errorf("direct relation failed at round %d", i)
+			return fmt.Errorf("direct relation failed at round %d", i)
+		}
+		return nil
+	}
+	// Small ordered batches retain deterministic first-failure reporting and
+	// bound work on invalid proofs to at most one extra equation. All operands
+	// above are read-only; each round owns its arithmetic temporaries. The
+	// pinned upstream GeneratePuzzleWithCustomNonce also uses fresh receivers.
+	for start := 0; start < directRounds; start += workers {
+		count := min(workers, directRounds-start)
+		errors := make([]error, count)
+		var pending sync.WaitGroup
+		for offset := 1; offset < count; offset++ {
+			pending.Add(1)
+			go func(offset int) {
+				defer pending.Done()
+				errors[offset] = verifyRound(start + offset)
+			}(offset)
+		}
+		errors[0] = verifyRound(start)
+		pending.Wait()
+		for _, err := range errors {
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return &verifiedDirectCapsule{
