@@ -74,7 +74,9 @@ pub fn provision_all() -> Provisioned {
     // managed path that already exists.
     let provisioning = tempfile::tempdir().expect("a private provisioning directory");
 
-    let route = laboratory::provision(directory.path(), provisioning.path())
+    // The fixed second, not the clock: a test route has to be reasoned about when it fails.
+    // Anything handing the route to the ceremony passes the real clock instead.
+    let route = laboratory::provision(directory.path(), provisioning.path(), NOW_SECONDS)
         .expect("the laboratory route provisions");
 
     Provisioned {

@@ -385,8 +385,9 @@ jobs:
           commit="$(sed -n 's/^commit_stage_digest=//p' "$RUNNER_TEMP/ceremony.env")"
           reveal="$(sed -n 's/^reveal_stage_digest=//p' "$RUNNER_TEMP/ceremony.env")"
           plan="$(sed -n 's/^bootstrap_plan=//p' "$RUNNER_TEMP/provisioned.env")"
+          now="$(sed -n 's/^now_seconds=//p' "$RUNNER_TEMP/provisioned.env")"
           cargo run --release --manifest-path labs/dom-solana-daemon-route/Cargo.toml \
-            --example admit_route -- "$RUNNER_TEMP/route" "$plan" "$commit" "$reveal"
+            --example admit_route -- "$RUNNER_TEMP/route" "$plan" "$now" "$commit" "$reveal"
 
   solana-leg-gate:
     name: Solana leg gate

@@ -25,16 +25,23 @@ use dom_interopd::{
     load_authenticated_production_inputs_v1, load_production_bootstrap_v11,
     ProductionBootstrapModeV1, ProductionF6PathRoleV8, ProductionPathRoleV1,
 };
-use dom_solana_daemon_route::{declared_inputs, laboratory, SolanaRouteBootstrapPlanV1 as Plan};
+use dom_solana_daemon_route::{declared_inputs, SolanaRouteBootstrapPlanV1 as Plan};
 use route_executor::LegIdV1;
 
 fn main() -> Result<(), String> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let [state_dir, plan_json, commit_hex, reveal_hex] = arguments.as_slice() else {
+    let [state_dir, plan_json, now_seconds, commit_hex, reveal_hex] = arguments.as_slice() else {
         return Err(
-            "usage: admit_route <state-dir> <plan-json> <commit-hex> <reveal-hex>".to_owned(),
+            "usage: admit_route <state-dir> <plan-json> <now-seconds> <commit-hex> <reveal-hex>"
+                .to_owned(),
         );
     };
+    // The same second the route was provisioned around. The registry's validity window, the
+    // time policy's window and both schedules are all relative to it, so a different one
+    // here would authenticate a route against a clock it was not built for.
+    let now_seconds: u64 = now_seconds
+        .parse()
+        .map_err(|error| format!("the trusted second: {error}"))?;
     let state_dir = PathBuf::from(state_dir)
         .canonicalize()
         .map_err(|error| format!("canonicalize the state directory: {error}"))?;
@@ -83,7 +90,7 @@ fn main() -> Result<(), String> {
 
     let bootstrap = load_production_bootstrap_v11(&state_dir, ProductionBootstrapModeV1::Create)
         .map_err(|error| format!("the daemon refused the directory: {error:?}"))?;
-    let inputs = load_authenticated_production_inputs_v1(&bootstrap, laboratory::NOW_SECONDS)
+    let inputs = load_authenticated_production_inputs_v1(&bootstrap, now_seconds)
         .map_err(|error| format!("the daemon refused to admit the route: {error:?}"))?;
 
     // The mission, stated as two questions the daemon answers: can it start an operation

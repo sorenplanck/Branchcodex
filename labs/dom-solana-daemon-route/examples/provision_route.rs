@@ -45,7 +45,11 @@ fn main() -> Result<(), String> {
         .canonicalize()
         .map_err(|error| format!("canonicalize the state directory: {error}"))?;
 
-    let route = laboratory::provision(&state_dir, &provisioning_dir)?;
+    // The REAL clock, because the ceremony validates the registry with SystemTime::now()
+    // rather than with a trusted second from the plan. A route anchored on a fictional time
+    // is refused there as not yet valid.
+    let now_seconds = laboratory::now_seconds()?;
+    let route = laboratory::provision(&state_dir, &provisioning_dir, now_seconds)?;
     let plans = ceremony::write_plans(&route.ceremony_input(&state_dir), &ceremony_dir)?;
     let secrets = [
         ceremony::write_secrets(
@@ -74,6 +78,8 @@ fn main() -> Result<(), String> {
 
     println!("state_dir={}", state_dir.display());
     println!("bootstrap_plan={}", plan_path.display());
+    // Everything that later hands this route to the daemon must use the same second.
+    println!("now_seconds={now_seconds}");
     for (index, path) in plans.paths.iter().enumerate() {
         println!("plan_{index}={}", path.display());
     }

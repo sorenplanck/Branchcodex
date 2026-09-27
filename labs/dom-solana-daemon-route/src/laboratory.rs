@@ -44,11 +44,25 @@ use crate::{RouteIdentitiesV1, SolanaRouteBootstrapPlanV1};
 /// The interop network this laboratory route belongs to.
 pub const NETWORK: [u8; 32] = [0x90; 32];
 
-/// A trusted second that is neither zero nor near an overflow, so the manifest's window,
-/// the policy's window and both schedules can be expressed relative to it. Fixed rather
-/// than read from the clock: a route whose artifacts change with the wall clock cannot be
-/// reasoned about when it fails.
+/// The trusted second the tests provision around.
+///
+/// Fixed, because a route whose artifacts change with the wall clock cannot be reasoned
+/// about when it fails. That is right for a test and WRONG for the ceremony: `load_context`
+/// validates the registry with `SystemTime::now()`, not with a trusted second from the
+/// plan, so a route anchored on a fictional time is refused as not yet valid -- with
+/// `Binding`, which says nothing about clocks.
+///
+/// So the second is a parameter of [`provision`]. Tests pass this constant; anything that
+/// will hand the route to the ceremony passes the real clock.
 pub const NOW_SECONDS: u64 = 1_800_000_000;
+
+/// The real clock, for a route that will be handed to the ceremony.
+pub fn now_seconds() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .map_err(|error| format!("the system clock is before the epoch: {error}"))
+}
 
 /// The DOM chain position everything is anchored at.
 ///
@@ -142,13 +156,13 @@ pub fn position(seed: u8) -> SolanaPositionTermsPlanV1 {
 /// hash non-zero with the tip's distinct from the anchor's, an interval inside the policy's
 /// width ceiling whose lower end is not further ahead than the future skew and whose upper
 /// end is recent enough for the observation, and a tip clearing the anchor's confirmations.
-pub fn observation(seed: u8, anchor_height: u64) -> ChainObservationV1 {
+pub fn observation(seed: u8, anchor_height: u64, now_seconds: u64) -> ChainObservationV1 {
     ChainObservationV1 {
         anchor_height,
         anchor_hash: [seed; 32],
         parent_hash: [seed.wrapping_add(1); 32],
-        time_lower_seconds: NOW_SECONDS - 300,
-        time_upper_seconds: NOW_SECONDS - 60,
+        time_lower_seconds: now_seconds - 300,
+        time_upper_seconds: now_seconds - 60,
         tip_height: anchor_height + 5,
         tip_hash: [seed.wrapping_add(2); 32],
         canonicality_evidence_digest: [seed.wrapping_add(3); 32],
@@ -166,6 +180,9 @@ pub struct LaboratoryRouteV1 {
     pub downstream: ProvisionedPositionV1,
     pub upstream_facts: SolanaChainFactsV1,
     pub downstream_facts: SolanaChainFactsV1,
+    /// The second this route was provisioned around. Everything that later hands it to the
+    /// daemon or to the ceremony must use the same one.
+    pub now_seconds: u64,
 }
 
 /// Provision the whole route into `state_dir`, using `provisioning_dir` for everything the
@@ -173,6 +190,7 @@ pub struct LaboratoryRouteV1 {
 pub fn provision(
     state_dir: &Path,
     provisioning_dir: &Path,
+    now_seconds: u64,
 ) -> Result<LaboratoryRouteV1, String> {
     let leg_store_dir = provisioning_dir.join("leg");
     let upstream_facts = upstream_facts();
@@ -184,7 +202,7 @@ pub fn provision(
         authorities_relative: REGISTRY_AUTHORITIES,
         network_id: NETWORK,
         epoch: 7,
-        now_seconds: NOW_SECONDS,
+        now_seconds,
         // Wide enough that the route-time policy's own window fits inside it, which the
         // policy requires of the manifest that authorises it.
         valid_from_offset_seconds: 86_400,
@@ -203,7 +221,7 @@ pub fn provision(
         provisioning_dir: &leg_store_dir,
         upstream: position(0x11),
         downstream: position(0x22),
-        now_seconds: NOW_SECONDS,
+        now_seconds,
         dom_anchor_height: DOM_ANCHOR_HEIGHT,
     })?;
     let [upstream, downstream] = positions;
@@ -246,11 +264,11 @@ pub fn provision(
         registry: &registry,
         upstream: &upstream.terms,
         downstream: &downstream.terms,
-        now_seconds: NOW_SECONDS,
+        now_seconds,
         provisioning_dir: &leg_store_dir,
-        hub: observation(0x61, DOM_ANCHOR_HEIGHT),
-        upstream_chain: observation(0x71, 4_000),
-        downstream_chain: observation(0x81, 5_000),
+        hub: observation(0x61, DOM_ANCHOR_HEIGHT, now_seconds),
+        upstream_chain: observation(0x71, 4_000, now_seconds),
+        downstream_chain: observation(0x81, 5_000, now_seconds),
         sequence: 1,
     })?;
     let plan = plan.with_route_time(route_time);
@@ -276,6 +294,7 @@ pub fn provision(
         downstream,
         upstream_facts,
         downstream_facts,
+        now_seconds,
     })
 }
 
