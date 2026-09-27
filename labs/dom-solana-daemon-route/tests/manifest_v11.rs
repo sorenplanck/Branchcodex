@@ -244,7 +244,22 @@ fn the_layout_assigns_every_role_the_path_it_is_named_for() {
         assert_eq!(P::f6_v8_relative(role), expected, "{role:?}");
     }
 
-    // Forty-six paths, all distinct: two roles sharing a path would make one of them
+    // The per-position paths are in the list too, because the loader validates their
+    // parent chains like any other: leaving them out is what left `state/upstream` and
+    // `state/downstream` uncreated and had the loader refuse the whole directory.
+    for expected in [
+        "state/upstream/solana-actuator.v1.sqlite3",
+        "state/downstream/solana-actuator.v1.sqlite3",
+        "artifacts/upstream-solana-authority-bundle.v1",
+        "artifacts/downstream-solana-authority-bundle.v1",
+    ] {
+        assert!(
+            P::path_relatives().contains(&expected),
+            "{expected} is validated by the loader and is not in the layout's path list"
+        );
+    }
+
+    // Fifty paths, all distinct: two roles sharing a path would make one of them
     // silently adopt the other's state.
     let all = P::path_relatives();
     let distinct: std::collections::BTreeSet<&str> = all.iter().copied().collect();

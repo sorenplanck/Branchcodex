@@ -94,6 +94,21 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     )
     .expect("the Contracts bootstrap artifact");
 
+    // One per position, and the loader reads both after the layout: a route whose
+    // positions carry no authority bundle is refused there, not at the layout.
+    let upstream_bundle = declared_inputs::write_leg_authority_bundle(
+        &root,
+        Plan::upstream_leg_authority_bundle_relative(),
+        b"the upstream position's authority material",
+    )
+    .expect("the upstream leg authority bundle");
+    let downstream_bundle = declared_inputs::write_leg_authority_bundle(
+        &root,
+        Plan::downstream_leg_authority_bundle_relative(),
+        b"the downstream position's authority material",
+    )
+    .expect("the downstream leg authority bundle");
+
     let f6 = declared_inputs::write_f6_authority_bundle(
         &root,
         Plan::f6_v8_relative(dom_interopd::ProductionF6PathRoleV8::AuthorityBundleV7),
@@ -109,7 +124,8 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     let plan = provisioned
         .plan
         .with_identities(identities())
-        .with_f6_authority_bundle(f6);
+        .with_f6_authority_bundle(f6)
+        .with_leg_authority_bundles(upstream_bundle, downstream_bundle);
     assert!(plan.artifact_pins_are_complete());
     assert!(plan.f6_authority_bundle_is_measured());
     plan.write_manifests(&root).expect("both manifests");
@@ -179,7 +195,7 @@ fn staged_report() -> String {
             .path()
             .canonicalize()
             .expect("a canonical directory");
-        let plan =
+        let mut plan =
             Plan::both_positions_on_solana([0x7c; 32], [0x8d; 32]).with_identities(identities());
 
         if stage >= 1 {
@@ -219,6 +235,19 @@ fn staged_report() -> String {
                 b"filler",
             )
             .expect("the F6 bundle");
+            let upstream = declared_inputs::write_leg_authority_bundle(
+                &root,
+                Plan::upstream_leg_authority_bundle_relative(),
+                b"filler",
+            )
+            .expect("the upstream leg bundle");
+            let downstream = declared_inputs::write_leg_authority_bundle(
+                &root,
+                Plan::downstream_leg_authority_bundle_relative(),
+                b"filler too",
+            )
+            .expect("the downstream leg bundle");
+            plan = plan.with_leg_authority_bundles(upstream, downstream);
             for role in [
                 ProductionPathRoleV1::RegistryStore,
                 ProductionPathRoleV1::RegistryAuthorities,

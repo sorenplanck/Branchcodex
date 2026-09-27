@@ -223,6 +223,20 @@ const F6_V8_PATHS: [&str; PRODUCTION_F6_PATH_ROLE_COUNT_V8] = [
 /// A DIRECTORY, and one the layout requires to exist in create and in reopen alike --
 /// "provisioned outside the daemon, never created and never repaired here". It was
 /// named `.sqlite3`, which describes a database the daemon never opens.
+/// The four paths a V11 route declares PER POSITION, outside the fifty role paths.
+///
+/// `load_production_bootstrap_v11` validates them after the layout, in a loop over the
+/// two legs: each position's actuator store must be absent on create with a valid parent
+/// chain, and each position's authority bundle must exist and hash to the digest the
+/// manifest declares. They were absent from `path_relatives`, so `state/upstream` and
+/// `state/downstream` were never created and the loader refused the whole directory with
+/// `InvalidStateAuthority` -- a missing directory, which is the one condition a listing
+/// of what exists cannot show.
+const UPSTREAM_ACTUATOR_STORE: &str = "state/upstream/solana-actuator.v1.sqlite3";
+const DOWNSTREAM_ACTUATOR_STORE: &str = "state/downstream/solana-actuator.v1.sqlite3";
+const UPSTREAM_LEG_AUTHORITY_BUNDLE: &str = "artifacts/upstream-solana-authority-bundle.v1";
+const DOWNSTREAM_LEG_AUTHORITY_BUNDLE: &str = "artifacts/downstream-solana-authority-bundle.v1";
+
 const CONTRACTS_IDENTITY_STORE: &str = "state/contracts/transport-identity.v1";
 const CONTRACTS_BUDGET_POLICY: &str = "artifacts/contracts-budget-policy.v1";
 const CONTRACTS_BOOTSTRAP: &str = "artifacts/contracts-bootstrap.v1";
@@ -304,6 +318,9 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// The Contracts bootstrap's commit and reveal stage digests, once the two-party
     /// ceremony has produced the artifact they come from.
     pub contracts_bootstrap: Option<([u8; 32], [u8; 32])>,
+    /// The two per-position authority bundle digests, once those files exist. The loader
+    /// reads each bundle and refuses a digest that is not its own.
+    pub leg_authority_bundles: Option<([u8; 32], [u8; 32])>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -342,6 +359,7 @@ impl SolanaRouteBootstrapPlanV1 {
             identities: None,
             f6_authority_bundle: None,
             contracts_bootstrap: None,
+            leg_authority_bundles: None,
         }
     }
 
@@ -461,6 +479,22 @@ impl SolanaRouteBootstrapPlanV1 {
         self
     }
 
+    /// Bind the measured digests of the two per-position authority bundles.
+    pub fn with_leg_authority_bundles(mut self, upstream: [u8; 32], downstream: [u8; 32]) -> Self {
+        self.leg_authority_bundles = Some((upstream, downstream));
+        self
+    }
+
+    /// The layout's own relative path for the upstream position's authority bundle.
+    pub const fn upstream_leg_authority_bundle_relative() -> &'static str {
+        UPSTREAM_LEG_AUTHORITY_BUNDLE
+    }
+
+    /// The layout's own relative path for the downstream position's authority bundle.
+    pub const fn downstream_leg_authority_bundle_relative() -> &'static str {
+        DOWNSTREAM_LEG_AUTHORITY_BUNDLE
+    }
+
     /// Bind the digest of the F6 authority bundle that was written.
     pub fn with_f6_authority_bundle(mut self, digest: [u8; 32]) -> Self {
         self.f6_authority_bundle = Some(digest);
@@ -480,12 +514,22 @@ impl SolanaRouteBootstrapPlanV1 {
     /// test can assert the role-to-path mapping against the loaded layout rather than
     /// trusting that two lists were written in the same order.
     pub fn path_relatives() -> Vec<&'static str> {
-        BASE_PATHS
+        let mut all: Vec<&'static str> = BASE_PATHS
             .iter()
             .chain(F6_V4_PATHS.iter())
             .chain(F6_V8_PATHS.iter())
             .copied()
-            .collect()
+            .collect();
+        // The per-position paths belong here: the loader validates their parent chains
+        // like any other, and leaving them out is what left `state/upstream` and
+        // `state/downstream` uncreated.
+        all.extend([
+            UPSTREAM_ACTUATOR_STORE,
+            DOWNSTREAM_ACTUATOR_STORE,
+            UPSTREAM_LEG_AUTHORITY_BUNDLE,
+            DOWNSTREAM_LEG_AUTHORITY_BUNDLE,
+        ]);
+        all
     }
 
     /// The layout's own relative path for one V1 role.
@@ -674,18 +718,24 @@ impl SolanaRouteBootstrapPlanV1 {
                 settlement_id: self.upstream.settlement_id,
                 session_id: self.upstream.session_id,
                 chain_id: self.upstream.chain_id,
-                actuator_store: "state/upstream/solana-actuator.v1.sqlite3".to_owned(),
-                authority_bundle: "artifacts/upstream-solana-authority-bundle.v1".to_owned(),
-                authority_bundle_digest: placeholder("upstream-solana-authority-bundle"),
+                actuator_store: UPSTREAM_ACTUATOR_STORE.to_owned(),
+                authority_bundle: UPSTREAM_LEG_AUTHORITY_BUNDLE.to_owned(),
+                authority_bundle_digest: self.leg_authority_bundles.map_or_else(
+                    || placeholder("upstream-solana-authority-bundle"),
+                    |(upstream, _)| upstream,
+                ),
             },
             ProductionUniversalLegV11 {
                 family: ProductionChainFamilyV11::Sol,
                 settlement_id: self.downstream.settlement_id,
                 session_id: self.downstream.session_id,
                 chain_id: self.downstream.chain_id,
-                actuator_store: "state/downstream/solana-actuator.v1.sqlite3".to_owned(),
-                authority_bundle: "artifacts/downstream-solana-authority-bundle.v1".to_owned(),
-                authority_bundle_digest: placeholder("downstream-solana-authority-bundle"),
+                actuator_store: DOWNSTREAM_ACTUATOR_STORE.to_owned(),
+                authority_bundle: DOWNSTREAM_LEG_AUTHORITY_BUNDLE.to_owned(),
+                authority_bundle_digest: self.leg_authority_bundles.map_or_else(
+                    || placeholder("downstream-solana-authority-bundle"),
+                    |(_, downstream)| downstream,
+                ),
             },
         ]
     }

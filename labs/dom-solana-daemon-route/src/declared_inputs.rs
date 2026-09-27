@@ -116,6 +116,28 @@ pub fn place_contracts_bootstrap(
     owner_only::write(&state_dir.join(relative), bytes)
 }
 
+/// Write one position's authority bundle and return the digest the manifest must declare.
+///
+/// The digest is `ProductionUniversalLegV11::bundle_digest` -- the daemon's own public
+/// function, over a domain, the length and the bytes -- so the file and the manifest agree
+/// by construction. `read_bundle` computes the same value and refuses anything else.
+///
+/// Its contents are the position's authority material and therefore the caller's, like the
+/// wallet: a provisioner places them.
+pub fn write_leg_authority_bundle(
+    state_dir: &Path,
+    relative: &str,
+    bytes: &[u8],
+) -> Result<[u8; 32], String> {
+    if bytes.is_empty() {
+        return Err("an empty leg authority bundle is refused by its own digest".to_owned());
+    }
+    let digest = dom_interopd::ProductionUniversalLegV11::bundle_digest(bytes)
+        .map_err(|error| format!("leg authority bundle digest: {error:?}"))?;
+    owner_only::write(&state_dir.join(relative), bytes)?;
+    Ok(digest)
+}
+
 /// Write the Contracts budget policy.
 ///
 /// An input file the layout requires in create and in reopen alike. Its bytes are a
