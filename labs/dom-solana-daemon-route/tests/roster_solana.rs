@@ -9,6 +9,7 @@ mod common;
 
 use common::{provision_all, RELAY_ROSTER};
 use dom_interopd::{ProductionRelayRosterBundleV1, ProductionRoutePositionV1};
+use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1;
 
 fn decoded(provisioned: &common::Provisioned) -> ProductionRelayRosterBundleV1 {
     let bytes = std::fs::read(provisioned.directory.path().join(RELAY_ROSTER))
@@ -120,13 +121,23 @@ fn one_member_initiates_and_the_other_solves() {
     }
 }
 
+/// What the roster adds, and nothing else. Same reason as in the terms suite: the
+/// count comes from a plan carrying only the artifacts this one depends on.
 #[test]
-fn the_roster_moves_one_more_pin() {
+fn binding_the_roster_turns_one_more_pin_into_a_measurement() {
     let provisioned = provision_all();
+    let before = SolanaRouteBootstrapPlanV1::both_positions_on_cluster(
+        provisioned.facts.genesis_hash,
+    )
+    .with_registry(provisioned.registry)
+    .with_terms(provisioned.plan.terms.expect("the provisioned terms"));
+    assert_eq!(before.measured_pin_count(), 7);
+
+    let after = before.with_roster(provisioned.plan.roster.expect("the provisioned roster"));
     assert_eq!(
-        provisioned.plan.measured_pin_count(),
+        after.measured_pin_count(),
         8,
-        "four from the registry, three from the terms, one from the roster"
+        "relay_binding_digest"
     );
-    assert!(provisioned.plan.pins_are_placeholders());
+    assert!(after.pins_are_placeholders());
 }

@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use dom_solana_daemon_route::{
-    registry::{provision as provision_registry, SolanaChainFactsV1},
+    registry::{provision as provision_registry, ProvisionedSolanaRegistryV1, SolanaChainFactsV1},
     participants::provision as provision_participants,
     roster::provision as provision_roster,
     terms::{
@@ -73,6 +73,9 @@ pub struct Provisioned {
     pub upstream_setup: ProvisionedPositionV1,
     pub downstream_setup: ProvisionedPositionV1,
     pub facts: SolanaChainFactsV1,
+    /// The provisioned registry itself, so a test can rebuild the plan with only the
+    /// artifacts its own subject depends on and assert what that one artifact adds.
+    pub registry: ProvisionedSolanaRegistryV1,
 }
 
 pub fn provision_all() -> Provisioned {
@@ -109,7 +112,7 @@ pub fn provision_all() -> Provisioned {
     let dom_chain_id = registry.dom_chain_id;
     let dom_asset_id = registry.dom_asset_id;
     let plan = SolanaRouteBootstrapPlanV1::both_positions_on_cluster(facts.genesis_hash)
-        .with_registry(registry)
+        .with_registry(registry)  // Copy, so the value above stays usable
         .with_terms(terms);
     let [upstream, downstream] = positions;
 
@@ -152,6 +155,7 @@ pub fn provision_all() -> Provisioned {
     Provisioned {
         directory,
         plan,
+        registry,
         upstream_setup: upstream.clone(),
         downstream_setup: downstream.clone(),
         facts,

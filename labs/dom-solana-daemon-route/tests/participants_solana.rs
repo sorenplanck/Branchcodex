@@ -126,13 +126,18 @@ fn the_dleq_is_present_and_bounded_as_the_constructor_requires() {
     }
 }
 
+/// The bindings are the last artifact the fixture provisions, so this is also the
+/// running total, and it is asserted in exactly one place for that reason.
 #[test]
-fn the_bindings_move_one_more_pin() {
+fn binding_the_setups_turns_the_ninth_pin_into_a_measurement() {
     let provisioned = provision_all();
     assert_eq!(
         provisioned.plan.measured_pin_count(),
         9,
         "four from the registry, three from the terms, one from the roster, one here"
     );
-    assert!(provisioned.plan.pins_are_placeholders());
+    assert!(
+        provisioned.plan.pins_are_placeholders(),
+        "ten pins are still labels and the plan must keep saying so"
+    );
 }

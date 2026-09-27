@@ -16,6 +16,7 @@
 mod common;
 
 use common::{provision_all, DOWNSTREAM_TERMS, UPSTREAM_TERMS};
+use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1;
 use kaystra_core::terms::SettlementTermsV1;
 
 #[test]
@@ -178,16 +179,31 @@ fn both_terms_satisfy_the_registry_coherence_the_daemon_refuses_without() {
     }
 }
 
+/// What the terms add, and nothing else.
+///
+/// Asserted against a plan carrying only the registry and the terms, not against the
+/// shared fixture's plan: the fixture provisions every artifact built so far, so a
+/// count taken from it would change every time a later artifact lands and would stop
+/// saying anything about the terms.
 #[test]
-fn the_terms_move_three_pins_and_leave_the_rest_declared_placeholders() {
+fn binding_the_terms_turns_three_more_pins_into_measurements() {
     let provisioned = provision_all();
+    let pins = provisioned.plan.terms.expect("the provisioned terms");
+
+    let registry_only = SolanaRouteBootstrapPlanV1::both_positions_on_cluster(
+        provisioned.facts.genesis_hash,
+    )
+    .with_registry(provisioned.registry);
+    assert_eq!(registry_only.measured_pin_count(), 4);
+
+    let with_terms = registry_only.with_terms(pins);
     assert_eq!(
-        provisioned.plan.measured_pin_count(),
+        with_terms.measured_pin_count(),
         7,
-        "four from the registry and three from the terms"
+        "upstream_terms_digest, downstream_terms_digest and route_scope_digest"
     );
     assert!(
-        provisioned.plan.pins_are_placeholders(),
+        with_terms.pins_are_placeholders(),
         "twelve pins are still labels and the plan must keep saying so"
     );
 }
