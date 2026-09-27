@@ -1,0 +1,13 @@
+# Measured digests of the Anza Agave release archives this harness runs.
+# One line per version: "<version> <sha256>", for
+# solana-release-x86_64-unknown-linux-gnu.tar.bz2 from
+# https://github.com/anza-xyz/agave/releases.
+#
+# A line here is enforced: `scripts/f8-install-solana-tools.sh` refuses an
+# archive whose digest differs and deletes it.
+#
+# v2.1.11 was measured directly from the release URL on 2026-09-26 (298837116
+# bytes), and the archive was checked at the same time to contain executable
+# bin/solana, bin/solana-test-validator and bin/solana-keygen, each reporting
+# 2.1.11. It is a measurement, not a transcribed upstream claim.
+2.1.11 4a43e1296440f6e056027d6afd5ccdaf49ae06067dde1f0969a86011255e8641
