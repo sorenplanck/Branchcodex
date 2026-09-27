@@ -21,7 +21,7 @@ use dom_solana_daemon_route::{
         provision as provision_terms, ProvisionedPositionV1, RouteTermsInputV1,
         SolanaPositionAccountsV1, SolanaPositionTermsPlanV1,
     },
-    SolanaRouteBootstrapPlanV1,
+    RouteIdentitiesV1, SolanaRouteBootstrapPlanV1,
 };
 use kaystra_core::{terms::SettlementTermsV1, types::ParticipantId};
 use solana_types::SolanaPubkey;
@@ -70,6 +70,24 @@ pub const NOW_SECONDS: u64 = 1_800_000_000;
 /// refuses a route whose two counterparty legs carry the same chain id unless the
 /// DOM/XMR mainnet profile is selected. So a Solana route in both directions is
 /// `Solana(A) -> DOM -> Solana(B)`.
+/// The six declared identities, fixed for the fixture.
+///
+/// Declared BEFORE the roster and the participant bindings are provisioned, because
+/// `route_id` is one of them and both of those artifacts carry it: the roster bundle and
+/// the participant bundle are each refused if their route id is not the pinned one. The
+/// first version of this fixture provisioned them from the placeholder id and declared
+/// the real one afterwards, and the loader answered `PinMismatch` -- correctly.
+pub fn identities() -> RouteIdentitiesV1 {
+    RouteIdentitiesV1 {
+        route_id: [0x31; 32],
+        process_owner_id: [0x32; 32],
+        coordinator_id: [0x33; 32],
+        coordinator_plan_authority_id: [0x34; 32],
+        actuator_bindings_digest: [0x35; 32],
+        solver_inventory_binding_digest: [0x36; 32],
+    }
+}
+
 pub fn upstream_facts() -> SolanaChainFactsV1 {
     SolanaChainFactsV1 {
         genesis_hash: [0x7c; 32],
@@ -205,6 +223,9 @@ pub fn provision_all() -> Provisioned {
         upstream_facts.genesis_hash,
         downstream_facts.genesis_hash,
     )
+    // Identities first: the roster and the participant bindings below carry the route id,
+    // and the loader refuses either one whose route id is not the pinned one.
+    .with_identities(identities())
     .with_registry(registry) // Copy, so the value above stays usable
     .with_terms(terms);
     let [upstream, downstream] = positions;

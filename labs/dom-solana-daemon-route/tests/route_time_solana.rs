@@ -17,7 +17,7 @@
 mod common;
 
 use common::{provision_all, TIME_EVIDENCE, TIME_POLICY};
-use dom_solana_daemon_route::{RouteIdentitiesV1, SolanaRouteBootstrapPlanV1};
+use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1;
 use route_time_anchor::{
     CheckpointRoleV2, ClockKindV2, RouteTimeEvidenceV2, RouteTimePolicyV2, SignedRouteTimeEvidenceV2,
     SignedRouteTimePolicyV2,
@@ -180,14 +180,8 @@ fn the_time_artifacts_turn_four_more_pins_into_measurements() {
 #[test]
 fn the_complete_artifact_side_encodes_both_manifests() {
     let provisioned = provision_all();
-    let plan = provisioned.plan.with_identities(RouteIdentitiesV1 {
-        route_id: [0x31; 32],
-        process_owner_id: [0x32; 32],
-        coordinator_id: [0x33; 32],
-        coordinator_plan_authority_id: [0x34; 32],
-        actuator_bindings_digest: [0x35; 32],
-        solver_inventory_binding_digest: [0x36; 32],
-    });
+    // The fixture declares the identities before the artifacts that bind the route id.
+    let plan = provisioned.plan;
 
     assert!(plan.artifact_pins_are_complete());
     assert_eq!(plan.route_id, [0x31; 32], "declaring identities sets the route id");

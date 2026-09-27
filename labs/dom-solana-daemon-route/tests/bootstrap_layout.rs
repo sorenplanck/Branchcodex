@@ -25,25 +25,12 @@
 
 mod common;
 
-use common::{provision_all, NOW_SECONDS};
+use common::{identities, provision_all, NOW_SECONDS};
 use dom_interopd::{
     load_authenticated_production_inputs_v1, load_production_bootstrap_v11,
     ProductionBootstrapModeV1, ProductionPathRoleV1,
 };
-use dom_solana_daemon_route::{
-    declared_inputs, RouteIdentitiesV1, SolanaRouteBootstrapPlanV1 as Plan,
-};
-
-fn identities() -> RouteIdentitiesV1 {
-    RouteIdentitiesV1 {
-        route_id: [0x31; 32],
-        process_owner_id: [0x32; 32],
-        coordinator_id: [0x33; 32],
-        coordinator_plan_authority_id: [0x34; 32],
-        actuator_bindings_digest: [0x35; 32],
-        solver_inventory_binding_digest: [0x36; 32],
-    }
-}
+use dom_solana_daemon_route::{declared_inputs, SolanaRouteBootstrapPlanV1 as Plan};
 
 /// Provision every input the layout requires, then write both manifests.
 fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -121,9 +108,10 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     declared_inputs::verify_parent_chains(&root, &Plan::path_relatives())
         .expect("every parent chain still valid after the inputs were written");
 
+    // The fixture already declared the identities, before the artifacts that bind the
+    // route id. Re-declaring them here would be harmless only by coincidence.
     let plan = provisioned
         .plan
-        .with_identities(identities())
         .with_f6_authority_bundle(f6)
         .with_leg_authority_bundles(upstream_bundle, downstream_bundle);
     assert!(plan.artifact_pins_are_complete());
