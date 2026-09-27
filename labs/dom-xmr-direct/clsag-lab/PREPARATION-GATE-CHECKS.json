@@ -1,0 +1,67 @@
+{
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--release",
+        "--locked",
+        "--test",
+        "preparation_gate",
+        "--test",
+        "release_journal",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/preparation-gate-final-tests.log",
+      "results": [
+        "test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.20s",
+        "test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.39s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "--release",
+        "--locked",
+        "--all-targets",
+        "-j2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "target/preparation-gate-clippy.log",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--offline",
+        "--release",
+        "--locked",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/preparation-gate-build.log",
+      "results": []
+    }
+  ],
+  "sha256": {
+    "src/lib.rs": "cabca3080f6d0377fc1fc7833b5a1bc8d54c06a8cd1cbc470a30c8f95209d424",
+    "src/preparation_gate.rs": "be3e77c1789e9f18277dbbc17a698021614cb8f507c4cf4b7a313594a290ca83",
+    "tests/preparation_gate.rs": "fb09b4ee3541493e04ce6d01922885da45a5969ab1b43a860e1178014fce4910",
+    "examples/regtest_claim.rs": "f13b6a440fa622a7cd3b30e45dff339e4e4d04691c2ebb8f78ebdb7289d69f3a",
+    "examples/support/refund_recovery_worker.rs": "d738c209789869727ac6b605b16a1c11b7829d9885478bca83358de4ba7153cc",
+    "examples/support/settlement_resume.rs": "2a7b86514d2813aac0185b408763ed62cca54b30630c797a8e30003bf3ba3d21"
+  }
+}

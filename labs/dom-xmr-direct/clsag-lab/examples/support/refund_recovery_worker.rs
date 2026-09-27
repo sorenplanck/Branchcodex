@@ -3,8 +3,11 @@
 use super::{direct_recovery_bridge, fresh_secret, presign, unix_seconds};
 use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
 use dxp1_clsag_lab::{
-    capsule_checkpoint::CapsuleCheckpoint, native::PreparedClaim,
-    xmr_recovery::checkpoint::LocalXmrRecoveryCheckpoint, Statement,
+    capsule_checkpoint::CapsuleCheckpoint,
+    native::PreparedClaim,
+    preparation_gate::{PreparationBinding, PreparationGate},
+    xmr_recovery::checkpoint::LocalXmrRecoveryCheckpoint,
+    Statement,
 };
 use frost::Participant;
 use monero_wallet::{ed25519::Point, transaction::Transaction};
@@ -169,6 +172,20 @@ pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
     assert!(args.next().is_none());
     let job = Job::load(&root, expected);
     assert!(unix_seconds() >= job.received && unix_seconds() <= job.latest);
+    // Hold this local lock through recovery/signing. Never infer non-exposure
+    // from a missing initial-claim journal or recreate a missing phase gate.
+    let mut phase = PreparationGate::open(
+        &root.join("preparation.wal"),
+        PreparationBinding {
+            capsule_link: job.link,
+            received: job.received,
+        },
+    )
+    .unwrap();
+    phase
+        .claim_recovery(expected)
+        .expect("private-abandonment recovery is not authorized");
+    assert!(unix_seconds() >= job.received && unix_seconds() <= job.latest);
     let capsule =
         CapsuleCheckpoint::read(&root.join("direct-capsule.record"), job.capsule).unwrap();
     assert_eq!(capsule.received_unix_seconds, job.received);
@@ -233,15 +250,66 @@ pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
     details["worker_exports_spend_shares"] = json!(false);
     details["worker_recovery_and_signing_seconds"] = json!(began.elapsed().as_secs_f64());
     details["worker_preserves_original_deadline"] = json!(true);
+    details["preparation_gate_recovery_only"] = json!(true);
     write_private(
         &root.join("refund-worker-report.json"),
         &serde_json::to_vec(&details).unwrap(),
     );
+    drop(phase);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposed_operation_is_rejected_before_loading_shares_or_starting_solver() {
+        let root =
+            std::env::temp_dir().join(format!("dxp1-refund-exposure-gate-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let received = unix_seconds();
+        let job = Job {
+            local_identity: [1; 32],
+            capsule: [2; 32],
+            link: [3; 64],
+            received,
+            latest: received + 100,
+            offset: Zeroizing::new(Scalar::ZERO),
+            unsigned: Zeroizing::new(vec![7; 16]),
+        };
+        let identity = job.persist(&root);
+        let mut gate = PreparationGate::create(
+            &root.join("preparation.wal"),
+            PreparationBinding {
+                capsule_link: job.link,
+                received,
+            },
+        )
+        .unwrap();
+        gate.begin_exchange([4; 32]).unwrap();
+        drop(gate);
+        let before = fs::read(root.join("preparation.wal")).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            worker(
+                vec![
+                    root.clone().into_os_string(),
+                    std::ffi::OsString::from("/nonexistent-solver-must-not-start"),
+                    hex(&identity).into(),
+                ]
+                .into_iter(),
+            )
+        });
+        let panic = result.expect_err("exposed operation reached recovery");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("private-abandonment recovery is not authorized"));
+        assert_eq!(fs::read(root.join("preparation.wal")).unwrap(), before);
+        assert!(!root.join("refund-signed.tx").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn worker_restores_real_unsigned_intent_with_the_codec_digest_domain() {

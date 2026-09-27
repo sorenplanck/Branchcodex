@@ -28,6 +28,7 @@ use dxp1_clsag_lab::{
     dom_reserve::{ReserveIntent, ReserveShare},
     joint::{JointParticipant, JointPlan},
     native::{ClaimTerms, PreparedClaim},
+    preparation_gate::{PreparationBinding, PreparationGate, PreparationState},
     recovery::RecoveryError,
     release_journal::{claim_digest, InitialClaimJournal, ReleasePolicy, ReleaseState},
     time_bounds::{
@@ -296,8 +297,18 @@ async fn journaled_initial_send<T, F: std::future::Future<Output = T>>(
     payload: &[u8],
     send: impl FnOnce() -> F,
 ) -> T {
-    // The journal requires a durable containing directory. This fresh regtest
-    // directory is never reused by a different operation.
+    let phase = PreparationGate::open(
+        &root.join("preparation.wal"),
+        PreparationBinding {
+            capsule_link: window.capsule_binding(),
+            received: window.disclosed_at().0,
+        },
+    )
+    .unwrap();
+    phase.require_exchange(operation).unwrap();
+    drop(phase); // ExchangePossible is immutable; cannot become RecoveryOnly.
+                 // The journal requires a durable containing directory. This fresh regtest
+                 // directory is never reused by a different operation.
     fs::File::open(root.parent().unwrap())
         .unwrap()
         .sync_all()
@@ -414,7 +425,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 .as_nanos()
         ));
     fs::create_dir(&root).expect("fresh experiment directory");
-    if pair_outcome.is_some_and(PairOutcome::restarts_solver) {
+    if pair_outcome.is_some() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         fs::File::open(&root).unwrap().sync_all().unwrap();
@@ -835,6 +846,11 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             direct_recovery_bridge::DirectPublicCapsule::prepare_with_work(&bridge, material, squarings)
         };
         let link = XmrDirectRecoveryLink::new(&roster, ids[1], capsule.context(), capsule.public_key(), capsule.binding()).unwrap();
+        if pair_outcome.is_some() {
+            drop(PreparationGate::create(&root.join("preparation.wal"),PreparationBinding {
+                capsule_link:link.binding(),received:capsule.received_unix_seconds(),
+            }).unwrap());
+        }
         if solver_restart_bridge.is_some() {
             capsule.persist(&root.join("direct-capsule.record"));
         }
@@ -1124,6 +1140,20 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 expected
             );
         }
+        let mut phase = PreparationGate::open(
+            &root.join("preparation.wal"),
+            PreparationBinding {
+                capsule_link: binding,
+                received,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            phase.state().unwrap(),
+            PreparationState::RecoveryOnly { job: identity }
+        );
+        assert!(phase.begin_exchange([1; 32]).is_err());
+        drop(phase);
         let seconds = started.elapsed().as_secs_f64();
         assert!(seconds <= 65.0 && unix_seconds() <= state.window.latest_honest().0);
         details
@@ -1142,6 +1172,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         details["local_setup_receipt_and_authority_unchanged"] = json!(true);
         details["local_state_and_unsigned_refund_job_unchanged"] = json!(true);
         details["refund_publication_by_parent"] = json!(true);
+        details["preparation_gate_created_before_funding"] = json!(true);
+        details["stale_exchange_rejected_after_recovery"] = json!(true);
         details["recovery_backend"] = json!("experimental-direct-dlog");
         details["puzzles"] = json!(1);
         details["proof_rounds"] = json!(256);
@@ -1170,6 +1202,21 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         }
     {
         if let Some(state) = paired.as_mut() {
+            let mut phase = PreparationGate::open(
+                &root.join("preparation.wal"),
+                PreparationBinding {
+                    capsule_link: link.binding(),
+                    received: capsule.received_unix_seconds(),
+                },
+            )
+            .unwrap();
+            // Legacy parent-only laboratory modes have no durable signing job.
+            // Pin their recovery purpose to this capsule instead of allowing
+            // them to bypass the same pre-exchange decision.
+            let mut purpose = Sha256::new();
+            purpose.update(b"DXP1/owned-parent-abandonment/v1");
+            purpose.update(link.binding());
+            phase.claim_recovery(purpose.finalize().into()).unwrap();
             assert!(
                 unix_seconds() <= state.ready_by.0,
                 "conditional test ready budget exhausted"
@@ -1709,6 +1756,20 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     dom_binding.update(prepared.context().route_binding);
     dom_binding.update(prepared.context().message);
     let joint_operation_binding = dom_binding.finalize().into();
+    if let Some(window) = &paired_release_window {
+        let mut phase = PreparationGate::open(
+            &root.join("preparation.wal"),
+            PreparationBinding {
+                capsule_link: window.capsule_binding(),
+                received: window.disclosed_at().0,
+            },
+        )
+        .unwrap();
+        phase.begin_exchange(joint_operation_binding).unwrap();
+        // Fail closed for the private-abandonment worker once any adaptor may
+        // be exchanged. Exposed-operation recovery remains a separate path.
+        assert!(phase.claim_recovery([2; 32]).is_err());
+    }
     let mut dom_offer = dom.offer(
         &cross_curve_proof.claim.secp_compressed,
         joint_operation_binding,

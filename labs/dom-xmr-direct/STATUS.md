@@ -13,6 +13,25 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Troca e recuperação agora exigem decisões duráveis mutuamente exclusivas.**
+`PreparationGate` é criado antes dos depósitos. Antes dos adaptors, fixa a
+operação em ExchangePossible; antes da recuperação privada, fixa o job em
+RecoveryOnly. Não volta a Private após queda/erro, não repara arquivo ausente
+e não renova o prazo. InitialClaimJournal e workers de settlement exigem a
+operação de troca original. Isso não substitui observação das cadeias.
+
+Passaram 32 testes Rust, Clippy/build, com quedas de processos, disputa de lock
+e recusa do worker exposto antes de ler shares/iniciar solver. Ensaios nativos:
+recuperação **174,093 s** total / **43,715 s** para recuperar/assinar; troca com
+republicação **178,899 s**, claims em **84,314 s**, primeira XMR reincluída152→153
+e contraparte por worker. Registros de decisão conferidos, outputs gastos,
+refund conflitante recusado; hashes/PIDs/grupos conferidos. Notas
+`clsag-lab/PREPARATION-GATE.md`. Resultados de laboratório com pouca margem,
+sem prova de prazo universal ou segurança bilateral.
+Segue pendente dar ao worker de refund observação/publicação nativas próprias,
+reconciliação do envio e recuperação após exposição; integração ao dom-interopd
+e fundamentos criptográficos/temporais também permanecem abertos.
+
 **Recuperação e assinatura da devolução XMR passaram em um Rust novo.**
 O supervisor descarta suas shares originais e encerra o verificador. O worker
 carrega a intenção sem assinatura e o estado local aprovados, preserva o prazo,

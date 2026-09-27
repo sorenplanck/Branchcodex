@@ -1,0 +1,299 @@
+{
+  "scope": "DOM RPC attempts by recovery workers only; excludes supervisor and XMR RPC. Per-worker wait budget, not a global liveness bound.",
+  "workers": [
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463052
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463053
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 2,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463054
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 4,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463055
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 3,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463056
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 5,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463057
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 4,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463058
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463059
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463060
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463061
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463062
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 4,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463063
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 4,
+        "public_read_attempts": 7,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463064
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 4,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463069
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 4,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463076
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 3,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463080
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 5,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463084
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 5,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463087
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 4,
+        "public_read_attempts": 9,
+        "submit_attempts": 1,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463088
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 1,
+        "public_read_attempts": 3,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463089
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 3,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463090
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 1,
+        "public_read_attempts": 3,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463100
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 5,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463102
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 2,
+        "public_read_attempts": 5,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463108
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463110
+    },
+    {
+      "dom_rpc": {
+        "authenticated_read_attempts": 0,
+        "public_read_attempts": 1,
+        "submit_attempts": 0,
+        "throttle_retries": 0,
+        "wait_elapsed_ms": 0,
+        "wait_requested_ms": 0
+      },
+      "pid": 1463113
+    }
+  ],
+  "totals": {
+    "public_read_attempts": 86,
+    "authenticated_read_attempts": 28,
+    "submit_attempts": 1,
+    "throttle_retries": 0,
+    "wait_requested_ms": 0,
+    "wait_elapsed_ms": 0
+  }
+}

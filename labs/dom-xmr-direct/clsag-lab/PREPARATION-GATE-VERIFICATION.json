@@ -1,0 +1,43 @@
+{
+  "recovery": {
+    "exit_code": 0,
+    "total_seconds": 174.093493369,
+    "recovery_seconds": 43.714538321,
+    "received_unix": 1790482735,
+    "started_unix": 1790482770,
+    "xmr_refund_observed_unix": 1790482813,
+    "xmr_original_latest_unix": 1790482835,
+    "dom_refund_height": 219,
+    "dom_refund_included_height": 220,
+    "dom_refund_spent_height": 221,
+    "phase": "RecoveryOnly",
+    "phase_target_matches_original_job": true,
+    "exchange_denied_after_recovery": true,
+    "pids_checked": [1418559,1441087,1418622,1441093],
+    "remaining_group": [],
+    "source_binary_hashes_match": true
+  },
+  "exchange_replay": {
+    "exit_code": 0,
+    "pid": 1462686,
+    "total_seconds": 178.89885513,
+    "wall_seconds": 178.9243726740242,
+    "claims_seconds": 84.313590266,
+    "replay_sender_pid": 1463064,
+    "replay_sender_exit_after_ack": 79,
+    "original_xmr_height": 152,
+    "new_xmr_height": 153,
+    "dom_conflicting_refund_rejected_height": 221,
+    "phase": "ExchangePossible",
+    "phase_target_matches_original_manifest_operation": true,
+    "private_recovery_denied_after_exchange_decision": true,
+    "worker_pids_checked_from_rpc_metrics": true,
+    "remaining_group": [],
+    "source_binary_hashes_match": true
+  },
+  "local_trusted_storage_and_cooperative_locks_required": true,
+  "complete_event_rollback_protected": false,
+  "refund_worker_independently_publishes": false,
+  "full_coordinator_restart": false,
+  "safe_bilateral_timing_proven": false
+}

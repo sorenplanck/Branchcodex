@@ -77,10 +77,12 @@ resultados de envio e retomada após queda no meio da assinatura/publicação,
 orçamento global de reinícios, preparação entre participantes independentes,
 fundamentos criptográficos/temporais e integração ao daemon. Os nonces deste
 worker são novos; este ensaio não retoma uma sessão cooperativa interrompida.
-O cenário é abandono ANTES de entregar adaptors. O job sozinho não registra
-uma barreira durável dessa entrega e não autoriza generalizar a assinatura ou
-publicação para uma operação com claims possivelmente expostas. Essa distinção
-deve ser ligada aos journals originais antes de ampliar o worker.
+O cenário é abandono ANTES de entregar adaptors. O job sozinho não autoriza
+generalizar a assinatura ou publicação para claims possivelmente expostas.
+A etapa posterior descrita em `PREPARATION-GATE.md` acrescentou uma barreira
+durável anterior aos depósitos: o worker agora exige RecoveryOnly para o job
+original, e a troca/republicação exige ExchangePossible para sua operação.
+Observação e publicação independentes pelo worker de refund continuam pendentes.
 
 ## Resultado financiado corrigido
 

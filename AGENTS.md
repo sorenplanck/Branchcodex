@@ -762,5 +762,47 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   assinatura/envio, limite global de retomadas, preparação independente,
   provas temporais/criptográficas e dom-interopd continuam abertos.
 
+- PreparationGate (src/preparation_gate.rs) criado em preparation.wal antes
+  dos depósitos dos modos direct-pair. Binding=link cápsula64+recebimento
+  original; Private escolhe uma vez ExchangePossible{operação final} ANTES
+  de dom.offer/presign OU RecoveryOnly{job exato}. Lock/fsync/0600/create_new,
+  root0700/durável para todos direct-pair. Sem transição de volta ou entre
+  estados. Registro ausente/parcial/corrompido não é recriado. Checksum/lock
+  pressupõem storage/writers confiáveis; rollback de evento completo excluído.
+- Worker de refund reserva o job antes de ler shares/iniciar Go e mantém lock
+  durante recuperar/assinar; pai confere decisão e recusa troca depois. Modos
+  antigos de abandono só no pai também fixam uma finalidade ligada à cápsula.
+  Journaled_initial_send e settlement_resume exigem ExchangePossible com a
+  operação do manifest antes de envio/retomada. Não reaplica gate temporal
+  inicial à contraparte devida. O gate não é autorização de refund exposto,
+  observação de cadeia, prova temporal ou orçamento global de tentativas.
+- 32 testes Rust (5 preparação,11 initial journal,16 example), Clippy/build
+  passaram; PREPARATION-GATE-CHECKS.json. Testes pais executam filhos que
+  encerram sem destructors, locks entre processos, troca de binding/job e
+  corrupção/truncamento; teste do worker exposto recusa antes de shares/Go.
+  Session18412 exit0. Nenhuma alteração/teste novo Go.
+- Recuperação nativa PID1418559/session86935 exit0: total174,093s,
+  recuperação43,715s, recebimento1790482735/início1790482770 (+35), refundXMR
+  observado1790482813 antes de1790482835. DOM lock219/refund220/gasto221.
+  RecoveryOnly contém hash do job original, tentativa de troca posterior
+  recusada. Rust1441087/Goantigo1418622/novo1441093, hashes/PIDs/grupo conferidos.
+  Prefixo DIRECT-PAIR-ABANDON-PREPARATION-GATE-*.
+- Coop native-replay PID1462686/session68082 exit0: total178,899s/claims84,314s,
+  worker1463064 republica XMR e morre79 após ACK; pool/reinclusão152→153,
+  contraparte por worker, outputs gastos/refund DOM conflitante recusado221.
+  ExchangePossible contém operação original do manifest; RecoveryOnly recusado
+  após a decisão. RPC DOM86public/28auth/1POST/0retry429, sem backoff nativo
+  exercitado. Prefixo DIRECT-PAIR-XMR-FIRST-REPLAY-PREPARATION-GATE-*.
+  Hashes/pai/workers/grupo conferidos; nenhum ensaio pendente. Notas
+  PREPARATION-GATE.md e PREPARATION-GATE-VERIFICATION.json. Resultados <=180
+  nesta rodada não apagam variação anterior nem provam segurança/SLA.
+- Próximo: worker de refund observa/publica nos nós por checkpoint original
+  de endpoints/genesis/inputs e reconcilia bytes exatos após queda. Agora já
+  exige fase privada reservada ao job; não usar ausência do journal inicial
+  como prova de não exposição, nem reutilizar esse caminho em ExchangePossible.
+  Recuperação após exposição, quedas antes de persistir intent após funding,
+  orçamento global, preparação independente, provas criptográficas/temporais
+  e dom-interopd continuam pendentes.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

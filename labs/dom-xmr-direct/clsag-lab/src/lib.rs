@@ -28,6 +28,8 @@ pub mod claim_resume;
 pub mod capsule_checkpoint;
 pub mod operation_checkpoint;
 #[cfg(unix)]
+pub mod preparation_gate;
+#[cfg(unix)]
 pub mod counterpart_delivery;
 pub mod dom_joint;
 pub mod dom_recovery;

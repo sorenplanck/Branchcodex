@@ -11,6 +11,7 @@ use dxp1_clsag_lab::{
     native::XmrClaimEnvelope,
     native_dom::DomClaimOffer,
     operation_checkpoint::{ClaimManifest, OperationCheckpoint},
+    preparation_gate::{PreparationBinding, PreparationGate},
 };
 use monero_simple_request_rpc::{prelude::*, SimpleRequestTransport};
 use monero_wallet::transaction::Transaction as XmrTransaction;
@@ -525,6 +526,18 @@ async fn recover(
     let records = root.join("claim-resume");
     let manifest = ClaimManifest::decode(&read(&records.join("manifest.record"))?, &checkpoint)
         .ok_or("original manifest invalid")?;
+    let preparation = PreparationGate::open(
+        &root.join("preparation.wal"),
+        PreparationBinding {
+            capsule_link: manifest.capsule,
+            received: manifest.disclosed_at,
+        },
+    )
+    .map_err(|_| "preparation decision unavailable")?;
+    preparation
+        .require_exchange(operation)
+        .map_err(|_| "operation not authorized for exchange")?;
+    drop(preparation); // One-way decision remains sticky after releasing lock.
     let xmr = XmrClaimEnvelope::from_resume_bytes(
         &read(&records.join("xmr.record"))?,
         manifest.xmr_record,
