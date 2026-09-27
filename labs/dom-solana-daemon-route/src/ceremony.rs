@@ -36,6 +36,8 @@
 
 use std::path::{Path, PathBuf};
 
+use btc_crypto::SecpContext;
+
 use crate::registry::ProvisionedSolanaRegistryV1;
 use crate::roster::ProvisionedRelayRosterV1;
 use crate::terms::ProvisionedRouteTermsV1;
@@ -169,4 +171,184 @@ pub fn write_plans(
             .try_into()
             .map_err(|_| "two ceremony plans".to_owned())?,
     })
+}
+
+/// Walk what `load_context` walks, and name the step that fails.
+///
+/// The ceremony reports `Binding` for every input disagreement it can have: a plan field
+/// that is zero, an authority bundle that does not decode, an authority-set digest that is
+/// not the one pinned, a registry that will not load or whose manifest is another one, a
+/// roster whose digest or network or route is not the plan's, terms that are not canonical
+/// or do not hash to their pin, and a roster leg that does not match its terms. One word for
+/// nine conditions across seven files.
+///
+/// So the same sequence runs here, in the same order, with the same public APIs and the
+/// REAL clock the ceremony uses -- and each step says which one it was. A provisioner that
+/// emits a plan its own route cannot satisfy should find out while it still has both sides.
+pub fn verify_plan(plan_path: &Path, now_seconds: u64) -> Result<(), String> {
+    use deployment_registry::{RegistryStoreV1, RegistryValidationPolicyV1};
+    use dom_interopd::{ProductionAuthorityBundleV1, ProductionRelayRosterBundleV1};
+    use kaystra_core::terms::SettlementTermsV1;
+
+    let plan: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(plan_path).map_err(|error| format!("read the plan: {error}"))?,
+    )
+    .map_err(|error| format!("parse the plan: {error}"))?;
+
+    let digest = |key: &str| -> Result<[u8; 32], String> {
+        let values = plan[key]
+            .as_array()
+            .ok_or_else(|| format!("{key} is not an array"))?;
+        let mut out = [0u8; 32];
+        if values.len() != 32 {
+            return Err(format!("{key} is {} bytes, not 32", values.len()));
+        }
+        for (slot, value) in values.iter().enumerate() {
+            out[slot] = u8::try_from(value.as_u64().ok_or_else(|| format!("{key} is not bytes"))?)
+                .map_err(|_| format!("{key} has a value past a byte"))?;
+        }
+        Ok(out)
+    };
+    let path = |key: &str| -> Result<PathBuf, String> {
+        Ok(PathBuf::from(
+            plan[key]
+                .as_str()
+                .ok_or_else(|| format!("{key} is not a string"))?,
+        ))
+    };
+
+    if plan["schema"].as_u64() != Some(13) {
+        return Err("the plan is not schema 13".to_owned());
+    }
+    let network_id = digest("network_id")?;
+    let route_id = digest("route_id")?;
+    let epoch = plan["minimum_registry_epoch"]
+        .as_u64()
+        .ok_or_else(|| "minimum_registry_epoch is not a number".to_owned())?;
+    for (name, value) in [
+        ("network_id", network_id),
+        ("route_id", route_id),
+        ("local_participant_id", digest("local_participant_id")?),
+    ] {
+        if value == [0; 32] {
+            return Err(format!("{name} is zero, which the ceremony refuses"));
+        }
+    }
+    if epoch == 0 {
+        return Err("minimum_registry_epoch is zero".to_owned());
+    }
+
+    let secp = SecpContext::new(&[0x5a; 32]);
+    let bundle = ProductionAuthorityBundleV1::decode_canonical(
+        &std::fs::read(path("authority_bundle_file")?)
+            .map_err(|error| format!("read the authority bundle: {error}"))?,
+    )
+    .map_err(|error| format!("the authority bundle does not decode: {error:?}"))?;
+    bundle
+        .registry()
+        .validate_with_context(&secp)
+        .map_err(|error| format!("the registry authority set is invalid: {error:?}"))?;
+    if bundle
+        .registry()
+        .authority_set_digest()
+        .map_err(|error| format!("the registry authority digest: {error:?}"))?
+        != digest("registry_authority_set_digest")?
+    {
+        return Err(
+            "the plan pins another registry authority set; this is the deployment-registry \
+             domain, not the route-time one"
+                .to_owned(),
+        );
+    }
+
+    let store = RegistryStoreV1::open_existing(&path("registry_store")?)
+        .map_err(|error| format!("the registry store does not open: {error:?}"))?;
+    let resolved = store
+        .load_current(
+            bundle.registry(),
+            &secp,
+            RegistryValidationPolicyV1 {
+                // The clock the ceremony uses, not a trusted second from the plan.
+                now_seconds,
+                expected_network_id: network_id,
+                minimum_epoch: epoch,
+            },
+        )
+        .map_err(|error| format!("the registry does not load at {now_seconds}: {error:?}"))?
+        .ok_or_else(|| {
+            format!("the registry store holds no registry current at {now_seconds}")
+        })?;
+    if resolved.manifest_digest() != digest("registry_manifest_digest")? {
+        return Err("the plan pins another registry manifest".to_owned());
+    }
+
+    let roster = ProductionRelayRosterBundleV1::decode_canonical(
+        &std::fs::read(path("roster_file")?)
+            .map_err(|error| format!("read the roster: {error}"))?,
+    )
+    .map_err(|error| format!("the roster does not decode: {error:?}"))?;
+    if roster
+        .bundle_digest()
+        .map_err(|error| format!("the roster digest: {error:?}"))?
+        != digest("roster_digest")?
+    {
+        return Err("the plan pins another roster".to_owned());
+    }
+    if roster.network_id() != network_id {
+        return Err("the roster names another interop network".to_owned());
+    }
+    if roster.route_id() != route_id {
+        return Err("the roster names another route".to_owned());
+    }
+
+    let terms_files = plan["terms_files"]
+        .as_array()
+        .ok_or_else(|| "terms_files is not an array".to_owned())?;
+    let terms_digests = plan["terms_digests"]
+        .as_array()
+        .ok_or_else(|| "terms_digests is not an array".to_owned())?;
+    for index in 0..2 {
+        let file = terms_files
+            .get(index)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("terms_files[{index}] is missing"))?;
+        let bytes =
+            std::fs::read(file).map_err(|error| format!("read terms_files[{index}]: {error}"))?;
+        let terms = SettlementTermsV1::decode(&bytes)
+            .map_err(|error| format!("terms_files[{index}] does not decode: {error:?}"))?;
+        if terms
+            .canonical_bytes()
+            .map_err(|error| format!("terms_files[{index}] does not encode: {error:?}"))?
+            != bytes
+        {
+            return Err(format!("terms_files[{index}] is not its own canonical bytes"));
+        }
+        let mut expected = [0u8; 32];
+        let declared = terms_digests
+            .get(index)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("terms_digests[{index}] is missing"))?;
+        for (slot, value) in declared.iter().enumerate().take(32) {
+            expected[slot] = u8::try_from(value.as_u64().unwrap_or(256)).unwrap_or(0);
+        }
+        if terms
+            .terms_hash()
+            .map_err(|error| format!("terms_files[{index}] hash: {error:?}"))?
+            != expected
+        {
+            return Err(format!("the plan pins another digest for terms_files[{index}]"));
+        }
+        // What `ExpectedLegV1::from_authenticated` demands of the roster leg beside it.
+        let leg = &roster.legs()[index];
+        if leg.session_id != terms.session_id.0 {
+            return Err(format!("roster leg {index} names another session"));
+        }
+        if leg.policy_version != terms.policy_version {
+            return Err(format!("roster leg {index} names another policy version"));
+        }
+        if leg.members.map(|member| member.participant_id) != terms.roster {
+            return Err(format!("roster leg {index} names other participants"));
+        }
+    }
+    Ok(())
 }

@@ -76,6 +76,13 @@ fn main() -> Result<(), String> {
             .map_err(|error| format!("encode the plan: {error}"))?,
     )?;
 
+    // Walk what the ceremony walks, before handing it anything. It reports one word for
+    // nine different disagreements across seven files; this names the step.
+    for path in &plans.paths {
+        ceremony::verify_plan(path, now_seconds)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+
     println!("state_dir={}", state_dir.display());
     println!("bootstrap_plan={}", plan_path.display());
     // Everything that later hands this route to the daemon must use the same second.
