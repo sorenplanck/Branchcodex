@@ -1,0 +1,62 @@
+{
+  "runs": [
+    {
+      "mode": "direct-restore-fast-audit",
+      "pid": 1590037,
+      "exit_code": 0,
+      "wall_seconds": 36.76878664002288,
+      "opening_seconds": 29.283897117,
+      "proof_verification_seconds": 7.468265137,
+      "below_assumed_adversarial_30_seconds": true,
+      "resource_pressure_before": {
+        "cpu": "some avg10=0.01 avg60=0.22 avg300=0.25 total=1152564135\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=2.83 avg60=3.46 avg300=10.81 total=23714781435\nfull avg10=2.43 avg60=3.18 avg300=10.19 total=22559094218\n",
+        "memory": "some avg10=0.00 avg60=0.21 avg300=1.05 total=1637780845\nfull avg10=0.00 avg60=0.19 avg300=0.97 total=1544619983\n"
+      }
+    },
+    {
+      "mode": "direct-restore-local-receipt",
+      "pid": 1590168,
+      "exit_code": 0,
+      "wall_seconds": 39.704804768029135,
+      "opening_seconds": 32.167416683,
+      "proof_verification_seconds": 7.520827568,
+      "below_assumed_adversarial_30_seconds": false,
+      "resource_pressure_before": {
+        "cpu": "some avg10=0.00 avg60=0.12 avg300=0.21 total=1152733734\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=44.88 avg60=12.75 avg300=11.93 total=23722867651\nfull avg10=40.56 avg60=11.60 avg300=11.18 total=22566461537\n",
+        "memory": "some avg10=0.00 avg60=0.11 avg300=0.93 total=1637792894\nfull avg10=0.00 avg60=0.10 avg300=0.85 total=1544631757\n"
+      }
+    },
+    {
+      "mode": "direct-restore-fast-audit",
+      "pid": 1590518,
+      "exit_code": 0,
+      "wall_seconds": 40.38804380397778,
+      "opening_seconds": 32.852485358,
+      "proof_verification_seconds": 7.518777153,
+      "below_assumed_adversarial_30_seconds": false,
+      "resource_pressure_before": {
+        "cpu": "some avg10=0.00 avg60=0.05 avg300=0.18 total=1152922830\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=71.86 avg60=42.02 avg300=19.76 total=23752016027\nfull avg10=63.33 avg60=37.57 avg300=18.10 total=22592529480\n",
+        "memory": "some avg10=1.38 avg60=0.49 avg300=0.90 total=1638145467\nfull avg10=1.27 avg60=0.43 avg300=0.82 total=1544935769\n"
+      }
+    }
+  ],
+  "same_original_capsule": true,
+  "scalar_equality_checked": true,
+  "work": 10000000,
+  "capsule_binding": "2119d6370c0c4e0d5d67139890f33c6b8256cd4e16c3a438057bd2015cc4491b",
+  "original_receipt_unix": 1790485218,
+  "sha256": {
+    "recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b",
+    "recovery-audit/direct_dlog.go": "a840aa532686fc6a3c0d22174e98b7734989156d3481138d5d3495ec4d89d4ba",
+    "recovery-audit/direct_dlog_cli.go": "6e7a4fd446d4c8906772ebabed6328e5c86d38c7209ae38a63df8ee499c532da",
+    "recovery-audit/direct_fast_open_audit.go": "199347be9683f2b7d347559e9b309096ec0a0e25a52af409dd75804e677614f4",
+    "clsag-lab/target/recovery-research/direct-fast-audit": "c111c756a4edb06dbc7d79d2001f2163536bbd0236739d97b1ce5c9b5685476d",
+    "clsag-lab/target/regtest-1580411-1790485138111332369/direct-capsule.record": "4e0fa4b77c341188d272ea7b0a6a8509fda63909cb9527c60073748500c9ef47"
+  },
+  "private_receipt_and_authority_unchanged": true,
+  "assumed_adversarial_minimum_seconds": 30,
+  "scope": "Opening-only on the already-spent own regtest capsule. No producer, no factors, no new funding or native transactions. Full proof checked in each process; only opening cost is relevant to an adversary who need not recheck the honest proof. No secret scalar or authority key is written to results."
+}

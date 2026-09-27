@@ -13,6 +13,22 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Prioridade atual: corrigir uma premissa de segurança refutada.**
+A cápsula de 10M passos, usada nos testes anteriores, foi aberta em7,475 s e
+7,492 s com OpenSSL Montgomery, parâmetros públicos e conferência independente
+do ponto Ed25519. Mesmo trabalho, sem fatores/segredo do produtor ou novos
+fundos. Logo, o mínimo adversarial de30 s do perfil atual é falso. Os tempos
+anteriores próximos de três minutos não demonstram um swap seguro.
+
+Passaram26 testes Go/vet/build, quatro comparações de aritmética C/Python e
+seis controles negativos. O teste Rust mostra que o guard de30 s admite
+publicação após a recuperação observada já ser possível. Não é ainda um roubo
+financiado reproduzido; é uma premissa necessária da janela refutada.
+`recovery-audit/FAST-OPEN-AUDIT.md` contém evidência/limites. Não substituir30
+por8 como se a medição fosse um novo mínimo. Próximo trabalho é reproduzir
+a corrida adversarial nos nós e revisar a recuperação temporizada/perfil,
+antes de integrar retomada durante o solve ou declarar proximidade de produção.
+
 **Retomada após abertura e gravação parcial da assinatura passou.**
 Checkpoint privado guarda a share original já recuperada, ligada ao job;
 workers novos retomam com caminho de solver inexistente. Staging parcial

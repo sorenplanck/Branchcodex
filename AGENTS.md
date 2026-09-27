@@ -887,5 +887,49 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   adversarial/prova de atomicidade e integração ao dom-interopd seguem requisitos
   obrigatórios. Sem usar abandono privado para recovery pós-exposição.
 
+- Commit3cd997a salvou completed-opening/signing-staging recovery, Soren-only.
+- AUDITORIA CRÍTICA posterior: ao estudar checkpoint durante solve, upstream
+  SolvePuzzle revelou Exp(w,2,N)+contador big.Int alocados a cada passo.
+  Implementado direct_fast_open_audit.go (Go Mul/Mod com temporários) e modo
+  local direct-restore-fast-audit após MESMA prova/verificação. Callback opcional
+  não vem do peer. Original open continua SolvePuzzle; decodePlaintext comum
+  preserva validações. Binário separado target/recovery-research/direct-fast-audit;
+  helper nativo antigo não foi sobrescrito. Não implementou ainda mid-solve resume.
+- 26 testes Go (24 anteriores+2 diferenciais/política), vet/build passaram
+  session90718; FAST-OPEN-AUDIT-CHECKS.json. Mesma cápsula encerrada da native
+  PID1580411 (outputs já gastos): fastGo29,284s, referência32,167s, fastGo32,852s;
+  escalar igual, toda prova verificada a cada processo. PIDs1590037,1590168,
+  1590518/session16293 exit0. FAST-OPEN-AUDIT-RESULT.json registra hashes/pressão.
+- Auditor independente direct_montgomery_audit.c usa OpenSSL Montgomery com
+  exatamente10M squarings, só N/U/T públicos. Python finaliza V público e
+  libsodium confere scalar*G == ponto original. Sem fatores, share fornecida,
+  produtor novo, funding ou deadline novo. C -O3 -Wall -Wextra -Werror -lcrypto;
+  1/2/17/200000 passos iguais a pow modular Python; seis entradas inválidas
+  recusadas. Sem gmp headers/pkg-config; usou OpenSSL3.0.13 já instalado.
+- Native arithmetic C/session95191 exit0, PIDs1592789/1592815: laço7,375/7,390s,
+  COM processo/extração/checkEd25519 7,475/7,492s. Mesma cápsula/job original,
+  sem segredos escritos em artefatos. MONTGOMERY-OPEN-AUDIT-RESULT.json.
+- O MÍNIMO ADVERSARIAL30s DO PERFIL ATUAL ESTÁ REFUTADO, não só pendente.
+  Não reduzir a constante para8 nem aumentarT por regra de três alegando
+  segurança:8 é teto observado de conclusão, não mínimo. Hardware adversarial,
+  primeira divulgação e margem honesta integral precisam fundamentação.
+  Testes anteriores continuam funcionais/condicionais, não atomicidade.
+  README/STATUS e recovery-audit/FAST-OPEN-AUDIT.md dão prioridade a esta falha.
+- Teste tests/recovery_time_bounds.rs mostra que perfil30 aceita release d+10
+  e offers-ready d+28, apesar de recuperação observada caber antesd+8; ambos
+  seriam recusados sob essa possibilidade. É contraexemplo de premissa/guard,
+  NÃO ainda corrida de roubo financiada.11 testes Rust passaram session67911.
+  Somente comentário no example marca perfil histórico refutado; mantido para
+  reproduzir ensaios owned/regtest, sem permissão de funding real.
+- Próximo: reproduzir corrida nativa com adversário abrindo cedo, refund XMR
+  vencendo primeiro claim e possível extração do witness/claim DOM. Honesto
+  conserva guard/journals; adversário não respeita locks locais. Considerar
+  tempos de assinatura/RPC/inclusão, não afirmar perda nativa sem medir.
+  Revisar/calibrar ou substituir recuperação temporizada com fundamentos;
+  preservar missão de mecanismo NOVO DOM↔XMR, sem voltar ao grafo antigo como
+  otimização ou introduzir BTC/novo custodiante. Preparação independente,
+  prova de atomicidade e dom-interopd continuam obrigatórios. Há ações concretas;
+  missão ativa, não marcar blocked/complete por esta descoberta.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

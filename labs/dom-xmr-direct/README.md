@@ -1,5 +1,12 @@
 # DXP1 — novo mecanismo direto DOM↔XMR
 
+**Atualização de segurança: o perfil temporal atual foi refutado.** A cápsula
+de 10 milhões de quadraturas foi aberta em menos de oito segundos com
+OpenSSL, contra os 30 segundos mínimos adversariais assumidos pelo fixture.
+O perfil não pode autorizar operações reais. Os testes de assinaturas e
+retomadas anteriores permanecem válidos como testes funcionais; não comprovam
+atomicidade. Evidência: [auditoria de abertura](recovery-audit/FAST-OPEN-AUDIT.md).
+
 Proposta experimental, ainda não implementada como swap. O objetivo é criar
 um mecanismo novo, seguro e rápido, independente do executor atual, com a
 troca diretamente entre DOM e XMR. Correção do operador em 26/09/2026:

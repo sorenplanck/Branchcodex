@@ -195,6 +195,13 @@ func serveDirectPrepared(input io.Reader, output io.Writer) error {
 }
 
 func serveDirectSession(input io.Reader, output io.Writer, authority []byte, resuming bool) error {
+	return serveDirectSessionWithEvaluator(input, output, authority, resuming, nil)
+}
+
+// The optional evaluator is configured by local audit mode, never wire input.
+// Setup acceptance and the entire original proof are still checked first.
+func serveDirectSessionWithEvaluator(input io.Reader, output io.Writer, authority []byte, resuming bool,
+	evaluator func(*verifiedDirectCapsule) ([32]byte, float64, error)) error {
 	if (authority != nil || resuming) && !validLocalAuthority(authority) {
 		return fmt.Errorf("local verifier authority missing")
 	}
@@ -297,6 +304,9 @@ func serveDirectSession(input io.Reader, output io.Writer, authority []byte, res
 	}
 	if err := encoder.Encode(ready); err != nil {
 		return err
+	}
+	if evaluator != nil {
+		return serveDirectOpening(reader, encoder, binding, func() ([32]byte, float64, error) { return evaluator(capsule) })
 	}
 	return serveDirectOpening(reader, encoder, binding, capsule.open)
 }

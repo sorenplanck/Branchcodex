@@ -1,0 +1,63 @@
+{
+  "checks": [
+    {
+      "work": 1,
+      "matches_independent_python_modular_exponentiation": true
+    },
+    {
+      "work": 2,
+      "matches_independent_python_modular_exponentiation": true
+    },
+    {
+      "work": 17,
+      "matches_independent_python_modular_exponentiation": true
+    },
+    {
+      "work": 200000,
+      "matches_independent_python_modular_exponentiation": true
+    }
+  ],
+  "invalid_input_cases_rejected": 6,
+  "runs": [
+    {
+      "run": 1,
+      "pid": 1592789,
+      "exit_code": 0,
+      "work": 10000000,
+      "sequential_seconds": 7.374665017,
+      "opening_and_independent_point_check_seconds": 7.474771923967637,
+      "original_ed25519_public_point_matches": true,
+      "below_assumed_adversarial_30_seconds": true,
+      "resource_pressure_before": {
+        "cpu": "some avg10=0.00 avg60=0.04 avg300=0.16 total=1153954168\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=77.78 avg60=36.86 avg300=21.83 total=23803424287\nfull avg10=75.65 avg60=35.80 avg300=20.45 total=22640818523\n",
+        "memory": "some avg10=0.00 avg60=0.02 avg300=0.41 total=1638321366\nfull avg10=0.00 avg60=0.01 avg300=0.37 total=1545099583\n"
+      }
+    },
+    {
+      "run": 2,
+      "pid": 1592815,
+      "exit_code": 0,
+      "work": 10000000,
+      "sequential_seconds": 7.38966844,
+      "opening_and_independent_point_check_seconds": 7.492348772997502,
+      "original_ed25519_public_point_matches": true,
+      "below_assumed_adversarial_30_seconds": true,
+      "resource_pressure_before": {
+        "cpu": "some avg10=0.00 avg60=0.03 avg300=0.15 total=1153999861\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=74.72 avg60=41.27 avg300=23.19 total=23808850570\nfull avg10=71.91 avg60=39.91 avg300=21.75 total=22645993296\n",
+        "memory": "some avg10=0.00 avg60=0.01 avg300=0.40 total=1638321366\nfull avg10=0.00 avg60=0.01 avg300=0.36 total=1545099583\n"
+      }
+    }
+  ],
+  "capsule_binding": "2119d6370c0c4e0d5d67139890f33c6b8256cd4e16c3a438057bd2015cc4491b",
+  "sha256": {
+    "recovery-audit/direct_montgomery_audit.c": "1668c0b3f6abb7f5e221ece62a8ce67ebdeb58647e8488ee4dbdc0a12eb0725b",
+    "clsag-lab/target/recovery-research/direct-montgomery-audit": "d9e153d25218ba8afae2e92ab1cd46f0788878e541478839859cb56f1d6657cb",
+    "clsag-lab/target/regtest-1580411-1790485138111332369/direct-capsule.record": "4e0fa4b77c341188d272ea7b0a6a8509fda63909cb9527c60073748500c9ef47"
+  },
+  "openssl_version": "OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)",
+  "libsodium_version": "1.0.18",
+  "assumed_adversarial_minimum_seconds": 30,
+  "scope": "Independent public-parameter evaluator on an already-spent own regtest capsule; exact 10 million squarings, no RSA factors or share given to solver. Residue decrypted and point independently checked with libsodium. No nodes/funding/deadline renewal; no scalar/delayed group element written to artifacts."
+}

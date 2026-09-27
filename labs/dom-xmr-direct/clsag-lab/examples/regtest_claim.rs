@@ -879,6 +879,10 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let disclosed = capsule.received_unix_seconds();
         // EXPLICIT CONDITIONAL LAB FIXTURE, not security bounds established
         // by benchmarks. Complete-frame receipt is not first disclosure.
+        // The historical 30-second adversarial premise is now REFUTED by
+        // recovery-audit/FAST-OPEN-AUDIT.md (<8s with the same work/capsule).
+        // Retained only to reproduce the owned-node conditional experiments;
+        // this fixture is not a viable timing profile or funding admission.
         let ready_by = dom_core::Timestamp(
             disclosed
                 .checked_add(if dom_first { 26 } else { 28 })

@@ -15,6 +15,80 @@ use dxp1_clsag_lab::{
 use frost::Participant;
 
 #[test]
+fn refuted_thirty_second_profile_admits_release_after_observed_recovery_is_possible() {
+    // Arithmetic consequence of FAST-OPEN-AUDIT.md, not a funded attack:
+    // OpenSSL recovered the original point in <8 seconds with the SAME 10M
+    // steps. Eight seconds is an OBSERVED upper bound for that evaluator,
+    // never a replacement minimum adversarial delay or admission policy.
+    let roster =
+        XmrRecoveryRoster::new([41; 32], [G * Scalar::from(17u64), G * Scalar::from(19u64)])
+            .unwrap();
+    let peer = Participant::new(2).unwrap();
+    let link = XmrDirectRecoveryLink::new(
+        &roster,
+        peer,
+        roster.recovery_domain(peer).unwrap(),
+        roster.share_key(peer).unwrap(),
+        [42; 32],
+    )
+    .unwrap();
+    let costs = AssumedDirectRecoveryCosts {
+        opening_and_check_secs: 60,
+        overhead_secs: 5,
+    };
+    let old = AssumedXmrRecoveryWindow::from_direct_costs(
+        &link,
+        Timestamp(1000),
+        30,
+        Timestamp(1035),
+        costs,
+    )
+    .unwrap();
+    let competing = AssumedXmrRecoveryWindow::from_direct_costs(
+        &link,
+        Timestamp(1000),
+        8,
+        Timestamp(1035),
+        costs,
+    )
+    .unwrap();
+    assert!(competing.earliest_adversarial() < Timestamp(1010));
+    for order in [InitialClaimOrder::XmrFirst, InitialClaimOrder::DomFirst] {
+        assert_eq!(
+            old.check_initial_claim_release(Timestamp(1010), order, DELAYS),
+            Ok(())
+        );
+        assert_eq!(
+            competing.check_initial_claim_release(Timestamp(1010), order, DELAYS),
+            Err(TimingError::InitiationWindowExhausted)
+        );
+    }
+    // Deferring the DOM refund does not repair early XMR recovery. The old
+    // fixture even admits an offers-ready deadline long AFTER this evaluator
+    // has finished. A known-false premise cannot authorize funding/release.
+    let anchor = AssumedDomAnchor::new(BlockHeight(10), Timestamp(1000));
+    assert!(old
+        .required_dom_refund_height(
+            &anchor,
+            DomClockNetwork::Regtest,
+            0,
+            Timestamp(1028),
+            DELAYS
+        )
+        .is_ok());
+    assert_eq!(
+        competing.required_dom_refund_height(
+            &anchor,
+            DomClockNetwork::Regtest,
+            0,
+            Timestamp(1028),
+            DELAYS
+        ),
+        Err(TimingError::InitiationWindowExhausted)
+    );
+}
+
+#[test]
 fn first_claim_release_rechecks_original_clock_and_entire_ordered_prefix() {
     let window = AssumedXmrRecoveryWindow::from_prepared_costs(
         &challenge(6),

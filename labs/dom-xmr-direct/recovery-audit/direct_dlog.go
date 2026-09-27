@@ -338,18 +338,22 @@ func verifyDirectWithWorkers(setup *verifiedDirectSetup, expectedContext, expect
 func (capsule *verifiedDirectCapsule) open() ([32]byte, float64, error) {
 	started := time.Now()
 	value := puzzle.SolvePuzzle(capsule.parameters, capsule.ciphertext)
+	scalar, err := capsule.decodePlaintext(value)
+	return scalar, time.Since(started).Seconds(), err
+}
+
+func (capsule *verifiedDirectCapsule) decodePlaintext(value *big.Int) ([32]byte, error) {
 	_, _, limit, _ := directLimits(capsule.parameters)
 	if value.Sign() < 0 || value.Cmp(capsule.parameters.N) >= 0 {
-		return [32]byte{}, time.Since(started).Seconds(), fmt.Errorf("noncanonical plaintext residue")
+		return [32]byte{}, fmt.Errorf("noncanonical plaintext residue")
 	}
 	if value.Cmp(new(big.Int).Rsh(new(big.Int).Set(capsule.parameters.N), 1)) > 0 {
 		value.Sub(value, capsule.parameters.N)
 	}
 	if new(big.Int).Abs(new(big.Int).Set(value)).Cmp(limit) >= 0 || directPoint(value) != capsule.public {
-		return [32]byte{}, time.Since(started).Seconds(), fmt.Errorf("opening outside range or wrong public point")
+		return [32]byte{}, fmt.Errorf("opening outside range or wrong public point")
 	}
 	// This reduction is exclusive to a capsule with the DIRECT relation proof.
 	// It must never be moved to the old range-only cut-and-choose decoder.
-	scalar, err := scalarToLittleEndian(new(big.Int).Mod(value, scalarOrder()), scalarOrder())
-	return scalar, time.Since(started).Seconds(), err
+	return scalarToLittleEndian(new(big.Int).Mod(value, scalarOrder()), scalarOrder())
 }
