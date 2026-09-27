@@ -36,14 +36,20 @@ rede, `chain_id`, settlement e sequência. A campanha financiada usa o proxy em
 todas as chamadas e o reinicia junto com os participantes. Cada processo também
 gera shares efêmeras próprias para os três kernels DOM, participa da prova de
 faixa colaborativa e da pré-assinatura adaptor e nunca entrega as chaves ao
-coordenador. As shares XMR duráveis usam storage local sem cifra própria.
+coordenador. As shares XMR duráveis são cifradas em repouso com
+XChaCha20-Poly1305 e uma chave de wrapping separada.
 
-O helper persiste sua share em um arquivo exclusivo `0600`, sincronizado e
-ligado à operação. A matriz mata e reinicia ambos os helpers depois de `Ready`,
-revalida a mesma chave conjunta e continua. O teste
+O helper persiste sua share cifrada em um arquivo exclusivo `0600`, sincronizado
+e ligado à operação. A chave de wrapping também exige modo `0600` e pode ficar
+em volume ou secret store separado. A matriz mata e reinicia ambos os helpers
+depois de `Ready`, revalida a mesma chave conjunta e continua. O teste
 `scripts/test_arbiter_party_state.py` cobre lock simultâneo, restart, troca de
-papel e corrupção. O arquivo protege contra acesso acidental entre usuários;
-seu conteúdo ainda não é cifrado contra leitura privilegiada do host.
+papel, corrupção e chave ausente, errada ou corrompida. Um invasor privilegiado
+que leia simultaneamente o estado e a chave ainda exige proteção externa por
+KMS, HSM ou isolamento do host.
+O formato v2 recusa estados v1 em claro e não executa migração silenciosa;
+sessões experimentais antigas precisam ser encerradas pelo caminho de recovery
+antes da atualização.
 
 O modo `server-persistent` mantém cada participante em seu próprio endpoint e
 reabre o estado privado a cada conexão autenticada. O coordenador aceita esses
@@ -64,17 +70,17 @@ python3 scripts/run_arbiter_matrix.py \
   --workers 2
 ```
 
-A campanha mais recente usou dois workers e terminou em 250,68 s de parede,
+A campanha mais recente usou dois workers e terminou em 243,66 s de parede,
 com duas confirmações DOM, shares XMR e DOM em processos separados, prova de
 faixa colaborativa, reinício dos dois participantes, rechecagem canônica antes
 da assinatura XMR e todas as operações pelo canal Noise. Claim, Refund e
-Punish levaram 27,49 s, 32,87 s e 41,61 s desde `Ready`. Um quarto caso
+Punish levaram 29,15 s, 34,87 s e 45,74 s desde `Ready`. Um quarto caso
 promoveu uma cadeia DOM concorrente, removeu o Claim e recusou qualquer
-assinatura XMR em 40,01 s desde `Ready`. Os registros completos e os limites
+assinatura XMR em 42,66 s desde `Ready`. Os registros completos e os limites
 atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
-O Claim financiado pelo caminho de servidores persistentes passou em 105,79 s
-no total e 29,83 s de `Ready` até a conclusão. Esse ensaio prova o protocolo de
+O Claim financiado pelo caminho de servidores persistentes e estado cifrado
+passou em 93,93 s no total e 29,34 s de `Ready` até a conclusão. Esse ensaio prova o protocolo de
 execução remota e a retomada sobre TCP/Noise, porém usou interfaces loopback no
 mesmo host. A execução em máquinas físicas distintas continua pendente.
 

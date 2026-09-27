@@ -118,8 +118,9 @@ fragmentação; a matriz inteira usa esse canal e o recria no restart. Falta
 repetir entre hosts físicos distintos. O servidor persistente e a configuração
 externa do coordenador já permitem essa topologia. Um Claim financiado pelo
 mesmo caminho remoto, com os dois servidores isolados em loopback, restaurou os
-participantes após a desconexão e passou em 105,79 s no total e 29,83 s desde
-`Ready`; o roteiro reproduzível está em `clsag-lab/REMOTE-REGTEST.md`.
+participantes após a desconexão e passou, com estado cifrado, em 93,93 s no
+total e 29,34 s desde `Ready`; o roteiro reproduzível está em
+`clsag-lab/REMOTE-REGTEST.md`.
 
 As chaves de pré-assinatura DOM agora também ficam distribuídas. Cada processo
 gera uma share efêmera por caminho, prova sua posse e participa tanto da prova
@@ -130,18 +131,20 @@ o restart, as shares efêmeras desaparecem e os processos recusam recriar uma
 oferta antiga, mas as ofertas persistidas antes do funding continuam válidas.
 
 O processo de share agora possui retomada durável. Seu arquivo exclusivo `0600`
-é sincronizado, bloqueado e vinculado a papel/operação/chain; outro processo,
-papel errado ou checksum inválido falham antes de emitir prova. A matriz mata e
-reabre ambos os participantes depois de `Ready`, confere a mesma chave conjunta
-e os mesmos adaptors e prossegue somente após reautorizar o contrato público.
-O arquivo guarda a share sem cifra própria: conta de sistema separada e storage
-cifrado ou hardware seguro continuam requisitos para um ambiente hostil.
+é sincronizado, bloqueado e vinculado a papel/operação/chain. A share fica
+cifrada por XChaCha20-Poly1305 sob uma chave de wrapping `0600` separada; outro
+processo, papel errado, adulteração ou chave ausente, errada ou corrompida
+falham antes de emitir prova. A matriz mata e reabre ambos os participantes
+depois de `Ready`, confere a mesma chave conjunta e os mesmos adaptors e
+prossegue somente após reautorizar o contrato público. Conta isolada e KMS ou
+hardware seguro continuam requisitos contra leitura privilegiada de ambos os
+arquivos pelo host.
 
 Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto.
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 27,49 s para Claim, 32,87 s para Refund e 41,61 s para Punish
+intervalo mediu 29,15 s para Claim, 34,87 s para Refund e 45,74 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

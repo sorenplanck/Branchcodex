@@ -12,6 +12,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305, XNonce,
+};
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT, edwards::CompressedEdwardsY, scalar::Scalar,
 };
@@ -40,9 +44,14 @@ use xmr_dleq_sigma::{
 use zeroize::Zeroizing;
 
 const MAX_LINE_BYTES: usize = 1 << 20;
-const STATE_MAGIC: &[u8] = b"DXA1/party-state/v1\0";
-const STATE_BODY_BYTES: usize = STATE_MAGIC.len() + 1 + 32 + 32 + 32 + 32;
-const STATE_BYTES: usize = STATE_BODY_BYTES + 32;
+const STATE_MAGIC: &[u8] = b"DXA1/party-state/v2\0";
+const STATE_PREFIX_BYTES: usize = STATE_MAGIC.len() + 1 + 32 + 32 + 32;
+const STATE_NONCE_BYTES: usize = 24;
+const STATE_CIPHERTEXT_BYTES: usize = 32 + 16;
+const STATE_BYTES: usize = STATE_PREFIX_BYTES + STATE_NONCE_BYTES + STATE_CIPHERTEXT_BYTES;
+const WRAPPING_KEY_MAGIC: &[u8] = b"DXA1/party-wrapping-key/v1\0";
+const WRAPPING_KEY_BODY_BYTES: usize = WRAPPING_KEY_MAGIC.len() + 32;
+const WRAPPING_KEY_BYTES: usize = WRAPPING_KEY_BODY_BYTES + 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
@@ -111,15 +120,78 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     .sync_all()
 }
 
+fn load_wrapping_key(path: &Path, allow_create: bool) -> io::Result<Zeroizing<[u8; 32]>> {
+    let read_key = |file: &mut File| {
+        let mut bytes = Zeroizing::new(Vec::with_capacity(WRAPPING_KEY_BYTES));
+        file.take((WRAPPING_KEY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() != WRAPPING_KEY_BYTES
+            || &bytes[..WRAPPING_KEY_MAGIC.len()] != WRAPPING_KEY_MAGIC
+            || bytes[WRAPPING_KEY_BODY_BYTES..]
+                != Sha256::digest(&bytes[..WRAPPING_KEY_BODY_BYTES])[..]
+        {
+            return Err(io::Error::other("corrupt party wrapping key"));
+        }
+        Ok(Zeroizing::new(
+            bytes[WRAPPING_KEY_MAGIC.len()..WRAPPING_KEY_BODY_BYTES]
+                .try_into()
+                .map_err(|_| io::Error::other("invalid party wrapping key"))?,
+        ))
+    };
+
+    let read_existing = || {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(io::Error::other("unsafe party wrapping key file"));
+        }
+        let mut file = OpenOptions::new().read(true).open(path)?;
+        read_key(&mut file)
+    };
+    if !allow_create {
+        return read_existing();
+    }
+
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(mut file) => {
+            let mut key = Zeroizing::new([0; 32]);
+            use rand_core::RngCore as _;
+            OsRng.fill_bytes(&mut *key);
+            let mut bytes = Zeroizing::new(Vec::with_capacity(WRAPPING_KEY_BYTES));
+            bytes.extend(WRAPPING_KEY_MAGIC);
+            bytes.extend_from_slice(&*key);
+            let checksum = Sha256::digest(&*bytes);
+            bytes.extend(checksum);
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            sync_parent(path)?;
+            Ok(key)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read_existing(),
+        Err(error) => Err(error),
+    }
+}
+
 fn load_or_create_secret(
     path: &Path,
+    wrapping_key_path: &Path,
     role: Role,
     settlement_id: [u8; 32],
     context_hash: [u8; 32],
     chain_id: [u8; 32],
 ) -> io::Result<(File, CrossCurveSecret252, bool)> {
+    if path == wrapping_key_path {
+        return Err(io::Error::other(
+            "party state and wrapping key paths must differ",
+        ));
+    }
     let binding_prefix = || {
-        let mut bytes = Vec::with_capacity(STATE_BODY_BYTES);
+        let mut bytes = Vec::with_capacity(STATE_PREFIX_BYTES);
         bytes.extend(STATE_MAGIC);
         bytes.push(role.tag());
         bytes.extend(settlement_id);
@@ -127,6 +199,13 @@ fn load_or_create_secret(
         bytes.extend(chain_id);
         bytes
     };
+    let state_exists = match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    let wrapping_key = load_wrapping_key(wrapping_key_path, !state_exists)?;
+    let cipher = XChaCha20Poly1305::new((&*wrapping_key).into());
     match OpenOptions::new()
         .read(true)
         .write(true)
@@ -139,9 +218,22 @@ fn load_or_create_secret(
                 .map_err(|_| io::Error::other("party state is locked"))?;
             let secret = CrossCurveSecret252::generate(&mut OsRng);
             let mut bytes = Zeroizing::new(binding_prefix());
-            bytes.extend(secret.xmr_share_little_endian());
-            let checksum = Sha256::digest(&*bytes);
-            bytes.extend(checksum);
+            let mut nonce = [0; STATE_NONCE_BYTES];
+            use rand_core::RngCore as _;
+            OsRng.fill_bytes(&mut nonce);
+            let plaintext = Zeroizing::new(secret.xmr_share_little_endian());
+            let ciphertext = cipher
+                .encrypt(
+                    XNonce::from_slice(&nonce),
+                    Payload {
+                        msg: &*plaintext,
+                        aad: &bytes,
+                    },
+                )
+                .map_err(|_| io::Error::other("party state encryption failed"))?;
+            debug_assert_eq!(ciphertext.len(), STATE_CIPHERTEXT_BYTES);
+            bytes.extend(nonce);
+            bytes.extend(ciphertext);
             debug_assert_eq!(bytes.len(), STATE_BYTES);
             file.write_all(&bytes)?;
             file.sync_all()?;
@@ -160,14 +252,25 @@ fn load_or_create_secret(
             (&mut file)
                 .take((STATE_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)?;
-            if bytes.len() != STATE_BYTES
-                || bytes[..STATE_BODY_BYTES - 32] != binding_prefix()
-                || bytes[STATE_BODY_BYTES..] != Sha256::digest(&bytes[..STATE_BODY_BYTES])[..]
-            {
+            let prefix = binding_prefix();
+            if bytes.len() != STATE_BYTES || bytes[..STATE_PREFIX_BYTES] != prefix {
                 return Err(io::Error::other("corrupt or mismatched party state"));
             }
+            let nonce_end = STATE_PREFIX_BYTES + STATE_NONCE_BYTES;
+            let plaintext = Zeroizing::new(
+                cipher
+                    .decrypt(
+                        XNonce::from_slice(&bytes[STATE_PREFIX_BYTES..nonce_end]),
+                        Payload {
+                            msg: &bytes[nonce_end..],
+                            aad: &prefix,
+                        },
+                    )
+                    .map_err(|_| io::Error::other("party state authentication failed"))?,
+            );
             let secret = CrossCurveSecret252::from_little_endian(
-                bytes[STATE_BODY_BYTES - 32..STATE_BODY_BYTES]
+                plaintext
+                    .as_slice()
                     .try_into()
                     .map_err(|_| io::Error::other("invalid party state secret"))?,
             )
@@ -787,12 +890,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context_hash = fixed_hex::<32>(&args.next().ok_or("missing context hash")?)?;
     let chain_id = fixed_hex::<32>(&args.next().ok_or("missing chain id")?)?;
     let state_path = PathBuf::from(args.next().ok_or("missing state path")?);
+    let wrapping_key_path = PathBuf::from(args.next().ok_or("missing wrapping key path")?);
     if args.next().is_some() {
         return Err("too many arguments".into());
     }
 
-    let (state_file, secret, restored) =
-        load_or_create_secret(&state_path, role, settlement_id, context_hash, chain_id)?;
+    let (state_file, secret, restored) = load_or_create_secret(
+        &state_path,
+        &wrapping_key_path,
+        role,
+        settlement_id,
+        context_hash,
+        chain_id,
+    )?;
     let proof = prove_bound(
         &secret,
         settlement_id,
@@ -828,7 +938,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = stdout.lock();
     serde_json::to_writer(
         &mut stdout,
-        &json!({"ok":true,"role":role.label(),"proof":proof,"restored":restored}),
+        &json!({
+            "ok":true,
+            "role":role.label(),
+            "proof":proof,
+            "restored":restored,
+            "encrypted_state":true,
+        }),
     )?;
     stdout.write_all(b"\n")?;
     stdout.flush()?;

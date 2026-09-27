@@ -191,6 +191,7 @@ impl PartyProcess {
             .port();
         let address = format!("127.0.0.1:{port}");
         let session = Self::transport_session(chain_id);
+        let wrapping_key_path = state_path.with_extension("wrapping-key");
         let mut server = Command::new(proxy_binary)
             .arg("server")
             .arg(binary)
@@ -199,6 +200,7 @@ impl PartyProcess {
             .arg(hex(&CONTEXT_HASH))
             .arg(hex(&chain_id))
             .arg(state_path)
+            .arg(&wrapping_key_path)
             .arg(&address)
             .arg(&noise.server_key_path)
             .arg(hex(&noise.client_public))
@@ -240,6 +242,7 @@ impl PartyProcess {
         let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(ready["ok"], true);
         assert_eq!(ready["role"], role);
+        assert_eq!(ready["encrypted_state"], true);
         let proof = serde_json::from_value(ready["proof"].clone()).unwrap();
         let restored = ready["restored"].as_bool().unwrap();
         (server, child, input, output, proof, restored)
@@ -282,6 +285,7 @@ impl PartyProcess {
         let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(ready["ok"], true);
         assert_eq!(ready["role"], role);
+        assert_eq!(ready["encrypted_state"], true);
         let proof = serde_json::from_value(ready["proof"].clone()).unwrap();
         let restored = ready["restored"].as_bool().unwrap();
         (child, input, output, proof, restored)
@@ -1629,6 +1633,7 @@ async fn exercise(
                 "monerod":true,
                 "bitcoin_involved":false,
                 "authenticated_noise_transport":true,
+                "encrypted_participant_state":true,
                 "remote_participant_servers":setup.remote_participants,
                 "distributed_dom_presigning":true,
                 "collaborative_dom_range_proofs":true,
@@ -1787,6 +1792,7 @@ async fn exercise(
             "coordinator_never_receives_dom_signing_keys":true,
             "post_restart_dom_presigning_rejected":true,
             "authenticated_noise_transport":true,
+            "encrypted_participant_state":true,
             "remote_participant_servers":setup.remote_participants,
             "noise_peer_identity_pinned":true,
             "transport_session_bound":true,

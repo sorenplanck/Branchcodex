@@ -38,6 +38,7 @@ No host do dono DOM, inicie o servidor substituindo os campos em maiúsculas:
 ```sh
 ./arbiter_party_proxy server-persistent ./arbiter_party \
   dom-owner SETTLEMENT CONTEXT CHAIN_ID /secure/dxa1/dom-owner.state \
+  /secret-store/dxa1/dom-owner.wrapping-key \
   0.0.0.0:PORTA /secure/dxa1/server-noise \
   CHAVE_PUBLICA_CLIENTE_DOM SESSION
 ```
@@ -47,13 +48,17 @@ No host do dono XMR, use o mesmo comando com o papel e o estado correspondentes:
 ```sh
 ./arbiter_party_proxy server-persistent ./arbiter_party \
   xmr-owner SETTLEMENT CONTEXT CHAIN_ID /secure/dxa1/xmr-owner.state \
+  /secret-store/dxa1/xmr-owner.wrapping-key \
   0.0.0.0:PORTA /secure/dxa1/server-noise \
   CHAVE_PUBLICA_CLIENTE_XMR SESSION
 ```
 
 Restrinja cada porta ao endereço do coordenador. O Noise XX autentica e cifra
-o canal, mas os arquivos de identidade e estado precisam permanecer em disco
-local privado com modo `0600`.
+o canal. Na primeira execução, o participante cria a chave de wrapping com modo
+`0600` e cifra o estado com XChaCha20-Poly1305. Guarde a chave em storage
+separado do estado e faça backup seguro dos dois; perder a chave torna a share
+irrecuperável. Um host que consiga ler os dois arquivos ainda precisa ser
+protegido por isolamento, KMS ou HSM.
 
 No coordenador, crie um arquivo `remote-parties.json`:
 

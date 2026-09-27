@@ -21,6 +21,7 @@ frost = { package = "modular-frost", version = "=0.11.0", features = ["ed25519"]
 dalek-ff-group = "=0.5.0"
 transcript = { package = "flexible-transcript", version = "=0.3.4", features = ["recommended"] }
 rand_chacha = "=0.3.1"
+chacha20poly1305 = { version = "=0.10.1", features = ["alloc"] }
 group = "=0.13.0"
 dom-core = { path = "../../../crates/dom-core" }
 dom-consensus = { path = "../../../crates/dom-consensus" }

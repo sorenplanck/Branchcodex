@@ -1184,6 +1184,7 @@ dependencies = [
 name = "dxp1-clsag-lab"
 version = "0.1.0"
 dependencies = [
+ "chacha20poly1305",
  "curve25519-dalek",
  "dalek-ff-group 0.5.0",
  "dom-chain",

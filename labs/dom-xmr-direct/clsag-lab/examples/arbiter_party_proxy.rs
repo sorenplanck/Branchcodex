@@ -168,15 +168,15 @@ async fn serve_connection(
 }
 
 async fn server(args: Vec<String>, persistent: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if args.len() != 10 {
-        return Err("server requires party, role, settlement, context, chain, state, listen, Noise state, expected peer and session".into());
+    if args.len() != 11 {
+        return Err("server requires party, role, settlement, context, chain, state, wrapping key, listen, Noise state, expected peer and session".into());
     }
     let party_binary = &args[0];
     let chain_id = fixed_hex::<32>(&args[4])?;
-    let listen = &args[6];
-    let noise_path = PathBuf::from(&args[7]);
-    let expected_peer = fixed_hex::<32>(&args[8])?;
-    let session = fixed_hex::<32>(&args[9])?;
+    let listen = &args[7];
+    let noise_path = PathBuf::from(&args[8]);
+    let expected_peer = fixed_hex::<32>(&args[9])?;
+    let session = fixed_hex::<32>(&args[10])?;
     let (_key_file, noise_secret, _) = load_or_create_key(&noise_path)?;
 
     let listener = tokio::net::TcpListener::bind(listen).await?;
@@ -200,7 +200,7 @@ async fn server(args: Vec<String>, persistent: bool) -> Result<(), Box<dyn std::
             }
             Err(error) => return Err(error.into()),
         };
-        serve_connection(&mut channel, party_binary, &args[1..6]).await?;
+        serve_connection(&mut channel, party_binary, &args[1..7]).await?;
         if !persistent {
             break;
         }
