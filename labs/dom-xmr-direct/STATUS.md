@@ -120,20 +120,20 @@ reconstrói e usa a chave somente dentro do próprio processo, devolvendo apenas
 a transação assinada. Em todos os três resultados, tentativas de inverter os
 papéis na conclusão DOM e na assinatura XMR foram recusadas. O IPC deste ensaio
 fixa ainda o contrato e o digest exato de cada oferta autorizada; uma segunda
-oferta criptograficamente válida do mesmo caminho também foi recusada. O canal
-é stdio local e a pré-assinatura multipartes DOM
-também continua coordenada pelo processo de teste. Isso demonstra isolamento
-operacional das shares XMR, não participantes de produção totalmente
-independentes nem transporte autenticado em rede.
+oferta criptograficamente válida do mesmo caminho também foi recusada. A
+pré-assinatura multipartes DOM continua coordenada pelo processo de teste. Isso
+demonstra isolamento operacional das shares XMR, ainda sem participantes de
+produção totalmente independentes.
 
 A base do transporte remoto agora reutiliza o Noise XX do próprio DOM. Ela
 exige a chave estática exata do peer, vincula o handshake ao `chain_id` e ao
 magic da rede e vincula cada mensagem ao settlement com sequência monotônica.
 Mensagens maiores que um frame foram fragmentadas e remontadas sob AEAD. Testes
 recusaram identidade inesperada e sessão divergente e confirmaram duas mensagens
-ordenadas, inclusive uma com mais de dois frames. Essa camada ainda precisa ser
-ligada ao `arbiter_party`; o ponta a ponta financiado abaixo continua usando
-stdio local e não conta como teste entre duas máquinas.
+ordenadas, inclusive uma com mais de dois frames. Um proxy agora mantém a share
+no processo servidor e encaminha todas as operações do `arbiter_party` por esse
+canal. A campanha financiada atravessa TCP/Noise, inclusive depois do reinício;
+ela ainda roda num único host e não substitui um ensaio físico entre máquinas.
 
 Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
 sincronizado no disco e ligado a papel, settlement, contexto e chain id. O
@@ -149,22 +149,22 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **30,25 s**, Refund **34,09 s** e Punish **40,00 s**. O runner
+Claim levou **29,64 s**, Refund **35,57 s** e Punish **40,86 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
-mainnet. Ainda faltam separar a pré-assinatura DOM, ligar o transporte Noise,
-testar reorg no ensaio cruzado e ativar com segurança as novas regras de
-consenso. O resultado comprova um ponta a ponta
+mainnet. Ainda faltam separar a pré-assinatura DOM, executar o transporte entre
+hosts distintos, testar reorg no ensaio cruzado e ativar com segurança as novas
+regras de consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
 
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
 oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund
 e Punish em paralelo com limite de 180 s por caso. Depois da barreira de duas
-confirmações DOM e da separação das shares por processo, uma reprodução local
-dos mesmos comandos e do mesmo arquivo oficial passou em **113,24 s** de
-parede; os casos completos levaram **103,24 s**, **105,99 s** e **113,23 s**.
-Desde `Ready`, os tempos foram **30,25 s**, **34,09 s** e **40,00 s**. A
+confirmações DOM, shares separadas, reinício e transporte Noise, uma reprodução
+local dos mesmos comandos e do mesmo arquivo oficial passou em **126,68 s** de
+parede; os casos completos levaram **115,29 s**, **120,22 s** e **126,67 s**.
+Desde `Ready`, os tempos foram **29,64 s**, **35,57 s** e **40,86 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

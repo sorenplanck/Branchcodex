@@ -29,9 +29,13 @@ coordenador vê somente as provas DLEQ públicas, solicita a conclusão DOM ao
 papel correto e entrega a abertura observada ao beneficiário, que assina XMR
 sem exportar a chave reconstruída. A matriz exige também a rejeição do papel
 errado nas duas operações e de outra oferta válida cujo digest não tenha sido
-autorizado para o contrato. O canal stdio é uma fronteira de teste local; as
-shares usam storage local sem cifra própria e a pré-assinatura DOM ainda não
-foi distribuída entre processos independentes.
+autorizado para o contrato. `examples/arbiter_party_proxy.rs` transporta essa
+mesma interface por TCP com Noise XX. As identidades estáticas ficam em arquivos
+`0600`; os dois lados fixam a chave pública esperada, e cada mensagem vincula
+rede, `chain_id`, settlement e sequência. A campanha financiada usa o proxy em
+todas as chamadas e o reinicia junto com os participantes. As shares usam
+storage local sem cifra própria e a pré-assinatura DOM ainda não foi distribuída
+entre processos independentes.
 
 O helper persiste sua share em um arquivo exclusivo `0600`, sincronizado e
 ligado à operação. A matriz mata e reinicia ambos os helpers depois de `Ready`,
@@ -49,14 +53,15 @@ python3 scripts/run_arbiter_matrix.py \
   --evidence-dir /diretorio/novo/de/evidencia
 ```
 
-A campanha mais recente terminou em 113,24 s de parede, com duas confirmações
-DOM, shares em processos separados e reinício dos dois participantes. Claim,
-Refund e Punish levaram 30,25 s, 34,09 s e 40,00 s desde `Ready`. Os registros completos e os limites atuais
-estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
+A campanha mais recente terminou em 126,68 s de parede, com duas confirmações
+DOM, shares em processos separados, reinício dos dois participantes e todas as
+operações pelo canal Noise. Claim, Refund e Punish levaram 29,64 s, 35,57 s e
+40,86 s desde `Ready`. Os registros completos e os limites atuais estão em
+`../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
 GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
-minutos para todo o job. A repetição local exata do workflow passou em 113,24 s
+minutos para todo o job. A repetição local exata do workflow passou em 126,68 s
 de parede e preserva os resultados como artefato quando executada no GitHub.
 
 ## Construção experimental

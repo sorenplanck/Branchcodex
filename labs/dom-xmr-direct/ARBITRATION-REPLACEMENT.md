@@ -101,12 +101,11 @@ Claim/Punish são concluídos pelo dono de XMR e o gasto XMR pelo dono de DOM;
 Refund inverte essas duas responsabilidades. A chave XMR reconstruída existe
 somente no processo que assina. A matriz força operações com o papel errado e
 exige sua rejeição; também recusa outra oferta válida que não corresponda ao
-digest autorizado dentro do contrato fixado. O ensaio financiado ainda usa IPC
-local, embora uma camada separada de transporte Noise XX já exija identidade
-estática conhecida, `chain_id`, rede, sessão e sequência exatos. Os controles
-cobrem peer errado, sessão divergente, ordem e fragmentação. Falta substituir o
-stdio do `arbiter_party` por esse canal e distribuir integralmente a
-pré-assinatura DOM.
+digest autorizado dentro do contrato fixado. Um proxy liga o `arbiter_party` ao
+transporte Noise XX com identidade estática conhecida, `chain_id`, rede, sessão
+e sequência exatos. Os controles cobrem peer errado, sessão divergente, ordem e
+fragmentação; a matriz inteira usa esse canal e o recria no restart. Falta
+repetir entre hosts distintos e distribuir integralmente a pré-assinatura DOM.
 
 O processo de share agora possui retomada durável. Seu arquivo exclusivo `0600`
 é sincronizado, bloqueado e vinculado a papel/operação/chain; outro processo,
@@ -120,7 +119,7 @@ Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 30,25 s para Claim, 34,09 s para Refund e 40,00 s para Punish
+intervalo mediu 29,64 s para Claim, 35,57 s para Refund e 40,86 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

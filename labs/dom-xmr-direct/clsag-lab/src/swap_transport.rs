@@ -19,6 +19,7 @@ const ENVELOPE_MAGIC: &[u8; 8] = b"DXA1NET1";
 const HEADER_BYTES: usize = ENVELOPE_MAGIC.len() + 32 + 8 + 4;
 const CHUNK_BYTES: usize = NOISE_MAX_MSG - 16;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Maximum application payload accepted by the participant channel.
 pub const MAX_SWAP_MESSAGE_BYTES: usize = 1 << 20;
@@ -153,7 +154,7 @@ impl SwapNoiseChannel {
         let mut plaintext = Vec::new();
         let mut expected_total = None;
         loop {
-            let ciphertext = tokio::time::timeout(IO_TIMEOUT, read_framed(&mut self.stream))
+            let ciphertext = tokio::time::timeout(READ_IDLE_TIMEOUT, read_framed(&mut self.stream))
                 .await
                 .map_err(|_| invalid("swap transport read timeout"))??;
             let mut chunk = vec![0; ciphertext.len()];

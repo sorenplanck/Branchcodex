@@ -50,6 +50,7 @@ use monero_wallet::{
 };
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use xmr_dleq_sigma::BoundCrossCurveProofV1;
 use zeroize::Zeroizing;
 
@@ -68,11 +69,22 @@ impl Drop for ManagedDaemon {
     }
 }
 
+#[derive(Clone)]
+struct NoiseEndpoints {
+    server_key_path: PathBuf,
+    client_key_path: PathBuf,
+    server_public: [u8; 32],
+    client_public: [u8; 32],
+}
+
 struct PartyProcess {
     binary: PathBuf,
+    proxy_binary: PathBuf,
     role: String,
     chain_id: [u8; 32],
     state_path: PathBuf,
+    noise: NoiseEndpoints,
+    server: Child,
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -82,28 +94,90 @@ impl Drop for PartyProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = self.server.kill();
+        let _ = self.server.wait();
     }
 }
 
 impl PartyProcess {
+    fn transport_session(chain_id: [u8; 32]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"DXA1/participant-transport/v1");
+        hash.update(SETTLEMENT_ID);
+        hash.update(CONTEXT_HASH);
+        hash.update(chain_id);
+        hash.finalize().into()
+    }
+
+    fn identity(proxy_binary: &Path, path: &Path) -> [u8; 32] {
+        let output = Command::new(proxy_binary)
+            .arg("identity")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Noise identity failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fixed_hex(String::from_utf8(output.stdout).unwrap().trim())
+    }
+
     fn launch(
         binary: &Path,
+        proxy_binary: &Path,
         role: &str,
         chain_id: [u8; 32],
         state_path: &Path,
+        noise: &NoiseEndpoints,
     ) -> (
+        Child,
         Child,
         ChildStdin,
         BufReader<ChildStdout>,
         BoundCrossCurveProofV1,
         bool,
     ) {
-        let mut child = Command::new(binary)
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let address = format!("127.0.0.1:{port}");
+        let session = Self::transport_session(chain_id);
+        let mut server = Command::new(proxy_binary)
+            .arg("server")
+            .arg(binary)
             .arg(role)
             .arg(hex(&SETTLEMENT_ID))
             .arg(hex(&CONTEXT_HASH))
             .arg(hex(&chain_id))
             .arg(state_path)
+            .arg(&address)
+            .arg(&noise.server_key_path)
+            .arg(hex(&noise.client_public))
+            .arg(hex(&session))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut server_output = BufReader::new(server.stdout.take().unwrap());
+        let mut listening = String::new();
+        assert_ne!(
+            server_output.read_line(&mut listening).unwrap(),
+            0,
+            "party proxy server exited early"
+        );
+        assert_eq!(listening.trim(), address);
+
+        let mut child = Command::new(proxy_binary)
+            .arg("client")
+            .arg(&address)
+            .arg(&noise.client_key_path)
+            .arg(hex(&noise.server_public))
+            .arg(hex(&chain_id))
+            .arg(hex(&session))
+            .arg(dom_core::NETWORK_MAGIC_REGTEST.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -122,7 +196,7 @@ impl PartyProcess {
         assert_eq!(ready["role"], role);
         let proof = serde_json::from_value(ready["proof"].clone()).unwrap();
         let restored = ready["restored"].as_bool().unwrap();
-        (child, input, output, proof, restored)
+        (server, child, input, output, proof, restored)
     }
 
     fn spawn(
@@ -131,14 +205,27 @@ impl PartyProcess {
         chain_id: [u8; 32],
         state_path: PathBuf,
     ) -> (Self, BoundCrossCurveProofV1, bool) {
-        let (child, input, output, proof, restored) =
-            Self::launch(binary, role, chain_id, &state_path);
+        let proxy_binary = binary.with_file_name("arbiter_party_proxy");
+        assert!(proxy_binary.is_file(), "arbiter_party_proxy missing");
+        let server_key_path = state_path.with_extension("server-noise");
+        let client_key_path = state_path.with_extension("client-noise");
+        let noise = NoiseEndpoints {
+            server_public: Self::identity(&proxy_binary, &server_key_path),
+            client_public: Self::identity(&proxy_binary, &client_key_path),
+            server_key_path,
+            client_key_path,
+        };
+        let (server, child, input, output, proof, restored) =
+            Self::launch(binary, &proxy_binary, role, chain_id, &state_path, &noise);
         (
             Self {
                 binary: binary.to_owned(),
+                proxy_binary,
                 role: role.to_owned(),
                 chain_id,
                 state_path,
+                noise,
+                server,
                 child,
                 input,
                 output,
@@ -151,8 +238,17 @@ impl PartyProcess {
     fn restart(&mut self) -> (BoundCrossCurveProofV1, bool) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
-        let (child, input, output, proof, restored) =
-            Self::launch(&self.binary, &self.role, self.chain_id, &self.state_path);
+        self.server.kill().unwrap();
+        self.server.wait().unwrap();
+        let (server, child, input, output, proof, restored) = Self::launch(
+            &self.binary,
+            &self.proxy_binary,
+            &self.role,
+            self.chain_id,
+            &self.state_path,
+            &self.noise,
+        );
+        self.server = server;
         self.child = child;
         self.input = input;
         self.output = output;
@@ -1161,6 +1257,9 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
             "dom_release_recorded_before_submit":true,
             "dom_finality_recorded_before_xmr_submit":true,
             "private_xmr_shares_held_by_separate_processes":true,
+            "authenticated_noise_transport":true,
+            "noise_peer_identity_pinned":true,
+            "transport_session_bound":true,
             "wrong_role_operations_rejected":true,
             "unauthorized_dom_offer_rejected":true,
             "participant_restart_restored_bound_shares":true,
