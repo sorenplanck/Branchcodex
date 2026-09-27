@@ -74,7 +74,24 @@ equação adaptor e não aceita o formato antigo de claim simples como se fosse 
 novo árbitro. Corrupção, truncamento, substituição sem o digest aprovado e
 alterações semânticas mesmo com digest recalculado foram recusados. As suítes
 de retomada anterior e do par árbitro passaram. Falta conectar essa restauração
-ao coordenador e executar a reserva conjunta em `monerod`.
+ao coordenador.
+
+**O ensaio financiado passou pelos dois daemons nos três resultados.** O novo
+`arbiter_regtest` inicia um nó DOM e um `monerod` offline próprios. Refund e
+Punish são pré-assinados, gravados e restaurados antes do funding DOM. Depois
+que a reserva XMR conjunta é confirmada e madura, o ensaio cria e persiste o
+Claim, que funciona como a transição `Ready`. Cada resultado atravessa mempool
+e bloco DOM; a share é extraída da transação canônica, combinada com a share
+local, e assina um gasto XMR CLSAG/Bulletproof+ aceito e minerado no `monerod`.
+
+Claim levou **70,54 s**, Refund **74,92 s** e Punish **80,85 s** em execuções
+isoladas. BTC não participa. Esses tempos incluem bootstrap e maturidade sob
+mineração Regtest solicitada pelo teste, portanto não estimam latência de rede
+real. A ordem de `Ready` ainda está no executor de laboratório; precisa virar
+estado durável do coordenador. Também faltam progressão simultânea das cadeias,
+participantes/processos separados, reorg no ensaio cruzado e ativação segura
+das novas regras de consenso. O resultado comprova um ponta a ponta funcional
+de laboratório, não prontidão de produção nem garantia universal de 2–3 min.
 
 ## Evidência obtida
 

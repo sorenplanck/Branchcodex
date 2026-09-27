@@ -268,6 +268,10 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
     ))
     .unwrap();
     let joint_xmr_key = (dom_xmr + xmr_xmr) * ED25519_BASEPOINT_POINT;
+    assert_eq!(
+        shares.joint_xmr_spend_key().unwrap(),
+        joint_xmr_key.compress().to_bytes()
+    );
 
     for (path, branch, height, secret, local_share, session) in [
         (SwapArbiterPath::Claim, &claim, 10, &xmr_owner, dom_xmr, 71),
@@ -386,6 +390,27 @@ fn share_proofs_cannot_swap_roles_or_settlements() {
         CONTEXT_HASH,
         &dom_owner_proof,
         &xmr_owner_proof,
+    )
+    .is_err());
+
+    let dom_scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(
+        dom_owner.xmr_share_little_endian(),
+    ))
+    .unwrap();
+    let cancelling = CrossCurveSecret252::from_little_endian((-dom_scalar).to_bytes()).unwrap();
+    let cancelling_proof = prove_bound(
+        &cancelling,
+        SETTLEMENT_ID,
+        CONTEXT_HASH,
+        ROLE_XMR_SHARED_SPEND,
+        &mut OsRng,
+    )
+    .unwrap();
+    assert!(VerifiedArbiterSharesV1::new(
+        SETTLEMENT_ID,
+        CONTEXT_HASH,
+        &dom_owner_proof,
+        &cancelling_proof,
     )
     .is_err());
 }

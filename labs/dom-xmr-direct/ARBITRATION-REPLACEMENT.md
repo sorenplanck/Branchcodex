@@ -30,17 +30,13 @@ e a [explicação do COMIT](https://arxiv.org/abs/2101.12332) mostram por que
 a chain sem scripts não precisa carregar o timelock quando a outra chain
 fornece a arbitragem. São lições de estrutura, não prova para DOM.
 
-O consenso DOM presente em
-[`transaction.rs`](../../crates/dom-consensus/src/transaction.rs) reconhece
-somente kernels `PLAIN`, `COINBASE` e `HEIGHT_LOCKED`. A reserva DOM do
-laboratório recebe uma devolução pré-assinada por altura, mas não tem um
-estado nativo `Ready` nem um output que aceite caminhos `Claim` e `Refund`
-mutuamente exclusivos por fase. Adicionar flags no daemon não criaria essa
-exclusão perante um peer adversário. Reproduzir a construção de arbitragem
-exige desenhar e validar uma **nova regra de consenso DOM**, ou demonstrar
-outra primitiva existente com garantia equivalente. Isso é uma dependência
-real da nova perna DOM↔XMR, não uma mudança automática autorizada para outras
-pernas.
+Antes deste trabalho, o consenso DOM em
+[`transaction.rs`](../../crates/dom-consensus/src/transaction.rs) reconhecia
+somente kernels `PLAIN`, `COINBASE` e `HEIGHT_LOCKED`. A reserva do laboratório
+tinha uma devolução pré-assinada por altura, sem um output que aceitasse
+Claim, Refund e Punish mutuamente exclusivos por fase. O candidato `DXA1`
+acrescenta essa regra ao consenso DOM; ela não é uma flag local do daemon e
+ainda exige ativação de rede antes de qualquer uso fora do laboratório.
 
 O `unlock_time` existente no Monero não fornece o bloqueio ausente da
 devolução: a [documentação de RPC do Monero](https://web.getmonero.org/resources/developer-guides/daemon-rpc.html)
@@ -59,11 +55,22 @@ ou punish entrega DOM ao dono de XMR e revela a share que permite ao dono de
 DOM gastar a saída XMR conjunta; refund devolve DOM ao dono de DOM e revela a
 share que permite ao dono de XMR recuperar XMR.
 
-Testes nativos já validam as assinaturas DOM multipartes, a extração de cada
-share, a reconstrução da chave XMR conjunta e uma transação CLSAG/Bulletproof+
-Monero válida em cada um dos três resultados. O nó DOM aplica o contrato no
-mempool, bloco direto, reorganização e reconstrução após reinício. Ainda falta
-o ensaio financiado com os dois daemons e a política final de ativação.
+Testes nativos validam as assinaturas DOM multipartes, a extração de cada
+share e a reconstrução da chave XMR conjunta. O nó DOM aplica o contrato no
+mempool, bloco direto, reorganização e reconstrução após reinício. Um ensaio
+financiado isolado também executou Claim, Refund e Punish separadamente pelo
+nó DOM e pelo `monerod`: cada abertura extraída do bloco DOM canônico assinou
+um gasto XMR CLSAG/Bulletproof+ aceito e minerado pelo daemon. Com a ordem
+final de `Ready`, os tempos foram 70,54 s, 74,92 s e 80,85 s,
+respectivamente, em Regtest sob demanda.
+
+A ordem do protocolo importa. Refund e Punish ficam pré-assinados e duráveis
+antes do funding DOM. O Claim só é concluído e persistido depois que a reserva
+XMR conjunta está confirmada e utilizável; essa entrega representa `Ready`.
+Se a parte DOM se recusar nesse ponto, Refund revela a share que devolve XMR
+ao depositante. Entregar Claim antes do depósito XMR permitiria capturar DOM
+sem contrapartida e é proibido pelo fluxo, embora a regra ainda dependa do
+coordenador e precise virar uma máquina de estados durável.
 
 Uma direção é uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único
@@ -99,9 +106,9 @@ maturidade XMR nem introduzir custódia, pré-funding obrigatório ou BTC.
 
 1. Modelar os estados e eventos `Ready`, `Claim`, `Refund`, divulgação de
    shares, inclusão e reorg, com busca por contraexemplos de dupla captura.
-2. Confirmar o formato de compromisso e verificação que o consenso DOM teria
-   de oferecer; separar mudanças de consenso das APIs do daemon.
-3. Só implementar funding depois de a máquina de estados excluir a corrida
-   observada, com premissas temporais declaradas e defensáveis.
-4. Medir sucesso e recuperação com participantes independentes e os daemons
-   reais, incluindo confirmação e maturidade exigidas, antes de afirmar prazo.
+2. Integrar a ordem durável de funding/Ready ao coordenador, sem disponibilizar
+   Claim antes da confirmação XMR.
+3. Definir ativação do consenso e margens de cutoff com premissas temporais
+   declaradas e defensáveis.
+4. Repetir sucesso e recuperação com participantes independentes e progressão
+   simultânea das duas cadeias antes de afirmar prazo de produção.

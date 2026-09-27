@@ -186,8 +186,9 @@ impl DomClaimOffer {
     }
 
     /// Immutable public signing material for one consensus-bound arbiter path.
-    /// Persist all three offers, and pin their record digests, before funding.
-    /// This record contains no signing key, nonce scalar or adaptor witness.
+    /// Persist recovery offers before arbiter funding; persist the claim only
+    /// after the joint XMR reserve is confirmed and usable. This record
+    /// contains no signing key, nonce scalar or adaptor witness.
     pub fn to_swap_arbiter_resume_bytes(&self) -> Result<Vec<u8>, DomError> {
         if !matches!(
             self.claim.transaction.kernels[0].features,
