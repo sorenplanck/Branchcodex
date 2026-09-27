@@ -62,6 +62,13 @@ solana-types = { path = "../../crates/adapters/solana-types" }
 # the DLEQ it carries. The crate is named for its first user; the role registry the
 # Solana condition lock uses lives in it.
 xmr-dleq-sigma = { path = "../../crates/adapters/xmr-dleq-sigma" }
+# The Contracts transport identity authority: a directory the layout requires to exist
+# and that the ceremony opens with a passphrase. Creating one needs the store's own
+# public constructor and the capability handle it takes.
+dom-scriptless-identity-store = { path = "../../crates/dom-scriptless-identity-store" }
+cap-std = { version = "=4.0.2", default-features = false }
+# The ceremony plan is JSON, and its fields are exactly what this crate measures.
+serde_json = "=1.0.151"
 sha2 = "=0.10.8"
 # The condition's secret scalar is generated when a position is established. Same
 # version the leg laboratory pins.

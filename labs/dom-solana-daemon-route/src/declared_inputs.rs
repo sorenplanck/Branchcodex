@@ -153,17 +153,60 @@ pub fn write_contracts_budget_policy(
     owner_only::write(&state_dir.join(relative), bytes)
 }
 
-/// Create the Contracts transport identity authority directory.
+/// Create the Contracts transport identity authority.
 ///
-/// A directory, and one the layout requires to exist in create and in reopen alike:
-/// "provisioned outside the daemon, never created and never repaired here". Creating it
-/// empty is what a provisioner can do; what goes in it belongs to the identity
-/// authority.
+/// A directory the layout requires to exist in create and in reopen alike: "provisioned
+/// outside the daemon, never created and never repaired here". An empty one satisfies the
+/// LAYOUT, which checks only that it is an owner-only directory -- and satisfies nothing
+/// else, because the Contracts bootstrap ceremony opens it with a passphrase.
+///
+/// So this creates a real one, through the store's own public constructor. That
+/// constructor publishes the named root itself, from a staging directory it renames, so
+/// only the PARENT is created here; pre-creating the target would leave it with a root the
+/// store did not make.
+///
+/// The passphrase is the caller's. A laboratory holds one; a deployment's belongs to
+/// whoever holds the identity.
 pub fn create_contracts_transport_identity(
     state_dir: &Path,
     relative: &str,
+    passphrase: &[u8],
 ) -> Result<(), String> {
-    owner_only::directory(&state_dir.join(relative))
+    use std::sync::Arc;
+
+    let path = state_dir.join(relative);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{relative} has no parent inside the state directory"))?;
+    let root_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{relative} has no usable final component"))?;
+    owner_only::directory(parent)?;
+
+    let parent_dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|error| format!("identity parent capability: {error}"))?;
+    let passphrase = dom_scriptless_identity_store::ContractsIdentityPassphraseV1::new(
+        passphrase.to_vec(),
+    )
+    .map_err(|error| format!("identity passphrase: {error:?}"))?;
+    // Dropped immediately: creating it is the point, and the store holds an exclusive lock
+    // while it lives. The ceremony reopens it with the same passphrase.
+    let store = dom_scriptless_identity_store::ContractsTransportIdentityStoreV1::create_production(
+        Arc::new(parent_dir),
+        root_name,
+        &passphrase,
+    )
+    .map_err(|error| format!("identity authority: {error:?}"))?;
+    drop(store);
+
+    // The layout requires this directory to be owner-only, and the store chose its own
+    // mode. Report a disagreement rather than silently widening or narrowing it: if the
+    // two requirements ever conflict, that is worth knowing by name.
+    let owner = owner_uid(state_dir)?;
+    owner_only_directory_is_valid(&path, owner).map_err(|error| {
+        format!("the identity authority the store created is not owner-only: {error}")
+    })
 }
 
 /// Create the parent directory of every path in the layout, and nothing else.

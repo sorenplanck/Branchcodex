@@ -54,8 +54,11 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
     declared_inputs::create_contracts_transport_identity(
         &root,
         Plan::contracts_transport_identity_relative(),
+        // A laboratory passphrase, stated as one. The ceremony reopens the authority with
+        // it, and a deployment's belongs to whoever holds the identity.
+        b"a laboratory contracts identity passphrase",
     )
-    .expect("the transport identity authority directory");
+    .expect("the transport identity authority");
 
     declared_inputs::write_dom_wallet(
         &root,
@@ -194,6 +197,7 @@ fn staged_report() -> String {
             declared_inputs::create_contracts_transport_identity(
                 &root,
                 Plan::contracts_transport_identity_relative(),
+                b"a laboratory contracts identity passphrase",
             )
             .expect("identity directory");
         }
