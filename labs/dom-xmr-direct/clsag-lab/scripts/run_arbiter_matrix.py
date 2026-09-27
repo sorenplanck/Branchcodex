@@ -160,14 +160,17 @@ def main() -> int:
     parser.add_argument("--monerod", required=True, type=executable)
     parser.add_argument("--evidence-dir", required=True, type=evidence_directory)
     parser.add_argument("--case-timeout", type=int, default=180)
+    parser.add_argument("--workers", type=int, default=2)
     args = parser.parse_args()
     if not 1 <= args.case_timeout <= 300:
         parser.error("--case-timeout must be between 1 and 300 seconds")
+    if not 1 <= args.workers <= len(OUTCOMES):
+        parser.error(f"--workers must be between 1 and {len(OUTCOMES)}")
 
     started = time.monotonic()
     results: dict[str, dict] = {}
     errors: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=len(OUTCOMES)) as executor:
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
                 run_one,
@@ -189,6 +192,7 @@ def main() -> int:
     campaign = {
         "schema": "DXA1-ARBITER-MATRIX-V2",
         "status": "passed" if not errors and len(results) == len(OUTCOMES) else "failed",
+        "workers": args.workers,
         "wall_seconds": time.monotonic() - started,
         "results": {key: results[key] for key in sorted(results)},
         "errors": {key: errors[key] for key in sorted(errors)},

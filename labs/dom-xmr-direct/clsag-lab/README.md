@@ -45,28 +45,42 @@ revalida a mesma chave conjunta e continua. O teste
 papel e corrupção. O arquivo protege contra acesso acidental entre usuários;
 seu conteúdo ainda não é cifrado contra leitura privilegiada do host.
 
+O modo `server-persistent` mantém cada participante em seu próprio endpoint e
+reabre o estado privado a cada conexão autenticada. O coordenador aceita esses
+endpoints pelo arquivo indicado em `DXA1_REMOTE_PARTIES`; ele não inicia nem
+recebe o estado privado dos participantes. O teste
+`scripts/test_arbiter_remote.py` percorre esse caminho completo, inclusive a
+reconexão dos dois participantes, usando servidores independentes em loopback.
+O procedimento para repetir em máquinas distintas está em
+[`REMOTE-REGTEST.md`](REMOTE-REGTEST.md).
+
 Após compilar o exemplo, a matriz paralela é executada assim:
 
 ```text
 python3 scripts/run_arbiter_matrix.py \
   --binary target/debug/examples/arbiter_regtest \
   --monerod /caminho/absoluto/monerod \
-  --evidence-dir /diretorio/novo/de/evidencia
+  --evidence-dir /diretorio/novo/de/evidencia \
+  --workers 2
 ```
 
-A campanha mais recente terminou em 163,26 s de parede, com duas confirmações
-DOM, shares XMR e DOM em processos separados, prova de faixa colaborativa,
-reinício dos dois participantes, rechecagem canônica antes da assinatura XMR e
-todas as operações pelo canal Noise. Claim, Refund e Punish levaram 42,22 s,
-47,92 s e 57,16 s desde `Ready`. Um quarto caso promoveu uma cadeia DOM
-concorrente, removeu o Claim e recusou qualquer assinatura XMR em 53,74 s desde
-`Ready`. Os registros completos e os limites atuais estão em
-`../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
+A campanha mais recente usou dois workers e terminou em 250,68 s de parede,
+com duas confirmações DOM, shares XMR e DOM em processos separados, prova de
+faixa colaborativa, reinício dos dois participantes, rechecagem canônica antes
+da assinatura XMR e todas as operações pelo canal Noise. Claim, Refund e
+Punish levaram 27,49 s, 32,87 s e 41,61 s desde `Ready`. Um quarto caso
+promoveu uma cadeia DOM concorrente, removeu o Claim e recusou qualquer
+assinatura XMR em 40,01 s desde `Ready`. Os registros completos e os limites
+atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
-O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
-GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
-minutos para todo o job. A repetição local exata do workflow passou em 163,26 s
-de parede e preserva os resultados como artefato quando executada no GitHub.
+O Claim financiado pelo caminho de servidores persistentes passou em 105,79 s
+no total e 29,83 s de `Ready` até a conclusão. Esse ensaio prova o protocolo de
+execução remota e a retomada sobre TCP/Noise, porém usou interfaces loopback no
+mesmo host. A execução em máquinas físicas distintas continua pendente.
+
+O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o ensaio remoto e a
+matriz no GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por
+caso e 20 minutos para todo o job. Ele preserva os resultados como artefato.
 
 ## Construção experimental
 

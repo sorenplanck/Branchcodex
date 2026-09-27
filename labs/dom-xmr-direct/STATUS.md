@@ -126,8 +126,8 @@ Claim e alcança duas confirmações. O segundo nó minera três blocos concorre
 sem o Claim; esses blocos atravessam `ChainState::connect_block`, promovem o fork
 mais pesado e removem o settlement da altura canônica. A rechecagem detecta o
 novo hash, recusa a liberação e o ensaio confirma que nenhuma assinatura ou
-transação XMR foi solicitada. Na campanha paralela, a recusa ocorreu em
-**53,74 s** desde `Ready` e **163,25 s** no caso completo.
+transação XMR foi solicitada. Na campanha mais recente, a recusa ocorreu em
+**40,01 s** desde `Ready` e **118,12 s** no caso completo.
 
 As duas shares privadas que formam a chave XMR agora são geradas e mantidas
 por processos distintos (`arbiter_party`). O coordenador recebe somente as
@@ -158,6 +158,12 @@ ordenadas, inclusive uma com mais de dois frames. Um proxy agora mantém a share
 no processo servidor e encaminha todas as operações do `arbiter_party` por esse
 canal. A campanha financiada atravessa TCP/Noise, inclusive depois do reinício;
 ela ainda roda num único host e não substitui um ensaio físico entre máquinas.
+O modo persistente agora permite deixar cada participante em outro host e
+reabrir seu helper privado depois que o coordenador desconecta. Um Claim
+financiado percorreu esse modo, reiniciou e restaurou os dois participantes e
+terminou em **105,79 s** no total e **29,83 s** desde `Ready`. O teste usou dois
+servidores loopback separados; `clsag-lab/REMOTE-REGTEST.md` registra o mesmo
+procedimento para máquinas distintas.
 
 Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
 sincronizado no disco e ligado a papel, settlement, contexto e chain id. O
@@ -173,24 +179,27 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **42,22 s**, Refund **47,92 s** e Punish **57,16 s**. O runner
+Claim levou **27,49 s**, Refund **32,87 s** e Punish **41,61 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
-mainnet. Ainda faltam executar o transporte entre hosts distintos, quantificar
-a política para reorgs mais profundos e ativar com segurança as novas regras de
-consenso. O resultado comprova um ponta a ponta
+mainnet. Ainda faltam executar o transporte em máquinas físicas distintas,
+quantificar a política para reorgs mais profundos e ativar com segurança as
+novas regras de consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
 
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
-oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund,
-Punish e o reorg concorrente em paralelo com limite de 180 s por caso. Depois da barreira de duas
+oficial, roda formatação, testes, Clippy e build, executa um Claim financiado
+pelos servidores persistentes e então executa Claim, Refund, Punish e o reorg
+concorrente em pares, com limite de 180 s por caso. Limitar a dois workers evita
+que contenção do runner seja confundida com latência do protocolo. Depois da
+barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
 reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **163,26 s** de parede. Claim, Refund e Punish
-completos levaram **148,32 s**, **149,17 s** e **161,79 s**; o reorg foi recusado
-em **163,25 s** totais. Desde `Ready`, os settlements levaram **42,22 s**,
-**47,92 s** e **57,16 s**. A
+mesmo arquivo oficial passou em **250,68 s** de parede com dois workers. Claim,
+Refund e Punish completos levaram **127,80 s**, **132,46 s** e **115,27 s**; o
+reorg foi recusado em **118,12 s** totais. Desde `Ready`, os settlements levaram
+**27,49 s**, **32,87 s** e **41,61 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

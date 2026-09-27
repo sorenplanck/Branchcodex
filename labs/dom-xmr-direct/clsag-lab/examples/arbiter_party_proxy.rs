@@ -21,6 +21,19 @@ use zeroize::Zeroizing;
 const KEY_MAGIC: &[u8] = b"DXA1/noise-static/v1\0";
 const KEY_BYTES: usize = KEY_MAGIC.len() + 32 + 32;
 
+fn transport_session(
+    settlement_id: [u8; 32],
+    context_hash: [u8; 32],
+    chain_id: [u8; 32],
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"DXA1/participant-transport/v1");
+    hash.update(settlement_id);
+    hash.update(context_hash);
+    hash.update(chain_id);
+    hash.finalize().into()
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -114,21 +127,14 @@ impl Drop for ManagedParty {
     }
 }
 
-async fn server(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    if args.len() != 10 {
-        return Err("server requires party, role, settlement, context, chain, state, listen, Noise state, expected peer and session".into());
-    }
-    let party_binary = &args[0];
-    let chain_id = fixed_hex::<32>(&args[4])?;
-    let listen = &args[6];
-    let noise_path = PathBuf::from(&args[7]);
-    let expected_peer = fixed_hex::<32>(&args[8])?;
-    let session = fixed_hex::<32>(&args[9])?;
-    let (_key_file, noise_secret, _) = load_or_create_key(&noise_path)?;
-
+async fn serve_connection(
+    channel: &mut SwapNoiseChannel,
+    party_binary: &str,
+    party_args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut party = ManagedParty(
         Command::new(party_binary)
-            .args(&args[1..6])
+            .args(party_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -140,25 +146,12 @@ async fn server(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if party_output.read_line(&mut ready)? == 0 {
         return Err("party exited before readiness".into());
     }
-
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    println!("{}", listener.local_addr()?);
-    io::stdout().flush()?;
-    let mut channel = SwapNoiseChannel::accept(
-        &listener,
-        &noise_secret,
-        expected_peer,
-        NETWORK_MAGIC_REGTEST,
-        chain_id,
-        session,
-    )
-    .await?;
     channel.send(ready.trim_end().as_bytes()).await?;
 
     loop {
         let request = match channel.receive().await {
             Ok(request) => request,
-            Err(_) => break,
+            Err(_) => return Ok(()),
         };
         if request.contains(&b'\n') || request.contains(&b'\r') {
             return Err("embedded newline in party request".into());
@@ -171,6 +164,46 @@ async fn server(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             return Err("party exited before response".into());
         }
         channel.send(response.trim_end().as_bytes()).await?;
+    }
+}
+
+async fn server(args: Vec<String>, persistent: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() != 10 {
+        return Err("server requires party, role, settlement, context, chain, state, listen, Noise state, expected peer and session".into());
+    }
+    let party_binary = &args[0];
+    let chain_id = fixed_hex::<32>(&args[4])?;
+    let listen = &args[6];
+    let noise_path = PathBuf::from(&args[7]);
+    let expected_peer = fixed_hex::<32>(&args[8])?;
+    let session = fixed_hex::<32>(&args[9])?;
+    let (_key_file, noise_secret, _) = load_or_create_key(&noise_path)?;
+
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    println!("{}", listener.local_addr()?);
+    io::stdout().flush()?;
+    loop {
+        let accepted = SwapNoiseChannel::accept(
+            &listener,
+            &noise_secret,
+            expected_peer,
+            NETWORK_MAGIC_REGTEST,
+            chain_id,
+            session,
+        )
+        .await;
+        let mut channel = match accepted {
+            Ok(channel) => channel,
+            Err(error) if persistent => {
+                eprintln!("rejected participant connection: {error}");
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        serve_connection(&mut channel, party_binary, &args[1..6]).await?;
+        if !persistent {
+            break;
+        }
     }
     Ok(())
 }
@@ -219,6 +252,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = args.next().ok_or("missing mode")?;
     let args: Vec<_> = args.collect();
     match mode.as_str() {
+        "regtest-bootstrap" => {
+            if args.len() != 2 {
+                return Err("regtest-bootstrap requires settlement and context hashes".into());
+            }
+            let settlement_id = fixed_hex::<32>(&args[0])?;
+            let context_hash = fixed_hex::<32>(&args[1])?;
+            let genesis = dom_core::Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST);
+            let chain_id =
+                *dom_consensus::derive_chain_id(NETWORK_MAGIC_REGTEST, &genesis).as_bytes();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "settlement_id":hex(&settlement_id),
+                    "context_hash":hex(&context_hash),
+                    "chain_id":hex(&chain_id),
+                    "session":hex(&transport_session(settlement_id, context_hash, chain_id)),
+                    "network_magic":NETWORK_MAGIC_REGTEST,
+                })
+            );
+            Ok(())
+        }
         "identity" => {
             if args.len() != 1 {
                 return Err("identity requires one state path".into());
@@ -227,8 +281,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", hex(&public));
             Ok(())
         }
-        "server" => server(args).await,
+        "server" => server(args, false).await,
+        "server-persistent" => server(args, true).await,
         "client" => client(args).await,
-        _ => Err("mode must be identity, server or client".into()),
+        _ => Err(
+            "mode must be regtest-bootstrap, identity, server, server-persistent or client".into(),
+        ),
     }
 }

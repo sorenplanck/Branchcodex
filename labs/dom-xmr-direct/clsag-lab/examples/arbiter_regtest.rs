@@ -45,7 +45,8 @@ use monero_wallet::{
     send::{Change, SignableTransaction},
     OutputWithDecoys, Scanner, ViewPair,
 };
-use rand_core::{OsRng, RngCore};
+use rand_chacha::ChaCha20Rng;
+use rand_core::{OsRng, RngCore, SeedableRng};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use xmr_dleq_sigma::BoundCrossCurveProofV1;
@@ -74,6 +75,51 @@ struct NoiseEndpoints {
     client_public: [u8; 32],
 }
 
+#[derive(Clone)]
+struct RemotePartyConfig {
+    address: String,
+    server_public: [u8; 32],
+    client_key_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct RemoteParties {
+    dom_owner: RemotePartyConfig,
+    xmr_owner: RemotePartyConfig,
+}
+
+impl RemoteParties {
+    fn from_environment() -> Option<Self> {
+        let path = PathBuf::from(env::var_os("DXA1_REMOTE_PARTIES")?);
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read DXA1 remote party config"))
+                .expect("parse DXA1 remote party config");
+        let parse = |name: &str| {
+            let party = value.get(name).expect("missing remote party entry");
+            RemotePartyConfig {
+                address: party["address"]
+                    .as_str()
+                    .expect("missing remote party address")
+                    .to_owned(),
+                server_public: fixed_hex(
+                    party["server_public"]
+                        .as_str()
+                        .expect("missing remote server identity"),
+                ),
+                client_key_path: PathBuf::from(
+                    party["client_key_path"]
+                        .as_str()
+                        .expect("missing local client identity path"),
+                ),
+            }
+        };
+        Some(Self {
+            dom_owner: parse("dom_owner"),
+            xmr_owner: parse("xmr_owner"),
+        })
+    }
+}
+
 struct PartyProcess {
     binary: PathBuf,
     proxy_binary: PathBuf,
@@ -81,7 +127,8 @@ struct PartyProcess {
     chain_id: [u8; 32],
     state_path: PathBuf,
     noise: NoiseEndpoints,
-    server: Child,
+    remote: Option<RemotePartyConfig>,
+    server: Option<Child>,
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -91,8 +138,10 @@ impl Drop for PartyProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = self.server.kill();
-        let _ = self.server.wait();
+        if let Some(server) = &mut self.server {
+            let _ = server.kill();
+            let _ = server.wait();
+        }
     }
 }
 
@@ -120,7 +169,7 @@ impl PartyProcess {
         fixed_hex(String::from_utf8(output.stdout).unwrap().trim())
     }
 
-    fn launch(
+    fn launch_local(
         binary: &Path,
         proxy_binary: &Path,
         role: &str,
@@ -196,24 +245,81 @@ impl PartyProcess {
         (server, child, input, output, proof, restored)
     }
 
+    fn launch_remote(
+        proxy_binary: &Path,
+        role: &str,
+        chain_id: [u8; 32],
+        remote: &RemotePartyConfig,
+    ) -> (
+        Child,
+        ChildStdin,
+        BufReader<ChildStdout>,
+        BoundCrossCurveProofV1,
+        bool,
+    ) {
+        let session = Self::transport_session(chain_id);
+        let mut child = Command::new(proxy_binary)
+            .arg("client")
+            .arg(&remote.address)
+            .arg(&remote.client_key_path)
+            .arg(hex(&remote.server_public))
+            .arg(hex(&chain_id))
+            .arg(hex(&session))
+            .arg(dom_core::NETWORK_MAGIC_REGTEST.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        assert_ne!(
+            output.read_line(&mut line).unwrap(),
+            0,
+            "remote party exited early"
+        );
+        let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["ok"], true);
+        assert_eq!(ready["role"], role);
+        let proof = serde_json::from_value(ready["proof"].clone()).unwrap();
+        let restored = ready["restored"].as_bool().unwrap();
+        (child, input, output, proof, restored)
+    }
+
     fn spawn(
         binary: &Path,
         role: &str,
         chain_id: [u8; 32],
         state_path: PathBuf,
+        remote: Option<RemotePartyConfig>,
     ) -> (Self, BoundCrossCurveProofV1, bool) {
         let proxy_binary = binary.with_file_name("arbiter_party_proxy");
         assert!(proxy_binary.is_file(), "arbiter_party_proxy missing");
-        let server_key_path = state_path.with_extension("server-noise");
-        let client_key_path = state_path.with_extension("client-noise");
-        let noise = NoiseEndpoints {
-            server_public: Self::identity(&proxy_binary, &server_key_path),
-            client_public: Self::identity(&proxy_binary, &client_key_path),
-            server_key_path,
-            client_key_path,
+        let (noise, server, child, input, output, proof, restored) = if let Some(endpoint) = &remote
+        {
+            let noise = NoiseEndpoints {
+                server_key_path: PathBuf::new(),
+                client_key_path: endpoint.client_key_path.clone(),
+                server_public: endpoint.server_public,
+                client_public: [0; 32],
+            };
+            let (child, input, output, proof, restored) =
+                Self::launch_remote(&proxy_binary, role, chain_id, endpoint);
+            (noise, None, child, input, output, proof, restored)
+        } else {
+            let server_key_path = state_path.with_extension("server-noise");
+            let client_key_path = state_path.with_extension("client-noise");
+            let noise = NoiseEndpoints {
+                server_public: Self::identity(&proxy_binary, &server_key_path),
+                client_public: Self::identity(&proxy_binary, &client_key_path),
+                server_key_path,
+                client_key_path,
+            };
+            let (server, child, input, output, proof, restored) =
+                Self::launch_local(binary, &proxy_binary, role, chain_id, &state_path, &noise);
+            (noise, Some(server), child, input, output, proof, restored)
         };
-        let (server, child, input, output, proof, restored) =
-            Self::launch(binary, &proxy_binary, role, chain_id, &state_path, &noise);
         (
             Self {
                 binary: binary.to_owned(),
@@ -222,6 +328,7 @@ impl PartyProcess {
                 chain_id,
                 state_path,
                 noise,
+                remote,
                 server,
                 child,
                 input,
@@ -235,17 +342,23 @@ impl PartyProcess {
     fn restart(&mut self) -> (BoundCrossCurveProofV1, bool) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
-        self.server.kill().unwrap();
-        self.server.wait().unwrap();
-        let (server, child, input, output, proof, restored) = Self::launch(
-            &self.binary,
-            &self.proxy_binary,
-            &self.role,
-            self.chain_id,
-            &self.state_path,
-            &self.noise,
-        );
-        self.server = server;
+        let (child, input, output, proof, restored) = if let Some(remote) = &self.remote {
+            Self::launch_remote(&self.proxy_binary, &self.role, self.chain_id, remote)
+        } else {
+            let server = self.server.as_mut().unwrap();
+            server.kill().unwrap();
+            server.wait().unwrap();
+            let (server, child, input, output, proof, restored) = Self::launch_local(
+                &self.binary,
+                &self.proxy_binary,
+                &self.role,
+                self.chain_id,
+                &self.state_path,
+                &self.noise,
+            );
+            self.server = Some(server);
+            (child, input, output, proof, restored)
+        };
         self.child = child;
         self.input = input;
         self.output = output;
@@ -876,6 +989,7 @@ struct FundedArbiter {
     _root: TestDir,
     node: Arc<DomNode>,
     shadow: Option<Arc<DomNode>>,
+    remote_participants: bool,
     chain_id: [u8; 32],
     contract: SwapArbiterContract,
     shares: VerifiedArbiterSharesV1,
@@ -915,7 +1029,11 @@ async fn observed_transaction(
         .unwrap()
 }
 
-async fn funded_arbiter(party_binary: &Path, create_shadow: bool) -> FundedArbiter {
+async fn funded_arbiter(
+    party_binary: &Path,
+    create_shadow: bool,
+    remote_parties: Option<&RemoteParties>,
+) -> FundedArbiter {
     let (root, node, chain_id) = node().await;
     let handle = NodeHandleImpl(node.clone());
 
@@ -938,12 +1056,14 @@ async fn funded_arbiter(party_binary: &Path, create_shadow: bool) -> FundedArbit
         "dom-owner",
         chain_id,
         root.0.join("dom-owner.state"),
+        remote_parties.map(|parties| parties.dom_owner.clone()),
     );
     let (mut xmr_owner, xmr_proof, xmr_restored) = PartyProcess::spawn(
         party_binary,
         "xmr-owner",
         chain_id,
         root.0.join("xmr-owner.state"),
+        remote_parties.map(|parties| parties.xmr_owner.clone()),
     );
     assert!(!dom_restored && !xmr_restored);
     let shares =
@@ -1094,6 +1214,7 @@ async fn funded_arbiter(party_binary: &Path, create_shadow: bool) -> FundedArbit
         _root: root,
         node,
         shadow,
+        remote_participants: remote_parties.is_some(),
         chain_id,
         contract,
         shares,
@@ -1113,9 +1234,19 @@ async fn funded_arbiter(party_binary: &Path, create_shadow: bool) -> FundedArbit
     }
 }
 
-async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
+async fn exercise(
+    monerod: PathBuf,
+    party_binary: PathBuf,
+    outcome: Outcome,
+    remote_parties: Option<RemoteParties>,
+) {
     let started = Instant::now();
-    let mut setup = funded_arbiter(&party_binary, outcome == Outcome::ReorgGuard).await;
+    let mut setup = funded_arbiter(
+        &party_binary,
+        outcome == Outcome::ReorgGuard,
+        remote_parties.as_ref(),
+    )
+    .await;
     let handle = NodeHandleImpl(setup.node.clone());
 
     let verified_joint = CompressedEdwardsY(setup.shares.joint_xmr_spend_key().unwrap())
@@ -1243,9 +1374,23 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
     setup.journal =
         ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
     let active_settlement = Instant::now();
-    let input = OutputWithDecoys::new(&mut OsRng, &rpc, 16, height, reserve_output)
-        .await
-        .unwrap();
+    // This fakechain fixture has one RingCT output per generated block. Keep
+    // its decoy sampling reproducible so a stochastic sample cannot make the
+    // protocol regression flaky; production wallets must use fresh entropy.
+    let mut decoy_seed = Sha256::new();
+    decoy_seed.update(b"DXA1/regtest-decoys/v1");
+    decoy_seed.update(SETTLEMENT_ID);
+    decoy_seed.update(CONTEXT_HASH);
+    let mut decoy_rng = ChaCha20Rng::from_seed(decoy_seed.finalize().into());
+    let input = OutputWithDecoys::fingerprintable_deterministic_new(
+        &mut decoy_rng,
+        &rpc,
+        16,
+        height,
+        reserve_output,
+    )
+    .await
+    .unwrap();
     let fee = rpc
         .fee_rate(FeePriority::Normal, 1_000_000_000)
         .await
@@ -1484,6 +1629,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
                 "monerod":true,
                 "bitcoin_involved":false,
                 "authenticated_noise_transport":true,
+                "remote_participant_servers":setup.remote_participants,
                 "distributed_dom_presigning":true,
                 "collaborative_dom_range_proofs":true,
                 "coordinator_never_receives_dom_signing_keys":true,
@@ -1641,6 +1787,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
             "coordinator_never_receives_dom_signing_keys":true,
             "post_restart_dom_presigning_rejected":true,
             "authenticated_noise_transport":true,
+            "remote_participant_servers":setup.remote_participants,
             "noise_peer_identity_pinned":true,
             "transport_session_bound":true,
             "wrong_role_operations_rejected":true,
@@ -1682,9 +1829,10 @@ async fn main() {
         party_binary.is_file(),
         "arbiter_party sibling binary missing"
     );
+    let remote_parties = RemoteParties::from_environment();
     tokio::time::timeout(
         Duration::from_secs(180),
-        exercise(monerod, party_binary, outcome),
+        exercise(monerod, party_binary, outcome, remote_parties),
     )
     .await
     .expect("arbiter regtest exceeded 180 seconds");
