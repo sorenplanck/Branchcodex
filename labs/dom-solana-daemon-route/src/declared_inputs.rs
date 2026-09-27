@@ -288,9 +288,14 @@ pub fn participant_id_for_identity(
         dom_network_magic,
         &dom_core::Hash256::from_bytes(dom_genesis_hash),
     );
-    let key = dom_crypto::PublicKey::from_compressed_bytes(schnorr_public_key)
-        .map_err(|error| format!("the identity key is not a point: {error:?}"))?;
-    let identity = dom_adaptor::ParticipantIdentityV1::new(&chain, key, key, direction)
+    // Decoded twice rather than cloned: `PublicKey` is not `Copy`, and the constructor takes
+    // an identity key and a signing key. Only the identity key enters the derivation, so both
+    // are this identity's -- the question being asked is which participant IT is.
+    let decode = || {
+        dom_crypto::PublicKey::from_compressed_bytes(schnorr_public_key)
+            .map_err(|error| format!("the identity key is not a point: {error:?}"))
+    };
+    let identity = dom_adaptor::ParticipantIdentityV1::new(&chain, decode()?, decode()?, direction)
         .map_err(|error| format!("derive the participant id: {error:?}"))?;
     Ok(*identity.participant_id())
 }
