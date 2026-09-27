@@ -309,8 +309,10 @@ pub fn provision(
         expected_network_id: network_id,
         minimum_epoch: epoch,
     };
+    // The registry store refuses a parent directory that is not owner-only, and
+    // `create_dir_all` would make one the runner's umask widened to 0o755.
     if let Some(parent) = state_dir.join(registry_relative).parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("registry parent: {error}"))?;
+        crate::owner_only::directory(parent)?;
     }
     let mut store = RegistryStoreV1::create(&state_dir.join(registry_relative))
         .map_err(|error| format!("registry store: {error:?}"))?;
@@ -334,12 +336,7 @@ pub fn provision(
     let bytes = bundle
         .canonical_bytes()
         .map_err(|error| format!("authority bundle bytes: {error:?}"))?;
-    let authorities_path = state_dir.join(authorities_relative);
-    if let Some(parent) = authorities_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("authorities parent: {error}"))?;
-    }
-    std::fs::write(&authorities_path, &bytes)
-        .map_err(|error| format!("authorities file: {error}"))?;
+    crate::owner_only::write(&state_dir.join(authorities_relative), &bytes)?;
 
     let solana_chain = ChainId(solana.genesis_hash);
     Ok(ProvisionedSolanaRegistryV1 {

@@ -294,8 +294,8 @@ pub use production_inputs::{
     ProductionBitcoinParticipantKeyProofV1, ProductionBitcoinParticipantKeyStatementRequestV1,
     ProductionEvmLegProofsV1, ProductionInputErrorV1, ProductionParticipantBindingBundleV1,
     ProductionRelayRosterBundleV1, ProductionRosterLegV1, ProductionRosterMemberV1,
-    ProductionRoutePositionV1, ProductionXmrEnrollmentBundleV23, ProductionXmrLegSetupV1,
-    ProductionXmrRefundBundleV1, BITCOIN_PARTICIPANT_KEY_PROOF_BYTES_V1,
+    ProductionRoutePositionV1, ProductionSolanaLegSetupV1, ProductionXmrEnrollmentBundleV23,
+    ProductionXmrLegSetupV1, ProductionXmrRefundBundleV1, BITCOIN_PARTICIPANT_KEY_PROOF_BYTES_V1,
     MAX_PRODUCTION_AUTHORITY_BUNDLE_BYTES_V1, MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1,
     PRODUCTION_ROSTER_BUNDLE_BYTES_V1,
 };

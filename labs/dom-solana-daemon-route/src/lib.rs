@@ -47,6 +47,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod owner_only;
+pub mod participants;
 pub mod registry;
 pub mod roster;
 pub mod terms;
@@ -63,6 +65,7 @@ use dom_interopd::{
     PRODUCTION_F6_PATH_ROLE_COUNT_V8, PRODUCTION_PATH_ROLE_COUNT_V1,
     PRODUCTION_REOPEN_CONFIG_FILE_V11,
 };
+use participants::ProvisionedParticipantBindingsV1;
 use registry::ProvisionedSolanaRegistryV1;
 use roster::ProvisionedRelayRosterV1;
 use terms::ProvisionedRouteTermsV1;
@@ -179,6 +182,9 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// The Relay roster, once both positions have one. Present means the daemon can
     /// tell which key speaks for which participant of which position.
     pub roster: Option<ProvisionedRelayRosterV1>,
+    /// The two Solana setups, once both positions have been established. Present
+    /// means the route carries the DLEQ the daemon authenticates each position with.
+    pub participants: Option<ProvisionedParticipantBindingsV1>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -204,6 +210,7 @@ impl SolanaRouteBootstrapPlanV1 {
             registry: None,
             terms: None,
             roster: None,
+            participants: None,
         }
     }
 
@@ -236,6 +243,13 @@ impl SolanaRouteBootstrapPlanV1 {
         self
     }
 
+    /// Bind the provisioned participant bindings, so `participant_bindings_digest`
+    /// stops being a label.
+    pub fn with_participants(mut self, provisioned: ProvisionedParticipantBindingsV1) -> Self {
+        self.participants = Some(provisioned);
+        self
+    }
+
     /// How many of the nineteen route pins are measurements of a real artifact.
     ///
     /// Reported as a number rather than a boolean because the bootstrap is built
@@ -257,7 +271,12 @@ impl SolanaRouteBootstrapPlanV1 {
             Some(_) => 1,
             None => 0,
         };
-        registry + terms + roster
+        let participants = match self.participants {
+            // participant_bindings_digest.
+            Some(_) => 1,
+            None => 0,
+        };
+        registry + terms + roster + participants
     }
 
     /// True while any pin is still a derived label rather than the digest of a
@@ -305,7 +324,10 @@ impl SolanaRouteBootstrapPlanV1 {
             upstream_terms_digest: upstream_terms,
             downstream_terms_digest: downstream_terms,
             route_scope_digest: route_scope,
-            participant_bindings_digest: placeholder("participant-bindings"),
+            participant_bindings_digest: match &self.participants {
+                Some(provisioned) => provisioned.participant_bindings_digest,
+                None => placeholder("participant-bindings"),
+            },
             relay_binding_digest: match &self.roster {
                 Some(provisioned) => provisioned.relay_binding_digest,
                 None => placeholder("relay-binding"),
@@ -464,6 +486,11 @@ impl SolanaRouteBootstrapPlanV1 {
     /// plan rather than edited into agreement.
     pub fn write_manifests(&self, state_dir: &Path) -> Result<[PathBuf; 2], ProductionConfigErrorV1> {
         let mut written = Vec::with_capacity(2);
+        // The loader validates the directory it reads from, not the one a caller meant
+        // to create: owner-only, or the whole bootstrap is refused before any pin is
+        // compared.
+        owner_only::directory(state_dir)
+            .map_err(|_| ProductionConfigErrorV1::InputArtifactUnavailable)?;
         for (mode, name) in [
             (
                 ProductionBootstrapModeV1::Create,
@@ -476,7 +503,7 @@ impl SolanaRouteBootstrapPlanV1 {
         ] {
             let bytes = self.config(mode)?.canonical_bytes()?;
             let path = state_dir.join(name);
-            std::fs::write(&path, &bytes)
+            owner_only::write(&path, &bytes)
                 .map_err(|_| ProductionConfigErrorV1::InputArtifactUnavailable)?;
             written.push(path);
         }

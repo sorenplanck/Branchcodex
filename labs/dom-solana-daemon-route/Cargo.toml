@@ -58,6 +58,10 @@ dom-solana-direct-lab = { path = "../dom-solana-direct" }
 solana-profile = { path = "../../crates/adapters/solana-profile" }
 solana-setup-store = { path = "../../crates/adapters/solana-setup-store" }
 solana-types = { path = "../../crates/adapters/solana-types" }
+# `MAX_PROOF_BYTES`, the frozen bound the participant-bundle constructor applies to
+# the DLEQ it carries. The crate is named for its first user; the role registry the
+# Solana condition lock uses lives in it.
+xmr-dleq-sigma = { path = "../../crates/adapters/xmr-dleq-sigma" }
 sha2 = "=0.10.8"
 # The condition's secret scalar is generated when a position is established. Same
 # version the leg laboratory pins.

@@ -136,11 +136,7 @@ pub fn provision(
     let bytes = bundle
         .canonical_bytes()
         .map_err(|error| format!("roster bytes: {error:?}"))?;
-    let path = state_dir.join(relative);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("roster parent: {error}"))?;
-    }
-    std::fs::write(&path, &bytes).map_err(|error| format!("roster file: {error}"))?;
+    crate::owner_only::write(&state_dir.join(relative), &bytes)?;
 
     Ok(ProvisionedRelayRosterV1 {
         relay_binding_digest: bundle

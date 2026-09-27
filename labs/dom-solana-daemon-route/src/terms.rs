@@ -322,8 +322,7 @@ fn establish(
     chosen_deadline: ScheduleAnchorV1,
     label: &str,
 ) -> Result<ProvisionedPositionV1, String> {
-    std::fs::create_dir_all(input.provisioning_dir)
-        .map_err(|error| format!("provisioning dir: {error}"))?;
+    crate::owner_only::directory(input.provisioning_dir)?;
     let store = SolanaSetupStore::open(
         input
             .provisioning_dir
@@ -347,11 +346,8 @@ fn establish(
 }
 
 fn write_terms(path: &Path, terms: &SettlementTermsV1) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("terms parent: {error}"))?;
-    }
     let bytes = terms
         .canonical_bytes()
         .map_err(|error| format!("terms bytes: {error:?}"))?;
-    std::fs::write(path, &bytes).map_err(|error| format!("terms file: {error}"))
+    crate::owner_only::write(path, &bytes)
 }

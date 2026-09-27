@@ -11,10 +11,11 @@
 
 use dom_solana_daemon_route::{
     registry::{provision as provision_registry, SolanaChainFactsV1},
+    participants::provision as provision_participants,
     roster::provision as provision_roster,
     terms::{
-        provision as provision_terms, RouteTermsInputV1, SolanaPositionAccountsV1,
-        SolanaPositionTermsPlanV1,
+        provision as provision_terms, ProvisionedPositionV1, RouteTermsInputV1,
+        SolanaPositionAccountsV1, SolanaPositionTermsPlanV1,
     },
     SolanaRouteBootstrapPlanV1,
 };
@@ -25,6 +26,7 @@ pub const NETWORK: [u8; 32] = [0x90; 32];
 pub const UPSTREAM_TERMS: &str = "artifacts/upstream-terms.v1";
 pub const DOWNSTREAM_TERMS: &str = "artifacts/downstream-terms.v1";
 pub const RELAY_ROSTER: &str = "artifacts/relay-roster.v1";
+pub const PARTICIPANT_BINDINGS: &str = "artifacts/participant-bindings.v1";
 
 pub fn solana_facts() -> SolanaChainFactsV1 {
     SolanaChainFactsV1 {
@@ -66,6 +68,11 @@ pub struct Provisioned {
     pub solana_chain_id: [u8; 32],
     pub dom_chain_id: [u8; 32],
     pub dom_asset_id: [u8; 32],
+    /// The established positions, kept whole: the participant bindings are built
+    /// from these, and only these carry the profile and the DLEQ binding.
+    pub upstream_setup: ProvisionedPositionV1,
+    pub downstream_setup: ProvisionedPositionV1,
+    pub facts: SolanaChainFactsV1,
 }
 
 pub fn provision_all() -> Provisioned {
@@ -119,6 +126,18 @@ pub fn provision_all() -> Provisioned {
     .expect("the roster provisions from both terms");
     let plan = plan.with_roster(roster);
 
+    // The participant bindings carry the two setups the leg produced, so they are
+    // provisioned from the established positions and not from the terms alone.
+    let participants = provision_participants(
+        directory.path(),
+        PARTICIPANT_BINDINGS,
+        plan.route_id,
+        &upstream,
+        &downstream,
+    )
+    .expect("the participant bindings provision from both setups");
+    let plan = plan.with_participants(participants);
+
     // The check the daemon itself performs on a Solana position, run here on the
     // artifacts as provisioned rather than on values assembled for the assertion.
     for provisioned in [&upstream, &downstream] {
@@ -133,6 +152,9 @@ pub fn provision_all() -> Provisioned {
     Provisioned {
         directory,
         plan,
+        upstream_setup: upstream.clone(),
+        downstream_setup: downstream.clone(),
+        facts,
         upstream: upstream.terms,
         downstream: downstream.terms,
         solana_chain_id,

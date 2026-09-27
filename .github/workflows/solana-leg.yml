@@ -117,7 +117,10 @@ jobs:
       # test in the leg laboratory down with the daemon's production tree.
       - name: DOM route provisioning for Solana positions
         run: |
-          cargo test --manifest-path labs/dom-solana-daemon-route/Cargo.toml
+          # `--no-fail-fast`: one run of this job costs several minutes of the
+          # daemon's production tree, so it reports every failing suite rather than
+          # stopping at the first and hiding the rest behind another round trip.
+          cargo test --no-fail-fast --manifest-path labs/dom-solana-daemon-route/Cargo.toml
 
       # The lockfile the resolution above produced: commit it and every later run
       # of this laboratory is fully pinned.
