@@ -14,6 +14,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from test_arbiter_party_state import KeyBroker
 from test_arbiter_remote import CONTEXT, SETTLEMENT, result_line, verify
 
 
@@ -137,6 +138,7 @@ def start_participant(
     client_public: str,
     chain: str,
     session: str,
+    wrapping_key_source: str,
 ) -> None:
     run(
         [
@@ -161,7 +163,7 @@ def start_participant(
             CONTEXT,
             chain,
             "/state/party.state",
-            "/state/party.wrapping-key",
+            wrapping_key_source,
             f"0.0.0.0:{PARTICIPANT_PORT}",
             "/state/server-noise",
             client_public,
@@ -271,6 +273,7 @@ def main() -> int:
     xmr_name = f"{prefix}-xmr"
     coordinator_name = f"{prefix}-coordinator"
     created: list[str] = []
+    brokers: list[KeyBroker] = []
     started = time.monotonic()
 
     with tempfile.TemporaryDirectory(prefix="dxa1-containers-") as directory:
@@ -308,6 +311,9 @@ def main() -> int:
             xmr_server_public = identity(
                 args.image, args.binary.parent, xmr_state, "server-noise"
             )
+            dom_broker = KeyBroker(dom_state / "key-provider.sock", os.urandom(32))
+            xmr_broker = KeyBroker(xmr_state / "key-provider.sock", os.urandom(32))
+            brokers.extend((dom_broker, xmr_broker))
 
             start_participant(
                 image=args.image,
@@ -319,6 +325,7 @@ def main() -> int:
                 client_public=dom_client_public,
                 chain=chain,
                 session=session,
+                wrapping_key_source="unix:/state/key-provider.sock",
             )
             created.append(dom_name)
             start_participant(
@@ -331,6 +338,7 @@ def main() -> int:
                 client_public=xmr_client_public,
                 chain=chain,
                 session=session,
+                wrapping_key_source="unix:/state/key-provider.sock",
             )
             created.append(xmr_name)
             wait_listening(dom_name)
@@ -401,15 +409,28 @@ def main() -> int:
                 raise RuntimeError(f"containerized Claim failed:\n{output}")
             result = result_line(output)
             verify(result)
+            for broker in brokers:
+                if len(broker.requests) < 2 or broker.requests[0][-1] != 0:
+                    raise RuntimeError("external key provider did not observe create and restore")
+                if not any(request[-1] == 1 for request in broker.requests[1:]):
+                    raise RuntimeError("external key provider did not observe restored state")
+            if any(
+                (directory / "party.wrapping-key").exists()
+                for directory in (dom_state, xmr_state)
+            ):
+                raise RuntimeError("participant wrote a local wrapping key")
             wall = time.monotonic() - started
             if wall > 180:
                 raise RuntimeError(f"containerized test exceeded 180 seconds: {wall}")
             evidence = {
-                "schema": "DXA1-CONTAINER-PARTICIPANTS-V1",
+                "schema": "DXA1-CONTAINER-PARTICIPANTS-V2",
                 "status": "passed",
                 "container_image": args.image,
                 "container_image_id": image_id,
                 "container_runner_wall_seconds": wall,
+                "external_wrapping_key_providers": True,
+                "wrapping_keys_absent_from_participant_filesystems": True,
+                "provider_restart_requests_observed": True,
                 **isolation,
                 "result": result,
             }
@@ -433,6 +454,8 @@ def main() -> int:
             raise
         finally:
             cleanup(created, network)
+            for broker in reversed(brokers):
+                broker.close()
     return 0
 
 

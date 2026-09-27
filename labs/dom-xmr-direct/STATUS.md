@@ -176,21 +176,26 @@ orçamento externo de 180 s ao processo completo.
 O caminho remoto também passou com coordenador, dono DOM e dono XMR em três
 contêineres sem capacidades, três namespaces/endereço de rede e estados privados
 separados. A rede interna não tinha rota externa e o coordenador não recebeu o
-mount de nenhum participante. O Claim levou **85,95 s** dentro do protocolo,
-**26,94 s** desde `Ready` e **124,87 s** incluindo a criação dos contêineres.
-A imagem Ubuntu foi fixada por digest. Essa topologia é mais forte que loopback,
+mount de nenhum participante. Cada processo obteve sua chave de wrapping por um
+provedor Unix externo antes da criação e novamente após o restart; nenhum
+arquivo local de chave foi criado. O Claim levou **91,51 s** dentro do protocolo,
+**27,06 s** desde `Ready` e **153,28 s** incluindo a criação dos contêineres. A
+imagem Ubuntu foi fixada por digest. Essa topologia é mais forte que loopback,
 mas ainda compartilha o mesmo kernel e host físico.
 
 Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
 sincronizado no disco e ligado a papel, settlement, contexto e chain id. A share
-é cifrada por XChaCha20-Poly1305 com nonce aleatório e chave de wrapping em
-arquivo `0600` separado. O arquivo de estado permanece bloqueado enquanto o
-processo está vivo. Um teste dedicado recusou segundo dono simultâneo, papel
-divergente, estado adulterado e chave ausente, errada ou corrompida, e confirmou
-a mesma claim pública após reinício. A campanha financiada reinicia os dois
-processos depois de `Ready`, revalida chave conjunta e adaptors e reautoriza
-somente as ofertas públicas já fixadas. Produção ainda exige KMS, HSM ou
-isolamento para impedir que um host privilegiado leia estado e chave juntos.
+é cifrada por XChaCha20-Poly1305 com nonce aleatório. A chave pode ficar em
+arquivo `0600` separado ou vir de um provedor Unix externo com requisição ligada
+a papel, settlement, contexto, chain id e fase criação/restauração. O arquivo de
+estado permanece bloqueado enquanto o processo está vivo. Um teste dedicado
+recusou segundo dono simultâneo, papel divergente, estado adulterado, chave
+ausente/errada, resposta de outra requisição, socket inseguro e provedor parado,
+e confirmou a mesma claim pública após reinício. A campanha financiada reinicia
+os dois processos depois de `Ready`, revalida chave conjunta e adaptors e
+reautoriza somente as ofertas públicas já fixadas. O provedor remove a chave do
+disco do participante; HSM com signer integrado, enclave ou isolamento ainda é
+necessário contra um host privilegiado que leia a memória do processo.
 
 Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos à
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em

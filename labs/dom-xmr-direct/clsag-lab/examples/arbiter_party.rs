@@ -8,8 +8,13 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    net::Shutdown,
+    os::unix::{
+        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+        net::UnixStream,
+    },
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chacha20poly1305::{
@@ -52,11 +57,47 @@ const STATE_BYTES: usize = STATE_PREFIX_BYTES + STATE_NONCE_BYTES + STATE_CIPHER
 const WRAPPING_KEY_MAGIC: &[u8] = b"DXA1/party-wrapping-key/v1\0";
 const WRAPPING_KEY_BODY_BYTES: usize = WRAPPING_KEY_MAGIC.len() + 32;
 const WRAPPING_KEY_BYTES: usize = WRAPPING_KEY_BODY_BYTES + 32;
+const KEY_PROVIDER_REQUEST_MAGIC: &[u8] = b"DXA1/key-provider/request/v1\0";
+const KEY_PROVIDER_RESPONSE_MAGIC: &[u8] = b"DXA1/key-provider/response/v1\0";
+const KEY_PROVIDER_TIMEOUT: Duration = Duration::from_secs(5);
+const KEY_PROVIDER_REQUEST_BYTES: usize = KEY_PROVIDER_REQUEST_MAGIC.len() + 1 + 32 + 32 + 32 + 1;
+const KEY_PROVIDER_RESPONSE_BYTES: usize = KEY_PROVIDER_RESPONSE_MAGIC.len() + 32 + 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
     DomOwner,
     XmrOwner,
+}
+
+enum WrappingKeySource {
+    File(PathBuf),
+    UnixProvider(PathBuf),
+}
+
+impl WrappingKeySource {
+    fn parse(value: &str) -> io::Result<Self> {
+        if let Some(path) = value.strip_prefix("unix:") {
+            let path = PathBuf::from(path);
+            if path.as_os_str().is_empty() || !path.is_absolute() {
+                return Err(io::Error::other(
+                    "wrapping key provider socket must be an absolute path",
+                ));
+            }
+            return Ok(Self::UnixProvider(path));
+        }
+        let path = value.strip_prefix("file:").unwrap_or(value);
+        if path.is_empty() {
+            return Err(io::Error::other("empty wrapping key file path"));
+        }
+        Ok(Self::File(PathBuf::from(path)))
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::File(_) => "file",
+            Self::UnixProvider(_) => "unix-provider",
+        }
+    }
 }
 
 impl Role {
@@ -120,7 +161,7 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     .sync_all()
 }
 
-fn load_wrapping_key(path: &Path, allow_create: bool) -> io::Result<Zeroizing<[u8; 32]>> {
+fn load_wrapping_key_file(path: &Path, allow_create: bool) -> io::Result<Zeroizing<[u8; 32]>> {
     let read_key = |file: &mut File| {
         let mut bytes = Zeroizing::new(Vec::with_capacity(WRAPPING_KEY_BYTES));
         file.take((WRAPPING_KEY_BYTES + 1) as u64)
@@ -177,18 +218,93 @@ fn load_wrapping_key(path: &Path, allow_create: bool) -> io::Result<Zeroizing<[u
     }
 }
 
+fn load_wrapping_key_provider(
+    path: &Path,
+    role: Role,
+    settlement_id: [u8; 32],
+    context_hash: [u8; 32],
+    chain_id: [u8; 32],
+    state_exists: bool,
+) -> io::Result<Zeroizing<[u8; 32]>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(io::Error::other("unsafe wrapping key provider socket"));
+    }
+    let mut request = Vec::with_capacity(KEY_PROVIDER_REQUEST_BYTES);
+    request.extend(KEY_PROVIDER_REQUEST_MAGIC);
+    request.push(role.tag());
+    request.extend(settlement_id);
+    request.extend(context_hash);
+    request.extend(chain_id);
+    request.push(u8::from(state_exists));
+    debug_assert_eq!(request.len(), KEY_PROVIDER_REQUEST_BYTES);
+    let request_digest: [u8; 32] = Sha256::digest(&request).into();
+
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(KEY_PROVIDER_TIMEOUT))?;
+    stream.set_write_timeout(Some(KEY_PROVIDER_TIMEOUT))?;
+    stream.write_all(&request)?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut response = Zeroizing::new(Vec::with_capacity(KEY_PROVIDER_RESPONSE_BYTES));
+    (&mut stream)
+        .take((KEY_PROVIDER_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut response)?;
+    let digest_start = KEY_PROVIDER_RESPONSE_MAGIC.len();
+    let key_start = digest_start + 32;
+    if response.len() != KEY_PROVIDER_RESPONSE_BYTES
+        || &response[..digest_start] != KEY_PROVIDER_RESPONSE_MAGIC
+        || response[digest_start..key_start] != request_digest
+    {
+        return Err(io::Error::other(
+            "invalid or mismatched wrapping key provider response",
+        ));
+    }
+    Ok(Zeroizing::new(response[key_start..].try_into().map_err(
+        |_| io::Error::other("invalid provider wrapping key"),
+    )?))
+}
+
+fn load_wrapping_key(
+    source: &WrappingKeySource,
+    allow_create: bool,
+    role: Role,
+    settlement_id: [u8; 32],
+    context_hash: [u8; 32],
+    chain_id: [u8; 32],
+) -> io::Result<Zeroizing<[u8; 32]>> {
+    match source {
+        WrappingKeySource::File(path) => load_wrapping_key_file(path, allow_create),
+        WrappingKeySource::UnixProvider(path) => load_wrapping_key_provider(
+            path,
+            role,
+            settlement_id,
+            context_hash,
+            chain_id,
+            !allow_create,
+        ),
+    }
+}
+
 fn load_or_create_secret(
     path: &Path,
-    wrapping_key_path: &Path,
+    wrapping_key_source: &WrappingKeySource,
     role: Role,
     settlement_id: [u8; 32],
     context_hash: [u8; 32],
     chain_id: [u8; 32],
 ) -> io::Result<(File, CrossCurveSecret252, bool)> {
-    if path == wrapping_key_path {
-        return Err(io::Error::other(
-            "party state and wrapping key paths must differ",
-        ));
+    match wrapping_key_source {
+        WrappingKeySource::File(key_path) if path == key_path => {
+            return Err(io::Error::other(
+                "party state and wrapping key paths must differ",
+            ));
+        }
+        WrappingKeySource::UnixProvider(socket_path) if path == socket_path => {
+            return Err(io::Error::other(
+                "party state and wrapping key provider paths must differ",
+            ));
+        }
+        _ => {}
     }
     let binding_prefix = || {
         let mut bytes = Vec::with_capacity(STATE_PREFIX_BYTES);
@@ -204,81 +320,91 @@ fn load_or_create_secret(
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error),
     };
-    let wrapping_key = load_wrapping_key(wrapping_key_path, !state_exists)?;
+    let wrapping_key = load_wrapping_key(
+        wrapping_key_source,
+        !state_exists,
+        role,
+        settlement_id,
+        context_hash,
+        chain_id,
+    )?;
     let cipher = XChaCha20Poly1305::new((&*wrapping_key).into());
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(mut file) => {
-            file.try_lock()
-                .map_err(|_| io::Error::other("party state is locked"))?;
-            let secret = CrossCurveSecret252::generate(&mut OsRng);
-            let mut bytes = Zeroizing::new(binding_prefix());
-            let mut nonce = [0; STATE_NONCE_BYTES];
-            use rand_core::RngCore as _;
-            OsRng.fill_bytes(&mut nonce);
-            let plaintext = Zeroizing::new(secret.xmr_share_little_endian());
-            let ciphertext = cipher
-                .encrypt(
-                    XNonce::from_slice(&nonce),
-                    Payload {
-                        msg: &*plaintext,
-                        aad: &bytes,
-                    },
-                )
-                .map_err(|_| io::Error::other("party state encryption failed"))?;
-            debug_assert_eq!(ciphertext.len(), STATE_CIPHERTEXT_BYTES);
-            bytes.extend(nonce);
-            bytes.extend(ciphertext);
-            debug_assert_eq!(bytes.len(), STATE_BYTES);
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            sync_parent(path)?;
-            Ok((file, secret, false))
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(path)?;
-            if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
-                return Err(io::Error::other("unsafe party state file"));
-            }
-            let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-            file.try_lock()
-                .map_err(|_| io::Error::other("party state is locked"))?;
-            let mut bytes = Zeroizing::new(Vec::with_capacity(STATE_BYTES));
-            (&mut file)
-                .take((STATE_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)?;
-            let prefix = binding_prefix();
-            if bytes.len() != STATE_BYTES || bytes[..STATE_PREFIX_BYTES] != prefix {
-                return Err(io::Error::other("corrupt or mismatched party state"));
-            }
-            let nonce_end = STATE_PREFIX_BYTES + STATE_NONCE_BYTES;
-            let plaintext = Zeroizing::new(
-                cipher
-                    .decrypt(
-                        XNonce::from_slice(&bytes[STATE_PREFIX_BYTES..nonce_end]),
-                        Payload {
-                            msg: &bytes[nonce_end..],
-                            aad: &prefix,
-                        },
-                    )
-                    .map_err(|_| io::Error::other("party state authentication failed"))?,
-            );
-            let secret = CrossCurveSecret252::from_little_endian(
-                plaintext
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| io::Error::other("invalid party state secret"))?,
+    if !state_exists {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    io::Error::other("party state appeared during creation")
+                } else {
+                    error
+                }
+            })?;
+        file.try_lock()
+            .map_err(|_| io::Error::other("party state is locked"))?;
+        let secret = CrossCurveSecret252::generate(&mut OsRng);
+        let mut bytes = Zeroizing::new(binding_prefix());
+        let mut nonce = [0; STATE_NONCE_BYTES];
+        use rand_core::RngCore as _;
+        OsRng.fill_bytes(&mut nonce);
+        let plaintext = Zeroizing::new(secret.xmr_share_little_endian());
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &*plaintext,
+                    aad: &bytes,
+                },
             )
-            .map_err(io::Error::other)?;
-            Ok((file, secret, true))
-        }
-        Err(error) => Err(error),
+            .map_err(|_| io::Error::other("party state encryption failed"))?;
+        debug_assert_eq!(ciphertext.len(), STATE_CIPHERTEXT_BYTES);
+        bytes.extend(nonce);
+        bytes.extend(ciphertext);
+        debug_assert_eq!(bytes.len(), STATE_BYTES);
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        sync_parent(path)?;
+        return Ok((file, secret, false));
     }
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(io::Error::other("unsafe party state file"));
+    }
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    file.try_lock()
+        .map_err(|_| io::Error::other("party state is locked"))?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(STATE_BYTES));
+    (&mut file)
+        .take((STATE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let prefix = binding_prefix();
+    if bytes.len() != STATE_BYTES || bytes[..STATE_PREFIX_BYTES] != prefix {
+        return Err(io::Error::other("corrupt or mismatched party state"));
+    }
+    let nonce_end = STATE_PREFIX_BYTES + STATE_NONCE_BYTES;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                XNonce::from_slice(&bytes[STATE_PREFIX_BYTES..nonce_end]),
+                Payload {
+                    msg: &bytes[nonce_end..],
+                    aad: &prefix,
+                },
+            )
+            .map_err(|_| io::Error::other("party state authentication failed"))?,
+    );
+    let secret = CrossCurveSecret252::from_little_endian(
+        plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| io::Error::other("invalid party state secret"))?,
+    )
+    .map_err(io::Error::other)?;
+    Ok((file, secret, true))
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
@@ -890,14 +1016,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context_hash = fixed_hex::<32>(&args.next().ok_or("missing context hash")?)?;
     let chain_id = fixed_hex::<32>(&args.next().ok_or("missing chain id")?)?;
     let state_path = PathBuf::from(args.next().ok_or("missing state path")?);
-    let wrapping_key_path = PathBuf::from(args.next().ok_or("missing wrapping key path")?);
+    let wrapping_key_source =
+        WrappingKeySource::parse(&args.next().ok_or("missing wrapping key source")?)?;
     if args.next().is_some() {
         return Err("too many arguments".into());
     }
 
     let (state_file, secret, restored) = load_or_create_secret(
         &state_path,
-        &wrapping_key_path,
+        &wrapping_key_source,
         role,
         settlement_id,
         context_hash,
@@ -944,6 +1071,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "proof":proof,
             "restored":restored,
             "encrypted_state":true,
+            "wrapping_key_source":wrapping_key_source.label(),
+            "external_wrapping_key_provider":matches!(wrapping_key_source, WrappingKeySource::UnixProvider(_)),
         }),
     )?;
     stdout.write_all(b"\n")?;

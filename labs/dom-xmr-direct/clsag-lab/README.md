@@ -52,13 +52,14 @@ tempo indefinido. Depois de qualquer timeout o canal é descartado; o modo
 persistente volta a aceitar uma conexão autenticada nova.
 
 O helper persiste sua share cifrada em um arquivo exclusivo `0600`, sincronizado
-e ligado à operação. A chave de wrapping também exige modo `0600` e pode ficar
-em volume ou secret store separado. A matriz mata e reinicia ambos os helpers
-depois de `Ready`, revalida a mesma chave conjunta e continua. O teste
-`scripts/test_arbiter_party_state.py` cobre lock simultâneo, restart, troca de
-papel, corrupção e chave ausente, errada ou corrompida. Um invasor privilegiado
-que leia simultaneamente o estado e a chave ainda exige proteção externa por
-KMS, HSM ou isolamento do host.
+e ligado à operação. A chave de wrapping pode ficar num arquivo `0600` separado
+ou ser solicitada a um agente externo pelo protocolo de
+[`KEY-PROVIDER.md`](KEY-PROVIDER.md), sem arquivo local de chave. A matriz mata e
+reinicia ambos os helpers depois de `Ready`, revalida a mesma chave conjunta e
+continua. O teste `scripts/test_arbiter_party_state.py` cobre lock simultâneo,
+restart, troca de papel, corrupção, chave ausente/errada, resposta cruzada,
+socket inseguro e timeout. Um invasor privilegiado que leia a memória do signer
+ainda exige HSM com signer integrado, enclave ou isolamento do host.
 O formato v2 recusa estados v1 em claro e não executa migração silenciosa;
 sessões experimentais antigas precisam ser encerradas pelo caminho de recovery
 antes da atualização.
@@ -100,11 +101,12 @@ mesmo host. A execução em máquinas físicas distintas continua pendente.
 Um ensaio adicional executa coordenador, dono DOM e dono XMR em três contêineres
 sem capacidades, com sistemas de arquivos privados e namespaces/endereço de
 rede distintos. A rede Docker é interna e não possui rota externa; o
-coordenador não monta nenhum estado dos participantes. O Claim financiado
-passou em 85,95 s dentro do protocolo, 26,94 s desde `Ready` e 124,87 s incluindo
-a preparação dos contêineres. A imagem Ubuntu é fixada por digest. Esse teste
-remove o compartilhamento de pilha de rede do loopback, mas continua no mesmo
-host físico.
+coordenador não monta nenhum estado dos participantes. Cada participante obtém
+sua chave de wrapping por um provedor externo, inclusive após reiniciar, e não
+cria arquivo local de chave. O Claim financiado passou em 91,51 s dentro do
+protocolo, 27,06 s desde `Ready` e 153,28 s incluindo a preparação dos
+contêineres. A imagem Ubuntu é fixada por digest. Esse teste remove o
+compartilhamento de pilha de rede do loopback, mas continua no mesmo host físico.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o ensaio em três
 contêineres e a matriz no GitHub com Monero 0.18.4.0 verificado por hash, limite

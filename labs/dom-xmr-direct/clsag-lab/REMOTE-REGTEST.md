@@ -60,6 +60,14 @@ separado do estado e faça backup seguro dos dois; perder a chave torna a share
 irrecuperável. Um host que consiga ler os dois arquivos ainda precisa ser
 protegido por isolamento, KMS ou HSM.
 
+Para não manter uma chave local, substitua o argumento
+`/secret-store/dxa1/*.wrapping-key` por um socket do agente externo, por exemplo
+`unix:/run/dxa1/key-provider.sock`. O socket precisa ser absoluto, Unix stream e
+modo `0600`; o agente deve continuar disponível depois das reconexões. O formato
+binário, a política de criação/restauração e o limite do modelo estão em
+[`KEY-PROVIDER.md`](KEY-PROVIDER.md). O provedor protege a chave persistente em
+repouso, mas um host privilegiado ainda pode atacar a memória do signer.
+
 O handshake deve terminar em até 15 s e cada mensagem Noise completa em até
 45 s. Esses prazos incluem todos os fragmentos da mensagem; conexão silenciosa
 ou fragmentação incompleta é encerrada. Configure o supervisor para reiniciar o
