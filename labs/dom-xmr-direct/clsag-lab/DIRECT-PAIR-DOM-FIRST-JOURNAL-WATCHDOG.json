@@ -1,0 +1,12 @@
+{
+  "experiment": "direct-pair-dom-first",
+  "pid": 864259,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 166.9782531709643,
+  "compilation_included": false,
+  "log": "target/direct-pair-dom-first-journal-1790464543397704175.log",
+  "journal_bytes": 284,
+  "journal_sha256": "31ed1a5e788064e672e55f3fac93307eed9c01d880504146cf96c69f382d97c9"
+}

@@ -26,7 +26,9 @@ Não usar esse check para abandonar uma obrigação já iniciada: uma claim da
 contraparte devida após pagamento deve ser resolvida. Uma assinatura inicial
 já exposta também exige reconciliação. O executor durável precisa distinguir
 preparação privada, exposição possível e evidência canônica; esse executor
-ainda não existe no laboratório.
+ainda não existe no laboratório. A barreira durável da primeira liberação
+agora está em `INITIAL-RELEASE-JOURNAL.md`; ela conserva exposição possível
+após falha, mas ainda não executa a reconciliação das cadeias.
 
 ## Cenários implementados
 

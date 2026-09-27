@@ -13,6 +13,61 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Envio da contraparte sem resposta:** `counterpart_delivery.rs` persiste os
+bytes exatos e exposição antes do envio, vinculados ao manifesto original e
+à primeira claim observada. Emissão ambígua mantém exposição e exige nova
+consulta; pool/inclusão não geram retry; ausência com input não gasto permite
+apenas os mesmos bytes, sem nova assinatura ou prazo. O manifesto de claims
+agora também conserva operação, cápsula, janela original, ordem e custos antes
+da primeira liberação. O pai ainda é necessário para autenticar contexto e
+observações; não é reinício completo do coordenador. Notas
+`clsag-lab/COUNTERPART-DELIVERY.md`. Passaram 49 testes e Clippy all-targets.
+XMR-first com perda da resposta passou em **171,713 s**, claims em 83,788 s,
+trecho de envio da contraparte em 0,166 s. A ponte admitiu a transação no nó e
+fechou sem responder ao emissor (exit 74); o registro reaberto acompanhou pool
+e bloco nativos. Evidência `DIRECT-PAIR-XMR-FIRST-ACK-LOSS-*`.
+DOM-first com perda da resposta também passou em **168,896 s**, claims em
+82,681 s, trecho de envio em 0,301 s; evidência
+`DIRECT-PAIR-DOM-FIRST-ACK-LOSS-*`. Os dois cenários gastaram os outputs e
+rejeitaram a devolução DOM conflitante; hashes conferidos e processos encerrados.
+
+**Retomada da claim devida em outro processo:** `PreparedClaim` agora pode ser
+consumido por `XmrClaimEnvelope`, descartando a abertura privada usada na
+assinatura. XMR e DOM têm registros de retomada canônicos e limitados, fixados
+pelo digest aprovado. O ensaio persiste ambos antes da primeira claim, paga a
+primeira perna, descarta os objetos e o witness original, encerra um worker
+com exit 73 e inicia outro para extrair/completar a contraparte. Os nós e o pai
+permanecem em execução; a inclusão canônica é verificada pelo pai. Não é um
+restart completo do executor/daemon. Detalhes em `clsag-lab/CLAIM-RESUME.md`.
+Passaram 43 testes Rust e Clippy all-targets. A retomada XMR-first passou em
+**170,142 s** (claims 83,299 s, workers 0,321 s), com gastos posteriores e
+devolução conflitante rejeitada; evidência `DIRECT-PAIR-XMR-FIRST-RESUME-*`.
+DOM-first também passou em **171,024 s** (claims 83,683 s, workers 0,289 s),
+publicando o pagamento XMR produzido pelo processo restaurado e rejeitando
+a devolução DOM na altura 215. Evidência `DIRECT-PAIR-DOM-FIRST-RESUME-*`.
+Os dois processos principais e seus workers terminaram; hashes conferidos.
+
+**Primeira liberação com registro durável:** `release_journal.rs` conserva o
+vínculo à operação, cápsula, prazo original, ordem e transação exata. Grava e
+sincroniza exposição possível antes de chamar a rede, verifica o relógio
+novamente após o disco e exige reconciliação depois de falha/cancelamento.
+O fechamento por prazo expirado é persistente. Reabrir não renova a janela.
+Dez testes de integração e um teste de erro de escrita passaram: encerramento
+de processo sem destructors, locks entre processos, corrupção/registro parcial,
+RPC rejeitado, cancelamento, relógio recuado e tempo consumido por fsync.
+Detalhes e limites em `clsag-lab/INITIAL-RELEASE-JOURNAL.md`.
+Isso é uma barreira de primeira publicação, não a recuperação completa do
+executor: persistência anterior ao funding/disclosure, sessões de assinatura,
+reconciliação canônica, autenticação e integração ao dom-interopd permanecem
+pendentes. Não aplicar o fechamento de iniciação a uma contraparte já devida.
+As regressões nativas com a versão atual passaram: XMR-first em **166,429 s**
+(claims 78,718 s) e DOM-first em **166,947 s** (claims 80,649 s), incluindo
+gastos posteriores e devoluções conflitantes rejeitadas. Evidências
+`DIRECT-PAIR-XMR-FIRST-JOURNAL-FINAL-*` e `DIRECT-PAIR-DOM-FIRST-JOURNAL-*`.
+O XMR-first preliminar em 173,535 s foi preservado separadamente, com seu
+binário anterior à sincronização também na reabertura e compilação concorrente.
+São 32 testes Rust aprovados na verificação conjunta, além de Clippy all-targets.
+
 **Exposição tardia após os adaptors:** o novo controle negativo reproduziu
 perda em 118,846 s. Após recuperar XMR, a contraparte recebeu os bytes de uma
 claim XMR tardia, rejeitada por key image gasto, extraiu o segredo e tomou DOM
@@ -66,8 +121,9 @@ gastos posteriores e devolução conflitante rejeitada; evidência
 `clsag-lab/HEIGHT-DOM-FIRST-MINER-*`. Todos os processos próprios terminaram.
 
 Os três resultados acima são locais e condicionais, com preparação no total
-e compilação separada. Não concluem a missão: faltam disputas após entrega dos
-adaptors, preparação entre partes independentes, transporte autenticado,
+e compilação separada. Não concluem a missão: as disputas ordenadas após entrega
+dos adaptors foram acrescentadas depois e estão descritas acima; ainda faltam
+preparação entre partes independentes, transporte autenticado,
 persistência/reabertura, política de reorg/finalização, justificativa dos
 limites temporais e análise criptográfica completa, além de dom-interopd.
 

@@ -5,7 +5,10 @@
 //! fee freshness, transport authentication or recovery is established here.
 //! The caller must validate those before any funding or signature exchange.
 
-use curve25519_dalek::{edwards::EdwardsPoint, scalar::Scalar};
+use curve25519_dalek::{
+    edwards::{CompressedEdwardsY, EdwardsPoint},
+    scalar::Scalar,
+};
 use monero_wallet::{
     address::{AddressType, MoneroAddress},
     ed25519::{Commitment, CompressedPoint, Point, Scalar as MoneroScalar},
@@ -14,16 +17,19 @@ use monero_wallet::{
     primitives::keccak256,
     ringct::{EncryptedAmount, RctProofs, RctPrunable, RctType},
     send::{Change, SignableTransaction, TransactionKeys},
-    transaction::Transaction,
+    transaction::{Input, Timelock, Transaction},
     OutputWithDecoys, ViewPair,
 };
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use crate::{joint::InputOpening, Context, Error, PreSignature, G, RING_SIZE};
+use crate::{
+    claim_resume, joint::InputOpening, Context, Error, PreSignature, Statement, G, RING_SIZE,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeError {
+    ResumeEncoding,
     Terms,
     Input,
     Builder,
@@ -50,10 +56,14 @@ pub struct ClaimTerms {
 
 /// Frozen unsigned transaction and its signing context. Does not own spend keys.
 pub struct PreparedClaim {
-    transaction: Transaction,
-    context: Context,
+    body: ClaimBody,
     opening: InputOpening,
     offsets: Vec<u64>,
+}
+
+struct ClaimBody {
+    transaction: Transaction,
+    context: Context,
 }
 
 impl PreparedClaim {
@@ -196,8 +206,10 @@ impl PreparedClaim {
         context.validate()?;
         check_range_and_balance(proofs, context.pseudo_out, rng)?;
         Ok(Self {
-            transaction,
-            context,
+            body: ClaimBody {
+                transaction,
+                context,
+            },
             offsets,
             opening: InputOpening {
                 commitment,
@@ -207,7 +219,7 @@ impl PreparedClaim {
     }
 
     pub fn context(&self) -> &Context {
-        &self.context
+        &self.body.context
     }
     pub fn offsets(&self) -> &[u64] {
         &self.offsets
@@ -219,6 +231,48 @@ impl PreparedClaim {
         }
     }
     pub fn fee(&self) -> u64 {
+        self.body.fee()
+    }
+
+    /// Consumes signing preparation, dropping private input openings. The
+    /// resulting artifact can only adapt/extract this already signed intent.
+    pub fn into_claim_envelope(self, pre: PreSignature) -> Result<XmrClaimEnvelope, NativeError> {
+        pre.verify(&self.body.context)?;
+        Ok(XmrClaimEnvelope {
+            body: self.body,
+            pre,
+        })
+    }
+
+    pub fn complete(
+        &self,
+        pre: &PreSignature,
+        witness: &Zeroizing<Scalar>,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Transaction, NativeError> {
+        self.body.complete(pre, witness, rng)
+    }
+
+    pub fn verify_final(
+        &self,
+        transaction: &Transaction,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<(), NativeError> {
+        self.body.verify_final(transaction, rng)
+    }
+
+    pub fn extract(
+        &self,
+        pre: &PreSignature,
+        transaction: &Transaction,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Zeroizing<Scalar>, NativeError> {
+        self.body.extract(pre, transaction, rng)
+    }
+}
+
+impl ClaimBody {
+    fn fee(&self) -> u64 {
         proofs(&self.transaction)
             .expect("validated transaction")
             .base
@@ -305,6 +359,208 @@ impl PreparedClaim {
             return Err(NativeError::Proofs);
         };
         Ok(pre.extract(&self.context, &clsags[0])?)
+    }
+}
+
+/// Frozen claim plus validated adaptor. No InputOpening, spend share, nonce,
+/// outgoing view key or original adaptor witness survives conversion.
+/// Context contains real ring position: this is participant-private metadata.
+pub struct XmrClaimEnvelope {
+    body: ClaimBody,
+    pre: PreSignature,
+}
+
+const RESUME_MAGIC: &[u8] = b"DXP1/XMR-claim-resume/v1\0";
+
+impl XmrClaimEnvelope {
+    pub fn context(&self) -> &Context {
+        &self.body.context
+    }
+    pub fn fee(&self) -> u64 {
+        self.body.fee()
+    }
+    pub fn complete(
+        &self,
+        witness: &Zeroizing<Scalar>,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Transaction, NativeError> {
+        self.body.complete(&self.pre, witness, rng)
+    }
+    pub fn verify_final(
+        &self,
+        tx: &Transaction,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<(), NativeError> {
+        self.body.verify_final(tx, rng)
+    }
+    pub fn extract(
+        &self,
+        tx: &Transaction,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Zeroizing<Scalar>, NativeError> {
+        self.body.extract(&self.pre, tx, rng)
+    }
+
+    pub fn to_resume_bytes(&self) -> Result<Vec<u8>, NativeError> {
+        self.pre.verify(self.context())?;
+        let mut bytes = RESUME_MAGIC.to_vec();
+        bytes.extend(self.context().route_binding);
+        bytes.push(self.context().real as u8);
+        for pair in self.context().ring {
+            for point in pair {
+                bytes.extend(point.compress().to_bytes());
+            }
+        }
+        bytes.extend(self.context().image.compress().to_bytes());
+        bytes.extend(self.context().pseudo_out.compress().to_bytes());
+        bytes.extend(self.context().message);
+        for point in [
+            self.pre.statement.t_g,
+            self.pre.statement.t_h,
+            self.pre.statement.r_g,
+            self.pre.statement.r_h,
+        ] {
+            bytes.extend(point.compress().to_bytes());
+        }
+        bytes.extend(self.pre.statement.response.to_bytes());
+        // A complete native wire shape carrying the PRE-signature, which is
+        // not a valid spend until adapted. Unsigned upstream placeholders do
+        // not have a round-trippable transaction encoding by themselves.
+        let mut tx = self.body.transaction.clone();
+        let Transaction::V2 {
+            proofs: Some(proofs),
+            ..
+        } = &mut tx
+        else {
+            return Err(NativeError::Proofs);
+        };
+        let RctPrunable::Clsag {
+            clsags,
+            pseudo_outs,
+            ..
+        } = &mut proofs.prunable
+        else {
+            return Err(NativeError::Proofs);
+        };
+        *clsags = vec![self.pre.signature.clone()];
+        *pseudo_outs = vec![Point::from(self.context().pseudo_out).compress()];
+        let raw = tx.serialize();
+        bytes.extend(
+            u32::try_from(raw.len())
+                .map_err(|_| NativeError::ResumeEncoding)?
+                .to_le_bytes(),
+        );
+        bytes.extend(raw);
+        if bytes.len() > claim_resume::MAX_RECORD_BYTES {
+            return Err(NativeError::ResumeEncoding);
+        }
+        Ok(bytes)
+    }
+
+    /// Expected digest must be pinned BEFORE exposure/failure. This validates
+    /// canonical encoding, adaptor, range proof and intent consistency, not
+    /// chain membership, destinations' approval or any timing assumption.
+    pub fn from_resume_bytes(
+        bytes: &[u8],
+        expected: [u8; 32],
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Self, NativeError> {
+        let mut input = claim_resume::checked(bytes, expected, RESUME_MAGIC)
+            .ok_or(NativeError::ResumeEncoding)?;
+        let route_binding = claim_resume::take(&mut input).ok_or(NativeError::ResumeEncoding)?;
+        let real =
+            claim_resume::take::<1>(&mut input).ok_or(NativeError::ResumeEncoding)?[0] as usize;
+        fn point(input: &mut &[u8]) -> Result<EdwardsPoint, NativeError> {
+            let raw = claim_resume::take(input).ok_or(NativeError::ResumeEncoding)?;
+            let point = CompressedEdwardsY(raw)
+                .decompress()
+                .ok_or(NativeError::ResumeEncoding)?;
+            if point.compress().to_bytes() != raw {
+                return Err(NativeError::ResumeEncoding);
+            }
+            Ok(point)
+        }
+        let mut ring = [[G; 2]; RING_SIZE];
+        for pair in &mut ring {
+            for value in pair {
+                *value = point(&mut input)?;
+            }
+        }
+        let context = Context {
+            ring,
+            real,
+            image: point(&mut input)?,
+            pseudo_out: point(&mut input)?,
+            message: claim_resume::take(&mut input).ok_or(NativeError::ResumeEncoding)?,
+            route_binding,
+        };
+        context.validate()?;
+        let statement = Statement {
+            t_g: point(&mut input)?,
+            t_h: point(&mut input)?,
+            r_g: point(&mut input)?,
+            r_h: point(&mut input)?,
+            response: Option::<Scalar>::from(Scalar::from_canonical_bytes(
+                claim_resume::take(&mut input).ok_or(NativeError::ResumeEncoding)?,
+            ))
+            .ok_or(NativeError::ResumeEncoding)?,
+        };
+        let len =
+            u32::from_le_bytes(claim_resume::take(&mut input).ok_or(NativeError::ResumeEncoding)?)
+                as usize;
+        if input.len() != len {
+            return Err(NativeError::ResumeEncoding);
+        }
+        let transaction = Transaction::read(&mut input).map_err(|_| NativeError::ResumeEncoding)?;
+        if !input.is_empty()
+            || transaction.prefix().additional_timelock != Timelock::None
+            || transaction.prefix().outputs.len() != 2
+        {
+            return Err(NativeError::ResumeEncoding);
+        }
+        match transaction.prefix().inputs.as_slice() {
+            [Input::ToKey {
+                amount: None,
+                key_offsets,
+                key_image,
+            }] if key_offsets.len() == RING_SIZE
+                && key_image.to_bytes() == context.image.compress().to_bytes() => {}
+            _ => return Err(NativeError::Input),
+        }
+        let proofs = proofs(&transaction)?;
+        let RctPrunable::Clsag {
+            clsags,
+            pseudo_outs,
+            ..
+        } = &proofs.prunable
+        else {
+            return Err(NativeError::Proofs);
+        };
+        if clsags.len() != 1
+            || pseudo_outs.as_slice() != [Point::from(context.pseudo_out).compress()]
+            || transaction.signature_hash() != Some(context.message)
+            || proofs.base.commitments.len() != 2
+            || proofs.base.encrypted_amounts.len() != 2
+        {
+            return Err(NativeError::Proofs);
+        }
+        check_range_and_balance(proofs, context.pseudo_out, rng)?;
+        let pre = PreSignature {
+            signature: clsags[0].clone(),
+            statement,
+        };
+        pre.verify(&context)?;
+        let result = Self {
+            body: ClaimBody {
+                transaction,
+                context,
+            },
+            pre,
+        };
+        if result.to_resume_bytes()? != bytes {
+            return Err(NativeError::ResumeEncoding);
+        }
+        Ok(result)
     }
 }
 

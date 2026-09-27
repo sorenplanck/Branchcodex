@@ -1,0 +1,77 @@
+[
+  {
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--release",
+      "--locked",
+      "--lib",
+      "--test",
+      "counterpart_delivery",
+      "--test",
+      "native",
+      "--test",
+      "native_legs",
+      "--test",
+      "release_journal",
+      "--test",
+      "direct_xmr_recovery",
+      "--test",
+      "recovery_time_bounds",
+      "--test",
+      "time_bounds",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 17.25990827399073,
+    "log": "target/counterpart-delivery-check-0.log",
+    "result_lines": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.67s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    ]
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--release",
+      "--locked",
+      "--all-targets",
+      "-j2",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 3.5462332220049575,
+    "log": "target/counterpart-delivery-check-1.log",
+    "result_lines": []
+  },
+  {
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--release",
+      "--locked",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 24.569134942023084,
+    "log": "target/counterpart-delivery-check-2.log",
+    "result_lines": []
+  }
+]

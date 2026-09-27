@@ -75,6 +75,7 @@ pub struct AssumedDirectRecoveryCosts {
 /// An assumption record tied to an exact challenge or direct capsule link,
 /// not a proof of timely recovery or permission to fund. Recoverability and
 /// the respective backend's security remain separate obligations.
+#[derive(Clone)]
 pub struct AssumedXmrRecoveryWindow {
     capsule_binding: [u8; 64],
     disclosed_at: Timestamp,
@@ -254,6 +255,9 @@ impl AssumedXmrRecoveryWindow {
     }
     pub fn candidates(&self) -> u16 {
         self.candidates
+    }
+    pub fn disclosed_at(&self) -> Timestamp {
+        self.disclosed_at
     }
     pub fn earliest_adversarial(&self) -> Timestamp {
         self.earliest_adversarial

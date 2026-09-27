@@ -837,6 +837,38 @@ impl FundedDom {
         Self::include_on_node(&self.node, tx).await
     }
 
+    pub fn assert_absent_and_unspent(&self, tx: &Transaction) {
+        let handle = NodeHandleImpl(self.node.clone());
+        let hash = *dom_crypto::blake2b_256(&tx.to_bytes().unwrap()).as_bytes();
+        assert!(handle.get_mempool_tx(&hash).is_none());
+        assert!(handle
+            .get_utxo(tx.inputs[0].commitment.as_bytes())
+            .is_some());
+    }
+    pub fn submit_without_mining(&self, tx: &Transaction) {
+        assert_eq!(
+            NodeHandleImpl(self.node.clone())
+                .submit_tx(tx.to_bytes().unwrap())
+                .unwrap()
+                .state,
+            dom_rpc::TxAdmissionState::New
+        );
+    }
+    pub fn assert_in_pool(&self, tx: &Transaction) {
+        let hash = *dom_crypto::blake2b_256(&tx.to_bytes().unwrap()).as_bytes();
+        assert!(NodeHandleImpl(self.node.clone())
+            .get_mempool_tx(&hash)
+            .is_some());
+    }
+    pub async fn include_submitted(&self, tx: &Transaction) -> (Transaction, u64) {
+        Self::include_with_admission(&self.node, tx, dom_rpc::TxAdmissionState::Mempool).await
+    }
+    pub fn canonical_hash(&self, height: u64) -> [u8; 32] {
+        NodeHandleImpl(self.node.clone())
+            .get_block_hash_at_height(height)
+            .unwrap()
+    }
+
     /// A cryptographically valid claim must still lose to a confirmed refund.
     pub async fn assert_spent_rejection(&self, tx: &Transaction) {
         dom_consensus::validate_transaction(tx, &self.context().await).unwrap();
@@ -852,10 +884,23 @@ impl FundedDom {
     }
 
     async fn include_on_node(node: &Arc<DomNode>, tx: &Transaction) -> (Transaction, u64) {
+        Self::include_with_admission(node, tx, dom_rpc::TxAdmissionState::New).await
+    }
+
+    async fn include_with_admission(
+        node: &Arc<DomNode>,
+        tx: &Transaction,
+        expected: dom_rpc::TxAdmissionState,
+    ) -> (Transaction, u64) {
         let handle = NodeHandleImpl(node.clone());
-        let admission = handle.submit_tx(tx.to_bytes().unwrap()).unwrap();
-        assert_eq!(admission.state, dom_rpc::TxAdmissionState::New);
-        assert!(handle.get_mempool_tx(&admission.tx_hash).is_some());
+        let tx_hash = if expected == dom_rpc::TxAdmissionState::Mempool {
+            *dom_crypto::blake2b_256(&tx.to_bytes().unwrap()).as_bytes()
+        } else {
+            let admission = handle.submit_tx(tx.to_bytes().unwrap()).unwrap();
+            assert_eq!(admission.state, expected);
+            admission.tx_hash
+        };
+        assert!(handle.get_mempool_tx(&tx_hash).is_some());
         let height = mine_with_native_clock(node).await;
         let chain = node.chain.lock().await;
         let tip = *chain.tip_hash.as_bytes();

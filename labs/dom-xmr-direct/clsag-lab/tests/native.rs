@@ -29,6 +29,210 @@ use monero_wallet::{
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
+#[test]
+fn frozen_xmr_envelope_restores_exact_claim_without_signing_openings() {
+    use dxp1_clsag_lab::{claim_resume::digest, native::XmrClaimEnvelope};
+    for real in [0, 7, 15] {
+        let fixture = Fixture::new(real);
+        let prepared = fixture.prepare();
+        let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+        let pre = fixture.presign(&prepared, &witness);
+        let expected_tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+        drop(fixture);
+        let envelope = prepared.into_claim_envelope(pre).unwrap();
+        let bytes = envelope.to_resume_bytes().unwrap();
+        let expected = digest(&bytes);
+        drop(envelope);
+        let restored = XmrClaimEnvelope::from_resume_bytes(&bytes, expected, &mut OsRng).unwrap();
+        assert_eq!(restored.to_resume_bytes().unwrap(), bytes);
+        let tx = restored.complete(&witness, &mut OsRng).unwrap();
+        assert_eq!(tx.serialize(), expected_tx.serialize());
+        let expected_witness = *witness * G;
+        drop(witness);
+        assert_eq!(
+            *restored.extract(&tx, &mut OsRng).unwrap() * G,
+            expected_witness
+        );
+    }
+}
+
+#[test]
+fn both_frozen_envelopes_resume_using_only_the_observed_first_signature() {
+    use dom_scriptless_primitives::SecretScalar;
+    use dxp1_clsag_lab::{
+        claim_resume::digest, native::XmrClaimEnvelope, native_dom::DomClaimOffer,
+    };
+    use xmr_dleq_sigma::CrossCurveSecret252;
+    for dom_first in [false, true] {
+        let secret = CrossCurveSecret252::generate(&mut OsRng);
+        let dom = dom_claim::Fixture::new();
+        let dom_offer = dom.offer(
+            &SecretScalar::from_be_bytes(secret.dom_secret_big_endian())
+                .unwrap()
+                .public_key()
+                .unwrap()
+                .to_compressed_bytes(),
+        );
+        let fixture = Fixture::new(7);
+        let prepared = fixture.prepare();
+        let witness = Zeroizing::new(
+            Option::<Scalar>::from(Scalar::from_canonical_bytes(
+                secret.xmr_share_little_endian(),
+            ))
+            .unwrap(),
+        );
+        let pre = fixture.presign(&prepared, &witness);
+        let xmr = prepared.into_claim_envelope(pre).unwrap();
+        let xmr_bytes = xmr.to_resume_bytes().unwrap();
+        let dom_bytes = dom_offer.to_resume_bytes().unwrap();
+        let first_xmr = (!dom_first).then(|| xmr.complete(&witness, &mut OsRng).unwrap());
+        let first_dom = dom_first.then(|| {
+            dom_offer
+                .complete(
+                    &SecretScalar::from_be_bytes(secret.dom_secret_big_endian()).unwrap(),
+                    &dom_claim::context(),
+                )
+                .unwrap()
+        });
+        drop((witness, secret, xmr, dom_offer, fixture, dom));
+        let xmr = XmrClaimEnvelope::from_resume_bytes(&xmr_bytes, digest(&xmr_bytes), &mut OsRng)
+            .unwrap();
+        let dom = DomClaimOffer::from_resume_bytes(&dom_bytes, digest(&dom_bytes)).unwrap();
+        if let Some(first) = first_xmr {
+            let mut extracted = Zeroizing::new(xmr.extract(&first, &mut OsRng).unwrap().to_bytes());
+            extracted.reverse();
+            let second = dom
+                .complete(
+                    &SecretScalar::from_be_bytes(*extracted).unwrap(),
+                    &dom_claim::context(),
+                )
+                .unwrap();
+            assert_eq!(
+                *dom.extract(&second, &dom_claim::context()).unwrap(),
+                *extracted
+            );
+        } else {
+            let mut extracted = dom
+                .extract(&first_dom.unwrap(), &dom_claim::context())
+                .unwrap();
+            extracted.reverse();
+            let witness = Zeroizing::new(
+                Option::<Scalar>::from(Scalar::from_canonical_bytes(*extracted)).unwrap(),
+            );
+            let second = xmr.complete(&witness, &mut OsRng).unwrap();
+            assert_eq!(*xmr.extract(&second, &mut OsRng).unwrap(), *witness);
+        }
+    }
+}
+
+#[test]
+fn resume_records_reject_truncation_corruption_and_unapproved_replacement() {
+    use dxp1_clsag_lab::{
+        claim_resume::{digest, MAX_RECORD_BYTES},
+        native::XmrClaimEnvelope,
+        native_dom::DomClaimOffer,
+    };
+    let fixture = Fixture::new(7);
+    let prepared = fixture.prepare();
+    let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+    let pre = fixture.presign(&prepared, &witness);
+    let bytes = prepared
+        .into_claim_envelope(pre)
+        .unwrap()
+        .to_resume_bytes()
+        .unwrap();
+    let expected = digest(&bytes);
+    for end in 0..bytes.len() {
+        assert!(XmrClaimEnvelope::from_resume_bytes(&bytes[..end], expected, &mut OsRng).is_err());
+    }
+    for index in 0..bytes.len() {
+        let mut bad = bytes.clone();
+        bad[index] ^= 1;
+        assert!(XmrClaimEnvelope::from_resume_bytes(&bad, expected, &mut OsRng).is_err());
+    }
+    let mut bad = bytes.clone();
+    bad.push(0);
+    assert!(XmrClaimEnvelope::from_resume_bytes(&bad, digest(&bad), &mut OsRng).is_err());
+    let huge = vec![0; MAX_RECORD_BYTES + 1];
+    assert!(XmrClaimEnvelope::from_resume_bytes(&huge, digest(&huge), &mut OsRng).is_err());
+    let replacement = fixture.prepare();
+    let other_pre = fixture.presign(&replacement, &witness);
+    let other = replacement
+        .into_claim_envelope(other_pre)
+        .unwrap()
+        .to_resume_bytes()
+        .unwrap();
+    assert!(XmrClaimEnvelope::from_resume_bytes(&other, expected, &mut OsRng).is_err());
+
+    let dom = dom_claim::Fixture::new();
+    let secret = dom_scriptless_primitives::SecretScalar::from_be_bytes([1; 32]).unwrap();
+    let bytes = dom
+        .offer(&secret.public_key().unwrap().to_compressed_bytes())
+        .to_resume_bytes()
+        .unwrap();
+    let expected = digest(&bytes);
+    for index in 0..bytes.len() {
+        let mut bad = bytes.clone();
+        bad[index] ^= 1;
+        assert!(DomClaimOffer::from_resume_bytes(&bad, expected).is_err());
+        assert!(DomClaimOffer::from_resume_bytes(&bytes[..index], expected).is_err());
+    }
+    let mut bad = bytes;
+    bad.push(0);
+    assert!(DomClaimOffer::from_resume_bytes(&bad, digest(&bad)).is_err());
+    assert!(DomClaimOffer::from_resume_bytes(&huge, digest(&huge)).is_err());
+}
+
+#[test]
+fn resume_decoder_rechecks_adaptors_and_native_intent_even_with_new_digest() {
+    use dxp1_clsag_lab::{
+        claim_resume::digest, native::XmrClaimEnvelope, native_dom::DomClaimOffer,
+    };
+    let fixture = Fixture::new(7);
+    let prepared = fixture.prepare();
+    let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+    let pre = fixture.presign(&prepared, &witness);
+    let bytes = prepared
+        .into_claim_envelope(pre)
+        .unwrap()
+        .to_resume_bytes()
+        .unwrap();
+    let start = b"DXP1/XMR-claim-resume/v1\0".len();
+    // Route, out-of-range real position, noncanonical ring point, message,
+    // statement response and native payload are independently checked.
+    for (index, fill) in [
+        (start, false),
+        (start + 32, true),
+        (start + 33, true),
+        (start + 33 + 1024 + 64, false),
+        (start + 33 + 1024 + 96 + 128, true),
+        (bytes.len() - 1, false),
+    ] {
+        let mut bad = bytes.clone();
+        if fill {
+            bad[index] = 255;
+        } else {
+            bad[index] ^= 1;
+        }
+        assert!(
+            XmrClaimEnvelope::from_resume_bytes(&bad, digest(&bad), &mut OsRng).is_err(),
+            "mutation {index}"
+        );
+    }
+    let dom = dom_claim::Fixture::new();
+    let secret = dom_scriptless_primitives::SecretScalar::from_be_bytes([1; 32]).unwrap();
+    let bytes = dom
+        .offer(&secret.public_key().unwrap().to_compressed_bytes())
+        .to_resume_bytes()
+        .unwrap();
+    let start = b"DXP1/DOM-claim-resume/v1\0".len();
+    for index in [start, start + 32, start + 64, start + 97, bytes.len() - 1] {
+        let mut bad = bytes.clone();
+        bad[index] ^= 1;
+        assert!(DomClaimOffer::from_resume_bytes(&bad, digest(&bad)).is_err());
+    }
+}
+
 const INPUT_AMOUNT: u64 = 9_000_000_000;
 const PAYMENT_AMOUNT: u64 = 5_000_000_000;
 

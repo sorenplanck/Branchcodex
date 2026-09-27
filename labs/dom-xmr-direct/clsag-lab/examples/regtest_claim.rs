@@ -3,6 +3,10 @@
 //! The first observed claim unlocks its funded counterpart, in either direction.
 //! Setup is centralized; recovery modes are isolated experiments, not an SLA.
 
+#[path = "support/claim_resume_bridge.rs"]
+mod claim_resume_bridge;
+#[path = "support/counterpart_delivery_bridge.rs"]
+mod counterpart_delivery_bridge;
 #[path = "support/direct_recovery_bridge.rs"]
 mod direct_recovery_bridge;
 #[path = "support/dom_regtest.rs"]
@@ -15,11 +19,13 @@ use dalek_ff_group::EdwardsPoint as GroupPoint;
 use dom_scriptless_primitives::SecretScalar;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dxp1_clsag_lab::{
+    counterpart_delivery::{DeliveryAction, DeliveryBinding, Observation},
     dom_recovery::{DomRecoveryLink, DomRecoveryMaterial},
     dom_reserve::{ReserveIntent, ReserveShare},
     joint::{JointParticipant, JointPlan},
     native::{ClaimTerms, PreparedClaim},
     recovery::RecoveryError,
+    release_journal::{claim_digest, InitialClaimJournal, ReleasePolicy, ReleaseState},
     time_bounds::{
         AssumedClaimDelays, AssumedDirectRecoveryCosts, AssumedXmrRecoveryWindow,
         InitialClaimOrder, TimingError,
@@ -47,7 +53,7 @@ use std::{
     fs,
     io::Write,
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -96,6 +102,10 @@ enum Mode {
 enum PairOutcome {
     XmrFirst,
     DomFirst,
+    XmrFirstResume,
+    DomFirstResume,
+    XmrFirstAckLoss,
+    DomFirstAckLoss,
     Abandon,
     ClaimWins,
     RefundWins,
@@ -103,6 +113,18 @@ enum PairOutcome {
 }
 
 impl PairOutcome {
+    fn resumes(self) -> bool {
+        matches!(
+            self,
+            Self::XmrFirstResume
+                | Self::DomFirstResume
+                | Self::XmrFirstAckLoss
+                | Self::DomFirstAckLoss
+        )
+    }
+    fn loses_ack(self) -> bool {
+        matches!(self, Self::XmrFirstAckLoss | Self::DomFirstAckLoss)
+    }
     fn races(self) -> bool {
         matches!(
             self,
@@ -219,6 +241,48 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
+// This exercises the durable initial-exposure gate, not restart of the whole
+// signing/recovery executor. All original secret material remains ephemeral.
+async fn journaled_initial_send<T, F: std::future::Future<Output = T>>(
+    root: &Path,
+    operation: [u8; 32],
+    window: &AssumedXmrRecoveryWindow,
+    order: InitialClaimOrder,
+    payload: &[u8],
+    send: impl FnOnce() -> F,
+) -> T {
+    // The journal requires a durable containing directory. This fresh regtest
+    // directory is never reused by a different operation.
+    fs::File::open(root.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    fs::File::open(root).unwrap().sync_all().unwrap();
+    let path = root.join("initial-claim.wal");
+    let policy = ReleasePolicy::new(
+        operation,
+        window,
+        order,
+        LAB_CLAIM_DELAYS,
+        claim_digest(payload),
+    )
+    .unwrap();
+    let journal =
+        InitialClaimJournal::create(&path, policy.clone(), dom_core::Timestamp(unix_seconds()))
+            .unwrap();
+    drop(journal);
+    let mut journal = InitialClaimJournal::open(&path, policy.clone()).unwrap();
+    assert_eq!(journal.state().unwrap(), ReleaseState::Private);
+    let result = journal
+        .release_once(payload, || dom_core::Timestamp(unix_seconds()), send)
+        .await
+        .expect("durable initial claim release refused; reconcile before any retry");
+    drop(journal);
+    let journal = InitialClaimJournal::open(&path, policy).unwrap();
+    assert_eq!(journal.state().unwrap(), ReleaseState::ExposurePossible);
+    result
+}
+
 struct RefundEvidence {
     binding: [u8; 64],
     seconds: f64,
@@ -262,7 +326,14 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         _ => None,
     };
     let dom_first = matches!(&mode, Mode::DomFirst | Mode::HeightDomFirst)
-        || pair_outcome == Some(PairOutcome::DomFirst);
+        || matches!(
+            pair_outcome,
+            Some(
+                PairOutcome::DomFirst | PairOutcome::DomFirstResume | PairOutcome::DomFirstAckLoss
+            )
+        );
+    let resume_worker = pair_outcome.is_some_and(PairOutcome::resumes);
+    let loses_ack = pair_outcome.is_some_and(PairOutcome::loses_ack);
     let height_refund =
         matches!(&mode, Mode::HeightXmrFirst | Mode::HeightDomFirst) || pair_outcome.is_some();
     const DOM_REFUND_HEIGHT: u64 = 12;
@@ -383,6 +454,55 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         serde_json::from_str(&rpc.json_rpc_call("get_info", None, 16384).await.unwrap()).unwrap();
     assert_eq!(info["offline"], true);
     assert_eq!(info["nettype"], "fakechain");
+    let xmr_chain = if loses_ack {
+        Some(rpc.block_by_number(0).await.unwrap().hash())
+    } else {
+        None
+    };
+    let observe_xmr = async |transaction: &monero_wallet::transaction::Transaction| {
+        let hash: String = transaction
+            .hash()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let response = rpc
+            .rpc_call(
+                "get_transactions",
+                Some(json!({"txs_hashes":[hash]}).to_string()),
+                65536,
+            )
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        if response["txs"].as_array().is_some_and(|txs| txs.len() == 1) {
+            assert_eq!(response["txs"][0]["tx_hash"], hash);
+            assert_eq!(response["txs"][0]["in_pool"], true);
+            Observation::InPool
+        } else {
+            assert_eq!(response["missed_tx"], json!([hash]));
+            let monero_wallet::transaction::Input::ToKey { key_image, .. } =
+                &transaction.prefix().inputs[0]
+            else {
+                panic!("native input")
+            };
+            let image: String = key_image
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let spent = rpc
+                .rpc_call(
+                    "is_key_image_spent",
+                    Some(json!({"key_images":[image]}).to_string()),
+                    16384,
+                )
+                .await
+                .unwrap();
+            let spent: serde_json::Value = serde_json::from_str(&spent).unwrap();
+            assert_eq!(spent["spent_status"], json!([0]));
+            Observation::AbsentAndUnspent
+        }
+    };
     // Keep test transactions in the local, mineable pool. A normal relay would
     // enter Dandelion's local/stem phase, which cannot propagate without peers.
     // All consensus validation remains enabled in send_raw_transaction.
@@ -1241,9 +1361,10 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     dom_binding.update(b"DXP1/DOM-joint/counterpart-xmr/v1");
     dom_binding.update(prepared.context().route_binding);
     dom_binding.update(prepared.context().message);
-    let dom_offer = dom.offer(
+    let joint_operation_binding = dom_binding.finalize().into();
+    let mut dom_offer = dom.offer(
         &cross_curve_proof.claim.secp_compressed,
-        dom_binding.finalize().into(),
+        joint_operation_binding,
     );
     let witness = Zeroizing::new(
         Option::<Scalar>::from(Scalar::from_canonical_bytes(
@@ -1257,6 +1378,23 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         cross_curve_proof.claim.ed_compressed
     );
     let pre = presign(&prepared, statement, keys, [44; 32]);
+    let mut prepared = prepared.into_claim_envelope(pre).unwrap();
+    let resume_artifacts = resume_worker.then(|| {
+        claim_resume_bridge::ResumeArtifacts::persist(
+            &root,
+            &prepared,
+            &dom_offer,
+            joint_operation_binding,
+            paired_release_window.as_ref().unwrap(),
+            dom_first,
+            LAB_CLAIM_DELAYS,
+        )
+    });
+    let mut resume_evidence = None;
+    let mut resumed_xmr_transaction = None;
+    let mut resumed_dom_transaction = None;
+    let mut first_claim_reference = None;
+    let mut pending_delivery = None;
     let paired_offer_elapsed = direct_recovery.as_ref().map(|(_, _, capsule)| {
         capsule.preparation_report()["offer_received_elapsed_seconds"]
             .as_f64()
@@ -1284,7 +1422,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let window = paired_release_window.as_ref().unwrap();
         // This completed claim remains PRIVATE to its sender until the later
         // explicitly marked exposure. Both adaptors have already been delivered.
-        let stale_claim = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+        let stale_claim = prepared.complete(&witness, &mut OsRng).unwrap();
         drop(witness);
         drop(shared);
         let owner = direct_owner_wallet.as_ref().unwrap();
@@ -1401,12 +1539,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 &mut stale_claim.serialize().as_slice(),
             )
             .unwrap();
-            let mut extracted = Zeroizing::new(
-                prepared
-                    .extract(&pre, &leaked, &mut OsRng)
-                    .unwrap()
-                    .to_bytes(),
-            );
+            let mut extracted =
+                Zeroizing::new(prepared.extract(&leaked, &mut OsRng).unwrap().to_bytes());
             extracted.reverse();
             let secret = SecretScalar::from_be_bytes(*extracted).unwrap();
             let stolen_dom = dom_offer.complete(&secret, &dom.context().await).unwrap();
@@ -1429,7 +1563,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             let rejection = reject_spent(&stale_claim).await;
             let mut extracted = Zeroizing::new(
                 prepared
-                    .extract(&pre, &stale_claim, &mut OsRng)
+                    .extract(&stale_claim, &mut OsRng)
                     .unwrap()
                     .to_bytes(),
             );
@@ -1541,7 +1675,43 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 )
                 .expect("initial DOM publication expired");
         }
-        let (observed_dom, height) = dom.include(&decoded_dom).await;
+        let (observed_dom, height) = if let Some(window) = &paired_release_window {
+            journaled_initial_send(
+                &root,
+                joint_operation_binding,
+                window,
+                InitialClaimOrder::DomFirst,
+                &decoded_dom.to_bytes().unwrap(),
+                || dom.include(&decoded_dom),
+            )
+            .await
+        } else {
+            dom.include(&decoded_dom).await
+        };
+        if let Some(artifacts) = &resume_artifacts {
+            // No original signing preparation, witness or live offer object is
+            // passed into either new process. Nodes remain owned by this parent.
+            drop((prepared, dom_offer));
+            let (raw, evidence) = artifacts.crash_then_complete(
+                true,
+                &observed_dom.to_bytes().unwrap(),
+                &dom.context().await,
+            );
+            (prepared, dom_offer) = artifacts.load();
+            let mut input = raw.as_slice();
+            let tx = monero_wallet::transaction::Transaction::read(&mut input).unwrap();
+            assert!(input.is_empty());
+            assert_eq!(tx.serialize(), raw);
+            prepared.verify_final(&tx, &mut OsRng).unwrap();
+            resumed_xmr_transaction = Some(tx);
+            resume_evidence = Some(evidence);
+            first_claim_reference = Some((
+                dxp1_clsag_lab::claim_resume::digest(&observed_dom.to_bytes().unwrap()),
+                dom.canonical_hash(height),
+                height,
+            ));
+            checkpoint("claim_worker_restored_after_dom_payment", json!({}));
+        }
         let mut extracted = dom_offer
             .extract(&observed_dom, &dom.context().await)
             .unwrap();
@@ -1570,7 +1740,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 .expect("initial XMR claim release expired");
         }
     }
-    let tx = prepared.complete(&pre, &xmr_witness, &mut OsRng).unwrap();
+    let tx = resumed_xmr_transaction
+        .unwrap_or_else(|| prepared.complete(&xmr_witness, &mut OsRng).unwrap());
     let xmr_transaction_ready_seconds = claim_start.elapsed().as_secs_f64();
     if !dom_first {
         if let Some(window) = &paired_release_window {
@@ -1583,7 +1754,52 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 .expect("initial XMR publication expired");
         }
     }
-    publish_local(&tx).await;
+    if !dom_first {
+        if let Some(window) = &paired_release_window {
+            journaled_initial_send(
+                &root,
+                joint_operation_binding,
+                window,
+                InitialClaimOrder::XmrFirst,
+                &tx.serialize(),
+                || publish_local(&tx),
+            )
+            .await;
+        } else {
+            publish_local(&tx).await;
+        }
+    } else {
+        // This is an owed counterpart after canonical DOM payment, NOT a new
+        // initial release. Do not apply the initial gate to this obligation.
+        if loses_ack {
+            assert_eq!(observe_xmr(&tx).await, Observation::AbsentAndUnspent);
+            let (first_claim, first_block, first_height) = first_claim_reference.unwrap();
+            let binding = DeliveryBinding {
+                manifest: resume_artifacts.as_ref().unwrap().manifest_digest(),
+                first_claim,
+                first_block,
+                first_height,
+                target_chain: xmr_chain.unwrap(),
+            };
+            let delivery = counterpart_delivery_bridge::send_without_reply(
+                &root,
+                binding,
+                &tx.serialize(),
+                || publish_local(&tx),
+            )
+            .await;
+            delivery.reconcile(observe_xmr(&tx).await, DeliveryAction::MonitorPool);
+            pending_delivery = Some(delivery);
+        } else {
+            publish_local(&tx).await;
+        }
+    }
+    let xmr_witness = if resume_worker {
+        drop(xmr_witness);
+        None
+    } else {
+        Some(xmr_witness)
+    };
     let (claim_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
     let block = rpc.scannable_block(claim_blocks[0]).await.unwrap();
     assert!(
@@ -1605,9 +1821,51 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         );
     }
     let observed = rpc.transactions(&[tx.hash()]).await.unwrap().remove(0);
+    if loses_ack {
+        let height = rpc.latest_block_number().await.unwrap();
+        assert_eq!(
+            rpc.block_by_number(height).await.unwrap().hash(),
+            claim_blocks[0]
+        );
+        if dom_first {
+            pending_delivery.as_ref().unwrap().reconcile(
+                Observation::Included {
+                    block: claim_blocks[0],
+                    height: height as u64,
+                },
+                DeliveryAction::MonitorInclusion,
+            );
+        } else {
+            first_claim_reference = Some((
+                dxp1_clsag_lab::claim_resume::digest(&observed.serialize()),
+                claim_blocks[0],
+                height as u64,
+            ));
+        }
+    }
+    if !dom_first {
+        if let Some(artifacts) = &resume_artifacts {
+            drop((prepared, dom_offer));
+            let (raw, evidence) =
+                artifacts.crash_then_complete(false, &observed.serialize(), &dom.context().await);
+            (prepared, dom_offer) = artifacts.load();
+            let tx = dom_consensus::Transaction::from_bytes(&raw).unwrap();
+            assert_eq!(tx.to_bytes().unwrap(), raw);
+            dom_offer.validate(&tx, &dom.context().await).unwrap();
+            resumed_dom_transaction = Some(tx);
+            resume_evidence = Some(evidence);
+            checkpoint("claim_worker_restored_after_xmr_payment", json!({}));
+        }
+    }
     prepared.verify_final(&observed, &mut OsRng).unwrap();
-    let recovered = prepared.extract(&pre, &observed, &mut OsRng).unwrap();
-    assert_eq!(*recovered, *xmr_witness);
+    let recovered = prepared.extract(&observed, &mut OsRng).unwrap();
+    if let Some(witness) = &xmr_witness {
+        assert_eq!(*recovered, **witness);
+    }
+    assert_eq!(
+        (*recovered * G).compress().to_bytes(),
+        cross_curve_proof.claim.ed_compressed
+    );
     drop(xmr_witness);
     let mut owner_change = if pair_outcome.is_some() {
         let (_, view) = direct_owner_wallet.as_ref().unwrap();
@@ -1638,12 +1896,16 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let dom_start = Instant::now();
         let mut to_dom = Zeroizing::new(recovered.to_bytes());
         to_dom.reverse();
-        let final_dom = dom_offer
-            .complete(
-                &SecretScalar::from_be_bytes(*to_dom).unwrap(),
-                &dom.context().await,
-            )
-            .unwrap();
+        let final_dom = if let Some(tx) = resumed_dom_transaction {
+            tx
+        } else {
+            dom_offer
+                .complete(
+                    &SecretScalar::from_be_bytes(*to_dom).unwrap(),
+                    &dom.context().await,
+                )
+                .unwrap()
+        };
         let decoded_dom =
             dom_consensus::Transaction::from_bytes(&final_dom.to_bytes().unwrap()).unwrap();
         dom_consensus::validate_transaction(&decoded_dom, &dom.context().await).unwrap();
@@ -1658,7 +1920,40 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             dom.assert_spent_rejection(&decoded_dom).await;
             None
         } else {
-            let (observed_dom, height) = dom.include(&decoded_dom).await;
+            let (observed_dom, height) = if loses_ack {
+                dom.assert_absent_and_unspent(&decoded_dom);
+                let (first_claim, first_block, first_height) = first_claim_reference.unwrap();
+                let binding = DeliveryBinding {
+                    manifest: resume_artifacts.as_ref().unwrap().manifest_digest(),
+                    first_claim,
+                    first_block,
+                    first_height,
+                    target_chain: *dom.claim.chain(),
+                };
+                let delivery = counterpart_delivery_bridge::send_without_reply(
+                    &root,
+                    binding,
+                    &decoded_dom.to_bytes().unwrap(),
+                    || async {
+                        dom.submit_without_mining(&decoded_dom);
+                    },
+                )
+                .await;
+                dom.assert_in_pool(&decoded_dom);
+                delivery.reconcile(Observation::InPool, DeliveryAction::MonitorPool);
+                let (observed, height) = dom.include_submitted(&decoded_dom).await;
+                delivery.reconcile(
+                    Observation::Included {
+                        block: dom.canonical_hash(height),
+                        height,
+                    },
+                    DeliveryAction::MonitorInclusion,
+                );
+                pending_delivery = Some(delivery);
+                (observed, height)
+            } else {
+                dom.include(&decoded_dom).await
+            };
             assert_eq!(
                 *dom_offer
                     .extract(&observed_dom, &dom.context().await)
@@ -1843,6 +2138,20 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         None
     });
     report["dom_reserve_share_capsule_exists"] = json!(false);
+    if let Some(delivery) = pending_delivery {
+        report
+            .as_object_mut()
+            .unwrap()
+            .extend(delivery.evidence.as_object().unwrap().clone());
+        report["counterpart_reconciled_from_native_pool_and_block_after_sender_exit"] = json!(true);
+    }
+    if let Some(evidence) = resume_evidence {
+        report
+            .as_object_mut()
+            .unwrap()
+            .extend(evidence.as_object().unwrap().clone());
+        report["claim_worker_restart_exercised"] = json!(true);
+    }
     if pair_outcome.is_some() {
         if let Some((_, _, capsule)) = direct_recovery {
             report
@@ -1868,6 +2177,9 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         report["xmr_claim_observed_unix"] = json!(xmr_claim_observed_unix);
         report["xmr_claim_preceded_conditional_earliest_recovery"] = json!(true);
         report["initial_claim_release_checked_before_publication"] = json!(true);
+        report["initial_claim_exposure_fsynced_before_publication"] = json!(true);
+        report["initial_claim_journal_reopened_before_and_after_send"] = json!(true);
+        report["full_executor_restart_exercised"] = json!(false);
         report["dom_post_bootstrap_walletless_regtest_mining"] = json!(true);
         report["xmr_change_paid_to_original_funding_owner"] = json!(true);
         report["xmr_owner_change_amount_atomic"] = json!(reserve_amount - AMOUNT - prepared.fee());
@@ -1897,6 +2209,22 @@ async fn exercise(binary: PathBuf, mode: Mode) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args_os().skip(1);
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--counterpart-delivery-worker")
+    {
+        args.next();
+        counterpart_delivery_bridge::worker(args);
+        return;
+    }
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--claim-resume-worker")
+    {
+        args.next();
+        claim_resume_bridge::worker(args);
+        return;
+    }
     let binary = args
         .next()
         .map(PathBuf::from)
@@ -1910,6 +2238,10 @@ async fn main() {
         Some(arg)
             if arg == "direct-pair-xmr-first"
                 || arg == "direct-pair-dom-first"
+                || arg == "direct-pair-xmr-first-resume"
+                || arg == "direct-pair-dom-first-resume"
+                || arg == "direct-pair-xmr-first-ack-loss"
+                || arg == "direct-pair-dom-first-ack-loss"
                 || arg == "direct-pair-abandon"
                 || arg == "direct-pair-claim-wins"
                 || arg == "direct-pair-refund-wins"
@@ -1917,7 +2249,15 @@ async fn main() {
         {
             let bridge = PathBuf::from(args.next().expect("absolute direct bridge path required"));
             assert!(bridge.is_absolute() && bridge.is_file());
-            let outcome = if arg == "direct-pair-xmr-first" {
+            let outcome = if arg == "direct-pair-xmr-first-ack-loss" {
+                PairOutcome::XmrFirstAckLoss
+            } else if arg == "direct-pair-dom-first-ack-loss" {
+                PairOutcome::DomFirstAckLoss
+            } else if arg == "direct-pair-xmr-first-resume" {
+                PairOutcome::XmrFirstResume
+            } else if arg == "direct-pair-dom-first-resume" {
+                PairOutcome::DomFirstResume
+            } else if arg == "direct-pair-xmr-first" {
                 PairOutcome::XmrFirst
             } else if arg == "direct-pair-dom-first" {
                 PairOutcome::DomFirst

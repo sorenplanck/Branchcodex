@@ -4,8 +4,9 @@
 //! key; `joint` experiments with a separate two-party signing protocol. Review,
 //! recovery, authenticated setup and route binding are still required before
 //! using this in DXP1. `native` builds and checks a restricted native claim;
-//! chain checks and durable state are outside the library. The regtest example
-//! starts its own isolated daemon and handles test coins only.
+//! chain checks and a full durable recovery executor are outside the library.
+//! `release_journal` adds a local durable first-claim exposure gate only. The
+//! regtest example starts its own isolated daemon and handles test coins only.
 //!
 //! CLSAG transcript layout follows monero-oxide at c8be5d3; see NOTICE.md.
 //! Final signatures are checked by that independent, unmodified implementation.
@@ -23,6 +24,9 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod claim_resume;
+#[cfg(unix)]
+pub mod counterpart_delivery;
 pub mod dom_joint;
 pub mod dom_recovery;
 pub mod dom_reserve;
@@ -31,6 +35,8 @@ pub mod native;
 pub mod native_dom;
 pub mod recovery;
 pub mod recovery_challenge;
+#[cfg(unix)]
+pub mod release_journal;
 pub mod time_bounds;
 pub mod xmr_recovery;
 

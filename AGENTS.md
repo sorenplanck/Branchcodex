@@ -235,5 +235,132 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   Autenticação, limites temporais fundamentados, preparação independente e
   integração ao dom-interopd continuam pendentes; a missão não está concluída.
 
+- O checkpoint solicitado foi salvo localmente no commit `ffc418e`, sem push.
+  Depois dele foi criada a barreira `clsag-lab/src/release_journal.rs`: arquivo
+  exclusivo 0600, lock entre processos, política original/ordem/cápsula e
+  digest da transação exata, checksum e leitura limitada. Grava e sincroniza
+  `ExposurePossible` ANTES da função de envio; repete o check temporal depois
+  do disco. Erro de escrita inutiliza o handle. Falha RPC ou cancelamento não
+  restaura `Private`; reabertura exige reconciliação. Prazo expirado persiste
+  `InitialReleaseClosed`, sem autorizar refund nem esquecer contraparte devida.
+  Criação e reabertura sincronizam arquivo e diretório; não recriar registro
+  ausente/corrompido como fallback. Exige diretório já durável e confiável;
+  não detecta remoção de evento completo por rollback de backup/storage hostil.
+- Passaram 32 testes Rust (11 journal, 18 vínculo/prazos, três cliente),
+  inclusive quatro processos filhos encerrados sem destructors, lock entre
+  processos, cancelamento durante RPC, cada byte corrompido/corte parcial,
+  erro de escrita, prazo consumido no disco e relógio recuado. O helper
+  crash_child fica ignorado na listagem principal porque é lançado pelo pai.
+  Clippy all-targets com -D warnings e formatação também passaram. Evidência
+  `INITIAL-RELEASE-JOURNAL-TESTS.json`; notas `INITIAL-RELEASE-JOURNAL.md`.
+- A barreira foi ligada à primeira claim dos modos cooperativos direct-pair,
+  mantendo a claim devida fora do gate de iniciação. Regressões nativas:
+  DOM-first 166,947 s / claims 80,649 s, PID 864259;
+  XMR-first revisão atual 166,429 s / claims 78,718 s, PID 865019.
+  Ambas reabrem o journal antes/depois do envio, gastam os outputs e rejeitam
+  a devolução DOM conflitante. Evidências `DIRECT-PAIR-DOM-FIRST-JOURNAL-*`
+  e `DIRECT-PAIR-XMR-FIRST-JOURNAL-FINAL-*`, com hashes conferidos. O ensaio
+  XMR-first preliminar PID 863315 (173,535 s / claims 86,789 s) está preservado
+  em `DIRECT-PAIR-XMR-FIRST-JOURNAL-*`; usou versão anterior à sincronização
+  adicional na reabertura e teve compilação concorrente. Sessions 37087 e
+  30795 terminaram exit 0; nenhuma execução precisa ser reiniciada.
+- Essa etapa NÃO implementa restart completo: segredos, nonces, material de
+  assinatura e solver ainda são efêmeros; journal começa na claim, não antes
+  de funding/disclosure. Próximo trabalho concreto: separar envelope imutável
+  de claim/extração de `PreparedClaim` (hoje carrega InputOpening privado),
+  persistir contexto e adaptors validados sem reabrir rodada de assinatura,
+  e testar retomada após primeira perna paga usando extração canônica sem o
+  witness original. Depois ligar reconciliação a estado durável anterior aos
+  depósitos e à divulgação original. Não tratar `NeedsReconciliation` como
+  recuperação concluída, não reiniciar prazos nem reutilizar nonces. Revisão
+  criptográfica, limites temporais fundamentados, autenticação, preparação
+  independente e integração ao dom-interopd continuam pendentes.
+
+- A separação para retomada foi implementada: `PreparedClaim` agora contém
+  `ClaimBody` e abertura privada separados. `into_claim_envelope` consome a
+  preparação e descarta InputOpening, retornando `XmrClaimEnvelope` com corpo,
+  contexto e adaptor validados. Os verificadores antigos delegam ao mesmo
+  ClaimBody. XMR e DomClaimOffer têm to/from_resume_bytes, versões, limite
+  64 KiB, digest fixado externamente e roundtrip canônico. Parser revalida
+  pontos, escalar, shape, mensagem, prova de faixa/balanço e pré-assinatura.
+  XMR usa formato nativo contendo PRE-signature (ainda não gasto válido).
+  Não há signing keys/nonces/witness/InputOpening nos envelopes, mas há
+  real ring index e vínculo transacional: preservar privacidade dos arquivos.
+- `examples/support/claim_resume_bridge.rs` grava registros 0600 em diretório
+  0700 e sincroniza antes da primeira claim. Novos modos
+  `direct-pair-xmr-first-resume` e `direct-pair-dom-first-resume` pagam a
+  primeira perna, descartam objetos originais/witness e lançam worker que
+  lê registros e morre exit 73. Um segundo processo restaura os registros,
+  extrai da transação nativa observada e grava a contraparte sem nova rodada
+  de assinatura. O pai a verifica e publica. A inclusão canônica e os digests
+  aprovados ainda são responsabilidade do pai; os workers não consultam
+  cadeias por conta própria. Não chamar isso de restart integral do daemon.
+- Passaram 43 testes Rust (incluindo quatro novos de envelopes, nove native
+  no total) e Clippy all-targets -D warnings. Evidência CLAIM-RESUME-TESTS.json.
+  Cenários nativos com moedas próprias offline:
+  XMR-first-resume PID 868657 passou em 170,142 s, claims 83,299 s,
+  dois workers 0,321 s, devolução DOM conflitante rejeitada em 214;
+  DOM-first-resume PID 869602 passou em 171,024 s, claims 83,683 s,
+  workers 0,289 s, devolução rejeitada em 215. Em ambos, os três outputs foram
+  gastos. Evidências DIRECT-PAIR-XMR-FIRST-RESUME-* e
+  DIRECT-PAIR-DOM-FIRST-RESUME-*; hashes conferem com fontes/binário.
+  Session 62416 terminou exit 0. Notas completas em CLAIM-RESUME.md.
+- Próxima lacuna concreta de retomada: o pai ainda conserva os digests e
+  valida inclusão canônica, e a obrigação da contraparte não tem journal
+  próprio para envio ambíguo/restart. Persistir manifesto original e estado
+  da obrigação antes de expor a primeira claim; vincular ao journal inicial,
+  registrar os bytes exatos da contraparte antes do envio, e reconciliar
+  inclusões/reorg sem criar outra assinatura ou reiniciar o prazo. Só então
+  testar queda após envio sem resposta e reinício do coordenador. Persistência
+  anterior a funding/disclosure, solver, autenticação, preparação independente,
+  limites temporais, revisão criptográfica e integração ao dom-interopd seguem
+  abertas. O mecanismo continua experimental; a missão não está concluída.
+
+- O journal da contraparte já existe em `src/counterpart_delivery.rs`. Guarda
+  bytes exatos, digest do manifesto original, primeira claim/bloco/altura e
+  cadeia alvo; create_new/0600, lock, fsync arquivo/diretório na criação e
+  reabertura. Marca exposição antes do envio, não recria assinatura nem prazo.
+  Observações são fornecidas por adaptador confiável: Unknown exige reconciliar;
+  InPool/Included só acompanham; AbsentAndUnspent permite mesmos bytes;
+  conflito exige resolução. Não tratar not-found isolado como input não gasto.
+  Não há cache de inclusão definitivo: nova consulta falha volta a Unknown;
+  exposição nunca é apagada. Registro parcial/corrompido não é reparado e
+  falha de escrita inutiliza o handle. Armazenamento hostil/rollback completo
+  continua fora do modelo; observações do enum não são provas de cadeia.
+- `claim_resume_bridge` agora persiste manifest.record antes da primeira
+  liberação, com operação, dois digests de envelope, cápsula, janela original,
+  ordem e custos. Workers conferem seu digest. O pai ainda conserva os digests
+  aprovados: manifesto não é ainda uma restauração autônoma de todo coordenador.
+  `counterpart_delivery_bridge` lança emissor separado que abre journal,
+  fsync exposição e entrega bytes por loopback limitado/token. O pai admite
+  bytes exatos no nó nativo e só então fecha a conexão SEM resposta. Emissor
+  recebe EOF e morre exit 74; journal reaberto consulta pool/bloco nativos.
+  É perda da resposta da ponte ao emissor, NÃO falha/retransmissão presumida
+  do monerod. O pai e os nós continuam vivos. Não despachar retry no pool.
+  O helper DOM mantém replay diagnóstico apenas depois de confirmado.
+- Passaram 49 testes Rust e Clippy all-targets -D warnings, build separado;
+  evidência COUNTERPART-DELIVERY-CHECKS.json. Os seis testes novos incluem
+  estado ambíguo, observação/reorg simulado (não reorg nativo), corrupção,
+  lock, bindings e erro de escrita. Novos modos nativos:
+  direct-pair-xmr-first-ack-loss PID 872753: 171,713 s total,
+  claims 83,788 s, trecho sem ack 0,166 s, devolução DOM rejeitada em 215;
+  direct-pair-dom-first-ack-loss PID 873049: 168,896 s total,
+  claims 82,681 s, trecho sem ack 0,301 s, devolução DOM rejeitada em 214.
+  Ambos retomam primeiro o worker de claims (exit 73/0), depois exercitam
+  emissor exit 74, consultam pool/bloco e gastam todos os outputs. Evidências
+  DIRECT-PAIR-XMR-FIRST-ACK-LOSS-* e DIRECT-PAIR-DOM-FIRST-ACK-LOSS-*.
+  Session 80883 terminou exit 0; hashes de fontes/binários conferidos.
+  Notas detalhadas em COUNTERPART-DELIVERY.md.
+- Próxima necessidade: retirar do pai a reconstrução dos bindings e a
+  interpretação da cadeia na retomada. Persistir um checkpoint de controle
+  original, recuperar manifestos/journals a partir de operação conhecida e
+  consultar nós em processo novo após envio ambíguo. Hoje o pai entrega
+  DeliveryBinding/observações e permanece vivo; não promover isso a restart
+  completo. O journal da contraparte nasce depois da primeira inclusão;
+  queda antes desse ponto ainda exige reconstrução da obrigação. Permanecem
+  lacunas anteriores ao funding/disclosure, solver, autenticação, reorg real,
+  preparação independente, limites temporais e integração ao dom-interopd.
+  A missão continua ativa e o mecanismo não está provado seguro em produção.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

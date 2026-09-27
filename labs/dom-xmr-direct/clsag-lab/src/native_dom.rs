@@ -12,7 +12,7 @@ use dom_scriptless_primitives::{
     scriptless_adapt_signature, scriptless_extract_adaptor_secret_be_bytes,
     scriptless_verify_pre_signature, SecretScalar,
 };
-use dom_serialization::DomSerialize;
+use dom_serialization::{DomDeserialize, DomSerialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -147,6 +147,60 @@ pub struct DomClaimOffer {
 }
 
 impl DomClaimOffer {
+    /// Participant-private, immutable resumption artifact. No nonce scalar,
+    /// reserve share or adaptor witness is stored. Only plain claims supported.
+    pub fn to_resume_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if self.claim.transaction.kernels[0].features != KERNEL_FEAT_PLAIN {
+            return Err(invalid("resume envelope only supports plain claims"));
+        }
+        let mut bytes = b"DXP1/DOM-claim-resume/v1\0".to_vec();
+        bytes.extend(self.claim.chain);
+        bytes.extend(self.pre.to_bytes());
+        bytes.extend(self.nonce.to_compressed_bytes());
+        bytes.extend(self.adaptor.to_compressed_bytes());
+        let tx = self.claim.transaction.to_bytes()?;
+        bytes.extend(
+            u32::try_from(tx.len())
+                .map_err(|_| invalid("resume body too large"))?
+                .to_le_bytes(),
+        );
+        bytes.extend(tx);
+        if bytes.len() > crate::claim_resume::MAX_RECORD_BYTES {
+            return Err(invalid("resume body too large"));
+        }
+        Ok(bytes)
+    }
+
+    /// `expected` must be pinned by the original operation; hashing a file
+    /// after a restart does not authenticate its payment terms or destination.
+    pub fn from_resume_bytes(bytes: &[u8], expected: [u8; 32]) -> Result<Self, DomError> {
+        use crate::claim_resume::{checked, take};
+        let mut input = checked(bytes, expected, b"DXP1/DOM-claim-resume/v1\0")
+            .ok_or_else(|| invalid("resume encoding or binding"))?;
+        let chain = take(&mut input).ok_or_else(|| invalid("missing resume chain"))?;
+        let pre = PartialSig::from_bytes(
+            &take::<32>(&mut input).ok_or_else(|| invalid("missing resume pre-signature"))?,
+        )?;
+        let nonce = PublicKey::from_compressed_bytes(
+            &take::<33>(&mut input).ok_or_else(|| invalid("missing resume nonce"))?,
+        )?;
+        let adaptor = PublicKey::from_compressed_bytes(
+            &take::<33>(&mut input).ok_or_else(|| invalid("missing resume adaptor"))?,
+        )?;
+        let len =
+            u32::from_le_bytes(take(&mut input).ok_or_else(|| invalid("missing resume length"))?)
+                as usize;
+        if input.len() != len {
+            return Err(invalid("resume length mismatch"));
+        }
+        let tx = Transaction::from_bytes(input)?;
+        let result = PreparedDomClaim::new(tx, chain)?.bind_presignature(pre, nonce, adaptor)?;
+        if result.to_resume_bytes()? != bytes {
+            return Err(invalid("noncanonical resume encoding"));
+        }
+        Ok(result)
+    }
+
     pub fn complete(
         &self,
         secret: &SecretScalar,
