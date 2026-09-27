@@ -64,6 +64,15 @@ pub fn observation(seed: u8, anchor_height: u64) -> ChainObservationV1 {
 /// the wall clock cannot be reasoned about when it fails.
 pub const NOW_SECONDS: u64 = 1_800_000_000;
 
+/// The DOM chain position everything is anchored at.
+///
+/// ONE value, used both to plan the schedule and to build the hub checkpoint, because
+/// they are the same chain position. The first version planned the schedule from height
+/// one and told the evidence the hub was at height nine hundred, which put the upstream
+/// DOM refund height six hundred blocks BEHIND the hub's own anchor -- and the route
+/// ladder refused it with `DeadlinePassed`, correctly.
+pub const DOM_ANCHOR_HEIGHT: u64 = 1;
+
 /// The two clusters, one per position.
 ///
 /// They are DIFFERENT clusters, and not by preference: `RouteTimePolicyV2::from_registry`
@@ -214,7 +223,7 @@ pub fn provision_all() -> Provisioned {
         upstream: position(0x11),
         downstream: position(0x22),
         now_seconds: NOW_SECONDS,
-        dom_anchor_height: 1,
+        dom_anchor_height: DOM_ANCHOR_HEIGHT,
     };
     let (terms, positions) = provision_terms(&input).expect("both positions establish");
     let dom_chain_id = registry.dom_chain_id;
@@ -285,7 +294,9 @@ pub fn provision_all() -> Provisioned {
         downstream: &downstream.terms,
         now_seconds: NOW_SECONDS,
         provisioning_dir: &leg_store_dir,
-        hub: observation(0x61, 900),
+        // The hub's anchor is the DOM position the schedule was planned from, not an
+        // unrelated height.
+        hub: observation(0x61, DOM_ANCHOR_HEIGHT),
         upstream_chain: observation(0x71, 4_000),
         downstream_chain: observation(0x81, 5_000),
         sequence: 1,

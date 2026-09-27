@@ -287,11 +287,13 @@ pub fn provision(
     // what `RelativeDeadlineV1` exists for: a provisioner fixes how far ahead the
     // deadline sits, never an absolute value it would have to guess the tip for.
     //
-    // 600 blocks is not arbitrary. `earliest_refund_time` subtracts the network's
-    // future-block tolerance (120 s on regtest) from the anchor's timestamp plus one
-    // second per block, so a gap smaller than that tolerance plus the DOM resolution
-    // delay puts the DOM deadline at or before now and the schedule is refused for
-    // leaving the first claimant no window at all.
+    // 2000 blocks is not arbitrary in either direction. `earliest_refund_time` subtracts
+    // the network's future-block tolerance (120 s on regtest) from the anchor's timestamp
+    // plus one second per block, so a gap smaller than that tolerance plus the DOM
+    // resolution delay leaves the first claimant no window and the schedule is refused.
+    // At the other end the route ladder needs the deadline to clear the hub margin the
+    // time policy declares -- 600 seconds, which at the fastest admitted DOM block is 600
+    // blocks -- so a gap that merely satisfies the schedule can still be an unsafe window.
     let upstream = establish(
         input,
         &upstream_profile,
@@ -300,7 +302,7 @@ pub fn provision(
         input.registry.upstream_asset_id,
         input.registry.upstream_profile_digest,
         &input.upstream,
-        RelativeDeadlineV1::DomRefundBlocksAhead(600)
+        RelativeDeadlineV1::DomRefundBlocksAhead(2_000)
             .resolve(&anchor, now)
             .map_err(|error| format!("upstream deadline: {error:?}"))?,
         "upstream",
