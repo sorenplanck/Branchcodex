@@ -79,7 +79,7 @@ jobs:
           python3 -B scripts/test_arbiter_party_state.py \
             --binary target/debug/examples/arbiter_party
 
-      - name: Run Claim, Refund and Punish concurrently
+      - name: Run settlements and competing reorg concurrently
         working-directory: labs/dom-xmr-direct/clsag-lab
         run: |
           set -euo pipefail

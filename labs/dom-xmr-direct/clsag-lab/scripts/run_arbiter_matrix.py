@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the three funded DXA1 outcomes concurrently and verify their evidence."""
+"""Run three settlements plus a competing-chain guard and verify evidence."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
-OUTCOMES = ("claim", "refund", "punish")
+OUTCOMES = ("claim", "refund", "punish", "reorg-guard")
 REQUIRED_TRUE = (
     "dom_node",
     "monerod",
@@ -36,6 +36,20 @@ REQUIRED_TRUE = (
     "wrong_role_operations_rejected",
     "unauthorized_dom_offer_rejected",
     "participant_restart_restored_bound_shares",
+    "prepared_mature_reserve_required_for_three_minute_target",
+)
+REORG_REQUIRED_TRUE = (
+    "dom_node",
+    "monerod",
+    "authenticated_noise_transport",
+    "distributed_dom_presigning",
+    "collaborative_dom_range_proofs",
+    "coordinator_never_receives_dom_signing_keys",
+    "participant_restart_restored_bound_shares",
+    "dom_finality_recorded_before_reorg",
+    "dom_reorg_promoted",
+    "dom_settlement_removed_by_reorg",
+    "dom_canonicality_recheck_rejected_reorg",
     "prepared_mature_reserve_required_for_three_minute_target",
 )
 
@@ -71,6 +85,27 @@ def verify(outcome: str, result: dict) -> None:
         raise ValueError(f"wrong outcome: {result.get('outcome')!r}")
     if result.get("bitcoin_involved") is not False:
         raise ValueError("BTC appeared in the DOM-XMR leg")
+    if outcome == "reorg-guard":
+        for field in REORG_REQUIRED_TRUE:
+            if result.get(field) is not True:
+                raise ValueError(f"missing reorg evidence: {field}")
+        if result.get("xmr_signing_requested") is not False:
+            raise ValueError("XMR signing was requested after the DOM reorg")
+        if result.get("xmr_transaction_submitted") is not False:
+            raise ValueError("XMR transaction was submitted after the DOM reorg")
+        active = result.get("ready_to_reorg_rejection_seconds")
+        total = result.get("total_seconds")
+        if not isinstance(active, (int, float)) or not 0 < active <= 180:
+            raise ValueError(f"reorg rejection outside 180 seconds: {active!r}")
+        if not isinstance(total, (int, float)) or not 0 < total <= 180:
+            raise ValueError(f"whole reorg test outside 180 seconds: {total!r}")
+        if result.get("xmr_default_lock_window_blocks") != 10:
+            raise ValueError("unexpected XMR output lock window")
+        if result.get("dom_min_confirmations") != 2:
+            raise ValueError("unexpected DOM confirmation policy")
+        if result.get("dom_confirmation_depth_before_reorg") != 2:
+            raise ValueError("reorg fixture did not begin after two confirmations")
+        return
     for field in REQUIRED_TRUE:
         if result.get(field) is not True:
             raise ValueError(f"missing required evidence: {field}")
@@ -152,7 +187,7 @@ def main() -> int:
                 errors[outcome] = str(error)
 
     campaign = {
-        "schema": "DXA1-ARBITER-MATRIX-V1",
+        "schema": "DXA1-ARBITER-MATRIX-V2",
         "status": "passed" if not errors and len(results) == len(OUTCOMES) else "failed",
         "wall_seconds": time.monotonic() - started,
         "results": {key: results[key] for key in sorted(results)},

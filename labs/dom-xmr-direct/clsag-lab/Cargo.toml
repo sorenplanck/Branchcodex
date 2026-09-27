@@ -34,6 +34,7 @@ snow = "=0.9.6"
 tokio = { version = "=1.52.3", features = ["macros", "net", "rt", "time"] }
 
 [dev-dependencies]
+dom-chain = { path = "../../../crates/dom-chain" }
 dom-node = { path = "../../../crates/dom-node" }
 dom-config = { path = "../../../crates/dom-config" }
 dom-wallet = { path = "../../../crates/dom-wallet" }

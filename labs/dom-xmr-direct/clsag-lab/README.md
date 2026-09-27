@@ -54,17 +54,18 @@ python3 scripts/run_arbiter_matrix.py \
   --evidence-dir /diretorio/novo/de/evidencia
 ```
 
-A campanha mais recente terminou em 132,44 s de parede, com duas confirmações
+A campanha mais recente terminou em 163,26 s de parede, com duas confirmações
 DOM, shares XMR e DOM em processos separados, prova de faixa colaborativa,
 reinício dos dois participantes, rechecagem canônica antes da assinatura XMR e
-todas as operações pelo canal Noise. Claim, Refund e Punish levaram 35,68 s,
-42,70 s e 48,06 s desde `Ready`. Os registros completos e os limites atuais
-estão em
+todas as operações pelo canal Noise. Claim, Refund e Punish levaram 42,22 s,
+47,92 s e 57,16 s desde `Ready`. Um quarto caso promoveu uma cadeia DOM
+concorrente, removeu o Claim e recusou qualquer assinatura XMR em 53,74 s desde
+`Ready`. Os registros completos e os limites atuais estão em
 `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
 GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
-minutos para todo o job. A repetição local exata do workflow passou em 132,44 s
+minutos para todo o job. A repetição local exata do workflow passou em 163,26 s
 de parede e preserva os resultados como artefato quando executada no GitHub.
 
 ## Construção experimental

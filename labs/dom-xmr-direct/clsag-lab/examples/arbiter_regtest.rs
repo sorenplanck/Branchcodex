@@ -389,6 +389,7 @@ enum Outcome {
     Claim,
     Refund,
     Punish,
+    ReorgGuard,
 }
 
 impl Outcome {
@@ -397,15 +398,25 @@ impl Outcome {
             "claim" => Self::Claim,
             "refund" => Self::Refund,
             "punish" => Self::Punish,
-            _ => panic!("outcome must be claim, refund, or punish"),
+            "reorg-guard" => Self::ReorgGuard,
+            _ => panic!("outcome must be claim, refund, punish, or reorg-guard"),
         }
     }
 
     fn path(self) -> SwapArbiterPath {
         match self {
-            Self::Claim => SwapArbiterPath::Claim,
+            Self::Claim | Self::ReorgGuard => SwapArbiterPath::Claim,
             Self::Refund => SwapArbiterPath::Refund,
             Self::Punish => SwapArbiterPath::Punish,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Refund => "refund",
+            Self::Punish => "punish",
+            Self::ReorgGuard => "reorg-guard",
         }
     }
 }
@@ -542,6 +553,87 @@ async fn node() -> (TestDir, Arc<DomNode>, [u8; 32]) {
         .wallet()
         .chain_id();
     (root, node, chain_id)
+}
+
+async fn canonical_block(node: &Arc<DomNode>, height: u64) -> Block {
+    let handle = NodeHandleImpl(node.clone());
+    let block_hash = handle.get_block_hash_at_height(height).unwrap();
+    let bytes = node
+        .chain
+        .lock()
+        .await
+        .store
+        .get_block_body(&block_hash)
+        .unwrap()
+        .unwrap();
+    Block::from_bytes(&bytes).unwrap()
+}
+
+fn validation_now() -> Timestamp {
+    Timestamp(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 7200,
+    )
+}
+
+async fn shadow_node(
+    root: &Path,
+    source: &Arc<DomNode>,
+    through_height: u64,
+    expected_chain_id: [u8; 32],
+) -> Arc<DomNode> {
+    let wallet_path = root.join("shadow-wallet");
+    WalletDir::create_from_seed(
+        &wallet_path,
+        "arbiter-shadow-test",
+        Network::Regtest,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        &Bip39Seed::generate_new().unwrap(),
+    )
+    .unwrap();
+    let mut config = dom_config::NodeConfig::regtest();
+    config.data_dir = root.join("shadow-chain").to_string_lossy().into_owned();
+    config.wallet_path = Some(wallet_path.to_string_lossy().into_owned());
+    config.wallet_password = Some("arbiter-shadow-test".into());
+    config.mine = false;
+    config.miner_threads = 1;
+    config.min_outbound = 0;
+    config.disable_dns_seeds = true;
+    config.p2p_listen_addr = "127.0.0.1:0".into();
+    let shadow = Arc::new(DomNode::init_with_map_size(config, 64 << 20).unwrap());
+    dom_node::miner::create_genesis_block(shadow.clone())
+        .await
+        .unwrap();
+    let shadow_chain_id = *shadow
+        .wallet
+        .as_ref()
+        .unwrap()
+        .lock()
+        .await
+        .wallet()
+        .chain_id();
+    assert_eq!(shadow_chain_id, expected_chain_id);
+    for height in 1..=through_height {
+        let block = canonical_block(source, height).await;
+        let result = shadow
+            .chain
+            .lock()
+            .await
+            .connect_block(&block, validation_now())
+            .unwrap();
+        assert!(matches!(result, dom_chain::ConnectResult::BestChain));
+    }
+    let source_tip = NodeHandleImpl(source.clone())
+        .get_block_hash_at_height(through_height)
+        .unwrap();
+    let shadow_tip = NodeHandleImpl(shadow.clone())
+        .get_block_hash_at_height(through_height)
+        .unwrap();
+    assert_eq!(source_tip, shadow_tip);
+    shadow
 }
 
 struct Branch {
@@ -783,6 +875,7 @@ fn signed_funding(
 struct FundedArbiter {
     _root: TestDir,
     node: Arc<DomNode>,
+    shadow: Option<Arc<DomNode>>,
     chain_id: [u8; 32],
     contract: SwapArbiterContract,
     shares: VerifiedArbiterSharesV1,
@@ -814,20 +907,7 @@ async fn observed_transaction(
     height: u64,
     expected: &Transaction,
 ) -> Transaction {
-    let handle = NodeHandleImpl(setup.node.clone());
-    let block_hash = handle.get_block_hash_at_height(height).unwrap();
-    let block = Block::from_bytes(
-        &setup
-            .node
-            .chain
-            .lock()
-            .await
-            .store
-            .get_block_body(&block_hash)
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
+    let block = canonical_block(&setup.node, height).await;
     block
         .transactions
         .into_iter()
@@ -835,7 +915,7 @@ async fn observed_transaction(
         .unwrap()
 }
 
-async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
+async fn funded_arbiter(party_binary: &Path, create_shadow: bool) -> FundedArbiter {
     let (root, node, chain_id) = node().await;
     let handle = NodeHandleImpl(node.clone());
 
@@ -1004,10 +1084,16 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
     journal
         .record_dom_funding(funding_admission.tx_hash, funding_height)
         .unwrap();
+    let shadow = if create_shadow {
+        Some(shadow_node(&root.0, &node, funding_height, chain_id).await)
+    } else {
+        None
+    };
 
     FundedArbiter {
         _root: root,
         node,
+        shadow,
         chain_id,
         contract,
         shares,
@@ -1029,7 +1115,7 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
 
 async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
     let started = Instant::now();
-    let mut setup = funded_arbiter(&party_binary).await;
+    let mut setup = funded_arbiter(&party_binary, outcome == Outcome::ReorgGuard).await;
     let handle = NodeHandleImpl(setup.node.clone());
 
     let verified_joint = CompressedEdwardsY(setup.shares.joint_xmr_spend_key().unwrap())
@@ -1261,7 +1347,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
     setup.xmr_owner.authorize_dom(&setup.contract, &claim_offer);
 
     let (branch, selected_offer, replacement_offer, settlement_height) = match outcome {
-        Outcome::Claim => (
+        Outcome::Claim | Outcome::ReorgGuard => (
             &setup.claim,
             &claim_offer,
             &claim_replacement_offer,
@@ -1299,7 +1385,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
                 .dom_owner
                 .complete_dom(selected_offer, settlement_height)
         }
-        Outcome::Claim | Outcome::Punish => {
+        Outcome::Claim | Outcome::Punish | Outcome::ReorgGuard => {
             assert!(setup
                 .dom_owner
                 .rejects_dom(selected_offer, settlement_height));
@@ -1348,6 +1434,77 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
         )
         .unwrap();
     assert_eq!(dom_confirmation_depth, MIN_DOM_CONFIRMATIONS);
+
+    if outcome == Outcome::ReorgGuard {
+        let shadow = setup.shadow.as_ref().unwrap().clone();
+        for expected_height in settlement_height..=settlement_height + 2 {
+            assert_eq!(mine(&shadow).await, expected_height);
+        }
+        let mut reorg_promoted = false;
+        for height in settlement_height..=settlement_height + 2 {
+            let alternate = canonical_block(&shadow, height).await;
+            let result = setup
+                .node
+                .chain
+                .lock()
+                .await
+                .connect_block(&alternate, validation_now())
+                .unwrap();
+            reorg_promoted |= matches!(result, dom_chain::ConnectResult::Reorg(_));
+        }
+        assert!(reorg_promoted);
+        let canonical_height = handle.chain_height();
+        assert_eq!(canonical_height, settlement_height + 2);
+        let changed_block_hash = handle.get_block_hash_at_height(settlement_height).unwrap();
+        let changed_tip_hash = handle.get_block_hash_at_height(canonical_height).unwrap();
+        assert_ne!(changed_block_hash, settlement_block_hash);
+        let changed_block = canonical_block(&setup.node, settlement_height).await;
+        assert!(!changed_block
+            .transactions
+            .iter()
+            .any(|candidate| candidate == &settlement));
+        assert!(setup
+            .journal
+            .verify_dom_canonicality(
+                &observed,
+                settlement_height,
+                changed_block_hash,
+                canonical_height,
+                changed_tip_hash,
+            )
+            .is_err());
+        let active_seconds = active_settlement.elapsed().as_secs_f64();
+        assert!(active_settlement.elapsed() <= Duration::from_secs(180));
+        println!(
+            "{}",
+            json!({
+                "experiment":"DXA1 DOM-XMR daemon end-to-end",
+                "outcome":outcome.label(),
+                "dom_node":true,
+                "monerod":true,
+                "bitcoin_involved":false,
+                "authenticated_noise_transport":true,
+                "distributed_dom_presigning":true,
+                "collaborative_dom_range_proofs":true,
+                "coordinator_never_receives_dom_signing_keys":true,
+                "participant_restart_restored_bound_shares":true,
+                "dom_finality_recorded_before_reorg":true,
+                "dom_reorg_promoted":true,
+                "dom_settlement_removed_by_reorg":true,
+                "dom_canonicality_recheck_rejected_reorg":true,
+                "xmr_signing_requested":false,
+                "xmr_transaction_submitted":false,
+                "dom_min_confirmations":MIN_DOM_CONFIRMATIONS,
+                "dom_confirmation_depth_before_reorg":dom_confirmation_depth,
+                "competing_tip_height":canonical_height,
+                "ready_to_reorg_rejection_seconds":active_seconds,
+                "total_seconds":started.elapsed().as_secs_f64(),
+                "prepared_mature_reserve_required_for_three_minute_target":true,
+                "xmr_default_lock_window_blocks":monero_wallet::DEFAULT_LOCK_WINDOW,
+            })
+        );
+        return;
+    }
     drop(setup.journal);
     setup.journal =
         ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
@@ -1368,6 +1525,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
     let recipient_role = match outcome {
         Outcome::Refund => "xmr_owner",
         Outcome::Claim | Outcome::Punish => "dom_owner",
+        Outcome::ReorgGuard => unreachable!(),
     };
     let payment = reserve_amount / 2;
     let signable_xmr_transaction = SignableTransaction::new(
@@ -1415,6 +1573,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
                 .dom_owner
                 .sign_xmr(&signable_xmr_transaction, *opening, outcome.path())
         }
+        Outcome::ReorgGuard => unreachable!(),
     };
     let response = rpc
         .rpc_call(
@@ -1467,7 +1626,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
         "{}",
         json!({
             "experiment":"DXA1 DOM-XMR daemon end-to-end",
-            "outcome":format!("{outcome:?}").to_lowercase(),
+            "outcome":outcome.label(),
             "dom_node":true,
             "monerod":true,
             "bitcoin_involved":false,
@@ -1508,13 +1667,13 @@ async fn main() {
     let mut args = env::args_os().skip(1);
     let monerod = PathBuf::from(
         args.next()
-            .expect("usage: arbiter_regtest MONEROD claim|refund|punish"),
+            .expect("usage: arbiter_regtest MONEROD claim|refund|punish|reorg-guard"),
     );
     let outcome = args
         .next()
         .and_then(|value| value.into_string().ok())
         .map(|value| Outcome::parse(&value))
-        .expect("usage: arbiter_regtest MONEROD claim|refund|punish");
+        .expect("usage: arbiter_regtest MONEROD claim|refund|punish|reorg-guard");
     assert!(args.next().is_none(), "too many arguments");
     let party_binary = std::env::current_exe()
         .unwrap()

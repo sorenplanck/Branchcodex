@@ -120,6 +120,15 @@ matriz registrou profundidade dois nessa segunda observação para os três
 caminhos. Isso reduz a janela entre observação e liberação XMR; uma reorganização
 que ocorra depois da consulta ainda pertence ao risco probabilístico da política.
 
+Um quarto cenário agora produz uma reorganização real. Um segundo nó DOM recebe
+o histórico canônico somente até o funding, enquanto o nó principal inclui o
+Claim e alcança duas confirmações. O segundo nó minera três blocos concorrentes
+sem o Claim; esses blocos atravessam `ChainState::connect_block`, promovem o fork
+mais pesado e removem o settlement da altura canônica. A rechecagem detecta o
+novo hash, recusa a liberação e o ensaio confirma que nenhuma assinatura ou
+transação XMR foi solicitada. Na campanha paralela, a recusa ocorreu em
+**53,74 s** desde `Ready` e **163,25 s** no caso completo.
+
 As duas shares privadas que formam a chave XMR agora são geradas e mantidas
 por processos distintos (`arbiter_party`). O coordenador recebe somente as
 provas DLEQ públicas. O processo autorizado conclui o caminho DOM; depois da
@@ -164,23 +173,24 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **35,68 s**, Refund **42,70 s** e Punish **48,06 s**. O runner
+Claim levou **42,22 s**, Refund **47,92 s** e Punish **57,16 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
-mainnet. Ainda faltam executar o transporte entre hosts distintos, testar reorg
-no ensaio cruzado e ativar com segurança as novas regras de consenso. O
-resultado comprova um ponta a ponta
+mainnet. Ainda faltam executar o transporte entre hosts distintos, quantificar
+a política para reorgs mais profundos e ativar com segurança as novas regras de
+consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
 
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
-oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund
-e Punish em paralelo com limite de 180 s por caso. Depois da barreira de duas
+oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund,
+Punish e o reorg concorrente em paralelo com limite de 180 s por caso. Depois da barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
 reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **132,44 s** de parede; os casos completos
-levaram **120,45 s**, **127,82 s** e **132,42 s**. Desde `Ready`, os tempos
-foram **35,68 s**, **42,70 s** e **48,06 s**. A
+mesmo arquivo oficial passou em **163,26 s** de parede. Claim, Refund e Punish
+completos levaram **148,32 s**, **149,17 s** e **161,79 s**; o reorg foi recusado
+em **163,25 s** totais. Desde `Ready`, os settlements levaram **42,22 s**,
+**47,92 s** e **57,16 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 
