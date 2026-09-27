@@ -542,5 +542,40 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   independentes, fundamentação criptográfica/temporal e dom-interopd continuam
   abertos. O sucesso com burst 100 nesta ordem não apaga a falha 429 DOM-first.
 
+- Etapa RPC: worker reutiliza prev_hash do cabeçalho localizado pelo kernel
+  como hint de âncora; scan nativo valida âncora/bloco/corpo/identidade/tip sob
+  um único chain lock. Removeu leitura posterior redundante /block/{height},
+  conservou todos os checks de corpo exato, snapshot e tips finais/pós-fsync.
+  Não mudou consenso, limitador ou código do nó; não é snapshot distribuído
+  entre as duas cadeias nem defesa ABA/nó hostil.
+- GET com HTTP 429 e header válido pode aguardar até 2.000 ms SOLICITADOS
+  por worker, compartilhados entre rotas, no máximo duas repetições. Respeita
+  Retry-After inteiro ou x-ratelimit-after nativo arredondado para baixo +1s;
+  malformed/duplicado/excessivo recusa repetição. POST nunca é repetido por
+  esse transporte. Timeout de recuperação 10s e instantes originais continuam;
+  contadores de espera decorrida incluem cancelamento durante sleep. Limite
+  por worker NÃO é orçamento global durável de reinícios nem SLA.
+- 38 testes relacionados (seis novos), Clippy all-targets -D warnings e build
+  passaram; RPC-READ-RECOVERY-CHECKS.json. Regressões com burst padrão 100:
+  DOM-first-xmr-detach PID 942133 passou em 189,201 s, claims 103,184 s,
+  recuperação 0,946 s, refund rejeitado em 213. XMR-first-reinclude PID 943166
+  passou em 179,736 s, claims 95,228 s, recuperação 1,340 s, refund em 212.
+  Outputs gastos, journals/prazos preservados. Tentativas DOM públicas/auth:
+  82/31 e 62/16, zero throttling nessas execuções; testes HTTP locais exercitam
+  429/backoff/POST/cancelamento. Não dizer que o backoff foi exercitado por
+  rate-limit nativo nesses dois ensaios. Primeiro >180s; segundo com margem
+  inferior a um segundo, nenhum garante a meta. Fontes/binários conferidos,
+  PIDs/grupos encerrados; session 60441 exit 0, nenhum ensaio pendente.
+  Artefatos DIRECT-PAIR-{DOM-FIRST-XMR-DETACH,XMR-FIRST-REINCLUDE}-RPC-READ-RECOVERY-*,
+  RPC-READ-RECOVERY-VERIFICATION.json e RPC-READ-RECOVERY.md.
+- Próximo: emissor/restaurador durável da PRIMEIRA transação, hoje republicada
+  pelo supervisor no teste. Distinguir possível exposição (que pode ocorrer
+  antes de qualquer RPC) de evidência de divulgação/inclusão anterior; não usar
+  marcador de exposição como autorização ilimitada para primeira liberação
+  tardia. Gate inicial não se reaplica à contraparte comprovadamente devida.
+  Preservar bytes/journals/instantes e consultas independentes. Orçamento global
+  de retomadas, setup/solver duráveis, participantes independentes, fundamentos
+  temporais/criptográficos e dom-interopd continuam abertos.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

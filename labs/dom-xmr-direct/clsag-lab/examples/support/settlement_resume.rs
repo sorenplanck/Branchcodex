@@ -71,12 +71,77 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-struct DomRpc {
+#[derive(Default)]
+struct RpcMetrics {
+    public_read_attempts: Cell<u64>,
+    authenticated_read_attempts: Cell<u64>,
+    submit_attempts: Cell<u64>,
+    throttle_retries: Cell<u64>,
+    wait_requested_ms: Cell<u64>,
+    wait_elapsed_ms: Cell<u64>,
+}
+struct MeasuredWait<'a> {
+    started: Instant,
+    elapsed_ms: &'a Cell<u64>,
+}
+impl Drop for MeasuredWait<'_> {
+    fn drop(&mut self) {
+        self.elapsed_ms.set(
+            self.elapsed_ms.get().saturating_add(
+                u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ),
+        );
+    }
+}
+impl RpcMetrics {
+    fn value(&self) -> Value {
+        json!({"public_read_attempts":self.public_read_attempts.get(),
+            "authenticated_read_attempts":self.authenticated_read_attempts.get(),
+            "submit_attempts":self.submit_attempts.get(),"throttle_retries":self.throttle_retries.get(),
+            "wait_requested_ms":self.wait_requested_ms.get(),"wait_elapsed_ms":self.wait_elapsed_ms.get()})
+    }
+    fn log(&self) {
+        eprintln!(
+            "recovery_rpc_metrics: {}",
+            json!({"pid":std::process::id(),"dom_rpc":self.value()})
+        );
+    }
+}
+
+// Integer Retry-After or native tower_governor's floor-rounded seconds. Reject
+// malformed/duplicate/conflicting-unbounded hints; never retry a POST here.
+fn throttle_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let mut seconds = None;
+    for (name, floor_rounded) in [("retry-after", false), ("x-ratelimit-after", true)] {
+        if headers.get_all(name).iter().count() > 1 {
+            return None;
+        }
+        if let Some(value) = headers.get(name) {
+            let text = value.to_str().ok()?;
+            if text.is_empty() || !text.bytes().all(|v| v.is_ascii_digit()) {
+                return None;
+            }
+            let mut wait = text.parse::<u64>().ok()?;
+            if floor_rounded {
+                wait = wait.checked_add(1)?;
+            }
+            wait = wait.max(1);
+            if wait > 2 {
+                return None;
+            }
+            seconds = Some(seconds.map_or(wait, |prior: u64| prior.max(wait)));
+        }
+    }
+    seconds.map(Duration::from_secs)
+}
+
+struct DomRpc<'a> {
     client: reqwest::Client,
     base: String,
     token: String,
+    metrics: &'a RpcMetrics,
 }
-impl DomRpc {
+impl DomRpc<'_> {
     async fn request(
         &self,
         method: reqwest::Method,
@@ -86,12 +151,52 @@ impl DomRpc {
     ) -> Result<Option<Value>> {
         let mut request = self
             .client
-            .request(method, format!("{}{route}", self.base))
+            .request(method.clone(), format!("{}{route}", self.base))
             .bearer_auth(&self.token);
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let mut response = request.send().await.map_err(|_| "DOM RPC unavailable")?;
+        let mut response = loop {
+            let counter = if method != reqwest::Method::GET {
+                &self.metrics.submit_attempts
+            } else if route.starts_with("/tx/") || route.starts_with("/chain/scan/") {
+                &self.metrics.authenticated_read_attempts
+            } else {
+                &self.metrics.public_read_attempts
+            };
+            counter.set(counter.get().saturating_add(1));
+            let response = request
+                .try_clone()
+                .ok_or("DOM request not repeatable")?
+                .send()
+                .await
+                .map_err(|_| "DOM RPC unavailable")?;
+            if method == reqwest::Method::GET
+                && response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                if let Some(wait) = throttle_delay(response.headers()) {
+                    let millis =
+                        u64::try_from(wait.as_millis()).map_err(|_| "DOM throttle wait")?;
+                    let requested = self.metrics.wait_requested_ms.get().saturating_add(millis);
+                    // Shared by ALL reads of this worker, not renewed per route.
+                    // Outer recovery timeout and original operation clock remain.
+                    if requested <= 2000 {
+                        self.metrics.wait_requested_ms.set(requested);
+                        self.metrics
+                            .throttle_retries
+                            .set(self.metrics.throttle_retries.get() + 1);
+                        drop(response);
+                        let _measurement = MeasuredWait {
+                            started: Instant::now(),
+                            elapsed_ms: &self.metrics.wait_elapsed_ms,
+                        };
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                }
+            }
+            break response;
+        };
         let missing = response.status() == reqwest::StatusCode::NOT_FOUND;
         if !response.status().is_success() && !(missing && allow_missing) {
             // No bearer token or response body is logged. Keep enough native
@@ -172,7 +277,7 @@ impl DomRpc {
         let tx_hash = hex(dom_crypto::blake2b_256(&raw).as_bytes());
         let found = self.get(&format!("/tx/{tx_hash}")).await?;
         let index_missing = found["found"] == false;
-        let (height, block) = if index_missing {
+        let (height, block, parent_hint) = if index_missing {
             // The admission identity index is optional/retained for a bounded
             // period. A miss does not prove absence. Locate by the native kernel
             // index, then require the EXACT transaction in the full scan below.
@@ -207,7 +312,11 @@ impl DomRpc {
             let block = hash(&kernel["block_hash"])?;
             let header = self.get(&format!("/block/{}", hex(&block))).await?;
             ensure(hash(&header["hash"])? == block, "DOM kernel block mismatch")?;
-            (number(&header["height"])?, block)
+            (
+                number(&header["height"])?,
+                block,
+                Some(hash(&header["prev_hash"])?),
+            )
         } else {
             ensure(
                 found["found"] == true && found["tx_hash"] == tx_hash,
@@ -217,89 +326,115 @@ impl DomRpc {
                 return Ok((Observation::InPool, false));
             }
             ensure(found["confirmed"] == true, "DOM confirmation flag")?;
-            (number(&found["block_height"])?, hash(&found["block_hash"])?)
+            (
+                number(&found["block_height"])?,
+                hash(&found["block_hash"])?,
+                None,
+            )
         };
         ensure(
             height > 0 && height <= number(&identity["tip_height"])?,
             "DOM inclusion height",
         )?;
-        let anchor = self.get(&format!("/block/{}", height - 1)).await?;
-        ensure(
-            number(&anchor["height"])? == height - 1,
-            "DOM anchor height",
-        )?;
-        let anchor_hash = hash(&anchor["hash"])?;
+        let anchor_hash = if let Some(parent) = parent_hint {
+            // Merely a hint until the native scan validates this anchor under
+            // the same chain lock as the canonical block and transaction body.
+            parent
+        } else {
+            let anchor = self.get(&format!("/block/{}", height - 1)).await?;
+            ensure(
+                number(&anchor["height"])? == height - 1,
+                "DOM anchor height",
+            )?;
+            hash(&anchor["hash"])?
+        };
         let scan = self.get(&format!("/chain/scan/scriptless/v1?from={height}&to={height}&expected_network_magic={}&expected_chain_id={}&anchor_hash={}",
             dom_core::NETWORK_MAGIC_REGTEST,identity["chain_id"].as_str().ok_or("DOM chain")?,hex(&anchor_hash))).await?;
-        ensure(
-            scan["schema_version"] == 1
-                && scan["status"] == "ok"
-                && scan["canonical"] == true
-                && scan["requested_from"] == height
-                && scan["requested_to"] == height
-                && scan["served_from"] == height
-                && scan["served_to"] == height
-                && scan["request_anchor"]["height"] == height - 1
-                && hash(&scan["request_anchor"]["block_hash"])? == anchor_hash,
-            "DOM incomplete scan",
-        )?;
-        for key in [
-            "chain_id",
-            "genesis_hash",
-            "network",
-            "tip_height",
-            "tip_hash",
-        ] {
-            ensure(
-                scan["identity"][key] == identity[key],
-                "DOM scan snapshot changed",
-            )?;
-        }
-        ensure(
-            scan["identity"]["network_magic"] == dom_core::NETWORK_MAGIC_REGTEST,
-            "DOM scan network",
-        )?;
-        let blocks = scan["blocks"].as_array().ok_or("DOM scan blocks")?;
-        ensure(blocks.len() == 1, "DOM scan block count")?;
-        let scanned = &blocks[0];
-        ensure(
-            number(&scanned["height"])? == height
-                && hash(&scanned["block_hash"])? == block
-                && hash(&scanned["previous_block_hash"])? == anchor_hash,
-            "DOM scan location",
-        )?;
-        let transactions = scanned["transactions"]
-            .as_array()
-            .ok_or("DOM scan transactions")?;
-        let matches: Vec<_> = transactions
-            .iter()
-            .filter(|v| v["tx_hash"] == tx_hash)
-            .collect();
-        ensure(matches.len() == 1, "DOM exact transaction missing")?;
-        let exact = matches[0];
-        ensure(
-            number(&exact["block_height"])? == height
-                && hash(&exact["block_hash"])? == block
-                && unhex(
-                    exact["canonical_bytes"]
-                        .as_str()
-                        .ok_or("DOM native bytes")?,
-                )? == raw,
-            "DOM native body mismatch",
-        )?;
-        let current = self.get(&format!("/block/{height}")).await?;
-        ensure(
-            hash(&current["hash"])? == block,
-            "DOM canonical block changed",
-        )?;
+        verify_dom_inclusion(&scan, identity, &raw, height, block, anchor_hash)?;
+        // The native full scan checks canonicality, anchor, exact body and tip
+        // under ONE chain lock. A second /block read adds no stronger snapshot.
+        // The caller still rechecks both tips after this observation and fsync.
         Ok((Observation::Included { block, height }, index_missing))
     }
+}
+
+fn verify_dom_inclusion(
+    scan: &Value,
+    identity: &Value,
+    raw: &[u8],
+    height: u64,
+    block: [u8; 32],
+    anchor_hash: [u8; 32],
+) -> Result<()> {
+    ensure(
+        height > 0 && height <= number(&identity["tip_height"])?,
+        "DOM inclusion height",
+    )?;
+    let tx_hash = hex(dom_crypto::blake2b_256(raw).as_bytes());
+    ensure(
+        scan["schema_version"] == 1
+            && scan["status"] == "ok"
+            && scan["canonical"] == true
+            && scan["requested_from"] == height
+            && scan["requested_to"] == height
+            && scan["served_from"] == height
+            && scan["served_to"] == height
+            && scan["request_anchor"]["height"] == height - 1
+            && hash(&scan["request_anchor"]["block_hash"])? == anchor_hash,
+        "DOM incomplete scan",
+    )?;
+    for key in [
+        "chain_id",
+        "genesis_hash",
+        "network",
+        "tip_height",
+        "tip_hash",
+    ] {
+        ensure(
+            scan["identity"][key] == identity[key],
+            "DOM scan snapshot changed",
+        )?;
+    }
+    ensure(
+        scan["identity"]["network_magic"] == dom_core::NETWORK_MAGIC_REGTEST,
+        "DOM scan network",
+    )?;
+    let blocks = scan["blocks"].as_array().ok_or("DOM scan blocks")?;
+    ensure(blocks.len() == 1, "DOM scan block count")?;
+    let scanned = &blocks[0];
+    ensure(
+        number(&scanned["height"])? == height
+            && hash(&scanned["block_hash"])? == block
+            && hash(&scanned["previous_block_hash"])? == anchor_hash,
+        "DOM scan location",
+    )?;
+    let transactions = scanned["transactions"]
+        .as_array()
+        .ok_or("DOM scan transactions")?;
+    let matches: Vec<_> = transactions
+        .iter()
+        .filter(|v| v["tx_hash"] == tx_hash)
+        .collect();
+    ensure(matches.len() == 1, "DOM exact transaction missing")?;
+    let exact = matches[0];
+    ensure(
+        number(&exact["block_height"])? == height
+            && hash(&exact["block_hash"])? == block
+            && unhex(
+                exact["canonical_bytes"]
+                    .as_str()
+                    .ok_or("DOM native bytes")?,
+            )? == raw,
+        "DOM native body mismatch",
+    )?;
+    Ok(())
 }
 
 #[derive(Default)]
 struct SendProgress {
     attempted: Cell<bool>,
     acknowledged: Cell<bool>,
+    dom_rpc: RpcMetrics,
 }
 
 fn is_send(action: &str) -> bool {
@@ -378,6 +513,7 @@ async fn recover(
             .map_err(|_| "DOM RPC client")?,
         base: format!("http://127.0.0.1:{}", checkpoint.dom_port),
         token: hex(&checkpoint.dom_token),
+        metrics: &progress.dom_rpc,
     };
     let identity = dom_rpc.identity(&checkpoint).await?;
     let context = ValidationContext {
@@ -547,6 +683,7 @@ async fn recover(
         ensure(!exists, "crash fixture already has obligation")?;
         // Actual process exit after native inclusion verification, before ANY
         // post-inclusion artifact/obligation is created. Nodes remain in host.
+        progress.dom_rpc.log();
         std::process::exit(75);
     }
     let mut created = false;
@@ -659,6 +796,7 @@ async fn recover(
                 .to_vec();
             exposed = true;
             if action == "send-crash-before-rpc" {
+                progress.dom_rpc.log();
                 std::process::exit(77);
             }
             // Account for storage latency by querying again after fsync. These
@@ -692,6 +830,7 @@ async fn recover(
                 // result to the supervisor or persisting an admission receipt.
                 // This is lost process state, NOT a dropped native RPC reply.
                 if action == "send-crash-after-admission" {
+                    progress.dom_rpc.log();
                     std::process::exit(76);
                 }
                 "Submitted".to_string()
@@ -788,6 +927,8 @@ pub async fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
     };
     result["transaction_send_attempted"] = json!(progress.attempted.get());
     result["native_admission_ack_received"] = json!(progress.acknowledged.get());
+    result["dom_rpc"] = progress.dom_rpc.value();
+    progress.dom_rpc.log();
     println!("{}", serde_json::to_string(&result).unwrap());
 }
 
@@ -1042,6 +1183,235 @@ pub async fn crash_then_reconstruct(
 #[cfg(test)]
 mod native_observation_tests {
     use super::*;
+
+    #[test]
+    fn coherent_dom_scan_rejects_stale_tip_parent_partial_range_and_changed_native_body() {
+        let raw = b"approved native bytes";
+        let block = [3; 32];
+        let parent = [2; 32];
+        let identity = json!({"network":"regtest","chain_id":hex(&[5;32]),"genesis_hash":hex(&[6;32]),"tip_height":9,"tip_hash":hex(&[9;32])});
+        let mut scan_identity = identity.clone();
+        scan_identity["network_magic"] = json!(dom_core::NETWORK_MAGIC_REGTEST);
+        let valid = json!({"schema_version":1,"status":"ok","canonical":true,
+            "requested_from":7,"requested_to":7,"served_from":7,"served_to":7,
+            "request_anchor":{"height":6,"block_hash":hex(&parent)},"identity":scan_identity,
+            "blocks":[{"height":7,"block_hash":hex(&block),"previous_block_hash":hex(&parent),
+            "transactions":[{"tx_hash":hex(dom_crypto::blake2b_256(raw).as_bytes()),
+                "block_height":7,"block_hash":hex(&block),"canonical_bytes":hex(raw)}]}]});
+        assert!(verify_dom_inclusion(&valid, &identity, raw, 7, block, parent).is_ok());
+        for (pointer, replacement) in [
+            ("/canonical", json!(false)),
+            ("/served_to", Value::Null),
+            ("/requested_from", json!(6)),
+            ("/identity/tip_hash", json!(hex(&[8; 32]))),
+            ("/identity/genesis_hash", json!(hex(&[8; 32]))),
+            ("/identity/network_magic", json!(0)),
+            ("/request_anchor/block_hash", json!(hex(&[8; 32]))),
+            ("/blocks/0/previous_block_hash", json!(hex(&[8; 32]))),
+            ("/blocks/0/block_hash", json!(hex(&[8; 32]))),
+            (
+                "/blocks/0/transactions/0/canonical_bytes",
+                json!(hex(b"changed native bytes")),
+            ),
+            ("/blocks/0/transactions/0/block_height", json!(8)),
+            ("/blocks/0/transactions", json!([])),
+            ("/blocks", json!([])),
+        ] {
+            let mut changed = valid.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                verify_dom_inclusion(&changed, &identity, raw, 7, block, parent).is_err(),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn throttle_hint_requires_bounded_unambiguous_integer_delay() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        assert!(throttle_delay(&headers).is_none());
+        headers.insert("x-ratelimit-after", HeaderValue::from_static("0"));
+        assert_eq!(throttle_delay(&headers), Some(Duration::from_secs(1)));
+        headers.insert("retry-after", HeaderValue::from_static("2"));
+        assert_eq!(throttle_delay(&headers), Some(Duration::from_secs(2)));
+        for invalid in ["3", "-1", "1.5", "forever", "18446744073709551615"] {
+            headers.insert("retry-after", HeaderValue::from_str(invalid).unwrap());
+            assert!(throttle_delay(&headers).is_none());
+        }
+        headers.remove("retry-after");
+        headers.append("x-ratelimit-after", HeaderValue::from_static("0"));
+        assert!(throttle_delay(&headers).is_none());
+    }
+
+    // Small owned HTTP server: assertions exercise the real reqwest transport,
+    // including request count/method, rather than a fabricated Observation.
+    fn scripted_http(
+        replies: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            for (status, headers, body) in replies {
+                let until = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < until, "expected HTTP request not received");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0 && request.len() + n <= 16384);
+                    request.extend_from_slice(&chunk[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let text = std::str::from_utf8(&request[..end]).unwrap();
+                        let length = text
+                            .lines()
+                            .filter_map(|s| s.split_once(':'))
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, v)| v.trim().parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            lines.push(text.lines().next().unwrap().to_string());
+                            break;
+                        }
+                    }
+                }
+                write!(stream, "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
+            }
+            lines
+        });
+        (base, worker)
+    }
+    fn test_rpc(base: String, metrics: &RpcMetrics) -> DomRpc<'_> {
+        DomRpc {
+            base,
+            token: "disposable-test-token".into(),
+            metrics,
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn throttled_read_repeats_read_and_counts_wait_before_using_fresh_response() {
+        let (base, server) = scripted_http(vec![
+            (
+                "429 Too Many Requests",
+                "x-ratelimit-after: 0\r\n",
+                "limited",
+            ),
+            ("200 OK", "", "{\"found\":false}"),
+        ]);
+        let metrics = RpcMetrics::default();
+        let rpc = test_rpc(base, &metrics);
+        assert_eq!(rpc.get("/tx/test").await.unwrap(), json!({"found":false}));
+        assert_eq!(
+            server.join().unwrap(),
+            ["GET /tx/test HTTP/1.1", "GET /tx/test HTTP/1.1"]
+        );
+        assert_eq!(metrics.authenticated_read_attempts.get(), 2);
+        assert_eq!(metrics.throttle_retries.get(), 1);
+        assert_eq!(metrics.wait_requested_ms.get(), 1000);
+        assert!(metrics.wait_elapsed_ms.get() >= 1000);
+        assert_eq!(metrics.submit_attempts.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn throttle_budget_is_shared_across_routes_and_exhaustion_never_submits() {
+        let limited = (
+            "429 Too Many Requests",
+            "x-ratelimit-after: 0\r\n",
+            "limited",
+        );
+        let ok = ("200 OK", "", "{}");
+        let (base, server) = scripted_http(vec![limited, ok, limited, ok, limited]);
+        let metrics = RpcMetrics::default();
+        let rpc = test_rpc(base, &metrics);
+        rpc.get("/chain/identity").await.unwrap();
+        rpc.get("/block/6").await.unwrap();
+        assert_eq!(
+            rpc.get("/block/7").await.unwrap_err(),
+            "DOM RPC rate limited"
+        );
+        assert_eq!(server.join().unwrap().len(), 5);
+        assert_eq!(metrics.public_read_attempts.get(), 5);
+        assert_eq!(metrics.throttle_retries.get(), 2);
+        assert_eq!(metrics.wait_requested_ms.get(), 2000);
+        assert_eq!(metrics.submit_attempts.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_recovery_during_throttle_counts_partial_wait_without_retry() {
+        let (base, server) = scripted_http(vec![(
+            "429 Too Many Requests",
+            "x-ratelimit-after: 0\r\n",
+            "limited",
+        )]);
+        let metrics = RpcMetrics::default();
+        let rpc = test_rpc(base, &metrics);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), rpc.get("/chain/identity"))
+                .await
+                .is_err()
+        );
+        assert_eq!(server.join().unwrap(), ["GET /chain/identity HTTP/1.1"]);
+        assert_eq!(metrics.public_read_attempts.get(), 1);
+        assert_eq!(metrics.wait_requested_ms.get(), 1000);
+        assert!(metrics.wait_elapsed_ms.get() > 0);
+        assert_eq!(metrics.submit_attempts.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn post_or_unbounded_throttle_or_other_status_is_never_automatically_repeated() {
+        for (method, status, headers) in [
+            (
+                reqwest::Method::POST,
+                "429 Too Many Requests",
+                "x-ratelimit-after: 0\r\n",
+            ),
+            (
+                reqwest::Method::GET,
+                "429 Too Many Requests",
+                "Retry-After: 3600\r\n",
+            ),
+            (
+                reqwest::Method::GET,
+                "503 Service Unavailable",
+                "Retry-After: 1\r\n",
+            ),
+        ] {
+            let (base, server) = scripted_http(vec![(status, headers, "busy")]);
+            let metrics = RpcMetrics::default();
+            assert!(test_rpc(base, &metrics)
+                .request(method.clone(), "/tx/submit", Some(json!({})), false)
+                .await
+                .is_err());
+            assert_eq!(
+                server.join().unwrap(),
+                [format!("{method} /tx/submit HTTP/1.1")]
+            );
+            assert_eq!(metrics.throttle_retries.get(), 0);
+            assert_eq!(metrics.wait_requested_ms.get(), 0);
+        }
+    }
 
     #[test]
     fn dom_missing_tx_needs_exact_mature_native_input_at_observed_tip() {

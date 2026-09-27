@@ -13,6 +13,36 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Cenário que falhava por HTTP 429 agora passou com o burst padrão 100.**
+O worker reutiliza o pai do cabeçalho como sugestão validada pelo scan nativo,
+que lê âncora, identidade, bloco e transações sob um chain lock. A segunda
+consulta de bloco foi removida; corpo exato, snapshot e checks finais de tips
+permanecem. Não houve mudança no limitador/consenso do nó.
+
+Somente GET com 429 e header de espera válido recebe repetição: até 2.000 ms
+de espera solicitada compartilhada por worker. POST não é repetido, cancelamento
+conta espera parcial, e erro persistente volta a Reconcile. Isso não é orçamento
+global durável de tentativas. Passaram 38 testes relacionados, incluindo seis
+novos de snapshot/HTTP/espera, Clippy e build. Notas em
+`clsag-lab/RPC-READ-RECOVERY.md`.
+
+As duas regressões nativas passaram com burst 100: DOM-first com retirada XMR,
+**189,201 s** total / **103,184 s** claims / **0,946 s** recuperação; XMR-first
+com reinclusão da primeira claim, **179,736 s** / **95,228 s** / **1,340 s**.
+Tentativas públicas/autenticadas DOM dos workers: 82/31 e 62/16. Nenhum 429
+nessas execuções; a política de espera é coberta pelos testes HTTP locais.
+Outputs gastos e refunds conflitantes rejeitados, fontes/binário conferidos,
+processos encerrados. Evidências `*-RPC-READ-RECOVERY-*`. Primeiro total acima
+de três minutos; segundo sem margem suficiente para garantia de prazo.
+
+Próximo avanço estrutural: retirar do supervisor a republicação da primeira
+transação já exposta, com estado durável e verificação nativa independente.
+Possível exposição sozinha não prova divulgação nem autoriza uma primeira
+liberação tardia. A contraparte comprovadamente devida tem política distinta;
+preservar essa distinção, a janela original e os bytes aprovados. Preparação
+durável, participantes independentes, prova temporal/criptográfica e daemon
+permanecem pendentes.
+
 **Mesma primeira claim reincluída em outro bloco:** corrigida a rejeição do
 journal por diferença de âncora. `DeliveryPayment` fixa manifesto, transação
 exata e cadeia alvo; `open_for_payment` valida o registro completo e preserva
