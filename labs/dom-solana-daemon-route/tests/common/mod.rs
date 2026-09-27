@@ -17,8 +17,8 @@ use kaystra_core::terms::SettlementTermsV1;
 
 pub use laboratory::{
     accounts, downstream_facts, identities, observation, position, upstream_facts,
-    DOM_ANCHOR_HEIGHT, DOWNSTREAM_TERMS, NETWORK, NOW_SECONDS, PARTICIPANT_BINDINGS, PARTY_A,
-    PARTY_B, RELAY_ROSTER, TIME_EVIDENCE, TIME_POLICY, UPSTREAM_TERMS,
+    DOM_ANCHOR_HEIGHT, DOWNSTREAM_TERMS, NETWORK, NOW_SECONDS, PARTICIPANT_BINDINGS, RELAY_ROSTER,
+    TIME_EVIDENCE, TIME_POLICY, UPSTREAM_TERMS,
 };
 
 /// The laboratory passphrase, as bytes, for callers that hand it to the identity store.
@@ -37,6 +37,10 @@ pub struct Provisioned {
     pub upstream_facts: SolanaChainFactsV1,
     pub downstream_facts: SolanaChainFactsV1,
     pub registry: ProvisionedSolanaRegistryV1,
+    /// The two parties, derived from their identity authorities rather than chosen.
+    pub parties: [kaystra_core::types::ParticipantId; 2],
+    /// Each party's identity authority, in party order.
+    pub identity_stores: [std::path::PathBuf; 2],
     pub dom_chain_id: [u8; 32],
     pub dom_asset_id: [u8; 32],
 }
@@ -89,6 +93,8 @@ pub fn provision_all() -> Provisioned {
         upstream_facts: route.upstream_facts,
         downstream_facts: route.downstream_facts,
         registry: route.registry,
+        parties: route.parties,
+        identity_stores: route.identity_stores,
         plan: route.plan,
         directory,
         provisioning,

@@ -56,6 +56,13 @@ pub struct CeremonyPlanInputV1<'a> {
     pub route_id: [u8; 32],
     /// The two parties, in the order the roster names them.
     pub parties: [[u8; 32]; 2],
+    /// Each party's own identity authority, in party order.
+    ///
+    /// The two plans differ here as well as in the participant id, and they must: the ceremony
+    /// opens this authority with the party's passphrase and then DERIVES that party's
+    /// participant id from the identity it found. A pair of plans pointing at one authority
+    /// would be one party twice.
+    pub identity_stores: [&'a Path; 2],
 }
 
 /// Where the two plans were written, in party order.
@@ -157,7 +164,7 @@ pub fn write_plans(
             "roster_file": absolute(Layout::relative(
                 dom_interopd::ProductionPathRoleV1::RelayRoster,
             )),
-            "identity_store": absolute(Layout::contracts_transport_identity_relative()),
+            "identity_store": input.identity_stores[index].to_string_lossy(),
             "budget_policy_file": absolute(Layout::contracts_budget_policy_relative()),
         });
         let bytes = serde_json::to_vec_pretty(&plan)

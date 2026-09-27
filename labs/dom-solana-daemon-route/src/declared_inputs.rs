@@ -138,19 +138,73 @@ pub fn write_leg_authority_bundle(
     Ok(digest)
 }
 
-/// Write the Contracts budget policy.
+/// Write the Contracts budget policy, as a policy rather than as bytes.
 ///
-/// An input file the layout requires in create and in reopen alike. Its bytes are a
-/// policy the deployment decides, so they are the caller's.
-pub fn write_contracts_budget_policy(
-    state_dir: &Path,
-    relative: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
-    if bytes.is_empty() {
-        return Err("the layout refuses an empty input file".to_owned());
+/// # Why this is not the caller's bytes any more
+///
+/// The layout requires only a non-empty owner-only file here, so an arbitrary string passed
+/// every check this crate made -- and the ceremony then refused the route with `Binding`,
+/// because it PARSES this file:
+///
+/// ```text
+/// let policy = BudgetPolicyV1::from_bytes(&bounded_owner_read(&plan.budget_policy_file, 4096)?)
+///     .map_err(|_| Binding)?;
+/// if policy.profile() != BudgetPolicyProfileV1::ProductionRatified { return Err(Binding); }
+/// ```
+///
+/// An input whose contents something downstream parses is not an opaque blob, whatever the
+/// layout says about it.
+///
+/// # The format, and where it comes from
+///
+/// `BudgetPolicyV1` has no public constructor, only `from_bytes`, so the canonical bytes are
+/// emitted here against the layout that parser accepts: the magic `DOMNVBP1`, version one
+/// little-endian, the profile byte, a fixed `0x01`, four reserved zero bytes, a non-zero
+/// thirty-two byte policy id, then seven non-zero budget numbers and a reserved zero pair,
+/// and finally the store's own authoritative digest over the first hundred and twelve bytes.
+/// `crates/dom-leg/src/f7_wallet_tests.rs` builds one the same way; the digest comes from
+/// `dom_scriptless_crypto::authoritative_storage_hash_v1`, never restated.
+///
+/// The numbers are laboratory values, conservative rather than tuned: a deployment ratifies
+/// its own budget, and `from_bytes`'s own documentation says parsing "does not establish that
+/// a production composition root ratified the policy values".
+pub fn write_contracts_budget_policy(state_dir: &Path, relative: &str) -> Result<(), String> {
+    use dom_scriptless_crypto::{authoritative_storage_hash_v1, StorageHashDomainV1};
+    use dom_scriptless_store::{BudgetPolicyProfileV1, BudgetPolicyV1, BUDGET_POLICY_LEN};
+
+    let mut bytes = [0u8; BUDGET_POLICY_LEN];
+    bytes[..8].copy_from_slice(b"DOMNVBP1");
+    bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
+    bytes[10] = BudgetPolicyProfileV1::ProductionRatified as u8;
+    bytes[11] = 1;
+    // A non-zero policy identity. Named by this route rather than fixed, so two laboratories
+    // do not describe one policy.
+    bytes[16..48].copy_from_slice(&{
+        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+        sha2::Digest::update(&mut hasher, b"DOM-SOLANA-DAEMON-ROUTE/BUDGET-POLICY-ID/V1\0");
+        sha2::Digest::update(&mut hasher, relative.as_bytes());
+        let out: [u8; 32] = sha2::Digest::finalize(hasher).into();
+        out
+    });
+    bytes[48..56].copy_from_slice(&100_u64.to_le_bytes());
+    bytes[56..64].copy_from_slice(&50_u64.to_le_bytes());
+    bytes[64..68].copy_from_slice(&10_u32.to_le_bytes());
+    bytes[72..80].copy_from_slice(&25_u64.to_le_bytes());
+    bytes[80..88].copy_from_slice(&3_600_u64.to_le_bytes());
+    bytes[88..96].copy_from_slice(&60_u64.to_le_bytes());
+    bytes[96..104].copy_from_slice(&86_400_u64.to_le_bytes());
+    bytes[104..112].copy_from_slice(&1_u64.to_le_bytes());
+    let digest = authoritative_storage_hash_v1(StorageHashDomainV1::BudgetPolicy, &bytes[..112]);
+    bytes[112..].copy_from_slice(&digest);
+
+    // Parsed back before it is written: a policy this crate cannot read is one the ceremony
+    // cannot either, and finding that out here names the format rather than the route.
+    let policy = BudgetPolicyV1::from_bytes(&bytes)
+        .map_err(|error| format!("the emitted budget policy does not parse: {error:?}"))?;
+    if policy.profile() != BudgetPolicyProfileV1::ProductionRatified {
+        return Err("the emitted budget policy is not the ratified profile".to_owned());
     }
-    owner_only::write(&state_dir.join(relative), bytes)
+    owner_only::write(&state_dir.join(relative), &bytes)
 }
 
 /// Create the Contracts transport identity authority.
@@ -171,7 +225,7 @@ pub fn create_contracts_transport_identity(
     state_dir: &Path,
     relative: &str,
     passphrase: &[u8],
-) -> Result<(), String> {
+) -> Result<[u8; 33], String> {
     use std::sync::Arc;
 
     let path = state_dir.join(relative);
@@ -190,14 +244,17 @@ pub fn create_contracts_transport_identity(
         passphrase.to_vec(),
     )
     .map_err(|error| format!("identity passphrase: {error:?}"))?;
-    // Dropped immediately: creating it is the point, and the store holds an exclusive lock
-    // while it lives. The ceremony reopens it with the same passphrase.
     let store = dom_scriptless_identity_store::ContractsTransportIdentityStoreV1::create_production(
         Arc::new(parent_dir),
         root_name,
         &passphrase,
     )
     .map_err(|error| format!("identity authority: {error:?}"))?;
+    // The Schnorr key of the identity that was just published. A participant id is derived
+    // from it, so the caller needs it before it can name the participant this identity speaks
+    // for. Dropped right after: the store holds an exclusive lock while it lives, and the
+    // ceremony reopens it with the same passphrase.
+    let schnorr_public_key = *store.reference().schnorr_public_key();
     drop(store);
 
     // The layout requires this directory to be owner-only, and the store chose its own
@@ -206,7 +263,36 @@ pub fn create_contracts_transport_identity(
     let owner = owner_uid(state_dir)?;
     owner_only_directory_is_valid(&path, owner).map_err(|error| {
         format!("the identity authority the store created is not owner-only: {error}")
-    })
+    })?;
+    Ok(schnorr_public_key)
+}
+
+/// The participant id an identity speaks for, derived the way the ceremony audits it.
+///
+/// `audit_retained_participant_id_v1` recomputes `derive_participant_id(dom_chain_id,
+/// identity_key)` and refuses anything else, so a participant id is not a label a provisioner
+/// may choose: it IS the identity, read through the DOM chain the route settles its hub leg
+/// on. `derive_participant_id` is private, and `ParticipantIdentityV1::new` is the public
+/// surface that performs it.
+///
+/// The signing key and the direction do not enter the derivation. The identity key is passed
+/// for both because only one of them is being asked about, and the direction is the one the
+/// roster role implies.
+pub fn participant_id_for_identity(
+    dom_genesis_hash: [u8; 32],
+    dom_network_magic: u32,
+    schnorr_public_key: &[u8; 33],
+    direction: dom_adaptor::DirectionV1,
+) -> Result<[u8; 32], String> {
+    let chain = dom_adaptor::TrustedChainIdV1::from_authenticated_genesis(
+        dom_network_magic,
+        &dom_core::Hash256::from_bytes(dom_genesis_hash),
+    );
+    let key = dom_crypto::PublicKey::from_compressed_bytes(schnorr_public_key)
+        .map_err(|error| format!("the identity key is not a point: {error:?}"))?;
+    let identity = dom_adaptor::ParticipantIdentityV1::new(&chain, key, key, direction)
+        .map_err(|error| format!("derive the participant id: {error:?}"))?;
+    Ok(*identity.participant_id())
 }
 
 /// Create the parent directory of every path in the layout, and nothing else.

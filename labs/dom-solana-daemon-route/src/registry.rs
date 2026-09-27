@@ -99,6 +99,12 @@ pub struct ProvisionedSolanaRegistryV1 {
     pub valid_from_seconds: u64,
     pub expires_at_seconds: u64,
     pub dom_chain_id: [u8; 32],
+    /// The DOM hub's genesis hash and network magic, as the manifest declares them.
+    ///
+    /// Reported because a participant id is derived from an identity key AND the DOM chain the
+    /// route settles its hub leg on, and the chain is named by these two.
+    pub dom_genesis_hash: [u8; 32],
+    pub dom_network_magic: u32,
     /// The DOM hub's native asset, as the manifest names it. The terms of both
     /// positions name this same asset on their DOM leg: a route whose terms named
     /// an asset the registry does not declare would be settling something the
@@ -521,6 +527,8 @@ pub fn provision(
         valid_from_seconds,
         expires_at_seconds,
         dom_chain_id: manifest.dom.chain_id.0,
+        dom_genesis_hash: manifest.dom.genesis_hash,
+        dom_network_magic: manifest.dom.runtime_identity.network_magic,
         dom_asset_id: manifest.dom.native_asset.0,
         dom_profile_digest,
         upstream_chain_id: input.upstream.genesis_hash,

@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{provision_all, PARTY_A, PARTY_B};
+use common::provision_all;
 use dom_solana_daemon_route::ceremony::{write_plans, CeremonyPlanInputV1};
 
 fn plans(
@@ -29,7 +29,11 @@ fn plans(
             terms: &provisioned.plan.terms.expect("the provisioned terms"),
             roster: &provisioned.plan.roster.expect("the provisioned roster"),
             route_id: provisioned.plan.route_id,
-            parties: [PARTY_A.0, PARTY_B.0],
+            parties: [provisioned.parties[0].0, provisioned.parties[1].0],
+            identity_stores: [
+                &provisioned.identity_stores[0],
+                &provisioned.identity_stores[1],
+            ],
         },
         &out,
     )
@@ -43,23 +47,32 @@ fn plans(
 }
 
 #[test]
-fn the_two_plans_differ_in_exactly_one_field() {
+fn the_two_plans_differ_in_exactly_the_two_fields_that_say_which_party() {
     let provisioned = provision_all();
     let (_out, mut a, b) = plans(&provisioned);
 
     assert_eq!(
         a["local_participant_id"],
-        serde_json::json!(PARTY_A.0.to_vec())
+        serde_json::json!(provisioned.parties[0].0.to_vec())
     );
     assert_eq!(
         b["local_participant_id"],
-        serde_json::json!(PARTY_B.0.to_vec())
+        serde_json::json!(provisioned.parties[1].0.to_vec())
     );
 
-    // Everything else is the route, and the route is the same route for both parties. A
-    // pair that differed anywhere else would be two parties preparing two ceremonies.
+    // The identity authority differs too, and must: the ceremony opens it with that party's
+    // passphrase and derives that party's participant id from the identity it finds. Two plans
+    // pointing at one authority would be one party twice.
+    assert_ne!(a["identity_store"], b["identity_store"]);
+
+    // Everything else is the route, and the route is the same route for both parties. A pair
+    // that differed anywhere else would be two parties preparing two ceremonies.
     a["local_participant_id"] = b["local_participant_id"].clone();
-    assert_eq!(a, b, "the plans differ in more than the local participant");
+    a["identity_store"] = b["identity_store"].clone();
+    assert_eq!(
+        a, b,
+        "the plans differ in more than which party each one is"
+    );
 }
 
 #[test]
@@ -158,7 +171,11 @@ fn a_plan_pair_for_one_party_is_refused() {
             terms: &provisioned.plan.terms.expect("the terms"),
             roster: &provisioned.plan.roster.expect("the roster"),
             route_id: provisioned.plan.route_id,
-            parties: [PARTY_A.0, PARTY_A.0],
+            parties: [provisioned.parties[0].0, provisioned.parties[0].0],
+            identity_stores: [
+                &provisioned.identity_stores[0],
+                &provisioned.identity_stores[1],
+            ],
         },
         out.path(),
     )
@@ -188,7 +205,7 @@ fn each_emitted_relay_secret_is_the_key_the_roster_names() {
     let roster = dom_interopd::ProductionRelayRosterBundleV1::decode_canonical(&bytes)
         .expect("the roster decodes");
 
-    for (index, party) in [PARTY_A, PARTY_B].into_iter().enumerate() {
+    for (index, party) in provisioned.parties.into_iter().enumerate() {
         let path = dom_solana_daemon_route::ceremony::write_secrets(
             &party.0,
             std::str::from_utf8(common::IDENTITY_PASSPHRASE).expect("a utf-8 passphrase"),

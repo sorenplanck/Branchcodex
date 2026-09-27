@@ -71,6 +71,16 @@ xmr-dleq-sigma = { path = "../../crates/adapters/xmr-dleq-sigma" }
 # public constructor and the capability handle it takes.
 dom-scriptless-identity-store = { path = "../../crates/dom-scriptless-identity-store" }
 cap-std = { version = "=4.0.2", default-features = false }
+# The Contracts budget policy the ceremony parses. It has no public constructor, so the
+# canonical bytes are emitted here and authenticated with the store's own digest function.
+# Default features only: `evidence-only` is opt-in and forbidden in release builds.
+dom-scriptless-store = { path = "../../crates/dom-scriptless-store" }
+dom-scriptless-crypto = { path = "../../crates/dom-scriptless-crypto" }
+# A participant id is DERIVED from that participant's identity key and the DOM chain id --
+# `audit_retained_participant_id_v1` refuses any other value -- so the route's participants
+# are its two identities and this crate has to derive them the canonical way.
+dom-adaptor = { path = "../../crates/dom-adaptor" }
+dom-crypto = { path = "../../crates/dom-crypto" }
 # The ceremony plan is JSON, and its fields are exactly what this crate measures. The
 # bootstrap plan is serialized too: each provisioning generates a fresh condition scalar, so
 # the pins CANNOT be recomputed after the ceremony -- the plan has to survive between the

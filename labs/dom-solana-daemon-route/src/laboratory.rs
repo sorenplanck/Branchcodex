@@ -75,14 +75,15 @@ pub const DOM_ANCHOR_HEIGHT: u64 = 1;
 /// The laboratory passphrase that opens the Contracts transport identity authority.
 pub const IDENTITY_PASSPHRASE: &str = "a laboratory contracts identity passphrase";
 
-/// The two parties of the route, shared by BOTH positions.
+/// Where each party's Contracts transport identity authority lives.
 ///
-/// A route is two settlements between the same two participants, which is why
-/// `RouteTimePolicyV2::from_registry` requires both terms to name the same DOM chain, asset
-/// and adapter profile: the hub leg is one leg seen twice. The Contracts bootstrap ceremony
-/// reads the same way -- it is bilateral.
-pub const PARTY_A: ParticipantId = ParticipantId([0xa1; 32]);
-pub const PARTY_B: ParticipantId = ParticipantId([0xb2; 32]);
+/// TWO of them, because each party opens its own with its own passphrase, and because the
+/// ceremony derives that party's participant id from the identity it opens. The layout
+/// declares one such directory -- the local daemon's -- so the first is inside the state
+/// directory and the second is beside it, under the provisioning root. The ceremony plan
+/// takes an absolute path, so it does not care which.
+pub const IDENTITY_PARTY_0: &str = "state/contracts/transport-identity-v1";
+pub const IDENTITY_PARTY_1: &str = "identity-party-1/transport-identity-v1";
 
 /// The layout paths this route provisions into, named once.
 pub const REGISTRY_STORE: &str = "artifacts/registry.v1.sqlite3";
@@ -141,12 +142,15 @@ pub fn accounts(seed: u8) -> SolanaPositionAccountsV1 {
 
 /// One position's plan. The two parties are the same on both; only the settlement and the
 /// session differ, because a route is two settlements between the same two people.
-pub fn position(seed: u8) -> SolanaPositionTermsPlanV1 {
+///
+/// The parties are passed in rather than chosen: a participant id is derived from that
+/// participant's identity key, so it is not available until the identities exist.
+pub fn position(seed: u8, parties: [ParticipantId; 2]) -> SolanaPositionTermsPlanV1 {
     SolanaPositionTermsPlanV1 {
         settlement_id: [seed; 32],
         session_id: [seed.wrapping_add(0x40); 32],
-        dom_beneficiary: PARTY_A,
-        dom_refund_to: PARTY_B,
+        dom_beneficiary: parties[0],
+        dom_refund_to: parties[1],
         dom_amount_noms: 4_000_000,
         accounts: accounts(seed),
     }
@@ -183,6 +187,11 @@ pub struct LaboratoryRouteV1 {
     /// The second this route was provisioned around. Everything that later hands it to the
     /// daemon or to the ceremony must use the same one.
     pub now_seconds: u64,
+    /// The two parties, in the order the roster names them: ascending, because
+    /// `SettlementTermsV1::validate` refuses an unsorted roster.
+    pub parties: [ParticipantId; 2],
+    /// Each party's identity authority, in party order.
+    pub identity_stores: [std::path::PathBuf; 2],
 }
 
 /// Provision the whole route into `state_dir`, using `provisioning_dir` for everything the
@@ -211,6 +220,44 @@ pub fn provision(
         downstream: &downstream_facts,
     })?;
 
+    // The two identity authorities, and the participant ids they speak for.
+    //
+    // A participant id is NOT a label this crate may choose: `audit_retained_participant_id_v1`
+    // recomputes it from the identity's Schnorr key and the DOM chain id and refuses anything
+    // else. So the identities come before the terms, and the terms name what they derive.
+    let identity_stores = [state_dir.join(IDENTITY_PARTY_0), provisioning_dir.join(IDENTITY_PARTY_1)];
+    let mut parties = Vec::with_capacity(2);
+    for (index, path) in identity_stores.iter().enumerate() {
+        let root = if index == 0 { state_dir } else { provisioning_dir };
+        let relative = if index == 0 { IDENTITY_PARTY_0 } else { IDENTITY_PARTY_1 };
+        let key = declared_inputs::create_contracts_transport_identity(
+            root,
+            relative,
+            IDENTITY_PASSPHRASE.as_bytes(),
+        )?;
+        let _ = path;
+        parties.push(ParticipantId(declared_inputs::participant_id_for_identity(
+            registry.dom_genesis_hash,
+            registry.dom_network_magic,
+            &key,
+            // The direction does not enter the derivation; the roster role it implies does.
+            if index == 0 {
+                dom_adaptor::DirectionV1::Initiator
+            } else {
+                dom_adaptor::DirectionV1::Responder
+            },
+        )?));
+    }
+    // Ascending, because `SettlementTermsV1::validate` refuses an unsorted roster and the
+    // relay roster's shape check refuses members that do not ascend.
+    parties.sort();
+    let parties: [ParticipantId; 2] = parties
+        .try_into()
+        .map_err(|_| "two parties".to_owned())?;
+    if parties[0] == parties[1] {
+        return Err("both identities derived the same participant".to_owned());
+    }
+
     let (terms, positions) = provision_terms(&RouteTermsInputV1 {
         state_dir,
         upstream_relative: UPSTREAM_TERMS,
@@ -219,8 +266,8 @@ pub fn provision(
         upstream_solana: &upstream_facts,
         downstream_solana: &downstream_facts,
         provisioning_dir: &leg_store_dir,
-        upstream: position(0x11),
-        downstream: position(0x22),
+        upstream: position(0x11, parties),
+        downstream: position(0x22, parties),
         now_seconds,
         dom_anchor_height: DOM_ANCHOR_HEIGHT,
     })?;
@@ -273,16 +320,11 @@ pub fn provision(
     })?;
     let plan = plan.with_route_time(route_time);
 
-    // Two inputs the layout requires and the ceremony plan names. They belong to the route.
+    // The budget policy the layout requires and the ceremony PARSES. The identity authorities
+    // were created above, before the terms, because the participants are derived from them.
     declared_inputs::write_contracts_budget_policy(
         state_dir,
         SolanaRouteBootstrapPlanV1::contracts_budget_policy_relative(),
-        b"a budget policy this deployment decided",
-    )?;
-    declared_inputs::create_contracts_transport_identity(
-        state_dir,
-        SolanaRouteBootstrapPlanV1::contracts_transport_identity_relative(),
-        IDENTITY_PASSPHRASE.as_bytes(),
     )?;
 
     Ok(LaboratoryRouteV1 {
@@ -295,6 +337,8 @@ pub fn provision(
         upstream_facts,
         downstream_facts,
         now_seconds,
+        parties,
+        identity_stores,
     })
 }
 
@@ -307,7 +351,8 @@ impl LaboratoryRouteV1 {
             terms: &self.terms,
             roster: &self.roster,
             route_id: self.plan.route_id,
-            parties: [PARTY_A.0, PARTY_B.0],
+            parties: [self.parties[0].0, self.parties[1].0],
+            identity_stores: [&self.identity_stores[0], &self.identity_stores[1]],
         }
     }
 }

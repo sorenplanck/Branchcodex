@@ -53,13 +53,13 @@ fn main() -> Result<(), String> {
     let plans = ceremony::write_plans(&route.ceremony_input(&state_dir), &ceremony_dir)?;
     let secrets: [PathBuf; 2] = [
         ceremony::write_secrets(
-            &laboratory::PARTY_A.0,
+            &route.parties[0].0,
             laboratory::IDENTITY_PASSPHRASE,
             &ceremony_dir,
             "secrets-party-0.json",
         )?,
         ceremony::write_secrets(
-            &laboratory::PARTY_B.0,
+            &route.parties[1].0,
             laboratory::IDENTITY_PASSPHRASE,
             &ceremony_dir,
             "secrets-party-1.json",
