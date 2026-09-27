@@ -18,10 +18,7 @@ use dom_consensus::{
     swap_arbiter_intent, Block, SwapArbiterContract, SwapArbiterPath, Transaction,
     TransactionInput, TransactionKernel, TransactionOutput, ValidationContext,
 };
-use dom_core::{
-    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_PLAIN, KERNEL_FEAT_SWAP_CLAIM,
-    KERNEL_FEAT_SWAP_PUNISH, KERNEL_FEAT_SWAP_REFUND, TAG_KERNEL_MSG,
-};
+use dom_core::{Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG};
 use dom_crypto::{
     hash::blake2b_256_tagged,
     pedersen::{BlindingFactor, Commitment},
@@ -36,7 +33,7 @@ use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
     arbiter_session::{ArbiterSessionBinding, ArbiterSessionJournal},
     claim_resume::digest,
-    dom_joint::{DomCommitment, DomSigner, DomSigningIntent},
+    dom_reserve::ReserveIntent,
     native_dom::{DomClaimOffer, PreparedDomClaim},
 };
 use monero_simple_request_rpc::{prelude::*, SimpleRequestTransport};
@@ -360,6 +357,31 @@ impl PartyProcess {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     }
+
+    fn rejects_dom_presign(
+        &mut self,
+        branch: &Branch,
+        adaptor: &dom_crypto::PublicKey,
+        path: SwapArbiterPath,
+        session: u8,
+    ) -> bool {
+        !self
+            .exchange(json!({
+                "op":"dom-possession",
+                "path":path_name(path),
+                "transaction":hex(&branch.unsigned.to_bytes().unwrap()),
+                "adaptor":hex(&adaptor.to_compressed_bytes()),
+                "kernel_keys":[
+                    hex(&branch.kernel_keys[0].to_compressed_bytes()),
+                    hex(&branch.kernel_keys[1].to_compressed_bytes()),
+                ],
+                "session":hex(&[session;32]),
+                "route":hex(&CONTEXT_HASH),
+            }))
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,6 +407,14 @@ impl Outcome {
             Self::Refund => SwapArbiterPath::Refund,
             Self::Punish => SwapArbiterPath::Punish,
         }
+    }
+}
+
+fn path_name(path: SwapArbiterPath) -> &'static str {
+    match path {
+        SwapArbiterPath::Claim => "claim",
+        SwapArbiterPath::Refund => "refund",
+        SwapArbiterPath::Punish => "punish",
     }
 }
 
@@ -516,41 +546,121 @@ async fn node() -> (TestDir, Arc<DomNode>, [u8; 32]) {
 
 struct Branch {
     unsigned: Transaction,
-    prepared: PreparedDomClaim,
-    keys: [SecretKey; 2],
+    kernel_keys: [dom_crypto::PublicKey; 2],
 }
 
 fn branch(
     input: Commitment,
     input_blinding: &BlindingFactor,
     chain_id: [u8; 32],
-    feature: u8,
     boundary: u64,
-    scalars: [u8; 2],
+    path: SwapArbiterPath,
+    dom_owner: &mut PartyProcess,
+    xmr_owner: &mut PartyProcess,
 ) -> Branch {
-    let scalar = |last| {
-        let mut bytes = [0u8; 32];
-        bytes[31] = last;
-        BlindingFactor::from_bytes(bytes).unwrap()
+    let feature = match path {
+        SwapArbiterPath::Claim => dom_core::KERNEL_FEAT_SWAP_CLAIM,
+        SwapArbiterPath::Refund => dom_core::KERNEL_FEAT_SWAP_REFUND,
+        SwapArbiterPath::Punish => dom_core::KERNEL_FEAT_SWAP_PUNISH,
     };
-    let blindings = scalars.map(scalar);
-    let output_blinding = input_blinding
-        .add(&blindings[0])
+    let configure = |party: &mut PartyProcess, input: Option<&BlindingFactor>| {
+        let mut request = json!({"op":"configure-branch","path":path_name(path)});
+        if let Some(input) = input {
+            request["input_blinding"] = json!(hex(input.as_bytes()));
+        }
+        let value = party.request(request);
+        (
+            dom_crypto::PublicKey::from_compressed_bytes(&fixed_hex::<33>(
+                value["kernel_key"].as_str().unwrap(),
+            ))
+            .unwrap(),
+            dom_crypto::PublicKey::from_compressed_bytes(&fixed_hex::<33>(
+                value["output_share_key"].as_str().unwrap(),
+            ))
+            .unwrap(),
+        )
+    };
+    let (dom_kernel, dom_output) = configure(dom_owner, Some(input_blinding));
+    let (xmr_kernel, xmr_output) = configure(xmr_owner, None);
+    let kernel_keys = [dom_kernel, xmr_kernel];
+    let output_keys = [dom_output, xmr_output];
+    let reserve_session = [feature; 32];
+    let reserve_intent = ReserveIntent::new(
+        ARBITER_VALUE - FEE,
+        chain_id,
+        reserve_session,
+        CONTEXT_HASH,
+        output_keys.clone(),
+    )
+    .unwrap();
+    let reserve_request = || {
+        json!({
+            "path":path_name(path),
+            "value":ARBITER_VALUE-FEE,
+            "session":hex(&reserve_session),
+            "terms":hex(&CONTEXT_HASH),
+            "output_share_keys":[
+                hex(&output_keys[0].to_compressed_bytes()),
+                hex(&output_keys[1].to_compressed_bytes()),
+            ],
+        })
+    };
+    let mut request = reserve_request();
+    request["op"] = json!("reserve-possession");
+    let dom_possession = dom_owner.request(request)["proof"]
+        .as_str()
         .unwrap()
-        .add(&blindings[1])
-        .unwrap();
-    let (proof, commitment) =
-        dom_crypto::range_proof_prove_bytes(ARBITER_VALUE - FEE, &output_blinding).unwrap();
-    let keys = blindings
-        .each_ref()
-        .map(|blinding| SecretKey::from_bytes(blinding.as_bytes()).unwrap());
-    let excess = scriptless_add_public_points(&keys.each_ref().map(SecretKey::public_key)).unwrap();
+        .to_owned();
+    let mut request = reserve_request();
+    request["op"] = json!("reserve-possession");
+    let xmr_possession = xmr_owner.request(request)["proof"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let possession = [dom_possession, xmr_possession];
+    let mut common_seed = [0; 32];
+    OsRng.fill_bytes(&mut common_seed);
+    let round_one_request = || {
+        let mut request = reserve_request();
+        request["op"] = json!("reserve-round-one");
+        request["proofs"] = json!(possession);
+        request["common_seed"] = json!(hex(&common_seed));
+        request
+    };
+    let round_one = [
+        dom_owner.request(round_one_request()),
+        xmr_owner.request(round_one_request()),
+    ];
+    let round_two_request = |peer: &serde_json::Value| {
+        json!({
+            "op":"reserve-round-two",
+            "path":path_name(path),
+            "plan":peer["plan"],
+            "index":peer["index"],
+            "t_one":peer["t_one"],
+            "t_two":peer["t_two"],
+        })
+    };
+    let dom_response = dom_owner.request(round_two_request(&round_one[1]));
+    let xmr_response = xmr_owner.request(round_two_request(&round_one[0]));
+    let complete_request = |peer: &serde_json::Value| {
+        json!({
+            "op":"reserve-complete",
+            "path":path_name(path),
+            "round":peer["round"],
+            "index":peer["index"],
+            "scalar":peer["scalar"],
+        })
+    };
+    let dom_proof = dom_owner.request(complete_request(&xmr_response));
+    let xmr_proof = xmr_owner.request(complete_request(&dom_response));
+    assert_eq!(dom_proof, xmr_proof);
+    let proof = decode_hex(dom_proof["range_proof"].as_str().unwrap());
+    let commitment = reserve_intent.commitment().clone();
+    let excess = scriptless_add_public_points(&kernel_keys).unwrap();
     let unsigned = Transaction {
         inputs: vec![TransactionInput { commitment: input }],
-        outputs: vec![TransactionOutput {
-            commitment: Commitment::from_compressed_bytes(&commitment).unwrap(),
-            proof,
-        }],
+        outputs: vec![TransactionOutput { commitment, proof }],
         kernels: vec![TransactionKernel {
             features: feature,
             fee: Amount::from_noms(FEE).unwrap(),
@@ -560,46 +670,83 @@ fn branch(
         }],
         offset: [0; 32],
     };
-    let prepared = PreparedDomClaim::new_swap_arbiter_path(unsigned.clone(), chain_id).unwrap();
+    PreparedDomClaim::new_swap_arbiter_path(unsigned.clone(), chain_id).unwrap();
     Branch {
         unsigned,
-        prepared,
-        keys,
+        kernel_keys,
     }
 }
 
-fn offer(branch: &Branch, adaptor: dom_crypto::PublicKey, session: u8) -> DomClaimOffer {
-    let intent = DomSigningIntent::new(
-        branch.prepared.clone(),
-        adaptor,
-        branch.keys.each_ref().map(SecretKey::public_key),
-        [session; 32],
-        CONTEXT_HASH,
-    )
-    .unwrap();
-    let proofs = [
-        intent.prove_share(0, &branch.keys[0]).unwrap(),
-        intent.prove_share(1, &branch.keys[1]).unwrap(),
-    ];
-    let plan = intent.authorize(proofs).unwrap();
-    let rounds: Vec<_> = branch
-        .keys
-        .iter()
-        .enumerate()
-        .map(|(index, key)| {
-            DomSigner::new(plan.clone(), index as u8, key.clone())
-                .unwrap()
-                .preprocess(&mut OsRng)
-                .unwrap()
+fn offer(
+    branch: &Branch,
+    adaptor: dom_crypto::PublicKey,
+    session: u8,
+    path: SwapArbiterPath,
+    dom_owner: &mut PartyProcess,
+    xmr_owner: &mut PartyProcess,
+) -> DomClaimOffer {
+    let transaction = hex(&branch.unsigned.to_bytes().unwrap());
+    let base = || {
+        json!({
+            "path":path_name(path),
+            "transaction":transaction,
+            "adaptor":hex(&adaptor.to_compressed_bytes()),
+            "kernel_keys":[
+                hex(&branch.kernel_keys[0].to_compressed_bytes()),
+                hex(&branch.kernel_keys[1].to_compressed_bytes()),
+            ],
+            "session":hex(&[session;32]),
+            "route":hex(&CONTEXT_HASH),
         })
-        .collect();
-    let commitments: [DomCommitment; 2] = [rounds[0].1.clone(), rounds[1].1.clone()];
-    let [first, second]: [_; 2] = rounds.try_into().ok().unwrap();
-    let (first, first_response) = first.0.sign(&commitments[1]).unwrap();
-    let (second, second_response) = second.0.sign(&commitments[0]).unwrap();
-    let result = first.complete(&second_response).unwrap();
-    second.complete(&first_response).unwrap();
-    result
+    };
+    let mut request = base();
+    request["op"] = json!("dom-possession");
+    let dom_possession = dom_owner.request(request)["proof"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut request = base();
+    request["op"] = json!("dom-possession");
+    let xmr_possession = xmr_owner.request(request)["proof"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let possession = [dom_possession, xmr_possession];
+    let round_one_request = || {
+        let mut request = base();
+        request["op"] = json!("dom-round-one");
+        request["proofs"] = json!(possession);
+        request
+    };
+    let round_one = [
+        dom_owner.request(round_one_request()),
+        xmr_owner.request(round_one_request()),
+    ];
+    let round_two_request = |peer: &serde_json::Value| {
+        json!({
+            "op":"dom-round-two",
+            "path":path_name(path),
+            "plan":peer["plan"],
+            "signer":peer["signer"],
+            "nonces":peer["nonces"],
+        })
+    };
+    let dom_response = dom_owner.request(round_two_request(&round_one[1]));
+    let xmr_response = xmr_owner.request(round_two_request(&round_one[0]));
+    let complete_request = |peer: &serde_json::Value| {
+        json!({
+            "op":"dom-presign-complete",
+            "path":path_name(path),
+            "round":peer["round"],
+            "signer":peer["signer"],
+            "scalar":peer["scalar"],
+        })
+    };
+    let dom_offer = dom_owner.request(complete_request(&xmr_response));
+    let xmr_offer = xmr_owner.request(complete_request(&dom_response));
+    assert_eq!(dom_offer, xmr_offer);
+    let bytes = decode_hex(dom_offer["offer"].as_str().unwrap());
+    DomClaimOffer::from_swap_arbiter_resume_bytes(&bytes, digest(&bytes)).unwrap()
 }
 
 fn signed_funding(
@@ -646,6 +793,8 @@ struct FundedArbiter {
     punish: Branch,
     refund_offer: DomClaimOffer,
     punish_offer: DomClaimOffer,
+    refund_replacement_offer: DomClaimOffer,
+    punish_replacement_offer: DomClaimOffer,
     claim_until: u64,
     refund_until: u64,
     session_binding: ArbiterSessionBinding,
@@ -732,25 +881,28 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
         arbiter.clone(),
         &arbiter_blinding,
         chain_id,
-        KERNEL_FEAT_SWAP_CLAIM,
         claim_until,
-        [21, 22],
+        SwapArbiterPath::Claim,
+        &mut dom_owner,
+        &mut xmr_owner,
     );
     let refund = branch(
         arbiter.clone(),
         &arbiter_blinding,
         chain_id,
-        KERNEL_FEAT_SWAP_REFUND,
         claim_until + 1,
-        [23, 24],
+        SwapArbiterPath::Refund,
+        &mut dom_owner,
+        &mut xmr_owner,
     );
     let punish = branch(
         arbiter,
         &arbiter_blinding,
         chain_id,
-        KERNEL_FEAT_SWAP_PUNISH,
         refund_until + 1,
-        [25, 26],
+        SwapArbiterPath::Punish,
+        &mut dom_owner,
+        &mut xmr_owner,
     );
     let restore = |name: &str, offer: DomClaimOffer| {
         let bytes = offer.to_swap_arbiter_resume_bytes().unwrap();
@@ -766,6 +918,9 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
             &refund,
             shares.adaptor_point(SwapArbiterPath::Refund).unwrap(),
             82,
+            SwapArbiterPath::Refund,
+            &mut dom_owner,
+            &mut xmr_owner,
         ),
     );
     let punish_offer = restore(
@@ -774,7 +929,26 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
             &punish,
             shares.adaptor_point(SwapArbiterPath::Punish).unwrap(),
             83,
+            SwapArbiterPath::Punish,
+            &mut dom_owner,
+            &mut xmr_owner,
         ),
+    );
+    let refund_replacement_offer = offer(
+        &refund,
+        shares.adaptor_point(SwapArbiterPath::Refund).unwrap(),
+        92,
+        SwapArbiterPath::Refund,
+        &mut dom_owner,
+        &mut xmr_owner,
+    );
+    let punish_replacement_offer = offer(
+        &punish,
+        shares.adaptor_point(SwapArbiterPath::Punish).unwrap(),
+        93,
+        SwapArbiterPath::Punish,
+        &mut dom_owner,
+        &mut xmr_owner,
     );
     fs::File::open(&root.0).unwrap().sync_all().unwrap();
     let contract = SwapArbiterContract::new(
@@ -844,6 +1018,8 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
         punish,
         refund_offer,
         punish_offer,
+        refund_replacement_offer,
+        punish_replacement_offer,
         claim_until,
         refund_until,
         session_binding,
@@ -996,6 +1172,17 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
         &setup.claim,
         setup.shares.adaptor_point(SwapArbiterPath::Claim).unwrap(),
         81,
+        SwapArbiterPath::Claim,
+        &mut setup.dom_owner,
+        &mut setup.xmr_owner,
+    );
+    let claim_replacement_offer = offer(
+        &setup.claim,
+        setup.shares.adaptor_point(SwapArbiterPath::Claim).unwrap(),
+        91,
+        SwapArbiterPath::Claim,
+        &mut setup.dom_owner,
+        &mut setup.xmr_owner,
     );
     let claim_bytes = claim_offer.to_swap_arbiter_resume_bytes().unwrap();
     let claim_path = setup._root.0.join("claim.offer");
@@ -1052,6 +1239,19 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
         setup.xmr_owner.bind_peer(&dom_restart_proof),
         setup.shares.joint_xmr_spend_key().unwrap()
     );
+    let claim_adaptor = setup.shares.adaptor_point(SwapArbiterPath::Claim).unwrap();
+    assert!(setup.dom_owner.rejects_dom_presign(
+        &setup.claim,
+        &claim_adaptor,
+        SwapArbiterPath::Claim,
+        81,
+    ));
+    assert!(setup.xmr_owner.rejects_dom_presign(
+        &setup.claim,
+        &claim_adaptor,
+        SwapArbiterPath::Claim,
+        81,
+    ));
     setup
         .dom_owner
         .authorize_dom(&setup.contract, &setup.refund_offer);
@@ -1060,27 +1260,33 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
         .authorize_dom(&setup.contract, &setup.punish_offer);
     setup.xmr_owner.authorize_dom(&setup.contract, &claim_offer);
 
-    let (branch, selected_offer, settlement_height) = match outcome {
-        Outcome::Claim => (&setup.claim, &claim_offer, setup.claim_until),
+    let (branch, selected_offer, replacement_offer, settlement_height) = match outcome {
+        Outcome::Claim => (
+            &setup.claim,
+            &claim_offer,
+            &claim_replacement_offer,
+            setup.claim_until,
+        ),
         Outcome::Refund => {
             assert_eq!(mine(&setup.node).await, setup.claim_until);
-            (&setup.refund, &setup.refund_offer, setup.claim_until + 1)
+            (
+                &setup.refund,
+                &setup.refund_offer,
+                &setup.refund_replacement_offer,
+                setup.claim_until + 1,
+            )
         }
         Outcome::Punish => {
             assert_eq!(mine(&setup.node).await, setup.claim_until);
             assert_eq!(mine(&setup.node).await, setup.refund_until);
-            (&setup.punish, &setup.punish_offer, setup.refund_until + 1)
+            (
+                &setup.punish,
+                &setup.punish_offer,
+                &setup.punish_replacement_offer,
+                setup.refund_until + 1,
+            )
         }
     };
-    let replacement_offer = offer(
-        branch,
-        setup.shares.adaptor_point(outcome.path()).unwrap(),
-        match outcome {
-            Outcome::Claim => 91,
-            Outcome::Refund => 92,
-            Outcome::Punish => 93,
-        },
-    );
     let settlement = match outcome {
         Outcome::Refund => {
             assert!(setup
@@ -1088,7 +1294,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
                 .rejects_dom(selected_offer, settlement_height));
             assert!(setup
                 .dom_owner
-                .rejects_dom(&replacement_offer, settlement_height));
+                .rejects_dom(replacement_offer, settlement_height));
             setup
                 .dom_owner
                 .complete_dom(selected_offer, settlement_height)
@@ -1099,7 +1305,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
                 .rejects_dom(selected_offer, settlement_height));
             assert!(setup
                 .xmr_owner
-                .rejects_dom(&replacement_offer, settlement_height));
+                .rejects_dom(replacement_offer, settlement_height));
             setup
                 .xmr_owner
                 .complete_dom(selected_offer, settlement_height)
@@ -1257,6 +1463,10 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
             "dom_release_recorded_before_submit":true,
             "dom_finality_recorded_before_xmr_submit":true,
             "private_xmr_shares_held_by_separate_processes":true,
+            "distributed_dom_presigning":true,
+            "collaborative_dom_range_proofs":true,
+            "coordinator_never_receives_dom_signing_keys":true,
+            "post_restart_dom_presigning_rejected":true,
             "authenticated_noise_transport":true,
             "noise_peer_identity_pinned":true,
             "transport_session_bound":true,

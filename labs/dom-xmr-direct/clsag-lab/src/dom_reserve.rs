@@ -28,6 +28,12 @@ pub struct ReserveShare {
 }
 
 impl ReserveShare {
+    /// Construct one local proof share from an already owned DOM blinding.
+    /// The aggregate opening is never computed by this API.
+    pub fn from_blinding(blind: BlindingFactor) -> Self {
+        Self { blind }
+    }
+
     /// Reserve shares intended for recovery use the same bounded integer on
     /// both curves. Ordinary generate() remains a full-width DOM-only share.
     pub fn generate_for_recovery(rng: &mut (impl RngCore + CryptoRng)) -> Result<Self, DomError> {
@@ -196,6 +202,10 @@ impl ReserveIntent {
             commitment,
             binding: hash.finalize().into(),
         })
+    }
+    /// Public reserve commitment derived from the two public share keys.
+    pub fn commitment(&self) -> &Commitment {
+        &self.commitment
     }
     fn check_share(&self, index: u8, key: &PublicKey) -> Result<(), DomError> {
         if index > 1

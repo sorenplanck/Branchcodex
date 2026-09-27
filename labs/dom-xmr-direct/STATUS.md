@@ -120,10 +120,17 @@ reconstrói e usa a chave somente dentro do próprio processo, devolvendo apenas
 a transação assinada. Em todos os três resultados, tentativas de inverter os
 papéis na conclusão DOM e na assinatura XMR foram recusadas. O IPC deste ensaio
 fixa ainda o contrato e o digest exato de cada oferta autorizada; uma segunda
-oferta criptograficamente válida do mesmo caminho também foi recusada. A
-pré-assinatura multipartes DOM continua coordenada pelo processo de teste. Isso
-demonstra isolamento operacional das shares XMR, ainda sem participantes de
-produção totalmente independentes.
+oferta criptograficamente válida do mesmo caminho também foi recusada.
+
+A pré-assinatura DOM também foi retirada do coordenador. Cada participante cria
+uma share efêmera diferente para Claim, Refund e Punish. O dono DOM combina sua
+share com a abertura do input; o dono XMR nunca recebe essa abertura. Os dois
+produzem a prova de faixa do output por MPC, e depois executam as duas rodadas de
+assinatura DOM com provas de posse. O coordenador recebe somente pontos,
+compromissos, respostas e a oferta final idêntica produzida pelos dois lados;
+nenhuma chave de kernel nem abertura agregada é retornada. Depois de `Ready`, o
+restart destrói essas shares efêmeras e uma tentativa de recriar a oferta antiga
+é recusada, enquanto as ofertas duráveis continuam utilizáveis.
 
 A base do transporte remoto agora reutiliza o Noise XX do próprio DOM. Ela
 exige a chave estática exata do peer, vincula o handshake ao `chain_id` e ao
@@ -149,22 +156,23 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **29,64 s**, Refund **35,57 s** e Punish **40,86 s**. O runner
+Claim levou **31,94 s**, Refund **36,01 s** e Punish **42,24 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
-mainnet. Ainda faltam separar a pré-assinatura DOM, executar o transporte entre
-hosts distintos, testar reorg no ensaio cruzado e ativar com segurança as novas
-regras de consenso. O resultado comprova um ponta a ponta
+mainnet. Ainda faltam executar o transporte entre hosts distintos, testar reorg
+no ensaio cruzado e ativar com segurança as novas regras de consenso. O
+resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
 
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
 oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund
 e Punish em paralelo com limite de 180 s por caso. Depois da barreira de duas
-confirmações DOM, shares separadas, reinício e transporte Noise, uma reprodução
-local dos mesmos comandos e do mesmo arquivo oficial passou em **126,68 s** de
-parede; os casos completos levaram **115,29 s**, **120,22 s** e **126,67 s**.
-Desde `Ready`, os tempos foram **29,64 s**, **35,57 s** e **40,86 s**. A
+confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
+reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
+mesmo arquivo oficial passou em **136,38 s** de parede; os casos completos
+levaram **121,67 s**, **129,88 s** e **136,37 s**. Desde `Ready`, os tempos
+foram **31,94 s**, **36,01 s** e **42,24 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

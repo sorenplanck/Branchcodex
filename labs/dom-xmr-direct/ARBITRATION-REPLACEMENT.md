@@ -105,7 +105,15 @@ digest autorizado dentro do contrato fixado. Um proxy liga o `arbiter_party` ao
 transporte Noise XX com identidade estática conhecida, `chain_id`, rede, sessão
 e sequência exatos. Os controles cobrem peer errado, sessão divergente, ordem e
 fragmentação; a matriz inteira usa esse canal e o recria no restart. Falta
-repetir entre hosts distintos e distribuir integralmente a pré-assinatura DOM.
+repetir entre hosts distintos.
+
+As chaves de pré-assinatura DOM agora também ficam distribuídas. Cada processo
+gera uma share efêmera por caminho, prova sua posse e participa tanto da prova
+de faixa colaborativa do output quanto das duas rodadas da assinatura adaptor.
+O coordenador soma apenas pontos públicos e não recebe chave de kernel, abertura
+de output ou nonce secreto. As duas finalizações produzem a mesma oferta. Após
+o restart, as shares efêmeras desaparecem e os processos recusam recriar uma
+oferta antiga, mas as ofertas persistidas antes do funding continuam válidas.
 
 O processo de share agora possui retomada durável. Seu arquivo exclusivo `0600`
 é sincronizado, bloqueado e vinculado a papel/operação/chain; outro processo,
@@ -119,7 +127,7 @@ Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 29,64 s para Claim, 35,57 s para Refund e 40,86 s para Punish
+intervalo mediu 31,94 s para Claim, 36,01 s para Refund e 42,24 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 
