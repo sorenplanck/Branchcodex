@@ -85,6 +85,8 @@ pub enum LegError {
     Setup(#[from] solana_profile::SetupError),
     #[error("route secret: {0}")]
     RouteSecret(#[from] solana_route_secret::RouteSecretError),
+    #[error("cross-curve proof: {0:?}")]
+    Dleq(xmr_dleq_sigma::DleqError),
     #[error("session initialization: {0}")]
     Session(#[from] solana_session_init::SessionInitError),
     #[error("setup store: {0}")]
@@ -417,6 +419,39 @@ impl SolanaLegV1 {
         store: &SolanaSetupStore,
         rng: &mut (impl rand::CryptoRng + rand::RngCore),
     ) -> Result<EstablishedLegV1, LegError> {
+        Self::establish_inner(input, profile, store, None, rng)
+    }
+
+    /// Establish this position from a secret the ROUTE owns.
+    ///
+    /// A composed route is one intent locked to one adaptor point across both of its
+    /// settlements: `ComposedBindingV2::bind` refuses two. A leg that generates its own
+    /// scalar is a standalone swap, and two of them side by side are two swaps in one
+    /// manifest rather than a route. So the route generates the scalar once and each
+    /// position is established from it, with its own bound proof over its own context.
+    pub fn establish_for_route(
+        input: &LegPlanInputV1,
+        profile: &SolanaAdapterProfileV1,
+        store: &SolanaSetupStore,
+        route_witness_little_endian: [u8; 32],
+        rng: &mut (impl rand::CryptoRng + rand::RngCore),
+    ) -> Result<EstablishedLegV1, LegError> {
+        Self::establish_inner(
+            input,
+            profile,
+            store,
+            Some(route_witness_little_endian),
+            rng,
+        )
+    }
+
+    fn establish_inner(
+        input: &LegPlanInputV1,
+        profile: &SolanaAdapterProfileV1,
+        store: &SolanaSetupStore,
+        route_witness_little_endian: Option<[u8; 32]>,
+        rng: &mut (impl rand::CryptoRng + rand::RngCore),
+    ) -> Result<EstablishedLegV1, LegError> {
         input.validate_token_accounts()?;
         let schedule = LegScheduleV1::plan(
             &input.anchor,
@@ -427,8 +462,30 @@ impl SolanaLegV1 {
             input.delays,
         )?;
         let context = input.proof_context(&schedule);
-        let route: SolanaRouteSecret = prepare_route_secret(profile, &context, rng)?;
         let context_hash = proof_context_hash(profile, &context)?;
+        let route: SolanaRouteSecret = match route_witness_little_endian {
+            // A ROUTE's secret, proved for this settlement. Both positions of a composed
+            // route are locked to one adaptor point -- `ComposedBindingV2::bind` refuses
+            // two -- so the scalar belongs to the route and each settlement gets its own
+            // bound proof of it. `restore` then checks that the witness reproduces exactly
+            // the public claim that proof carries, so a witness that is not this scalar is
+            // refused rather than resumed.
+            Some(witness) => {
+                let secret = xmr_dleq_sigma::CrossCurveSecret252::from_little_endian(witness)
+                    .map_err(LegError::Dleq)?;
+                let proof = xmr_dleq_sigma::prove_bound(
+                    &secret,
+                    input.settlement_id,
+                    context_hash,
+                    xmr_dleq_sigma::ROLE_SOLANA_CONDITION_LOCK,
+                    rng,
+                )
+                .map_err(LegError::Dleq)?;
+                SolanaRouteSecret::restore(witness, proof, rng)?
+            }
+            // A standalone leg: one settlement, its own scalar.
+            None => prepare_route_secret(profile, &context, rng)?,
+        };
         let claim = verify_counterparty_bundle(route.proof(), &input.settlement_id, &context_hash)?;
         let lock = ConditionLockV1::from_verified_claim(claim)?;
         let terms = Self::frozen_terms(input, profile, &schedule, lock.dom_adaptor_point())?;

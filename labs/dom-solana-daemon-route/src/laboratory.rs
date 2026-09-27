@@ -75,6 +75,9 @@ pub const DOM_ANCHOR_HEIGHT: u64 = 1;
 /// The laboratory passphrase that opens the Contracts transport identity authority.
 pub const IDENTITY_PASSPHRASE: &str = "a laboratory contracts identity passphrase";
 
+/// The intent both positions of this route execute.
+pub const ROUTE_INTENT: [u8; 32] = [0x49; 32];
+
 /// Where each party's Contracts transport identity authority lives.
 ///
 /// TWO of them, because each party opens its own with its own passphrase, and because the
@@ -266,6 +269,9 @@ pub fn provision(
         upstream_solana: &upstream_facts,
         downstream_solana: &downstream_facts,
         provisioning_dir: &leg_store_dir,
+        // One intent for the route, because a route is one intent carried out as two
+        // settlements. `ComposedBindingV2::bind` refuses two.
+        intent_hash: ROUTE_INTENT,
         upstream: position(0x11, parties),
         downstream: position(0x22, parties),
         now_seconds,

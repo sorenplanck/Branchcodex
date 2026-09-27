@@ -137,6 +137,12 @@ pub struct RouteTermsInputV1<'a> {
     /// one of them. Writing it there would put a file the daemon never named inside
     /// the directory it validates.
     pub provisioning_dir: &'a Path,
+    /// The intent both positions execute.
+    ///
+    /// ONE value for the route: `ComposedBindingV2::bind` refuses two settlements whose
+    /// intent hashes differ, because a route is one intent carried out as two settlements
+    /// and not two errands that happen to share a manifest.
+    pub intent_hash: [u8; 32],
     /// Trusted wall clock, seconds. The schedule is planned from it.
     pub now_seconds: u64,
     /// The DOM chain height the schedule is anchored at.
@@ -209,7 +215,7 @@ fn plan_input(
     LegPlanInputV1 {
         settlement_id: position.settlement_id,
         session_id: position.session_id,
-        intent_hash: derived(b"DOM-SOLANA-DAEMON-ROUTE/INTENT/V1\0", &position.settlement_id),
+        intent_hash: input.intent_hash,
         solver_id: derived(b"DOM-SOLANA-DAEMON-ROUTE/SOLVER/V1\0", &position.settlement_id),
         dom_chain_id: input.registry.dom_chain_id,
         dom_asset_id: input.registry.dom_asset_id,
@@ -270,6 +276,15 @@ fn derived(domain: &[u8], seed: &[u8; 32]) -> [u8; 32] {
 pub fn provision(
     input: &RouteTermsInputV1<'_>,
 ) -> Result<(ProvisionedRouteTermsV1, [ProvisionedPositionV1; 2]), String> {
+    // ONE secret for the route, proved separately for each settlement.
+    //
+    // `ComposedBindingV2::bind` refuses two settlements whose adaptor points differ, and it
+    // is right to: the same secret opening both legs is what makes the hop atomic. A leg
+    // that generates its own scalar is a standalone swap, and two of those side by side are
+    // two swaps in one manifest. So the scalar is generated here, once, and each position is
+    // established from it with its own bound proof over its own context.
+    let route_witness = xmr_dleq_sigma::CrossCurveSecret252::generate(&mut rand::rngs::OsRng)
+        .xmr_share_little_endian();
     // One profile per cluster: the profile commits to the escrow program id, and the
     // two clusters run their own deployment of it.
     let upstream_profile = profile(input.upstream_solana)?;
@@ -333,6 +348,7 @@ pub fn provision(
             .resolve(&anchor, now)
             .map_err(|error| format!("upstream deadline: {error:?}"))?,
         "upstream",
+        route_witness,
     )?;
     let downstream = establish(
         input,
@@ -346,6 +362,7 @@ pub fn provision(
             .resolve(&anchor, now)
             .map_err(|error| format!("downstream deadline: {error:?}"))?,
         "downstream",
+        route_witness,
     )?;
 
     write_terms(
@@ -381,6 +398,7 @@ fn establish(
     position: &SolanaPositionTermsPlanV1,
     chosen_deadline: ScheduleAnchorV1,
     label: &str,
+    route_witness: [u8; 32],
 ) -> Result<ProvisionedPositionV1, String> {
     crate::owner_only::directory(input.provisioning_dir)?;
     let store = SolanaSetupStore::open(
@@ -398,8 +416,14 @@ fn establish(
         solana_profile_digest,
         chosen_deadline,
     );
-    let established = SolanaLegV1::establish(&plan, profile, &store, &mut rand::rngs::OsRng)
-        .map_err(|error| format!("{label} leg: {error:?}"))?;
+    let established = SolanaLegV1::establish_for_route(
+        &plan,
+        profile,
+        &store,
+        route_witness,
+        &mut rand::rngs::OsRng,
+    )
+    .map_err(|error| format!("{label} leg: {error:?}"))?;
     let leg = established.leg();
     let terms = leg.terms().clone();
     let terms_digest = terms
