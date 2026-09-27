@@ -22,6 +22,7 @@ REQUIRED_TRUE = (
     "monerod",
     "remote_participant_servers",
     "authenticated_noise_transport",
+    "bounded_noise_handshake_and_message_deadlines",
     "encrypted_participant_state",
     "noise_peer_identity_pinned",
     "transport_session_bound",

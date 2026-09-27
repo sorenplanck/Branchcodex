@@ -45,6 +45,12 @@ faixa colaborativa e da pré-assinatura adaptor e nunca entrega as chaves ao
 coordenador. As shares XMR duráveis são cifradas em repouso com
 XChaCha20-Poly1305 e uma chave de wrapping separada.
 
+O estabelecimento Noise tem prazo total de 15 s e cada mensagem completa,
+inclusive todos os seus fragmentos, tem prazo total de 45 s. Um peer que apenas
+abre o TCP ou envia o primeiro fragmento não consegue manter o helper preso por
+tempo indefinido. Depois de qualquer timeout o canal é descartado; o modo
+persistente volta a aceitar uma conexão autenticada nova.
+
 O helper persiste sua share cifrada em um arquivo exclusivo `0600`, sincronizado
 e ligado à operação. A chave de wrapping também exige modo `0600` e pode ficar
 em volume ou secret store separado. A matriz mata e reinicia ambos os helpers
@@ -76,18 +82,18 @@ python3 scripts/run_arbiter_matrix.py \
   --workers 2
 ```
 
-A campanha mais recente usou dois workers e terminou em 235,61 s de parede,
+A campanha mais recente usou dois workers e terminou em 242,19 s de parede,
 com duas confirmações DOM, shares XMR e DOM em processos separados, prova de
 faixa colaborativa, reinício dos dois participantes, rechecagem canônica antes
 da assinatura XMR e todas as operações pelo canal Noise. Claim, Refund e
-Punish levaram 33,32 s, 40,29 s e 39,05 s desde `Ready`. Um quarto caso
+Punish levaram 34,23 s, 40,56 s e 46,79 s desde `Ready`. Um quarto caso
 promoveu uma cadeia DOM concorrente, removeu o Claim e recusou qualquer
-assinatura XMR em 37,64 s desde `Ready`. Os registros completos e os limites
+assinatura XMR em 45,13 s desde `Ready`. Os registros completos e os limites
 atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
-O Claim financiado pelo caminho de servidores persistentes, estado cifrado e
-barreira de ativação passou em 107,80 s no total e 32,68 s de `Ready` até a
-conclusão. Esse ensaio prova o protocolo de
+O Claim financiado pelo caminho de servidores persistentes, estado cifrado,
+barreira de ativação e prazos Noise passou em 93,06 s no total e 27,70 s de
+`Ready` até a conclusão. Esse ensaio prova o protocolo de
 execução remota e a retomada sobre TCP/Noise, porém usou interfaces loopback no
 mesmo host. A execução em máquinas físicas distintas continua pendente.
 

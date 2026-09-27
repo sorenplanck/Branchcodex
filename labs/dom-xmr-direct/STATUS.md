@@ -127,7 +127,7 @@ sem o Claim; esses blocos atravessam `ChainState::connect_block`, promovem o for
 mais pesado e removem o settlement da altura canônica. A rechecagem detecta o
 novo hash, recusa a liberação e o ensaio confirma que nenhuma assinatura ou
 transação XMR foi solicitada. Na campanha mais recente, a recusa ocorreu em
-**37,64 s** desde `Ready` e **117,90 s** no caso completo.
+**45,13 s** desde `Ready` e **121,09 s** no caso completo.
 
 As duas shares privadas que formam a chave XMR agora são geradas e mantidas
 por processos distintos (`arbiter_party`). O coordenador recebe somente as
@@ -161,10 +161,17 @@ ela ainda roda num único host e não substitui um ensaio físico entre máquina
 O modo persistente agora permite deixar cada participante em outro host e
 reabrir seu helper privado depois que o coordenador desconecta. Um Claim
 financiado percorreu esse modo, reiniciou e restaurou os dois participantes e
-terminou em **107,80 s** no total e **32,68 s** desde `Ready`, já com as shares
+terminou em **93,06 s** no total e **27,70 s** desde `Ready`, já com as shares
 cifradas em repouso e a barreira de ativação. O teste usou dois
 servidores loopback separados; `clsag-lab/REMOTE-REGTEST.md` registra o mesmo
 procedimento para máquinas distintas.
+
+O transporte remoto agora impõe 15 s para concluir o handshake Noise e 45 s
+para uma mensagem inteira, não para cada fragmento isolado. Controles negativos
+confirmaram que um TCP silencioso e uma mensagem interrompida depois do primeiro
+fragmento falham pelo prazo e liberam o servidor persistente para outra conexão.
+Isso remove uma espera ilimitada do caminho remoto; o runner continua impondo o
+orçamento externo de 180 s ao processo completo.
 
 Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
 sincronizado no disco e ligado a papel, settlement, contexto e chain id. A share
@@ -181,7 +188,7 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **33,32 s**, Refund **40,29 s** e Punish **39,05 s**. O runner
+Claim levou **34,23 s**, Refund **40,56 s** e Punish **46,79 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
 mainnet. Ainda faltam executar o transporte em máquinas físicas distintas,
@@ -205,10 +212,10 @@ que contenção do runner seja confundida com latência do protocolo. Depois da
 barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
 reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **235,61 s** de parede com dois workers. Claim,
-Refund e Punish completos levaram **110,50 s**, **117,69 s** e **120,36 s**; o
-reorg foi recusado em **117,90 s** totais. Desde `Ready`, os settlements levaram
-**33,32 s**, **40,29 s** e **39,05 s**. A
+mesmo arquivo oficial passou em **242,19 s** de parede com dois workers. Claim,
+Refund e Punish completos levaram **114,70 s**, **121,07 s** e **120,26 s**; o
+reorg foi recusado em **121,09 s** totais. Desde `Ready`, os settlements levaram
+**34,23 s**, **40,56 s** e **46,79 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

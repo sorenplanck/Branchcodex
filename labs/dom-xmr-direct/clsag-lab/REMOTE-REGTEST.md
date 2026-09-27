@@ -60,6 +60,12 @@ separado do estado e faça backup seguro dos dois; perder a chave torna a share
 irrecuperável. Um host que consiga ler os dois arquivos ainda precisa ser
 protegido por isolamento, KMS ou HSM.
 
+O handshake deve terminar em até 15 s e cada mensagem Noise completa em até
+45 s. Esses prazos incluem todos os fragmentos da mensagem; conexão silenciosa
+ou fragmentação incompleta é encerrada. Configure o supervisor para reiniciar o
+servidor caso o processo termine por erro local e mantenha o limite externo de
+180 s para o ensaio completo.
+
 No coordenador, crie um arquivo `remote-parties.json`:
 
 ```json
@@ -86,7 +92,8 @@ DXA1_REMOTE_PARTIES=/secure/dxa1/remote-parties.json \
 
 O resultado final deve conter `"remote_participant_servers":true`,
 `"participant_restart_restored_bound_shares":true` e um tempo positivo de
-`ready_to_complete_seconds` de no máximo 180 segundos. Para validar todo o
+`ready_to_complete_seconds` de no máximo 180 segundos. Ele também deve registrar
+`"bounded_noise_handshake_and_message_deadlines":true`. Para validar todo o
 caminho numa única máquina antes de distribuir os hosts:
 
 ```sh

@@ -18,8 +18,15 @@ use tokio::net::{TcpListener, TcpStream};
 const ENVELOPE_MAGIC: &[u8; 8] = b"DXA1NET1";
 const HEADER_BYTES: usize = ENVELOPE_MAGIC.len() + 32 + 8 + 4;
 const CHUNK_BYTES: usize = NOISE_MAX_MSG - 16;
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
-const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(not(test))]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(not(test))]
+const MESSAGE_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(test)]
+const MESSAGE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Maximum application payload accepted by the participant channel.
 pub const MAX_SWAP_MESSAGE_BYTES: usize = 1 << 20;
@@ -48,13 +55,16 @@ impl SwapNoiseChannel {
         chain_id: [u8; 32],
         session: [u8; 32],
     ) -> Result<Self, DomError> {
-        let mut stream = tokio::time::timeout(IO_TIMEOUT, TcpStream::connect(address))
+        let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
             .await
             .map_err(|_| invalid("swap transport connect timeout"))?
             .map_err(|error| DomError::Internal(format!("swap transport connect: {error}")))?;
-        let transport =
-            perform_handshake_initiator(&mut stream, local_static, network_magic, &chain_id)
-                .await?;
+        let transport = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            perform_handshake_initiator(&mut stream, local_static, network_magic, &chain_id),
+        )
+        .await
+        .map_err(|_| invalid("swap transport handshake timeout"))??;
         Self::new(stream, transport, expected_peer, session)
     }
 
@@ -67,13 +77,16 @@ impl SwapNoiseChannel {
         chain_id: [u8; 32],
         session: [u8; 32],
     ) -> Result<Self, DomError> {
-        let (mut stream, _) = tokio::time::timeout(IO_TIMEOUT, listener.accept())
+        let (mut stream, _) = listener
+            .accept()
             .await
-            .map_err(|_| invalid("swap transport accept timeout"))?
             .map_err(|error| DomError::Internal(format!("swap transport accept: {error}")))?;
-        let transport =
-            perform_handshake_responder(&mut stream, local_static, network_magic, &chain_id)
-                .await?;
+        let transport = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            perform_handshake_responder(&mut stream, local_static, network_magic, &chain_id),
+        )
+        .await
+        .map_err(|_| invalid("swap transport handshake timeout"))??;
         Self::new(stream, transport, expected_peer, session)
     }
 
@@ -128,19 +141,19 @@ impl SwapNoiseChannel {
         let mut framed = Vec::with_capacity(4 + plaintext.len());
         framed.extend_from_slice(&total_len.to_le_bytes());
         framed.extend_from_slice(&plaintext);
-        for chunk in framed.chunks(CHUNK_BYTES) {
-            let mut ciphertext = vec![0; chunk.len() + 16];
-            let written = self
-                .transport
-                .write_message(chunk, &mut ciphertext)
-                .map_err(|error| DomError::Internal(format!("swap Noise encrypt: {error}")))?;
-            tokio::time::timeout(
-                IO_TIMEOUT,
-                write_framed(&mut self.stream, &ciphertext[..written]),
-            )
-            .await
-            .map_err(|_| invalid("swap transport write timeout"))??;
-        }
+        tokio::time::timeout(MESSAGE_TIMEOUT, async {
+            for chunk in framed.chunks(CHUNK_BYTES) {
+                let mut ciphertext = vec![0; chunk.len() + 16];
+                let written = self
+                    .transport
+                    .write_message(chunk, &mut ciphertext)
+                    .map_err(|error| DomError::Internal(format!("swap Noise encrypt: {error}")))?;
+                write_framed(&mut self.stream, &ciphertext[..written]).await?;
+            }
+            Ok::<(), DomError>(())
+        })
+        .await
+        .map_err(|_| invalid("swap transport message write timeout"))??;
         self.send_sequence = self
             .send_sequence
             .checked_add(1)
@@ -150,13 +163,17 @@ impl SwapNoiseChannel {
 
     /// Receive one message and reject a different session or sequence.
     pub async fn receive(&mut self) -> Result<Vec<u8>, DomError> {
+        tokio::time::timeout(MESSAGE_TIMEOUT, self.receive_inner())
+            .await
+            .map_err(|_| invalid("swap transport message read timeout"))?
+    }
+
+    async fn receive_inner(&mut self) -> Result<Vec<u8>, DomError> {
         let maximum = HEADER_BYTES + MAX_SWAP_MESSAGE_BYTES;
         let mut plaintext = Vec::new();
         let mut expected_total = None;
         loop {
-            let ciphertext = tokio::time::timeout(READ_IDLE_TIMEOUT, read_framed(&mut self.stream))
-                .await
-                .map_err(|_| invalid("swap transport read timeout"))??;
+            let ciphertext = read_framed(&mut self.stream).await?;
             let mut chunk = vec![0; ciphertext.len()];
             let length = self
                 .transport
@@ -295,5 +312,61 @@ mod tests {
         .await;
         assert!(result.is_err());
         responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn silent_peer_cannot_hold_the_noise_handshake_open() {
+        let (_, initiator_public) = generate_static_keypair();
+        let (responder_secret, _) = generate_static_keypair();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            SwapNoiseChannel::accept(
+                &listener,
+                &responder_secret,
+                initiator_public,
+                NETWORK_MAGIC_REGTEST,
+                CHAIN,
+                SESSION,
+            )
+            .await
+        });
+        let _silent = TcpStream::connect(address).await.unwrap();
+        let error = match responder.await.unwrap() {
+            Ok(_) => panic!("silent handshake was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("handshake timeout"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_fragmented_message_has_one_total_deadline() {
+        let (mut initiator, mut responder) = pair(SESSION, SESSION).await;
+        let payload = vec![0xA7; CHUNK_BYTES];
+        let mut plaintext = Vec::with_capacity(HEADER_BYTES + payload.len());
+        plaintext.extend_from_slice(ENVELOPE_MAGIC);
+        plaintext.extend_from_slice(&SESSION);
+        plaintext.extend_from_slice(&0u64.to_le_bytes());
+        plaintext.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        plaintext.extend_from_slice(&payload);
+        let mut framed = Vec::with_capacity(4 + plaintext.len());
+        framed.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&plaintext);
+
+        let first = &framed[..CHUNK_BYTES];
+        let mut ciphertext = vec![0; first.len() + 16];
+        let written = initiator
+            .transport
+            .write_message(first, &mut ciphertext)
+            .unwrap();
+        write_framed(&mut initiator.stream, &ciphertext[..written])
+            .await
+            .unwrap();
+
+        let error = responder
+            .receive()
+            .await
+            .expect_err("incomplete message crossed its deadline");
+        assert!(error.to_string().contains("message read timeout"));
     }
 }
