@@ -17,7 +17,7 @@
 mod common;
 
 use common::{provision_all, TIME_EVIDENCE, TIME_POLICY};
-use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1;
+use dom_solana_daemon_route::{RouteIdentitiesV1, SolanaRouteBootstrapPlanV1};
 use route_time_anchor::{
     CheckpointRoleV2, ClockKindV2, RouteTimeEvidenceV2, RouteTimePolicyV2, SignedRouteTimeEvidenceV2,
     SignedRouteTimePolicyV2,
@@ -162,8 +162,60 @@ fn the_time_artifacts_turn_four_more_pins_into_measurements() {
         13,
         "two authority-set digests, the policy digest and the evidence digest"
     );
+    // Every pin that is the digest of an artifact is now a measurement. The six that
+    // remain are identities a deployment declares, not files this crate can write.
     assert!(
-        after.pins_are_placeholders(),
-        "six pins are still labels and the plan must keep saying so"
+        after.artifact_pins_are_complete(),
+        "thirteen artifact pins measured is the whole artifact side of the bootstrap"
     );
+}
+
+/// The whole bootstrap on disk: every artifact written, every artifact pin measured,
+/// the six identities declared, and both manifests encoded from that plan.
+///
+/// This is as far as this crate can assert on its own. What it does NOT assert is that
+/// `load_production_bootstrap_v11` and `load_authenticated_production_inputs_v1` accept
+/// the directory -- that needs the rest of the layout the daemon creates, and it is the
+/// next step rather than something to imply here.
+#[test]
+fn the_complete_artifact_side_encodes_both_manifests() {
+    let provisioned = provision_all();
+    let plan = provisioned.plan.with_identities(RouteIdentitiesV1 {
+        route_id: [0x31; 32],
+        process_owner_id: [0x32; 32],
+        coordinator_id: [0x33; 32],
+        coordinator_plan_authority_id: [0x34; 32],
+        actuator_bindings_digest: [0x35; 32],
+        solver_inventory_binding_digest: [0x36; 32],
+    });
+
+    assert!(plan.artifact_pins_are_complete());
+    assert_eq!(plan.route_id, [0x31; 32], "declaring identities sets the route id");
+
+    // Written into the same state directory the artifacts are in, which is what the
+    // daemon is handed.
+    let written = plan
+        .write_manifests(provisioned.directory.path())
+        .expect("both manifests encode from a plan with every artifact pin measured");
+    assert_eq!(written.len(), 2);
+    for path in written {
+        assert!(path.exists(), "{} was not written", path.display());
+    }
+
+    // Every artifact the bootstrap names is beside them.
+    for relative in [
+        "artifacts/registry.v1.sqlite3",
+        "artifacts/registry-authorities.v1",
+        common::UPSTREAM_TERMS,
+        common::DOWNSTREAM_TERMS,
+        common::RELAY_ROSTER,
+        common::PARTICIPANT_BINDINGS,
+        TIME_POLICY,
+        TIME_EVIDENCE,
+    ] {
+        assert!(
+            provisioned.directory.path().join(relative).exists(),
+            "{relative} is named by a pin and is not on disk"
+        );
+    }
 }

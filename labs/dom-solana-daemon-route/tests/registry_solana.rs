@@ -122,9 +122,9 @@ fn binding_the_registry_turns_four_pins_into_measurements() {
         bound.network_id, NETWORK,
         "a bound plan must take the registry's network id, not keep its own"
     );
-    // Fifteen pins still to go, and the plan says so rather than implying a route
-    // the daemon would admit.
-    assert!(bound.pins_are_placeholders());
+    // Nine artifact pins still to go, and the plan says so rather than implying a
+    // route the daemon would admit.
+    assert!(!bound.artifact_pins_are_complete());
 }
 
 #[test]

@@ -64,7 +64,7 @@
 //! encoded and decoded before any artifact is signed. A manifest built this way is
 //! structurally valid and **not** a route the daemon would admit: authentication
 //! reads the artifacts. Producing them is the next step, and
-//! [`SolanaRouteBootstrapPlanV1::pins_are_placeholders`] says so in the type.
+//! [`SolanaRouteBootstrapPlanV1::artifact_pins_are_complete`] says so in the type.
 
 #![forbid(unsafe_code)]
 
@@ -175,6 +175,35 @@ const CONTRACTS_IDENTITY_STORE: &str = "state/contracts-transport-identity.v1.sq
 const CONTRACTS_BUDGET_POLICY: &str = "artifacts/contracts-budget-policy.v1";
 const CONTRACTS_BOOTSTRAP: &str = "artifacts/contracts-bootstrap.v1";
 
+/// How many of the nineteen route pins are digests of an artifact this crate writes.
+///
+/// The other six are declarations; see
+/// [`SolanaRouteBootstrapPlanV1::artifact_pins_are_complete`].
+pub const ARTIFACT_PIN_COUNT: usize = 13;
+
+/// The six pins that are identities a deployment declares rather than digests of
+/// artifacts.
+///
+/// Grouped so a caller supplies them together and the type says what they are. Every
+/// one must be non-zero: `ProductionRoutePinsV1::validate` refuses a zero pin, which is
+/// the right refusal -- a zero owner id would fence nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteIdentitiesV1 {
+    /// Composed route identity. Threaded into admission by the caller and checked for
+    /// consistency against the route store's checkpoint; never derived from content.
+    pub route_id: [u8; 32],
+    /// The identity a fenced store records as its owner, so another process is refused.
+    pub process_owner_id: [u8; 32],
+    /// The settlement coordinator this route's work is dispatched under.
+    pub coordinator_id: [u8; 32],
+    /// The plan authority the coordinator accepts plans from.
+    pub coordinator_plan_authority_id: [u8; 32],
+    /// Binds the concrete actuator authorities.
+    pub actuator_bindings_digest: [u8; 32],
+    /// Binds the solver inventory and bond authority.
+    pub solver_inventory_binding_digest: [u8; 32],
+}
+
 /// One counterparty position of the route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SolanaRoutePositionPlanV1 {
@@ -212,6 +241,9 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// route has a time authority: the daemon can tell whether a deadline is still
     /// reachable instead of trusting a clock.
     pub route_time: Option<ProvisionedRouteTimeV1>,
+    /// The six declared identities, once a caller has supplied them. Absent means the
+    /// plan is using derived laboratory labels.
+    pub identities: Option<RouteIdentitiesV1>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -247,6 +279,7 @@ impl SolanaRouteBootstrapPlanV1 {
             roster: None,
             participants: None,
             route_time: None,
+            identities: None,
         }
     }
 
@@ -327,12 +360,37 @@ impl SolanaRouteBootstrapPlanV1 {
         registry + terms + roster + participants + route_time
     }
 
-    /// True while any pin is still a derived label rather than the digest of a
-    /// signed artifact. While it holds, the manifest encodes and decodes but
-    /// authentication would refuse the route. Kept as a method rather than a
-    /// comment so a caller cannot pretend otherwise.
-    pub const fn pins_are_placeholders(&self) -> bool {
-        self.measured_pin_count() < 19
+    /// True while any ARTIFACT pin is still a derived label rather than the digest of
+    /// something on disk. While it holds, the manifest encodes and decodes but
+    /// authentication would refuse the route, because authentication reads the
+    /// artifacts.
+    ///
+    /// The threshold is [`ARTIFACT_PIN_COUNT`] and not nineteen, and the difference is
+    /// not bookkeeping. Six of the nineteen pins are not digests of artifacts at all:
+    /// they are identities a deployment DECLARES, and nothing in
+    /// `load_authenticated_production_inputs_v1` compares them with a file. Reading the
+    /// daemon's own uses of them says so plainly -- `process_owner_id` is the fence
+    /// owner written into the route store it creates, `coordinator_id` and
+    /// `coordinator_plan_authority_id` are handed to the coordinator at run time,
+    /// `route_id` is threaded into admission by the caller and only ever checked for
+    /// consistency against the stored checkpoint, and the two binding digests appear in
+    /// the pins' own non-zero validation and in the run-time signer binding. Counting
+    /// them as missing artifacts would mean this crate could never report itself
+    /// complete no matter what it wrote.
+    pub const fn artifact_pins_are_complete(&self) -> bool {
+        self.measured_pin_count() >= ARTIFACT_PIN_COUNT
+    }
+
+    /// Declare the six identity pins.
+    ///
+    /// Without this the plan derives them from labels, which is honest for a laboratory
+    /// and wrong for a deployment: `process_owner_id` in particular is the identity a
+    /// fenced store will refuse another process for, so it belongs to whoever runs the
+    /// daemon and not to whoever wrote the manifest.
+    pub fn with_identities(mut self, identities: RouteIdentitiesV1) -> Self {
+        self.route_id = identities.route_id;
+        self.identities = Some(identities);
+        self
     }
 
     fn pins(&self) -> ProductionRoutePinsV1 {
@@ -362,6 +420,7 @@ impl SolanaRouteBootstrapPlanV1 {
             ),
         };
         let time = self.route_time;
+        let identities = self.identities;
         ProductionRoutePinsV1 {
             network_id: self.network_id,
             route_id: self.route_id,
@@ -393,11 +452,22 @@ impl SolanaRouteBootstrapPlanV1 {
                 || placeholder("time-evidence"),
                 |value| value.time_evidence_digest,
             ),
-            process_owner_id: placeholder("process-owner"),
-            coordinator_id: placeholder("coordinator"),
-            coordinator_plan_authority_id: placeholder("coordinator-plan-authority"),
-            actuator_bindings_digest: placeholder("actuator-bindings"),
-            solver_inventory_binding_digest: placeholder("solver-inventory-binding"),
+            process_owner_id: identities
+                .map_or_else(|| placeholder("process-owner"), |value| value.process_owner_id),
+            coordinator_id: identities
+                .map_or_else(|| placeholder("coordinator"), |value| value.coordinator_id),
+            coordinator_plan_authority_id: identities.map_or_else(
+                || placeholder("coordinator-plan-authority"),
+                |value| value.coordinator_plan_authority_id,
+            ),
+            actuator_bindings_digest: identities.map_or_else(
+                || placeholder("actuator-bindings"),
+                |value| value.actuator_bindings_digest,
+            ),
+            solver_inventory_binding_digest: identities.map_or_else(
+                || placeholder("solver-inventory-binding"),
+                |value| value.solver_inventory_binding_digest,
+            ),
         }
     }
 

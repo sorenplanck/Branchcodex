@@ -140,5 +140,5 @@ fn binding_the_roster_turns_one_more_pin_into_a_measurement() {
         8,
         "relay_binding_digest"
     );
-    assert!(after.pins_are_placeholders());
+    assert!(!after.artifact_pins_are_complete());
 }

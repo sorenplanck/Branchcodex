@@ -215,7 +215,7 @@ fn binding_the_terms_turns_three_more_pins_into_measurements() {
         "upstream_terms_digest, downstream_terms_digest and route_scope_digest"
     );
     assert!(
-        with_terms.pins_are_placeholders(),
-        "twelve pins are still labels and the plan must keep saying so"
+        !with_terms.artifact_pins_are_complete(),
+        "six artifact pins are still labels and the plan must keep saying so"
     );
 }

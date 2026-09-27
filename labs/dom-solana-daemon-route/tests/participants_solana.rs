@@ -150,5 +150,5 @@ fn binding_the_setups_turns_one_more_pin_into_a_measurement() {
             .expect("the provisioned bindings"),
     );
     assert_eq!(after.measured_pin_count(), 9, "participant_bindings_digest");
-    assert!(after.pins_are_placeholders());
+    assert!(!after.artifact_pins_are_complete());
 }

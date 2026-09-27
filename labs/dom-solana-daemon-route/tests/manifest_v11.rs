@@ -65,7 +65,7 @@ fn the_pins_are_declared_as_placeholders() {
     // Until the signed artifacts exist, a manifest from this crate is structurally
     // valid and would be refused at authentication. The type says so, so that a
     // later reader does not mistake a passing round trip for an admitted route.
-    assert!(plan().pins_are_placeholders());
+    assert!(!plan().artifact_pins_are_complete());
 }
 
 #[test]
