@@ -1,0 +1,51 @@
+[
+  {
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--release",
+      "--locked",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/local-setup-receipt-latest-start-tests.log",
+    "results": [
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s"
+    ]
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--release",
+      "--locked",
+      "--all-targets",
+      "-j2",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "log": "target/local-setup-receipt-latest-start-clippy.log",
+    "results": []
+  },
+  {
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--release",
+      "--locked",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/local-setup-receipt-latest-start-build.log",
+    "results": []
+  }
+]

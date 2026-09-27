@@ -24,9 +24,24 @@ impl Drop for LabProcess {
 }
 
 fn spawn(binary: &Path, mode: &str) -> (LabProcess, ChildStdin, BufReader<ChildStdout>) {
+    spawn_with_authority(binary, mode, None)
+}
+
+fn spawn_with_authority(
+    binary: &Path,
+    mode: &str,
+    authority: Option<&Path>,
+) -> (LabProcess, ChildStdin, BufReader<ChildStdout>) {
     assert!(binary.is_absolute() && binary.is_file());
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .arg(mode)
+        .env_remove("DXP1_LOCAL_SETUP_AUTHORITY_FILE");
+    if let Some(path) = authority {
+        assert!(path.is_absolute());
+        command.env("DXP1_LOCAL_SETUP_AUTHORITY_FILE", path);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -35,6 +50,43 @@ fn spawn(binary: &Path, mode: &str) -> (LabProcess, ChildStdin, BufReader<ChildS
     let writer = child.stdin.take().unwrap();
     let reader = BufReader::new(child.stdout.take().unwrap());
     (LabProcess(child), writer, reader)
+}
+
+fn write_private_new(path: &Path, bytes: &[u8; 32]) {
+    use std::{
+        fs::{File, OpenOptions},
+        os::unix::fs::OpenOptionsExt,
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+    File::open(path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+}
+
+fn read_private_fixed(path: &Path) -> [u8; 32] {
+    use std::{fs::File, os::unix::fs::PermissionsExt};
+    let file = File::open(path).unwrap();
+    let metadata = file.metadata().unwrap();
+    assert!(metadata.is_file() && metadata.permissions().mode() & 0o777 == 0o600);
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(33).read_to_end(&mut bytes).unwrap();
+    bytes.as_slice().try_into().unwrap()
+}
+
+fn decode_receipt(value: &Value) -> [u8; 32] {
+    let raw = value.as_str().unwrap();
+    assert_eq!(raw.len(), 64);
+    let bytes = std::array::from_fn(|i| u8::from_str_radix(&raw[2 * i..2 * i + 2], 16).unwrap());
+    assert_eq!(hex(&bytes), raw);
+    bytes
 }
 
 fn frame(reader: &mut impl BufRead) -> Value {
@@ -78,6 +130,7 @@ pub struct DirectPublicCapsule {
     squarings: u64,
     payload: String,
     setup: String,
+    local_receipt: Option<[u8; 32]>,
     restoration_report: Value,
 }
 
@@ -90,6 +143,31 @@ impl DirectPublicCapsule {
         binary: &Path,
         material: XmrDirectRecoveryMaterial,
         squarings: u64,
+    ) -> Self {
+        Self::prepare_session(binary, material, squarings, None)
+    }
+
+    #[allow(dead_code)]
+    pub fn prepare_with_local_receipt(
+        binary: &Path,
+        material: XmrDirectRecoveryMaterial,
+        squarings: u64,
+        authority: &Path,
+    ) -> Self {
+        use rand_core::RngCore;
+        let mut key = Zeroizing::new([0u8; 32]);
+        rand_core::OsRng.fill_bytes(&mut *key);
+        assert_ne!(*key, [0; 32]);
+        write_private_new(authority, &key);
+        drop(key);
+        Self::prepare_session(binary, material, squarings, Some(authority))
+    }
+
+    fn prepare_session(
+        binary: &Path,
+        material: XmrDirectRecoveryMaterial,
+        squarings: u64,
+        authority: Option<&Path>,
     ) -> Self {
         assert!(
             matches!(squarings, 200_000 | 10_000_000),
@@ -121,7 +199,15 @@ impl DirectPublicCapsule {
         );
         let setup = announced["setup"].as_str().unwrap();
         let setup_binding = hex(&Sha256::digest(setup.as_bytes()));
-        let (process, mut public_writer, mut public_reader) = spawn(binary, "direct-prepare");
+        let (process, mut public_writer, mut public_reader) = spawn_with_authority(
+            binary,
+            if authority.is_some() {
+                "direct-prepare-local-receipt"
+            } else {
+                "direct-prepare"
+            },
+            authority,
+        );
         send(
             &mut public_writer,
             &json!({
@@ -151,7 +237,11 @@ impl DirectPublicCapsule {
         assert!(producer.0.wait().unwrap().success());
         drop(producer);
         // The public process has received no private scalar or producer nonce.
-        send(&mut public_writer, &json!({"payload":payload}));
+        let mut supplied = json!({"payload":payload});
+        if authority.is_some() {
+            supplied["original_receipt_unix_seconds"] = json!(received_unix_seconds);
+        }
+        send(&mut public_writer, &supplied);
         let ready = frame(&mut public_reader);
         assert_eq!(ready["result"], "ready");
         assert_eq!(ready["offer_binding"], hex(&binding));
@@ -164,6 +254,14 @@ impl DirectPublicCapsule {
         assert_eq!(ready["public_verifier_no_share_secret"], true);
         assert_eq!(ready["squarings"], squarings);
         let verification_seconds = seconds(&ready, "proof_verification_seconds");
+        let local_receipt = authority.map(|_| {
+            assert_eq!(
+                ready["original_receipt_unix_seconds"],
+                received_unix_seconds
+            );
+            assert_eq!(ready["setup_relation_recomputed"], true);
+            decode_receipt(&ready["local_setup_receipt"])
+        });
         Self {
             binding,
             expected_context,
@@ -179,6 +277,7 @@ impl DirectPublicCapsule {
             squarings,
             payload: payload.to_owned(),
             setup: setup.to_owned(),
+            local_receipt,
             restoration_report: json!({}),
         }
     }
@@ -202,6 +301,9 @@ impl DirectPublicCapsule {
         }
         .write_new(path)
         .unwrap();
+        if let Some(receipt) = self.local_receipt {
+            write_private_new(&path.with_extension("setup-receipt"), &receipt);
+        }
     }
 
     /// Abruptly terminate ONLY this verifier. This does not restart the Rust
@@ -220,16 +322,50 @@ impl DirectPublicCapsule {
     /// all setup/proof checks; no trusted "already verified" shortcut.
     #[allow(dead_code)]
     pub fn restore(binary: &Path, path: &Path, expected_binding: [u8; 32]) -> Self {
+        Self::restore_session(binary, path, expected_binding, None)
+    }
+
+    /// Local acceptance cache only. The authority is trusted configuration,
+    /// never a key supplied in a peer request. Missing receipt/key fails.
+    #[allow(dead_code)]
+    pub fn restore_with_local_receipt(
+        binary: &Path,
+        path: &Path,
+        expected_binding: [u8; 32],
+        authority: &Path,
+    ) -> Self {
+        Self::restore_session(binary, path, expected_binding, Some(authority))
+    }
+
+    fn restore_session(
+        binary: &Path,
+        path: &Path,
+        expected_binding: [u8; 32],
+        authority: Option<&Path>,
+    ) -> Self {
         let began = Instant::now();
         let saved = CapsuleCheckpoint::read(path, expected_binding).unwrap();
         let setup = &saved.setup;
-        let (process, mut writer, mut reader) = spawn(binary, "direct-prepare");
-        let pid = process.0.id();
-        send(
-            &mut writer,
-            &json!({"setup":setup,"context":saved.context,
-            "public":saved.public,"squarings":saved.squarings}),
+        let local_receipt =
+            authority.map(|_| read_private_fixed(&path.with_extension("setup-receipt")));
+        let (process, mut writer, mut reader) = spawn_with_authority(
+            binary,
+            if authority.is_some() {
+                "direct-restore-local-receipt"
+            } else {
+                "direct-prepare"
+            },
+            authority,
         );
+        let pid = process.0.id();
+        let mut initial = json!({"setup":setup,"context":saved.context,
+            "public":saved.public,"squarings":saved.squarings});
+        if let Some(receipt) = local_receipt {
+            initial["local_setup_receipt"] = json!(hex(&receipt));
+            initial["offer_binding"] = json!(hex(&saved.binding));
+            initial["original_receipt_unix_seconds"] = json!(saved.received_unix_seconds);
+        }
+        send(&mut writer, &initial);
         let prepared = frame(&mut reader);
         assert_eq!(prepared["result"], "setup_ready");
         assert_eq!(
@@ -237,7 +373,14 @@ impl DirectPublicCapsule {
             hex(&Sha256::digest(setup.as_bytes()))
         );
         assert_eq!(prepared["squarings"], saved.squarings);
-        assert_eq!(prepared["setup_verifications"], 1);
+        assert_eq!(
+            prepared["setup_verifications"],
+            if authority.is_some() { 0 } else { 1 }
+        );
+        assert_eq!(
+            prepared["local_setup_receipt_verified"],
+            authority.is_some()
+        );
         send(&mut writer, &json!({"payload":saved.payload}));
         let ready = frame(&mut reader);
         assert_eq!(ready["result"], "ready");
@@ -246,6 +389,8 @@ impl DirectPublicCapsule {
         assert_eq!(ready["public"], json!(saved.public));
         assert_eq!(ready["squarings"], saved.squarings);
         assert_eq!(ready["public_verifier_no_share_secret"], true);
+        assert_eq!(ready["local_setup_receipt_verified"], authority.is_some());
+        assert_eq!(ready["setup_relation_recomputed"], authority.is_none());
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -257,7 +402,9 @@ impl DirectPublicCapsule {
             "restoration_seconds":began.elapsed().as_secs_f64(),
             "restoration_setup_verification_seconds":seconds(&prepared,"setup_verification_seconds"),
             "restoration_proof_verification_seconds":seconds(&ready,"proof_verification_seconds"),
-            "original_receipt_preserved":true,"restoration_repeats_full_public_verification":true,
+            "original_receipt_preserved":true,"restoration_repeats_full_public_verification":authority.is_none(),
+            "restoration_rechecks_proof":true,"restoration_setup_sequential_checks":if authority.is_some() {0} else {1},
+            "restoration_uses_authenticated_local_setup_receipt":authority.is_some(),
             "restored_elapsed_uses_original_floor_second":true,"new_producer_or_proof_generation":false,
             "full_coordinator_restarted":false,
         });
@@ -278,6 +425,7 @@ impl DirectPublicCapsule {
             squarings: saved.squarings,
             payload: saved.payload,
             setup: saved.setup,
+            local_receipt,
             restoration_report,
         }
     }
@@ -357,6 +505,7 @@ impl DirectPublicCapsule {
             squarings,
             payload: _,
             setup: _,
+            local_receipt: _,
             restoration_report,
         } = self;
         let elapsed_since_offer = received_at.elapsed().as_secs_f64();

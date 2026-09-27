@@ -1,0 +1,63 @@
+[
+  {
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--release",
+      "--locked",
+      "--test",
+      "capsule_checkpoint",
+      "--test",
+      "direct_xmr_recovery",
+      "--test",
+      "recovery_time_bounds",
+      "--test",
+      "time_bounds",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/local-setup-receipt-tests.log",
+    "results": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s"
+    ]
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--release",
+      "--locked",
+      "--all-targets",
+      "-j2",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "log": "target/local-setup-receipt-clippy.log",
+    "results": []
+  },
+  {
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--release",
+      "--locked",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/local-setup-receipt-build.log",
+    "results": []
+  }
+]

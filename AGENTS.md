@@ -659,5 +659,34 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   local/solve parcial, preparação independente, limite global de quedas,
   autenticação/provas criptográficas/temporais e dom-interopd continuam abertos.
 
+- Retomada com comprovante LOCAL implementada em direct_dlog_cli.go e bridge
+  Rust. Autoridade aleatória separada 0600/create_new/fsync, caminho absoluto
+  configurado só no verificador. HMAC-SHA256 emitido só depois de verificar
+  setup sequencial e todas as 256 equações; vincula hashes exatos de setup/
+  oferta, contexto/ponto/work/recebimento original. JSON de peer não fornece
+  chave. Restauração autentica comprovante e repete prova; dispensa apenas
+  recomputação H já aceita. Não é prova remota nem defesa contra writer que
+  controla a autoridade local. Registro v2 sozinho não autoriza cache.
+- Passaram 35 testes Rust, 24 Go, Clippy all-targets -D warnings, vet/build.
+  Os 13 testes do exemplo repetidos após espera tardia não são novos testes.
+  LOCAL-SETUP-RECEIPT-{RUST,LATEST-START}-CHECKS.json e recovery-audit/
+  LOCAL-SETUP-RECEIPT-GO-CHECKS.json. Sem novo teste -race nesta etapa.
+- Native direct-pair-abandon-local-receipt PID1084776/session58410 exit0:
+  total219,839s, recuperação44,756s, restauração9,796s, abertura34,936s.
+  Esperou recebimento1790478990 +35 para iniciar em1790479025; XMR refund
+  observado1790479070 antes do limite1790479090. Custo<=65 passou; total<=180
+  FALHOU. Setup inicial70,089s/cápsula103,502s; não repetir por sorte.
+  DOM lock217/refund218/gasto219, outputs XMR gastos. Cápsula/comprovante/
+  autoridade/prazos inalterados. PIDs1084776/1085002/1109383 e grupo ausentes,
+  fontes/binários conferidos. Não há ensaio pendente. Evidências
+  DIRECT-PAIR-ABANDON-LOCAL-RECEIPT-* e LOCAL-SETUP-RECEIPT-VERIFICATION.json;
+  notas LOCAL-SETUP-RECEIPT.md. Supervisor Rust/nós/roster/share local vivos,
+  sem solve parcial, restart integral ou integração ao dom-interopd.
+- Próximo: persistência da share local/roster e retomada por processo novo,
+  conservando autoridade/cápsula/janela já financiadas. Não confundir restart
+  apenas do Go com restart do coordenador. Orçamento global de quedas,
+  preparação independente, fundamentos criptográficos/temporais e daemon
+  seguem pendentes; resultado de laboratório não conclui a missão.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

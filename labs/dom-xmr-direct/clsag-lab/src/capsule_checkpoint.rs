@@ -1,6 +1,8 @@
 //! Immutable public capsule material for a cold verifier restart.
 //! Loading this record never means the proof/setup have been verified: the
-//! receiver MUST reverify both before opening. Receipt time is local evidence,
+//! receiver MUST reverify both before opening unless a SEPARATE local verifier
+//! acceptance capability authenticates the original setup and exact offer.
+//! This codec alone supplies no such capability. Receipt time is local evidence,
 //! not authenticated first disclosure. Requires trusted participant storage;
 //! checksum and payload binding do not defend against hostile metadata rewrites.
 //! The caller must establish a durable parent directory before write_new.

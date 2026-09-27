@@ -1,0 +1,92 @@
+{
+  "checks": [
+    {
+      "command": [
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/go/bin/go",
+        "test",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge_test.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_test.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli_test.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_setup_receipt_test.go",
+        "-count=1",
+        "-timeout=8m",
+        "-v"
+      ],
+      "exit_code": 0,
+      "log": "clsag-lab/target/local-setup-receipt-go-tests.log",
+      "passed_tests": [
+        "TestPublicSolverRejectsInvalidIndexesAndUnverifiedProof",
+        "TestPublicSessionVerifiesOnceAndStopsWithoutSolvingUnrequestedIndex",
+        "TestPublicSessionRejectsReplacementRepeatedAndExhaustedRequests",
+        "TestPublicSessionDoesNotReleaseReadyForInvalidProof",
+        "TestVerifiedSolverRetainsParsedSnapshot",
+        "TestAcceptedRangeProofCanContainNoncanonicalPlaintext",
+        "TestSessionFramesRejectUnboundedOrAmbiguousMessages",
+        "TestPreparedSessionCompletesSetupBeforeReceivingAnyPuzzles",
+        "TestPreparedSessionRejectsSetupReplacementFalseProofAndBadOpenings",
+        "TestPreparedSessionRejectsFalseSetupAndPrematureOffer",
+        "TestPublicParserRejectsMalformedInputsBeforeArithmetic",
+        "TestPublicSetupRelationRejectsFalseDelayedElement",
+        "TestDirectPointsRejectNoncanonicalTorsionAndMixedOrder",
+        "TestDirectRealPuzzleProofOpeningAndAdversarialMutations",
+        "TestDirectProverRejectsMissingSetupAndInvalidSecret",
+        "TestDirectIntegerBoundsCannotWrapTheMessageModulus",
+        "TestDirectWorkPolicyRejectsDowngradeAndLeavesLegacyFixed",
+        "TestDirectPayloadFramingRejectsMissingExtraAndOversizedInput",
+        "TestDirectProducerWaitsForExactSetupAcknowledgement",
+        "TestDirectPublicProcessRejectsSecretAndPrematureOffer",
+        "TestDirectOpeningRequestsCancelRejectReplayAndCountExactlyOne",
+        "TestLocalSetupAuthorityRequiresPrivateConfiguredFile",
+        "TestLocalSetupReceiptBindsEveryOperationFieldAndRejectsWireAuthority",
+        "TestLocalSetupReceiptIssuedAfterVerificationAndColdRestoreStillChecksProof"
+      ]
+    },
+    {
+      "command": [
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/go/bin/go",
+        "vet",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge_test.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_test.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli_test.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_setup_receipt_test.go"
+      ],
+      "exit_code": 0,
+      "log": "clsag-lab/target/local-setup-receipt-go-vet.log",
+      "passed_tests": []
+    },
+    {
+      "command": [
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/go/bin/go",
+        "build",
+        "-o",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli.go"
+      ],
+      "exit_code": 0,
+      "log": "clsag-lab/target/local-setup-receipt-go-build.log",
+      "passed_tests": []
+    }
+  ],
+  "sha256": {
+    "lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b",
+    "direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "direct_dlog_cli.go": "3c264cb1af6406eb1636834b962cf9104400cf705366fec2bbbb33f47bd6c70c",
+    "lhtlp_bridge_test.go": "74205380963f9b75a67a468e1b3fdef23b9d68d046cca835a5ff000d20721066",
+    "direct_dlog_test.go": "7321c033d3c61cf010b91fec780cf2f4b0a858f4dfef644563fc996859f3e337",
+    "direct_dlog_cli_test.go": "f55a2cf7b9a08cf2ca5dc4996cb9194f5083fc7be6900155362cbacd9826401c",
+    "direct_setup_receipt_test.go": "e8b256462c4748c19e2436c0e73a3f7ac9eeac68bf6174aec5b8a2b1dfd38801"
+  },
+  "environment": {
+    "GOMAXPROCS": "2",
+    "GOPROXY": "off"
+  },
+  "scope": "Functional tests. Initial Rust build may overlap; these suite measurements are not an isolated performance comparison."
+}

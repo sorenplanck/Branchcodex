@@ -13,6 +13,24 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Retomada com aceitação local autenticada passou no início máximo previsto.**
+O modo `direct-pair-abandon-local-receipt` verifica setup e prova integralmente
+antes dos depósitos e persiste um HMAC sob chave local separada. Depois da
+queda, autentica a aceitação anterior do setup exato e reverifica toda a prova;
+nenhuma chave ou flag do peer autoriza pular a verificação inicial.
+Trata-se de cache sob confiança no verificador/storage local, não prova remota.
+
+Esperou até recebimento original +35 s para iniciar: recuperação integral
+**44,756 s**, dentro dos 65 s assumidos, restauração **9,796 s**. Devoluções
+DOM/XMR incluídas e outputs gastos, preservando registros e prazos originais.
+Total **219,839 s**, acima de 180 s; preparação da cápsula **103,502 s**, dos
+quais **70,089 s** na primeira verificação do setup. Não há garantia de prazo.
+Passaram 35 testes Rust relacionados e 24 Go, Clippy, vet e builds; os 13 testes
+do exemplo foram repetidos após acrescentar a espera. Hashes conferidos,
+processos próprios encerrados. Notas `clsag-lab/LOCAL-SETUP-RECEIPT.md`.
+Supervisor/nós/roster/share local permaneceram vivos; restart integral,
+preparação independente, fundamentos de segurança e dom-interopd seguem abertos.
+
 **Verificador da cápsula restaurado após queda; custo excedeu o orçamento
 de recuperação do modelo.** O operador aceita alguma margem além de dois
 minutos, sem definir novo teto exato. Essa tolerância não renova os prazos de

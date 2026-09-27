@@ -115,6 +115,7 @@ enum PairOutcome {
     XmrFirstNativeReplay,
     Abandon,
     AbandonSolverRestart,
+    AbandonLocalReceipt,
     ClaimWins,
     RefundWins,
     LateClaimLeakAudit,
@@ -122,7 +123,13 @@ enum PairOutcome {
 
 impl PairOutcome {
     fn abandons(self) -> bool {
-        matches!(self, Self::Abandon | Self::AbandonSolverRestart)
+        matches!(
+            self,
+            Self::Abandon | Self::AbandonSolverRestart | Self::AbandonLocalReceipt
+        )
+    }
+    fn restarts_solver(self) -> bool {
+        matches!(self, Self::AbandonSolverRestart | Self::AbandonLocalReceipt)
     }
     fn resumes(self) -> bool {
         matches!(
@@ -405,7 +412,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 .as_nanos()
         ));
     fs::create_dir(&root).expect("fresh experiment directory");
-    if pair_outcome == Some(PairOutcome::AbandonSolverRestart) {
+    if pair_outcome.is_some_and(PairOutcome::restarts_solver) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         fs::File::open(&root).unwrap().sync_all().unwrap();
@@ -803,7 +810,9 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     } else {
         None
     };
-    let solver_restart_bridge = (pair_outcome == Some(PairOutcome::AbandonSolverRestart))
+    let use_local_receipt = pair_outcome == Some(PairOutcome::AbandonLocalReceipt);
+    let solver_restart_bridge = pair_outcome
+        .is_some_and(PairOutcome::restarts_solver)
         .then(|| direct_recovery_config.as_ref().unwrap().0.clone());
     let mut direct_recovery = direct_recovery_config.map(|(bridge, squarings)| {
         let mut reservation = Sha256::new();
@@ -813,7 +822,11 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let roster = XmrRecoveryRoster::new(reservation.finalize().into(),
             ids.map(|id| keys[0].original_verification_share(id).0)).unwrap();
         let material = XmrDirectRecoveryMaterial::create(&keys[1], &roster).unwrap();
-        let capsule = if squarings == 200_000 {
+        let capsule = if use_local_receipt {
+            direct_recovery_bridge::DirectPublicCapsule::prepare_with_local_receipt(
+                &bridge, material, squarings, &root.join("local-verifier-authority.key"),
+            )
+        } else if squarings == 200_000 {
             direct_recovery_bridge::DirectPublicCapsule::prepare(&bridge, material)
         } else {
             direct_recovery_bridge::DirectPublicCapsule::prepare_with_work(&bridge, material, squarings)
@@ -1014,10 +1027,30 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         }
         let [local, remote] = keys;
         drop(remote);
+        if use_local_receipt {
+            let original_start_by = capsule.received_unix_seconds().checked_add(35).unwrap();
+            checkpoint(
+                "waiting_original_honest_start",
+                json!({"original_start_by_unix":original_start_by}),
+            );
+            while unix_seconds() < original_start_by {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(
+                unix_seconds(),
+                original_start_by,
+                "fixture missed original latest-start second"
+            );
+        }
+        let recovery_started_unix = unix_seconds();
         let recovery_start = Instant::now();
         let binding = capsule.binding();
-        checkpoint("xmr_recovery_started", json!({}));
+        checkpoint(
+            "xmr_recovery_started",
+            json!({"started_unix":recovery_started_unix}),
+        );
         let capsule_path = root.join("direct-capsule.record");
+        let authority_path = root.join("local-verifier-authority.key");
         let open_capsule = move || {
             let mut restarted = json!({});
             let capsule = if let Some(binary) = solver_restart_bridge {
@@ -1025,16 +1058,41 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 let original_context = capsule.context();
                 let original_public = capsule.public_key();
                 let before = fs::read(&capsule_path).unwrap();
+                let receipt_before = use_local_receipt
+                    .then(|| fs::read(capsule_path.with_extension("setup-receipt")).unwrap());
+                let authority_before = use_local_receipt
+                    .then(|| Sha256::digest(&*Zeroizing::new(fs::read(&authority_path).unwrap())));
                 restarted = capsule.kill_for_restart();
-                let restored = direct_recovery_bridge::DirectPublicCapsule::restore(
-                    &binary,
-                    &capsule_path,
-                    binding,
-                );
+                let restored = if use_local_receipt {
+                    direct_recovery_bridge::DirectPublicCapsule::restore_with_local_receipt(
+                        &binary,
+                        &capsule_path,
+                        binding,
+                        &authority_path,
+                    )
+                } else {
+                    direct_recovery_bridge::DirectPublicCapsule::restore(
+                        &binary,
+                        &capsule_path,
+                        binding,
+                    )
+                };
                 assert_eq!(restored.received_unix_seconds(), original_receipt);
                 assert_eq!(restored.context(), original_context);
                 assert_eq!(restored.public_key(), original_public);
                 assert_eq!(fs::read(&capsule_path).unwrap(), before);
+                if let Some(receipt) = receipt_before {
+                    assert_eq!(
+                        fs::read(capsule_path.with_extension("setup-receipt")).unwrap(),
+                        receipt
+                    );
+                    assert_eq!(
+                        Sha256::digest(&*Zeroizing::new(fs::read(&authority_path).unwrap())),
+                        authority_before.unwrap()
+                    );
+                    restarted["local_setup_receipt_and_authority_unchanged"] = json!(true);
+                    restarted["local_setup_receipt_persisted_before_funding"] = json!(true);
+                }
                 restarted["capsule_record_persisted_before_funding"] = json!(true);
                 restarted["capsule_record_unchanged_after_restart"] = json!(true);
                 restored
@@ -1070,6 +1128,15 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             "xmr_recovery_verified",
             json!({"recovery_seconds":recovery_start.elapsed().as_secs_f64()}),
         );
+        details["recovery_started_unix_seconds"] = json!(recovery_started_unix);
+        if use_local_receipt {
+            assert!(
+                recovery_start.elapsed() <= Duration::from_secs(65),
+                "observed cold recovery exceeded original assumed cost"
+            );
+            details["recovery_waited_until_original_latest_start"] = json!(true);
+            details["observed_recovery_within_assumed_cost"] = json!(true);
+        }
         if let Some(state) = &paired {
             assert!(
                 unix_seconds() <= state.window.latest_honest().0,
@@ -2804,6 +2871,7 @@ async fn main() {
                 || arg == "direct-pair-xmr-first-native-replay"
                 || arg == "direct-pair-abandon"
                 || arg == "direct-pair-abandon-solver-restart"
+                || arg == "direct-pair-abandon-local-receipt"
                 || arg == "direct-pair-claim-wins"
                 || arg == "direct-pair-refund-wins"
                 || arg == "direct-pair-late-claim-audit" =>
@@ -2840,6 +2908,8 @@ async fn main() {
                 PairOutcome::LateClaimLeakAudit
             } else if arg == "direct-pair-abandon-solver-restart" {
                 PairOutcome::AbandonSolverRestart
+            } else if arg == "direct-pair-abandon-local-receipt" {
+                PairOutcome::AbandonLocalReceipt
             } else {
                 PairOutcome::Abandon
             };
