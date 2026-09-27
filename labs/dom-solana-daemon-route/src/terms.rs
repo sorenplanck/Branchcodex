@@ -287,13 +287,24 @@ pub fn provision(
     // what `RelativeDeadlineV1` exists for: a provisioner fixes how far ahead the
     // deadline sits, never an absolute value it would have to guess the tip for.
     //
-    // 2000 blocks is not arbitrary in either direction. `earliest_refund_time` subtracts
-    // the network's future-block tolerance (120 s on regtest) from the anchor's timestamp
-    // plus one second per block, so a gap smaller than that tolerance plus the DOM
-    // resolution delay leaves the first claimant no window and the schedule is refused.
-    // At the other end the route ladder needs the deadline to clear the hub margin the
-    // time policy declares -- 600 seconds, which at the fastest admitted DOM block is 600
-    // blocks -- so a gap that merely satisfies the schedule can still be an unsafe window.
+    // Both gaps are set by the widest rule that reaches them, and for a Solana leg that
+    // rule is the clock drift the route ladder allows the cluster:
+    // `SOLANA_CLOCK_DRIFT_SECONDS_V2` is ONE HOUR, and the ladder projects an escrow
+    // deadline as `[deadline - drift, deadline + drift]` and then refuses the route if
+    // `now` has reached the earliest end. So a Solana escrow deadline must sit MORE than
+    // an hour ahead; its own documentation states the consequence -- "a route's legs must
+    // be spaced further apart".
+    //
+    // The first version used 600 blocks and 3600 seconds. Both were refused with
+    // `DeadlinePassed`: the upstream escrow, derived from the DOM height, landed about
+    // 1900 seconds out, and the downstream landed at exactly one hour, where the
+    // comparison is `now >= earliest` and equality already loses.
+    //
+    // Four hours of DOM blocks and five hours for the escrow clear it with room, and they
+    // also clear the two narrower rules: `earliest_refund_time` subtracts the network's
+    // future-block tolerance (120 s on regtest) so a gap below it leaves the first
+    // claimant no window at all, and the ladder needs both hub deadlines separated by the
+    // hub margin the policy declares, 600 seconds.
     let upstream = establish(
         input,
         &upstream_profile,
@@ -302,7 +313,7 @@ pub fn provision(
         input.registry.upstream_asset_id,
         input.registry.upstream_profile_digest,
         &input.upstream,
-        RelativeDeadlineV1::DomRefundBlocksAhead(2_000)
+        RelativeDeadlineV1::DomRefundBlocksAhead(14_400)
             .resolve(&anchor, now)
             .map_err(|error| format!("upstream deadline: {error:?}"))?,
         "upstream",
@@ -315,7 +326,7 @@ pub fn provision(
         input.registry.downstream_asset_id,
         input.registry.downstream_profile_digest,
         &input.downstream,
-        RelativeDeadlineV1::EscrowRefundSecondsAhead(3_600)
+        RelativeDeadlineV1::EscrowRefundSecondsAhead(18_000)
             .resolve(&anchor, now)
             .map_err(|error| format!("downstream deadline: {error:?}"))?,
         "downstream",

@@ -127,8 +127,8 @@ fn the_two_positions_are_the_two_claim_orders() {
 
     assert!(
         downstream_escrow > upstream_escrow,
-        "the downstream position chose a one-hour escrow deadline; the upstream derived a \
-         shorter one from its DOM height ({downstream_escrow} vs {upstream_escrow})"
+        "the downstream position chose its escrow deadline directly; the upstream derived a \
+         nearer one from its DOM height ({downstream_escrow} vs {upstream_escrow})"
     );
     assert!(
         downstream_height > upstream_height,
