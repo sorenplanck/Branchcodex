@@ -89,16 +89,16 @@ jobs:
           python3 -B scripts/test_arbiter_party_state.py \
             --binary target/debug/examples/arbiter_party
 
-      - name: Run funded Claim through persistent participant servers
+      - name: Run funded Claim across isolated participant containers
         working-directory: labs/dom-xmr-direct/clsag-lab
         run: |
           set -euo pipefail
-          python3 -B scripts/test_arbiter_remote.py \
+          python3 -B scripts/test_arbiter_containers.py \
             --binary target/debug/examples/arbiter_regtest \
             --party target/debug/examples/arbiter_party \
             --proxy target/debug/examples/arbiter_party_proxy \
             --monerod "$DXA1_MONEROD" \
-            --evidence-file "$RUNNER_TEMP/dxa1-remote-participants.json"
+            --evidence-file "$RUNNER_TEMP/dxa1-container-participants.json"
 
       - name: Run settlements and competing reorg concurrently
         working-directory: labs/dom-xmr-direct/clsag-lab
@@ -118,6 +118,6 @@ jobs:
           name: dxa1-arbiter-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/dxa1-arbiter-evidence/
-            ${{ runner.temp }}/dxa1-remote-participants.json
+            ${{ runner.temp }}/dxa1-container-participants.json
           if-no-files-found: warn
           retention-days: 14

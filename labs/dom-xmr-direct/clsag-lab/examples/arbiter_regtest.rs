@@ -1318,14 +1318,23 @@ async fn exercise(
     );
     let startup = Instant::now();
     let url = format!("http://127.0.0.1:{rpc_port}");
+    let mut last_rpc_error: String;
     let rpc = loop {
         assert!(daemon.0.try_wait().unwrap().is_none(), "monerod exited");
-        if let Ok(rpc) =
-            SimpleRequestTransport::with_custom_timeout(url.clone(), Duration::from_secs(30)).await
+        match SimpleRequestTransport::with_custom_timeout(url.clone(), Duration::from_secs(2)).await
         {
-            break rpc;
+            Ok(rpc) => break rpc,
+            Err(error) => last_rpc_error = format!("{error:?}"),
         }
-        assert!(startup.elapsed() < Duration::from_secs(30));
+        if startup.elapsed() >= Duration::from_secs(30) {
+            let stdout = fs::read_to_string(setup._root.0.join("monerod.stdout.log"))
+                .unwrap_or_else(|error| format!("unreadable: {error}"));
+            let daemon_log = fs::read_to_string(setup._root.0.join("monerod.log"))
+                .unwrap_or_else(|error| format!("unreadable: {error}"));
+            panic!(
+                "monerod startup timeout: {last_rpc_error}\nstdout:\n{stdout}\ndaemon log:\n{daemon_log}"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let info: serde_json::Value =

@@ -103,3 +103,22 @@ python3 -B scripts/test_arbiter_remote.py \
   --proxy target/debug/examples/arbiter_party_proxy \
   --monerod /caminho/monerod
 ```
+
+Se Docker estiver disponível, o ensaio mais forte coloca coordenador e os dois
+participantes em três namespaces de rede e sistemas de arquivos separados, numa
+rede interna sem rota externa:
+
+```sh
+python3 -B scripts/test_arbiter_containers.py \
+  --binary target/debug/examples/arbiter_regtest \
+  --party target/debug/examples/arbiter_party \
+  --proxy target/debug/examples/arbiter_party_proxy \
+  --monerod /caminho/monerod \
+  --evidence-file /caminho/novo/dxa1-container-participants.json
+```
+
+O arquivo deve registrar `three_distinct_network_namespaces`,
+`participant_state_mounts_separate` e
+`coordinator_has_no_participant_state_mount` como verdadeiros. Isso valida a
+separação lógica no mesmo host; o ensaio físico de três hosts permanece a etapa
+seguinte.

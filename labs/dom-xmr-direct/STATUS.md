@@ -173,6 +173,14 @@ fragmento falham pelo prazo e liberam o servidor persistente para outra conexão
 Isso remove uma espera ilimitada do caminho remoto; o runner continua impondo o
 orçamento externo de 180 s ao processo completo.
 
+O caminho remoto também passou com coordenador, dono DOM e dono XMR em três
+contêineres sem capacidades, três namespaces/endereço de rede e estados privados
+separados. A rede interna não tinha rota externa e o coordenador não recebeu o
+mount de nenhum participante. O Claim levou **85,95 s** dentro do protocolo,
+**26,94 s** desde `Ready` e **124,87 s** incluindo a criação dos contêineres.
+A imagem Ubuntu foi fixada por digest. Essa topologia é mais forte que loopback,
+mas ainda compartilha o mesmo kernel e host físico.
+
 Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
 sincronizado no disco e ligado a papel, settlement, contexto e chain id. A share
 é cifrada por XChaCha20-Poly1305 com nonce aleatório e chave de wrapping em
@@ -206,8 +214,9 @@ coordenadas, deliberadamente ausentes deste candidato.
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
 oficial, roda formatação, testes, Clippy e build, executa um Claim financiado
-pelos servidores persistentes e então executa Claim, Refund, Punish e o reorg
-concorrente em pares, com limite de 180 s por caso. Limitar a dois workers evita
+com os participantes em contêineres isolados e então executa Claim, Refund,
+Punish e o reorg concorrente em pares, com limite de 180 s por caso. Limitar a
+dois workers evita
 que contenção do runner seja confundida com latência do protocolo. Depois da
 barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,

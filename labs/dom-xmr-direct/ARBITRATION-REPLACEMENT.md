@@ -130,6 +130,12 @@ restrita ao Regtest, em 93,06 s no total e 27,70 s desde `Ready`; o roteiro
 reproduzível está em
 `clsag-lab/REMOTE-REGTEST.md`.
 
+O mesmo Claim passou com coordenador e participantes em três contêineres sem
+capacidades, estados privados separados, namespaces/endereço distintos e rede
+interna sem rota externa. O protocolo levou 85,95 s no total e 26,94 s desde
+`Ready`; a preparação completa dos contêineres levou 124,87 s. Isso comprova
+isolamento lógico no mesmo host, não um ensaio em máquinas físicas distintas.
+
 As chaves de pré-assinatura DOM agora também ficam distribuídas. Cada processo
 gera uma share efêmera por caminho, prova sua posse e participa tanto da prova
 de faixa colaborativa do output quanto das duas rodadas da assinatura adaptor.

@@ -97,9 +97,19 @@ barreira de ativação e prazos Noise passou em 93,06 s no total e 27,70 s de
 execução remota e a retomada sobre TCP/Noise, porém usou interfaces loopback no
 mesmo host. A execução em máquinas físicas distintas continua pendente.
 
-O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o ensaio remoto e a
-matriz no GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por
-caso e 20 minutos para todo o job. Ele preserva os resultados como artefato.
+Um ensaio adicional executa coordenador, dono DOM e dono XMR em três contêineres
+sem capacidades, com sistemas de arquivos privados e namespaces/endereço de
+rede distintos. A rede Docker é interna e não possui rota externa; o
+coordenador não monta nenhum estado dos participantes. O Claim financiado
+passou em 85,95 s dentro do protocolo, 26,94 s desde `Ready` e 124,87 s incluindo
+a preparação dos contêineres. A imagem Ubuntu é fixada por digest. Esse teste
+remove o compartilhamento de pilha de rede do loopback, mas continua no mesmo
+host físico.
+
+O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o ensaio em três
+contêineres e a matriz no GitHub com Monero 0.18.4.0 verificado por hash, limite
+de 180 s por caso e 20 minutos para todo o job. Ele preserva os resultados como
+artefato.
 
 ## Construção experimental
 
