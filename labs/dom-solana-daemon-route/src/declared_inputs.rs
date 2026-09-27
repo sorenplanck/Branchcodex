@@ -225,7 +225,7 @@ fn owner_only_directory_is_valid(path: &Path, owner: u32) -> Result<(), String> 
         return Err(format!("{} is not a directory", path.display()));
     }
     let mode = metadata.permissions().mode() & 0o7777;
-    if mode != DIRECTORY_MODE {
+    if mode != owner_only::DIRECTORY_MODE {
         return Err(format!("{} is {mode:04o}, not 0700", path.display()));
     }
     if metadata.uid() != owner {
