@@ -12,6 +12,7 @@ use dom_crypto::SecretKey;
 use dom_scriptless_primitives::SecretScalar;
 use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
+    claim_resume::digest,
     dom_joint::{DomCommitment, DomSigner, DomSigningIntent, DomSigningPlan},
     native_dom::{DomClaimOffer, PreparedDomClaim},
 };
@@ -288,6 +289,11 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         ),
     ] {
         let offer = offer(branch, shares.adaptor_point(path).unwrap(), session);
+        let resume = offer.to_swap_arbiter_resume_bytes().unwrap();
+        assert!(DomClaimOffer::from_resume_bytes(&resume, digest(&resume)).is_err());
+        let offer =
+            DomClaimOffer::from_swap_arbiter_resume_bytes(&resume, digest(&resume)).unwrap();
+        assert_eq!(offer.to_swap_arbiter_resume_bytes().unwrap(), resume);
         let final_tx = offer
             .complete(
                 &SecretScalar::from_be_bytes(secret.dom_secret_big_endian()).unwrap(),
@@ -315,6 +321,36 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         assert!(shares
             .xmr_share_from_dom_opening(other_path, *extracted)
             .is_err());
+    }
+}
+
+#[test]
+fn arbiter_resume_rejects_unpinned_or_semantically_changed_offers() {
+    let input_blinding = scalar(31);
+    let branch = branch(
+        Commitment::commit(INPUT_VALUE, &input_blinding),
+        &input_blinding,
+        KERNEL_FEAT_SWAP_CLAIM,
+        40,
+        [32, 33],
+    );
+    let mut secret_bytes = [0; 32];
+    secret_bytes[31] = 34;
+    let secret = SecretScalar::from_be_bytes(secret_bytes).unwrap();
+    let offer = offer(&branch, secret.public_key().unwrap(), 86);
+    let bytes = offer.to_swap_arbiter_resume_bytes().unwrap();
+    let pinned = digest(&bytes);
+
+    assert!(DomClaimOffer::from_swap_arbiter_resume_bytes(&bytes, [0; 32]).is_err());
+    for end in [0, bytes.len() / 2, bytes.len() - 1] {
+        assert!(DomClaimOffer::from_swap_arbiter_resume_bytes(&bytes[..end], pinned).is_err());
+    }
+
+    let magic_len = b"DXP1/DOM-swap-arbiter-resume/v1\0".len();
+    for index in [magic_len, magic_len + 64, bytes.len() - 1] {
+        let mut changed = bytes.clone();
+        changed[index] ^= 1;
+        assert!(DomClaimOffer::from_swap_arbiter_resume_bytes(&changed, digest(&changed)).is_err());
     }
 }
 

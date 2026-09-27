@@ -65,6 +65,17 @@ reserva XMR continua sintética neste teste. Ainda faltam persistir as ofertas
 pré-assinadas dos três caminhos e executar a contraparte contra `monerod` antes
 de chamar o ensaio de ponta a ponta DOM↔XMR.
 
+**As ofertas pré-assinadas do árbitro agora têm retomada durável própria.** O
+registro conserva apenas transação, pré-assinatura, nonce público e adaptor
+público; nenhuma share, nonce secreto ou witness é gravado. Claim, refund e
+punish foram serializados, descartados e restaurados antes da conclusão. O
+decoder exige o digest fixado pela operação, revalida a forma nativa e a
+equação adaptor e não aceita o formato antigo de claim simples como se fosse o
+novo árbitro. Corrupção, truncamento, substituição sem o digest aprovado e
+alterações semânticas mesmo com digest recalculado foram recusados. As suítes
+de retomada anterior e do par árbitro passaram. Falta conectar essa restauração
+ao coordenador e executar a reserva conjunta em `monerod`.
+
 ## Evidência obtida
 
 **Prioridade atual: corrigir uma premissa de segurança refutada.**

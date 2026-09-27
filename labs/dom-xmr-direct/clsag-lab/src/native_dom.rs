@@ -16,6 +16,9 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+const PLAIN_RESUME_MAGIC: &[u8] = b"DXP1/DOM-claim-resume/v1\0";
+const SWAP_ARBITER_RESUME_MAGIC: &[u8] = b"DXP1/DOM-swap-arbiter-resume/v1\0";
+
 #[derive(Clone)]
 pub struct PreparedDomClaim {
     transaction: Transaction,
@@ -179,7 +182,26 @@ impl DomClaimOffer {
         if self.claim.transaction.kernels[0].features != KERNEL_FEAT_PLAIN {
             return Err(invalid("resume envelope only supports plain claims"));
         }
-        let mut bytes = b"DXP1/DOM-claim-resume/v1\0".to_vec();
+        self.encode_resume(PLAIN_RESUME_MAGIC)
+    }
+
+    /// Immutable public signing material for one consensus-bound arbiter path.
+    /// Persist all three offers, and pin their record digests, before funding.
+    /// This record contains no signing key, nonce scalar or adaptor witness.
+    pub fn to_swap_arbiter_resume_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if !matches!(
+            self.claim.transaction.kernels[0].features,
+            dom_core::KERNEL_FEAT_SWAP_CLAIM
+                | dom_core::KERNEL_FEAT_SWAP_REFUND
+                | dom_core::KERNEL_FEAT_SWAP_PUNISH
+        ) {
+            return Err(invalid("resume envelope requires a swap arbiter path"));
+        }
+        self.encode_resume(SWAP_ARBITER_RESUME_MAGIC)
+    }
+
+    fn encode_resume(&self, magic: &[u8]) -> Result<Vec<u8>, DomError> {
+        let mut bytes = magic.to_vec();
         bytes.extend(self.claim.chain);
         bytes.extend(self.pre.to_bytes());
         bytes.extend(self.nonce.to_compressed_bytes());
@@ -200,9 +222,28 @@ impl DomClaimOffer {
     /// `expected` must be pinned by the original operation; hashing a file
     /// after a restart does not authenticate its payment terms or destination.
     pub fn from_resume_bytes(bytes: &[u8], expected: [u8; 32]) -> Result<Self, DomError> {
+        Self::decode_resume(bytes, expected, PLAIN_RESUME_MAGIC, false)
+    }
+
+    /// Restore and revalidate an arbiter offer against its pinned record digest.
+    /// The decoder rechecks the transaction shape and native adaptor equation;
+    /// the node remains responsible for checking the canonical input contract.
+    pub fn from_swap_arbiter_resume_bytes(
+        bytes: &[u8],
+        expected: [u8; 32],
+    ) -> Result<Self, DomError> {
+        Self::decode_resume(bytes, expected, SWAP_ARBITER_RESUME_MAGIC, true)
+    }
+
+    fn decode_resume(
+        bytes: &[u8],
+        expected: [u8; 32],
+        magic: &[u8],
+        swap_arbiter: bool,
+    ) -> Result<Self, DomError> {
         use crate::claim_resume::{checked, take};
-        let mut input = checked(bytes, expected, b"DXP1/DOM-claim-resume/v1\0")
-            .ok_or_else(|| invalid("resume encoding or binding"))?;
+        let mut input =
+            checked(bytes, expected, magic).ok_or_else(|| invalid("resume encoding or binding"))?;
         let chain = take(&mut input).ok_or_else(|| invalid("missing resume chain"))?;
         let pre = PartialSig::from_bytes(
             &take::<32>(&mut input).ok_or_else(|| invalid("missing resume pre-signature"))?,
@@ -220,8 +261,18 @@ impl DomClaimOffer {
             return Err(invalid("resume length mismatch"));
         }
         let tx = Transaction::from_bytes(input)?;
-        let result = PreparedDomClaim::new(tx, chain)?.bind_presignature(pre, nonce, adaptor)?;
-        if result.to_resume_bytes()? != bytes {
+        let claim = if swap_arbiter {
+            PreparedDomClaim::new_swap_arbiter_path(tx, chain)?
+        } else {
+            PreparedDomClaim::new(tx, chain)?
+        };
+        let result = claim.bind_presignature(pre, nonce, adaptor)?;
+        let canonical = if swap_arbiter {
+            result.to_swap_arbiter_resume_bytes()?
+        } else {
+            result.to_resume_bytes()?
+        };
+        if canonical != bytes {
             return Err(invalid("noncanonical resume encoding"));
         }
         Ok(result)

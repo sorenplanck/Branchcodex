@@ -459,10 +459,7 @@ async fn node_funds_and_settles_claim_from_the_consensus_arbiter() {
 
     let refund_tx = offer(
         &setup.refund,
-        setup
-            .shares
-            .adaptor_point(SwapArbiterPath::Refund)
-            .unwrap(),
+        setup.shares.adaptor_point(SwapArbiterPath::Refund).unwrap(),
         82,
     )
     .complete(
@@ -472,10 +469,7 @@ async fn node_funds_and_settles_claim_from_the_consensus_arbiter() {
     .unwrap();
     let punish_tx = offer(
         &setup.punish,
-        setup
-            .shares
-            .adaptor_point(SwapArbiterPath::Punish)
-            .unwrap(),
+        setup.shares.adaptor_point(SwapArbiterPath::Punish).unwrap(),
         83,
     )
     .complete(
@@ -488,10 +482,7 @@ async fn node_funds_and_settles_claim_from_the_consensus_arbiter() {
 
     let claim_offer = offer(
         &setup.claim,
-        setup
-            .shares
-            .adaptor_point(SwapArbiterPath::Claim)
-            .unwrap(),
+        setup.shares.adaptor_point(SwapArbiterPath::Claim).unwrap(),
         81,
     );
     let claim_tx = claim_offer
@@ -511,10 +502,7 @@ async fn node_funds_and_settles_claim_from_the_consensus_arbiter() {
     assert_eq!(claim_height, setup.claim_until);
     let observed = observed_transaction(&setup, claim_height, &claim_tx).await;
     let extracted = claim_offer
-        .extract(
-            &observed,
-            &validation_context(setup.chain_id, claim_height),
-        )
+        .extract(&observed, &validation_context(setup.chain_id, claim_height))
         .unwrap();
     assert_reconstructs_joint_xmr_key(&setup, SwapArbiterPath::Claim, *extracted);
     assert!(handle
@@ -528,10 +516,7 @@ async fn node_opens_refund_only_after_claim_window() {
     let handle = NodeHandleImpl(setup.node.clone());
     let refund_offer = offer(
         &setup.refund,
-        setup
-            .shares
-            .adaptor_point(SwapArbiterPath::Refund)
-            .unwrap(),
+        setup.shares.adaptor_point(SwapArbiterPath::Refund).unwrap(),
         84,
     );
     let refund_tx = refund_offer
@@ -571,10 +556,7 @@ async fn node_opens_punish_only_after_refund_window() {
     let handle = NodeHandleImpl(setup.node.clone());
     let punish_offer = offer(
         &setup.punish,
-        setup
-            .shares
-            .adaptor_point(SwapArbiterPath::Punish)
-            .unwrap(),
+        setup.shares.adaptor_point(SwapArbiterPath::Punish).unwrap(),
         85,
     );
     let punish_tx = punish_offer
