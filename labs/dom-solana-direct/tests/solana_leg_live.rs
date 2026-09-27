@@ -1973,3 +1973,377 @@ fn solana_live_the_escrow_refuses_what_it_must() {
         }),
     );
 }
+
+// ── DOM -> SOL, with a token ────────────────────────────────────────────────
+
+/// The token asset in the other claim order: the escrow claim is what discloses
+/// the scalar, and the DOM side completes its claim from what it reads off the
+/// cluster. Same escrow, same condition, a token instead of lamports.
+#[test]
+#[ignore = "requires the live harness: scripts/f8-run-solana-live-v1.sh"]
+fn solana_live_spl_token_dom_to_sol_reveals_through_the_escrow_claim() {
+    let fixture = Fixture::open();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime for the DOM node");
+    let directory = tempfile::tempdir().expect("a private working directory");
+    let settlement_id = [0xF6; 32];
+
+    let sol_giver = LiveEnvironment::keypair(&fixture.environment.funder);
+    let sol_receiver = LiveEnvironment::keypair(&fixture.environment.beneficiary);
+    let sol_refund = LiveEnvironment::keypair(&fixture.environment.refund);
+    let asset = SolanaAssetV1::LegacySpl {
+        mint: fixture.environment.mint,
+        decimals: fixture.environment.mint_decimals,
+    };
+    let spl_profile = profile(fixture.environment.program_id, true);
+
+    let prepared = runtime.block_on(FundedDom::prepare_unfunded(&directory.path().join("dom")));
+    let now = Timestamp(now_seconds());
+    let mut dom = runtime.block_on(FundedDom::fund_for_solana_leg(
+        prepared,
+        RelativeDeadlineV1::EscrowRefundSecondsAhead(600),
+        DELAYS,
+        now,
+    ));
+    let schedule = dom.leg_schedule().expect("a Solana leg schedule");
+    assert_eq!(schedule.order, ClaimOrderV1::SolanaFirst);
+
+    let input = leg_input(
+        &fixture,
+        settlement_id,
+        *dom.claim.chain(),
+        dom.anchor(),
+        schedule.chosen(),
+        sol_giver.public(),
+        sol_receiver.public(),
+        sol_refund.public(),
+        now,
+        asset,
+        SPL_BASE_UNITS,
+    );
+    // The SOL receiver holds the secret in this order.
+    let established = SolanaLegV1::establish(
+        &input,
+        &spl_profile,
+        &store(directory.path(), "receiver-setup.sqlite"),
+        &mut rand::thread_rng(),
+    )
+    .expect("the SOL receiver establishes the condition");
+    let accepted = SolanaLegV1::accept(
+        &input,
+        &spl_profile,
+        established.proof(),
+        &store(directory.path(), "giver-setup.sqlite"),
+    )
+    .expect("the SOL giver accepts the condition");
+    assert_eq!(accepted.setup().setup_id(), established.leg().setup().setup_id());
+
+    fixture
+        .cluster
+        .execute(
+            &[accepted.initialize_instruction()],
+            &sol_giver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("initialize the token escrow");
+    let fund_signature = fixture
+        .cluster
+        .execute(
+            &[accepted
+                .fund_instruction()
+                .expect("a token fund instruction")],
+            &sol_giver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("fund the token escrow");
+    let observer = observer_for(&fixture, &accepted);
+    let observations = feed(directory.path(), "observations.sqlite", &accepted);
+    let funding_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        fund_signature,
+        ObservationKind::Funding,
+    );
+    let funding = funding_evidence(&funding_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &funding.settlement_id,
+        &funding.terms_hash,
+        &funding.program_data_hash,
+        funding.amount,
+    );
+    let funding_chain_record = funding_record(
+        solana_chain_id(&accepted),
+        funding,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the funding evidence converts to a neutral record");
+    let funding_ref =
+        assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Funding, &funding_ref);
+    assert_eq!(
+        token_account(&fixture.cluster, accepted.setup().vault_pda()).amount,
+        SPL_BASE_UNITS
+    );
+
+    // ── the escrow claim discloses the scalar ────────────────────────────────
+    let opening = established.opening().expect("the established opening");
+    let before = token_account(&fixture.cluster, fixture.environment.beneficiary_token).amount;
+    let claim_signature = fixture
+        .cluster
+        .execute(
+            &[established
+                .leg()
+                .claim_instruction(&opening)
+                .expect("a token claim instruction")],
+            &sol_receiver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("claim the token escrow");
+    let claim_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        claim_signature,
+        ObservationKind::Claim,
+    );
+    let claim = claim_evidence(&claim_envelope);
+    assert_eq!(claim.revealed_secret_be, opening.escrow_claim_bytes());
+    assert_eq!(claim.mint, fixture.environment.mint);
+    let claim_chain_record = claim_record(
+        solana_chain_id(&accepted),
+        claim,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the claim evidence converts to a neutral record");
+    let claim_ref =
+        assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Claim, &claim_ref);
+    let after = token_account(&fixture.cluster, fixture.environment.beneficiary_token).amount;
+    assert_eq!(after - before, SPL_BASE_UNITS);
+
+    // ── and the DOM side completes its claim from what the cluster published ─
+    let from_state = accepted
+        .opening_from_escrow_state(
+            &fixture
+                .cluster
+                .account_data(accepted.setup().state_pda())
+                .expect("the escrow state account"),
+        )
+        .expect("the claimed escrow state discloses the scalar");
+    assert_opening_agrees(&from_state, &opening);
+    let offer = dom.offer(
+        &accepted.lock().dom_adaptor_point(),
+        accepted.setup().setup_id(),
+    );
+    let context = runtime.block_on(dom.context());
+    let claim_transaction = offer
+        .complete(from_state.dom_secret(), &context)
+        .expect("the adapted DOM claim");
+    let (_, dom_height) = runtime.block_on(dom.include(&claim_transaction));
+    let onward_height = runtime.block_on(dom.prove_onward_spend_and_reject_double_spend());
+
+    fixture.environment.record(
+        "spl_dom_to_sol",
+        serde_json::json!({
+            "status": "passed",
+            "claim_order": "SolanaFirst",
+            "asset": "legacy-spl",
+            "mint": fixture.environment.mint.to_base58(),
+            "base_units": SPL_BASE_UNITS,
+            "settlement_id": hex32(&settlement_id),
+            "setup_id": hex32(&accepted.setup().setup_id()),
+            "escrow_claim_signature": claim_signature.to_base58(),
+            "dom_claim_height": dom_height,
+            "dom_onward_spend_height": onward_height,
+            "funding_record_block_anchor": hex32(&funding_ref.block_anchor),
+            "claim_record_block_anchor": hex32(&claim_ref.block_anchor),
+            "timing_bounds_proven": false,
+        }),
+    );
+}
+
+// ── the token comes back ────────────────────────────────────────────────────
+
+/// The token refund: the escrow returns the principal to the refund owner the
+/// terms froze, through the vault authority PDA, after its frozen deadline.
+///
+/// No DOM node: the DOM height-locked refund is established by the native
+/// `both_refunds` scenario, and what is unexercised anywhere is the escrow's token
+/// return path -- a different transfer, a different authority, a different
+/// destination check.
+#[test]
+#[ignore = "requires the live harness and waits for a real deadline"]
+fn solana_live_spl_token_refund_returns_the_token() {
+    let fixture = Fixture::open();
+    let directory = tempfile::tempdir().expect("a private working directory");
+    let settlement_id = [0xA7; 32];
+
+    let sol_giver = LiveEnvironment::keypair(&fixture.environment.funder);
+    let sol_receiver = LiveEnvironment::keypair(&fixture.environment.beneficiary);
+    let sol_refund = LiveEnvironment::keypair(&fixture.environment.refund);
+    let asset = SolanaAssetV1::LegacySpl {
+        mint: fixture.environment.mint,
+        decimals: fixture.environment.mint_decimals,
+    };
+    let spl_profile = profile(fixture.environment.program_id, true);
+
+    let now = Timestamp(now_seconds());
+    let anchor = AssumedDomAnchor::new(BlockHeight(1), now);
+    let chosen = RelativeDeadlineV1::EscrowRefundSecondsAhead(90)
+        .resolve(&anchor, now)
+        .expect("a Solana-first schedule choice");
+    let input = leg_input(
+        &fixture,
+        settlement_id,
+        [0xEF; 32],
+        anchor,
+        chosen,
+        sol_giver.public(),
+        sol_receiver.public(),
+        sol_refund.public(),
+        now,
+        asset,
+        SPL_BASE_UNITS,
+    );
+    let established = SolanaLegV1::establish(
+        &input,
+        &spl_profile,
+        &store(directory.path(), "setup.sqlite"),
+        &mut rand::thread_rng(),
+    )
+    .expect("establish the condition");
+    let leg = established.leg();
+
+    fixture
+        .cluster
+        .execute(&[leg.initialize_instruction()], &sol_giver, &[], CONFIRM_TIMEOUT)
+        .expect("initialize the token escrow");
+    let fund_signature = fixture
+        .cluster
+        .execute(
+            &[leg.fund_instruction().expect("a token fund instruction")],
+            &sol_giver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("fund the token escrow");
+    let observer = observer_for(&fixture, leg);
+    let observations = feed(directory.path(), "observations.sqlite", leg);
+    let funding_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(leg),
+        fund_signature,
+        ObservationKind::Funding,
+    );
+    let funding = funding_evidence(&funding_envelope);
+    assert_eq!(funding.mint, fixture.environment.mint);
+    assert_eq!(
+        token_account(&fixture.cluster, leg.setup().vault_pda()).amount,
+        SPL_BASE_UNITS
+    );
+
+    // Before the deadline, the token stays where it is.
+    assert!(
+        fixture
+            .cluster
+            .cluster_unix_time()
+            .expect("the cluster clock")
+            < leg.setup().refund_after_unix()
+    );
+    fixture
+        .cluster
+        .expect_refusal(
+            &[leg.refund_instruction().expect("a refund instruction")],
+            &sol_refund,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("an early token refund must be refused");
+    assert_eq!(
+        token_account(&fixture.cluster, leg.setup().vault_pda()).amount,
+        SPL_BASE_UNITS,
+        "a refused refund moved tokens out of the vault"
+    );
+
+    // After it, the principal returns to the refund owner and nowhere else.
+    fixture
+        .cluster
+        .wait_for_cluster_time(leg.setup().refund_after_unix(), Duration::from_secs(300))
+        .expect("the cluster clock reaches the frozen deadline");
+    let before = token_account(&fixture.cluster, fixture.environment.refund_token).amount;
+    let beneficiary_before =
+        token_account(&fixture.cluster, fixture.environment.beneficiary_token).amount;
+    let refund_signature = fixture
+        .cluster
+        .execute(
+            &[leg.refund_instruction().expect("a refund instruction")],
+            &sol_refund,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("refund the token escrow after its deadline");
+    let refund_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(leg),
+        refund_signature,
+        ObservationKind::Refund,
+    );
+    let refund = refund_evidence(&refund_envelope);
+    assert_eq!(refund.mint, fixture.environment.mint);
+    let refund_chain_record = refund_record(
+        solana_chain_id(leg),
+        refund,
+        &leg.setup().settlement_id(),
+        &leg.setup().terms_hash(),
+    )
+    .expect("the refund evidence converts to a neutral record");
+    let refund_ref =
+        assert_record_pins_evidence(&refund_chain_record, leg, refund_signature, refund.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Refund, &refund_ref);
+
+    let after = token_account(&fixture.cluster, fixture.environment.refund_token).amount;
+    assert_eq!(after - before, SPL_BASE_UNITS);
+    assert_eq!(
+        token_account(&fixture.cluster, leg.setup().vault_pda()).amount,
+        0,
+        "the vault still holds tokens after returning the principal"
+    );
+    assert_eq!(
+        token_account(&fixture.cluster, fixture.environment.beneficiary_token).amount,
+        beneficiary_before,
+        "a refund credited the beneficiary"
+    );
+    let state = escrow_state(&fixture.cluster, leg);
+    assert_eq!(state.status, solana_escrow_wire::EscrowStatus::Refunded);
+    assert_eq!(state.revealed_secret_be, [0; 32]);
+
+    fixture.environment.record(
+        "spl_refund",
+        serde_json::json!({
+            "status": "passed",
+            "asset": "legacy-spl",
+            "mint": fixture.environment.mint.to_base58(),
+            "base_units": SPL_BASE_UNITS,
+            "settlement_id": hex32(&settlement_id),
+            "setup_id": hex32(&leg.setup().setup_id()),
+            "escrow_refund_after_unix": leg.setup().refund_after_unix(),
+            "escrow_refund_signature": refund_signature.to_base58(),
+            "early_token_refund_refused": true,
+            "refund_record_block_anchor": hex32(&refund_ref.block_anchor),
+            "beneficiary_untouched": true,
+            "no_dom_node_started": true,
+        }),
+    );
+}
