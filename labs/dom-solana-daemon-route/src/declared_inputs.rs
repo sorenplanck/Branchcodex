@@ -175,7 +175,7 @@ pub fn verify_parent_chains(state_dir: &Path, relatives: &[&str]) -> Result<(), 
     let canonical = state_dir
         .canonicalize()
         .map_err(|error| format!("canonicalize {}: {error}", state_dir.display()))?;
-    if canonical != state_dir {
+    if canonical.as_path() != state_dir {
         return Err(format!(
             "the state directory must already be canonical: {} resolves to {}",
             state_dir.display(),
