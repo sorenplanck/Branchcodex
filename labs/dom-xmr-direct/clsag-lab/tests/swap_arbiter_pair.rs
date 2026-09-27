@@ -347,6 +347,18 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         .record_dom_finality(&session_claim, 10, [3; 32], 11, [4; 32])
         .unwrap();
     assert_eq!(finality_depth, 2);
+    assert!(journal
+        .verify_dom_canonicality(&session_claim, 10, [8; 32], 11, [4; 32])
+        .is_err());
+    assert!(journal
+        .verify_dom_canonicality(&session_claim, 10, [3; 32], 10, [4; 32])
+        .is_err());
+    assert_eq!(
+        journal
+            .verify_dom_canonicality(&session_claim, 10, [3; 32], 12, [7; 32])
+            .unwrap(),
+        3
+    );
     journal.record_xmr_settlement([5; 32]).unwrap();
     assert!(journal.record_xmr_settlement([6; 32]).is_err());
     drop(journal);

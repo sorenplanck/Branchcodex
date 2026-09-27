@@ -112,6 +112,14 @@ a transação Monero. Profundidade insuficiente, hash nulo e outra transação s
 recusados. Duas confirmações são uma política de teste contra reorg curto, não
 finalidade absoluta contra reorganizações mais profundas.
 
+Imediatamente antes de solicitar a assinatura XMR, o coordenador agora consulta
+o daemon DOM outra vez, relê a transação no bloco canônico, compara o hash desse
+bloco com o fixado no journal e recalcula a profundidade usando a ponta atual.
+Hash de settlement alterado e profundidade reduzida foram recusados em teste. A
+matriz registrou profundidade dois nessa segunda observação para os três
+caminhos. Isso reduz a janela entre observação e liberação XMR; uma reorganização
+que ocorra depois da consulta ainda pertence ao risco probabilístico da política.
+
 As duas shares privadas que formam a chave XMR agora são geradas e mantidas
 por processos distintos (`arbiter_party`). O coordenador recebe somente as
 provas DLEQ públicas. O processo autorizado conclui o caminho DOM; depois da
@@ -156,7 +164,7 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **31,94 s**, Refund **36,01 s** e Punish **42,24 s**. O runner
+Claim levou **35,68 s**, Refund **42,70 s** e Punish **48,06 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
 mainnet. Ainda faltam executar o transporte entre hosts distintos, testar reorg
@@ -170,9 +178,9 @@ oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refu
 e Punish em paralelo com limite de 180 s por caso. Depois da barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
 reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **136,38 s** de parede; os casos completos
-levaram **121,67 s**, **129,88 s** e **136,37 s**. Desde `Ready`, os tempos
-foram **31,94 s**, **36,01 s** e **42,24 s**. A
+mesmo arquivo oficial passou em **132,44 s** de parede; os casos completos
+levaram **120,45 s**, **127,82 s** e **132,42 s**. Desde `Ready`, os tempos
+foram **35,68 s**, **42,70 s** e **48,06 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

@@ -24,6 +24,7 @@ REQUIRED_TRUE = (
     "durable_ordering_journal_complete",
     "dom_release_recorded_before_submit",
     "dom_finality_recorded_before_xmr_submit",
+    "dom_canonicality_rechecked_before_xmr_signing",
     "private_xmr_shares_held_by_separate_processes",
     "distributed_dom_presigning",
     "collaborative_dom_range_proofs",

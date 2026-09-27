@@ -1380,6 +1380,20 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
         fee,
     )
     .unwrap();
+    let recheck_tip_height = handle.chain_height();
+    let recheck_block_hash = handle.get_block_hash_at_height(settlement_height).unwrap();
+    let recheck_tip_hash = handle.get_block_hash_at_height(recheck_tip_height).unwrap();
+    let rechecked_settlement = observed_transaction(&setup, settlement_height, &settlement).await;
+    let recheck_depth = setup
+        .journal
+        .verify_dom_canonicality(
+            &rechecked_settlement,
+            settlement_height,
+            recheck_block_hash,
+            recheck_tip_height,
+            recheck_tip_hash,
+        )
+        .unwrap();
     let (tx_as_hex, xmr_transaction_id) = match outcome {
         Outcome::Refund => {
             assert!(setup.dom_owner.rejects_xmr(
@@ -1475,6 +1489,8 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
             "participant_restart_restored_bound_shares":true,
             "dom_min_confirmations":MIN_DOM_CONFIRMATIONS,
             "dom_confirmation_depth":dom_confirmation_depth,
+            "dom_pre_xmr_recheck_depth":recheck_depth,
+            "dom_canonicality_rechecked_before_xmr_signing":true,
             "dom_settlement_height":settlement_height,
             "xmr_reserve_amount":reserve_amount,
             "xmr_payment_amount":payment,

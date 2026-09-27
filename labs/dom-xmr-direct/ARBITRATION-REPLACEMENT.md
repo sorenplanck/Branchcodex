@@ -95,6 +95,13 @@ Isso fecha o reorg de um bloco para a política adotada, mas não transforma dua
 confirmações probabilísticas em finalidade absoluta. Uma reorganização mais
 profunda continua dentro do modelo adversarial que precisa ser quantificado.
 
+Antes da assinatura XMR há uma segunda leitura do daemon DOM. Ela exige que o
+hash canônico na altura do settlement ainda seja o mesmo fixado no journal,
+relê a transação desse bloco e recalcula a profundidade contra a ponta atual.
+Troca de bloco ou queda abaixo do mínimo são recusadas. Essa rechecagem estreita
+a janela de reorg, mas não fornece finalidade determinística depois da leitura;
+o próximo ensaio deve produzir uma reorganização real com nós concorrentes.
+
 As shares DLEQ não ficam mais juntas no coordenador do ensaio. Dois processos
 geram as shares, validam a prova pública do peer e aplicam regras de papel:
 Claim/Punish são concluídos pelo dono de XMR e o gasto XMR pelo dono de DOM;
@@ -127,7 +134,7 @@ Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 31,94 s para Claim, 36,01 s para Refund e 42,24 s para Punish
+intervalo mediu 35,68 s para Claim, 42,70 s para Refund e 48,06 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

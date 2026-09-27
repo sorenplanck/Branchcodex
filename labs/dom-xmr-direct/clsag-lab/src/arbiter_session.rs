@@ -644,4 +644,38 @@ impl ArbiterSessionJournal {
         self.append(event)?;
         Ok(confirmation_depth)
     }
+
+    /// Recheck the current canonical DOM view immediately before authorizing
+    /// XMR signing. The caller reads the settlement-height hash and current tip
+    /// from its daemon in one observation window. A changed settlement block or
+    /// a tip that no longer provides the configured depth is denied.
+    pub fn verify_dom_canonicality(
+        &self,
+        transaction: &Transaction,
+        settlement_height: u64,
+        canonical_block_hash: [u8; 32],
+        canonical_tip_height: u64,
+        canonical_tip_hash: [u8; 32],
+    ) -> Result<u64, ArbiterSessionError> {
+        let (path, transaction_id) =
+            self.validated_dom_transaction(transaction, settlement_height)?;
+        let state = self.state()?;
+        let settlement = state.dom_settlement.ok_or(ArbiterSessionError::Denied)?;
+        let finality = state.dom_finality.ok_or(ArbiterSessionError::Denied)?;
+        let depth = canonical_tip_height
+            .checked_sub(settlement_height)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(ArbiterSessionError::Denied)?;
+        if settlement.path != path
+            || settlement.transaction.id != transaction_id
+            || settlement.transaction.height != settlement_height
+            || canonical_block_hash == [0; 32]
+            || canonical_block_hash != finality.block_hash
+            || canonical_tip_hash == [0; 32]
+            || depth < self.binding.min_dom_confirmations
+        {
+            return Err(ArbiterSessionError::Denied);
+        }
+        Ok(depth)
+    }
 }
