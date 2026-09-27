@@ -814,6 +814,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     let solver_restart_bridge = pair_outcome
         .is_some_and(PairOutcome::restarts_solver)
         .then(|| direct_recovery_config.as_ref().unwrap().0.clone());
+    let mut local_state_identity = None;
     let mut direct_recovery = direct_recovery_config.map(|(bridge, squarings)| {
         let mut reservation = Sha256::new();
         reservation.update(b"DXP1/XMR-direct-recovery/owned-offline-fakechain/v0");
@@ -834,6 +835,14 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let link = XmrDirectRecoveryLink::new(&roster, ids[1], capsule.context(), capsule.public_key(), capsule.binding()).unwrap();
         if solver_restart_bridge.is_some() {
             capsule.persist(&root.join("direct-capsule.record"));
+        }
+        if use_local_receipt {
+            use dxp1_clsag_lab::{capsule_checkpoint::CapsuleCheckpoint,
+                xmr_recovery::checkpoint::LocalXmrRecoveryCheckpoint};
+            let saved = CapsuleCheckpoint::read(&root.join("direct-capsule.record"), capsule.binding()).unwrap();
+            let state = LocalXmrRecoveryCheckpoint::new(&roster, &keys[0], &saved).unwrap();
+            state.write_new(&root.join("local-xmr-recovery.record")).unwrap();
+            local_state_identity = Some(state.binding());
         }
         println!("Direct XMR capsule verified; producer exited; funding isolated test reserve (no timing admission)");
         (roster, link, capsule)
@@ -1051,6 +1060,23 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         );
         let capsule_path = root.join("direct-capsule.record");
         let authority_path = root.join("local-verifier-authority.key");
+        let (local, roster, link) = if let Some(identity) = local_state_identity {
+            use dxp1_clsag_lab::{
+                capsule_checkpoint::CapsuleCheckpoint,
+                xmr_recovery::checkpoint::LocalXmrRecoveryCheckpoint,
+            };
+            let original_link = (roster, link).1.binding();
+            drop(local);
+            let state =
+                LocalXmrRecoveryCheckpoint::read(&root.join("local-xmr-recovery.record"), identity)
+                    .unwrap();
+            let saved = CapsuleCheckpoint::read(&capsule_path, binding).unwrap();
+            let restored = state.restore(&saved).unwrap();
+            assert_eq!(restored.2.binding(), original_link);
+            restored
+        } else {
+            (local, roster, link)
+        };
         let open_capsule = move || {
             let mut restarted = json!({});
             let capsule = if let Some(binary) = solver_restart_bridge {
@@ -1129,6 +1155,10 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             json!({"recovery_seconds":recovery_start.elapsed().as_secs_f64()}),
         );
         details["recovery_started_unix_seconds"] = json!(recovery_started_unix);
+        details["local_xmr_state_persisted_before_funding"] = json!(local_state_identity.is_some());
+        details["local_xmr_state_restored_after_dropping_original"] =
+            json!(local_state_identity.is_some());
+        details["local_xmr_state_restored_in_fresh_process"] = json!(false);
         if use_local_receipt {
             assert!(
                 recovery_start.elapsed() <= Duration::from_secs(65),

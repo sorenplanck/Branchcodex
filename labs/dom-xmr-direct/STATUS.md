@@ -13,6 +13,23 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Share local e roster agora persistem antes dos depósitos.** O novo registro
+privado, fixo e imutável conserva papel/chaves/cápsula/recebimento/dificuldade,
+recusa shares derivadas e exige identidade pública aprovada. Não guarda chave
+agregada ou nonces; não substitui verificação de prova nem política temporal.
+Passaram 25 testes Rust, Clippy/build, incluindo restauração de ambos os papéis
+em processos novos que recebem somente arquivos e bindings públicos.
+
+Ensaio financiado: **178,415 s** total / **58,509 s** recuperação integral;
+devoluções DOM e XMR incluídas e gastas, registros e prazos preservados.
+Iniciou no instante original +35; XMR devolvido seis segundos antes do limite.
+Nesta fixture o estado local é reconstruído no mesmo Rust após descartar os
+objetos originais; só o Go reinicia. A restauração Rust em outro processo tem
+teste separado sem funding. Evidências `clsag-lab/LOCAL-XMR-STATE.md` e
+`DIRECT-PAIR-ABANDON-LOCAL-XMR-STATE-*`; hashes/PIDs/grupo conferidos.
+Falta recuperação/devolução financiada por coordenador novo, integração ao
+dom-interopd e fundamentação de segurança. Não é garantia de três minutos.
+
 **Retomada com aceitação local autenticada passou no início máximo previsto.**
 O modo `direct-pair-abandon-local-receipt` verifica setup e prova integralmente
 antes dos depósitos e persiste um HMAC sob chave local separada. Depois da

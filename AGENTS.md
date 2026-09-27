@@ -688,5 +688,36 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   preparação independente, fundamentos criptográficos/temporais e daemon
   seguem pendentes; resultado de laboratório não conclui a missão.
 
+- LocalXmrRecoveryCheckpoint em src/xmr_recovery/checkpoint.rs persiste share
+  LOCAL original, reserva/chaves/papel/binding cápsula/recebimento/work; formato
+  fixo/checksum/0600/create_new/fsync, buffers de segredo Zeroizing. Exige
+  identidade pública aprovada externa ao arquivo; não protege storage hostil
+  ou rollback. Sem aggregate key, offset, nonce ou autorização de publicação.
+  Restore confere cápsula/roster/papel, não prova nem janela temporal.
+- 25 testes Rust/Clippy/build passaram. Quatro novos exercitam corrupção,
+  substituição e restauração por filho novo para ambos papéis com só arquivos
+  e bindings públicos; fixture de codec sem prova/funding. Primeira rodada
+  Clippy recusou drop_non_drop no teste, corrigido por fim de escopo/move;
+  LOCAL-XMR-STATE-{INITIAL-CHECKS,CHECKS}.json conserva histórico. Session81611
+  terminou exit0; session97589 falhou no lint antes do build e foi encerrada.
+- Native PID1250252/session46505 exit0: total178,415s/parede178,466s,
+  recuperação58,509s (dentro65), restauração9,129s/abertura49,311s. Preparação
+  cápsula65,443s/setup37,640s; variação não prova melhoria de velocidade.
+  Recebimento1790480170/início1790480205 (+35), XMR observado1790480264 antes
+  do limite1790480270 (6s). DOM lock219/refund220/gasto221, outputs gastos.
+  Original local/roster/link descartados e reconstruídos do registro no MESMO
+  Rust; Go antigo1250312/new1251361. Não é full coordinator restart.
+  Hashes/PIDs/grupo conferidos, nenhum processo pendente. Evidências
+  DIRECT-PAIR-ABANDON-LOCAL-XMR-STATE-* e LOCAL-XMR-STATE-VERIFICATION.json;
+  notas LOCAL-XMR-STATE.md. Native <=180 passou nesta execução com pouca
+  folga; manter resultados anteriores mais lentos. Não há SLA/prova temporal.
+- Próximo concreto: recuperação E devolução financiadas em processo Rust novo
+  carregando plano nativo/autorizações/janela originais, além do estado local.
+  Hoje refund PreparedClaim, outputs/offset/endereço/fee ainda vêm da memória
+  do coordenador em regtest_claim.rs. Não resolver essa lacuna deixando uma
+  devolução XMR completa previamente disponível antes do atraso. Persistência
+  de sessões cooperativas, quedas globais, preparação independente, provas
+  criptográficas/temporais e dom-interopd continuam abertas.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

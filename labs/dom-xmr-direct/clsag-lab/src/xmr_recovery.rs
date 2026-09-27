@@ -17,11 +17,14 @@ use crate::{
     valid_point, G,
 };
 
+pub mod checkpoint;
+
 /// Ordered public roster for an already agreed, one-use reservation. The caller
 /// must bind `reservation` to its network, address, route and authenticated
 /// session. Public point consistency is not proof of possession or identity.
 #[derive(Clone)]
 pub struct XmrRecoveryRoster {
+    reservation: [u8; 32],
     keys: [EdwardsPoint; 2],
     binding: [u8; 32],
 }
@@ -42,6 +45,7 @@ impl XmrRecoveryRoster {
             hash.update(key.compress().as_bytes());
         }
         Ok(Self {
+            reservation,
             keys,
             binding: hash.finalize().into(),
         })
