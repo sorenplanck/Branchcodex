@@ -276,6 +276,40 @@ impl ClusterSessionV1 {
         }
     }
 
+    /// Wait until the transaction is visible AT THIS SESSION'S COMMITMENT.
+    ///
+    /// `confirm` returns as soon as the node has a status for the signature, and
+    /// `get_signature_status` carries no commitment: the status can be known while the
+    /// account view this session reads from has not advanced to the slot that carries
+    /// the transaction. Every read after `execute` assumes otherwise -- a balance
+    /// compared before and after a transfer is exactly that assumption -- so the gap
+    /// shows up as a transfer that appears not to have happened, intermittently and
+    /// nowhere near its cause.
+    ///
+    /// `get_transaction` does take a commitment, so this waits for the node to serve the
+    /// transaction at the same commitment the session's reads use. It does not weaken any
+    /// check: `confirm` still refuses a landed-but-failed transaction first.
+    fn await_visible_at_commitment(
+        &self,
+        signature: SolanaSignature,
+        timeout: Duration,
+    ) -> Result<(), ClusterError> {
+        let started = Instant::now();
+        loop {
+            if self
+                .rpc
+                .get_transaction(signature, self.commitment)?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if started.elapsed() >= timeout {
+                return Err(ClusterError::ConfirmationTimedOut(timeout));
+            }
+            sleep(Duration::from_millis(200));
+        }
+    }
+
     /// Submit and confirm in one step.
     pub fn execute(
         &self,
@@ -286,6 +320,7 @@ impl ClusterSessionV1 {
     ) -> Result<SolanaSignature, ClusterError> {
         let signature = self.submit(instructions, fee_payer, cosigners)?;
         self.confirm(signature, timeout)?;
+        self.await_visible_at_commitment(signature, timeout)?;
         Ok(signature)
     }
 
