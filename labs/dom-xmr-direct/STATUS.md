@@ -121,16 +121,26 @@ a transação assinada. Em todos os três resultados, tentativas de inverter os
 papéis na conclusão DOM e na assinatura XMR foram recusadas. O IPC deste ensaio
 fixa ainda o contrato e o digest exato de cada oferta autorizada; uma segunda
 oferta criptograficamente válida do mesmo caminho também foi recusada. O canal
-é stdio local e as shares ainda são efêmeras; a pré-assinatura multipartes DOM
+é stdio local e a pré-assinatura multipartes DOM
 também continua coordenada pelo processo de teste. Isso demonstra isolamento
 operacional das shares XMR, não participantes de produção totalmente
 independentes nem transporte autenticado em rede.
+
+Cada processo agora cria ou reabre um estado privado exclusivo, modo `0600`,
+sincronizado no disco e ligado a papel, settlement, contexto e chain id. O
+arquivo permanece bloqueado enquanto o processo está vivo. Um teste dedicado
+recusou segundo dono simultâneo, papel divergente e checksum corrompido, e
+confirmou a mesma claim pública após reinício. A campanha financiada reinicia
+os dois processos depois de `Ready`, revalida chave conjunta e adaptors e
+reautoriza somente as ofertas públicas já fixadas. A share está em claro no
+arquivo protegido por permissões; produção ainda exige conta isolada e storage
+cifrado ou hardware seguro para resistir à leitura do host.
 
 Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos à
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **20,94 s**, Refund **25,99 s** e Punish **31,68 s**. O runner
+Claim levou **30,25 s**, Refund **34,09 s** e Punish **40,00 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
 mainnet. Ainda faltam separar a pré-assinatura DOM, autenticar o transporte,
@@ -143,9 +153,9 @@ um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
 oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund
 e Punish em paralelo com limite de 180 s por caso. Depois da barreira de duas
 confirmações DOM e da separação das shares por processo, uma reprodução local
-dos mesmos comandos e do mesmo arquivo oficial passou em **109,60 s** de
-parede; os casos completos levaram **99,68 s**, **105,24 s** e **109,57 s**.
-Desde `Ready`, os tempos foram **20,94 s**, **25,99 s** e **31,68 s**. A
+dos mesmos comandos e do mesmo arquivo oficial passou em **113,24 s** de
+parede; os casos completos levaram **103,24 s**, **105,99 s** e **113,23 s**.
+Desde `Ready`, os tempos foram **30,25 s**, **34,09 s** e **40,00 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

@@ -105,11 +105,19 @@ digest autorizado dentro do contrato fixado. Ainda é IPC local sem autenticaç�
 de rede, persistência da share privada ou pré-assinatura DOM totalmente
 distribuída.
 
+O processo de share agora possui retomada durável. Seu arquivo exclusivo `0600`
+é sincronizado, bloqueado e vinculado a papel/operação/chain; outro processo,
+papel errado ou checksum inválido falham antes de emitir prova. A matriz mata e
+reabre ambos os participantes depois de `Ready`, confere a mesma chave conjunta
+e os mesmos adaptors e prossegue somente após reautorizar o contrato público.
+O arquivo guarda a share sem cifra própria: conta de sistema separada e storage
+cifrado ou hardware seguro continuam requisitos para um ambiente hostil.
+
 Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto.
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 20,94 s para Claim, 25,99 s para Refund e 31,68 s para Punish
+intervalo mediu 30,25 s para Claim, 34,09 s para Refund e 40,00 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

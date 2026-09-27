@@ -5,7 +5,12 @@
 //! signs an already constructed Monero transaction after verifying the peer's
 //! opening. Requests and responses are newline-delimited JSON on stdio.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
 
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT, edwards::CompressedEdwardsY, scalar::Scalar,
@@ -18,6 +23,7 @@ use dxp1_clsag_lab::{claim_resume::digest, native_dom::DomClaimOffer};
 use monero_wallet::{ed25519::Scalar as MoneroScalar, send::SignableTransaction};
 use rand_core::OsRng;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use xmr_dleq_sigma::{
     prove_bound, revealed_dom_secret_to_xmr_scalar, verify_bound, BoundCrossCurveProofV1,
     CrossCurvePublicClaim, CrossCurveSecret252, ROLE_XMR_REFUND_SHARE, ROLE_XMR_SHARED_SPEND,
@@ -25,6 +31,9 @@ use xmr_dleq_sigma::{
 use zeroize::Zeroizing;
 
 const MAX_LINE_BYTES: usize = 1 << 20;
+const STATE_MAGIC: &[u8] = b"DXA1/party-state/v1\0";
+const STATE_BODY_BYTES: usize = STATE_MAGIC.len() + 1 + 32 + 32 + 32 + 32;
+const STATE_BYTES: usize = STATE_BODY_BYTES + 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
@@ -74,6 +83,89 @@ impl Role {
             Self::DomOwner => "dom-owner",
             Self::XmrOwner => "xmr-owner",
         }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            Self::DomOwner => 1,
+            Self::XmrOwner => 2,
+        }
+    }
+}
+
+fn sync_parent(path: &Path) -> io::Result<()> {
+    File::open(
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| io::Error::other("state path has no parent"))?,
+    )?
+    .sync_all()
+}
+
+fn load_or_create_secret(
+    path: &Path,
+    role: Role,
+    settlement_id: [u8; 32],
+    context_hash: [u8; 32],
+    chain_id: [u8; 32],
+) -> io::Result<(File, CrossCurveSecret252, bool)> {
+    let binding_prefix = || {
+        let mut bytes = Vec::with_capacity(STATE_BODY_BYTES);
+        bytes.extend(STATE_MAGIC);
+        bytes.push(role.tag());
+        bytes.extend(settlement_id);
+        bytes.extend(context_hash);
+        bytes.extend(chain_id);
+        bytes
+    };
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.try_lock()
+                .map_err(|_| io::Error::other("party state is locked"))?;
+            let secret = CrossCurveSecret252::generate(&mut OsRng);
+            let mut bytes = Zeroizing::new(binding_prefix());
+            bytes.extend(secret.xmr_share_little_endian());
+            let checksum = Sha256::digest(&*bytes);
+            bytes.extend(checksum);
+            debug_assert_eq!(bytes.len(), STATE_BYTES);
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            sync_parent(path)?;
+            Ok((file, secret, false))
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+                return Err(io::Error::other("unsafe party state file"));
+            }
+            let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+            file.try_lock()
+                .map_err(|_| io::Error::other("party state is locked"))?;
+            let mut bytes = Zeroizing::new(Vec::with_capacity(STATE_BYTES));
+            (&mut file)
+                .take((STATE_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() != STATE_BYTES
+                || bytes[..STATE_BODY_BYTES - 32] != binding_prefix()
+                || bytes[STATE_BODY_BYTES..] != Sha256::digest(&bytes[..STATE_BODY_BYTES])[..]
+            {
+                return Err(io::Error::other("corrupt or mismatched party state"));
+            }
+            let secret = CrossCurveSecret252::from_little_endian(
+                bytes[STATE_BODY_BYTES - 32..STATE_BODY_BYTES]
+                    .try_into()
+                    .map_err(|_| io::Error::other("invalid party state secret"))?,
+            )
+            .map_err(io::Error::other)?;
+            Ok((file, secret, true))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -142,6 +234,7 @@ fn path_index(path: SwapArbiterPath) -> usize {
 }
 
 struct Party {
+    _state_file: File,
     role: Role,
     settlement_id: [u8; 32],
     context_hash: [u8; 32],
@@ -333,11 +426,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settlement_id = fixed_hex::<32>(&args.next().ok_or("missing settlement id")?)?;
     let context_hash = fixed_hex::<32>(&args.next().ok_or("missing context hash")?)?;
     let chain_id = fixed_hex::<32>(&args.next().ok_or("missing chain id")?)?;
+    let state_path = PathBuf::from(args.next().ok_or("missing state path")?);
     if args.next().is_some() {
         return Err("too many arguments".into());
     }
 
-    let secret = CrossCurveSecret252::generate(&mut OsRng);
+    let (state_file, secret, restored) =
+        load_or_create_secret(&state_path, role, settlement_id, context_hash, chain_id)?;
     let proof = prove_bound(
         &secret,
         settlement_id,
@@ -347,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let own_claim = secret.public_claim()?;
     let mut party = Party {
+        _state_file: state_file,
         role,
         settlement_id,
         context_hash,
@@ -363,7 +459,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = stdout.lock();
     serde_json::to_writer(
         &mut stdout,
-        &json!({"ok":true,"role":role.label(),"proof":proof}),
+        &json!({"ok":true,"role":role.label(),"proof":proof,"restored":restored}),
     )?;
     stdout.write_all(b"\n")?;
     stdout.flush()?;

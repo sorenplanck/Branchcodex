@@ -30,8 +30,15 @@ papel correto e entrega a abertura observada ao beneficiário, que assina XMR
 sem exportar a chave reconstruída. A matriz exige também a rejeição do papel
 errado nas duas operações e de outra oferta válida cujo digest não tenha sido
 autorizado para o contrato. O canal stdio é uma fronteira de teste local; as
-shares são efêmeras e a pré-assinatura DOM ainda não foi distribuída entre
-processos independentes.
+shares usam storage local sem cifra própria e a pré-assinatura DOM ainda não
+foi distribuída entre processos independentes.
+
+O helper persiste sua share em um arquivo exclusivo `0600`, sincronizado e
+ligado à operação. A matriz mata e reinicia ambos os helpers depois de `Ready`,
+revalida a mesma chave conjunta e continua. O teste
+`scripts/test_arbiter_party_state.py` cobre lock simultâneo, restart, troca de
+papel e corrupção. O arquivo protege contra acesso acidental entre usuários;
+seu conteúdo ainda não é cifrado contra leitura privilegiada do host.
 
 Após compilar o exemplo, a matriz paralela é executada assim:
 
@@ -42,14 +49,14 @@ python3 scripts/run_arbiter_matrix.py \
   --evidence-dir /diretorio/novo/de/evidencia
 ```
 
-A campanha mais recente terminou em 109,60 s de parede, com duas confirmações
-DOM e shares em processos separados. Claim, Refund e Punish levaram 20,94 s,
-25,99 s e 31,68 s desde `Ready`. Os registros completos e os limites atuais
+A campanha mais recente terminou em 113,24 s de parede, com duas confirmações
+DOM, shares em processos separados e reinício dos dois participantes. Claim,
+Refund e Punish levaram 30,25 s, 34,09 s e 40,00 s desde `Ready`. Os registros completos e os limites atuais
 estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
 GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
-minutos para todo o job. A repetição local exata do workflow passou em 109,60 s
+minutos para todo o job. A repetição local exata do workflow passou em 113,24 s
 de parede e preserva os resultados como artefato quando executada no GitHub.
 
 ## Construção experimental

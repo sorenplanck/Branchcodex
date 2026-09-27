@@ -27,6 +27,7 @@ REQUIRED_TRUE = (
     "private_xmr_shares_held_by_separate_processes",
     "wrong_role_operations_rejected",
     "unauthorized_dom_offer_rejected",
+    "participant_restart_restored_bound_shares",
     "prepared_mature_reserve_required_for_three_minute_target",
 )
 

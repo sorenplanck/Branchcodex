@@ -69,6 +69,10 @@ impl Drop for ManagedDaemon {
 }
 
 struct PartyProcess {
+    binary: PathBuf,
+    role: String,
+    chain_id: [u8; 32],
+    state_path: PathBuf,
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -82,14 +86,24 @@ impl Drop for PartyProcess {
 }
 
 impl PartyProcess {
-    fn spawn(binary: &Path, role: &str, chain_id: [u8; 32]) -> (Self, BoundCrossCurveProofV1) {
+    fn launch(
+        binary: &Path,
+        role: &str,
+        chain_id: [u8; 32],
+        state_path: &Path,
+    ) -> (
+        Child,
+        ChildStdin,
+        BufReader<ChildStdout>,
+        BoundCrossCurveProofV1,
+        bool,
+    ) {
         let mut child = Command::new(binary)
-            .args([
-                role,
-                &hex(&SETTLEMENT_ID),
-                &hex(&CONTEXT_HASH),
-                &hex(&chain_id),
-            ])
+            .arg(role)
+            .arg(hex(&SETTLEMENT_ID))
+            .arg(hex(&CONTEXT_HASH))
+            .arg(hex(&chain_id))
+            .arg(state_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -107,14 +121,42 @@ impl PartyProcess {
         assert_eq!(ready["ok"], true);
         assert_eq!(ready["role"], role);
         let proof = serde_json::from_value(ready["proof"].clone()).unwrap();
+        let restored = ready["restored"].as_bool().unwrap();
+        (child, input, output, proof, restored)
+    }
+
+    fn spawn(
+        binary: &Path,
+        role: &str,
+        chain_id: [u8; 32],
+        state_path: PathBuf,
+    ) -> (Self, BoundCrossCurveProofV1, bool) {
+        let (child, input, output, proof, restored) =
+            Self::launch(binary, role, chain_id, &state_path);
         (
             Self {
+                binary: binary.to_owned(),
+                role: role.to_owned(),
+                chain_id,
+                state_path,
                 child,
                 input,
                 output,
             },
             proof,
+            restored,
         )
+    }
+
+    fn restart(&mut self) -> (BoundCrossCurveProofV1, bool) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+        let (child, input, output, proof, restored) =
+            Self::launch(&self.binary, &self.role, self.chain_id, &self.state_path);
+        self.child = child;
+        self.input = input;
+        self.output = output;
+        (proof, restored)
     }
 
     fn exchange(&mut self, request: serde_json::Value) -> serde_json::Value {
@@ -566,8 +608,19 @@ async fn funded_arbiter(party_binary: &Path) -> FundedArbiter {
     let staging_height = mine(&node).await;
     assert!(handle.get_utxo(staging.as_bytes()).is_some());
 
-    let (mut dom_owner, dom_proof) = PartyProcess::spawn(party_binary, "dom-owner", chain_id);
-    let (mut xmr_owner, xmr_proof) = PartyProcess::spawn(party_binary, "xmr-owner", chain_id);
+    let (mut dom_owner, dom_proof, dom_restored) = PartyProcess::spawn(
+        party_binary,
+        "dom-owner",
+        chain_id,
+        root.0.join("dom-owner.state"),
+    );
+    let (mut xmr_owner, xmr_proof, xmr_restored) = PartyProcess::spawn(
+        party_binary,
+        "xmr-owner",
+        chain_id,
+        root.0.join("xmr-owner.state"),
+    );
+    assert!(!dom_restored && !xmr_restored);
     let shares =
         VerifiedArbiterSharesV1::new(SETTLEMENT_ID, CONTEXT_HASH, &dom_proof, &xmr_proof).unwrap();
     let dom_joint = dom_owner.bind_peer(&xmr_proof);
@@ -864,6 +917,53 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
     setup.journal =
         ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
 
+    let (dom_restart_proof, dom_restored) = setup.dom_owner.restart();
+    let (xmr_restart_proof, xmr_restored) = setup.xmr_owner.restart();
+    assert!(dom_restored && xmr_restored);
+    let restarted_shares = VerifiedArbiterSharesV1::new(
+        SETTLEMENT_ID,
+        CONTEXT_HASH,
+        &dom_restart_proof,
+        &xmr_restart_proof,
+    )
+    .unwrap();
+    assert_eq!(
+        restarted_shares.joint_xmr_spend_key().unwrap(),
+        setup.shares.joint_xmr_spend_key().unwrap()
+    );
+    for path in [
+        SwapArbiterPath::Claim,
+        SwapArbiterPath::Refund,
+        SwapArbiterPath::Punish,
+    ] {
+        assert_eq!(
+            restarted_shares
+                .adaptor_point(path)
+                .unwrap()
+                .to_compressed_bytes(),
+            setup
+                .shares
+                .adaptor_point(path)
+                .unwrap()
+                .to_compressed_bytes()
+        );
+    }
+    assert_eq!(
+        setup.dom_owner.bind_peer(&xmr_restart_proof),
+        setup.shares.joint_xmr_spend_key().unwrap()
+    );
+    assert_eq!(
+        setup.xmr_owner.bind_peer(&dom_restart_proof),
+        setup.shares.joint_xmr_spend_key().unwrap()
+    );
+    setup
+        .dom_owner
+        .authorize_dom(&setup.contract, &setup.refund_offer);
+    setup
+        .xmr_owner
+        .authorize_dom(&setup.contract, &setup.punish_offer);
+    setup.xmr_owner.authorize_dom(&setup.contract, &claim_offer);
+
     let (branch, selected_offer, settlement_height) = match outcome {
         Outcome::Claim => (&setup.claim, &claim_offer, setup.claim_until),
         Outcome::Refund => {
@@ -1063,6 +1163,7 @@ async fn exercise(monerod: PathBuf, party_binary: PathBuf, outcome: Outcome) {
             "private_xmr_shares_held_by_separate_processes":true,
             "wrong_role_operations_rejected":true,
             "unauthorized_dom_offer_rejected":true,
+            "participant_restart_restored_bound_shares":true,
             "dom_min_confirmations":MIN_DOM_CONFIRMATIONS,
             "dom_confirmation_depth":dom_confirmation_depth,
             "dom_settlement_height":settlement_height,
