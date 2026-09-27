@@ -1,137 +1,124 @@
-# BTC ↔ DOM ↔ SOL: what the two-leg hub needs from this leg
+# DOM is a hop, not a route: what that means for the Solana leg
 
-Written 2026-09-27, after the Solana↔DOM leg went green. No code accompanies it,
-by request: the DOM-side modules this laboratory copied are being changed in
-another working tree, and touching the same files from two places is the problem
-this document exists to avoid.
+Written 2026-09-27. Rewritten the same day, because the first version described the
+wrong architecture. That correction is the most useful thing in this file, so it
+comes first.
 
-## 0. The question, and why it is already answered
+## 0. The correction
 
-A route that moves BTC to SOL is not one transfer. It is two legs — BTC↔DOM and
-DOM↔SOL — sharing one DOM hub. Each leg, on its own, is what this laboratory now
-settles: a jointly owned DOM reserve spent by an adapted claim, a counterparty
-lock, one 252-bit scalar with a face on each curve, and two deadlines ordered so
-that whoever must act second has the later one.
+The first version of this document assumed a **composed route**: one operation
+moving an asset from chain A to chain B through DOM, with the two legs
+cryptographically joined so the whole thing settles atomically. It then went
+looking for how the two legs should be joined, found `DR-PRIV-001` and its secret
+leg offset, and listed what this leg would have to accept in order to participate.
 
-The obvious way to join two such legs is to condition all four locks on the same
-scalar. **That is not the design this project chose**, and it is worth reading why
-before anyone builds it that way.
+That is not the objective. The objective, as stated by the operator:
 
-The decision is `docs/specifications/design/DR-PRIV-001-leg-unlinkability-blinding-and-a2lplus.en.md`,
-dated 2026-09-02, and it is explicit about its own standing:
+> An operation starts on Solana and sends to DOM. DOM takes that operation and
+> distributes: if it is going to Bitcoin, to the Bitcoin leg; if to Monero, to
+> Monero; if to EVM, to EVM. It passes through DOM because the passage through DOM
+> is where privacy is mitigated. It is **not one operation**. An asset leaving
+> Solana, passing through DOM and arriving at Bitcoin is **two operations,
+> independent**: one Solana → DOM, and another DOM → the destination.
 
-> Status: **DESIGN RECORD / NOT IMPLEMENTED / NOT NORMATIVE / UNSIGNED**
+And, said again more sharply afterwards:
 
-It approves nothing until ratified and signed. But it is not idle either: Level 1
-of it exists in the tree as `crates/route-composer/src/leg_blinding.rs` and
-`ComposedBindingV3`, so the record is behind the code rather than ahead of it.
+> I said DOM to Solana and DOM to Bitcoin. That is why your job is to integrate
+> with the DOM daemon. It is to integrate with DOM. Solana↔DOM. That is why it has
+> to be with DOM. Then the DOM centre is what distributes.
 
-## 1. What it decides
+So there is no route object joining two legs, and nothing for a leg offset to
+relate. Every consequence the first version drew from the composed-route premise
+was answering a question nobody asked.
 
-**Level 1 — per-leg witness blinding.** One route stops carrying one witness.
-Each leg carries its own, and the two are joined by a secret integer offset δ:
+Two things follow, and they set the scope of this leg. **One:** the leg's
+counterparty is DOM and nothing else. It never needs to know which chain an asset
+goes to next, because that is a separate operation. **Two:** the distribution --
+which destination a received asset goes out to -- belongs to the DOM centre, not to
+any leg. A leg that tried to reason about the destination would be taking work away
+from the place that is supposed to decide it, and would re-link the two operations
+in the process.
 
-```
-s_downstream = s_upstream + δ            translate_witness_v1
-D            = δ · G                     prove_offset_relation_v1  → (D, proof)
-S_downstream = S_upstream + D            verify_offset_relation_v1
-```
+## 1. What this leg already is
 
-The point relation is publicly checkable; δ is not public. The Schnorr
-proof-of-knowledge of δ writes DLEQ role byte `4`
-(`ROLE_LEG_OFFSET_RELATION`) into its transcript, drawn from the same closed
-registry as roles 1–3, and its nonce is derived RFC-6979 style so a broken RNG
-cannot leak δ through nonce reuse.
+Exactly one of those independent operations, and it needs no change to be one.
+Checked rather than assumed: this laboratory contains no reference to `upstream`,
+`downstream`, a composed binding, `route_composer` or an offset relation. Each
+settlement carries its own `settlement_id`, its own session and intent, its own
+freshly generated condition, its own pair of deadlines, and its own evidence.
 
-What this buys: an observer watching both chains sees two unrelated locks. What it
-costs: the party holding δ is the only one who can carry a revealed upstream
-witness across to the downstream leg — which is precisely the hub's position, and
-is the reason the hub is a hub.
+Two operations run back to back through it share nothing: not a witness, not a
+deadline, not an escrow, not a DOM reserve. That is the property the objective
+wants, and it is the property the leg has — by construction rather than by effort.
 
-**Level 2 — solver-blind puzzles, A²L+ shape.** Removes the solver's *own* ability
-to link the two legs it serves. The record restricts its first version to routes
-whose two legs share a curve, and the curve in question is the one each leg's
-counterparty lock is verified on, not DOM's. DOM signs on secp256k1 throughout;
-this leg's condition is checked on ed25519 by the curve25519 syscall.
+The three "points of contact" the first version listed — take a witness instead of
+minting one, verify an offset relation, take deadlines from a route policy — are
+requirements of the composed-route design. Under the stated objective they are
+**not** needed, and adding them would couple two things the design wants apart.
 
-So a route qualifies when both counterparty locks sit on the same curve — this leg
-paired with a Monero leg would, since `CrossCurveSharedSpend` opens an ed25519
-spend key, and a Bitcoin leg paired with an EVM leg would, both being secp256k1 —
-and does not when they differ, which is the case for BTC↔DOM↔SOL. Level 2 is
-therefore not a near-term property of that particular route, and saying so now is
-cheaper than discovering it later.
+## 2. Where the privacy actually comes from, and what can quietly destroy it
 
-On the Bitcoin side this document claims only what its own sources say:
-`crates/adapters/btc` describes a Taproot contract with a MuSig2 2-of-2 adaptor,
-which is secp256k1. Which `LockMechanism` byte that leg carries is not recorded in
-those crates and is not asserted here; it belongs to whoever owns that leg.
+This is the part worth writing down, because under this model the privacy is not a
+cryptographic property of the leg. The leg contributes only one thing: two
+operations are independent, so nothing in either operation's public bytes names the
+other. That is necessary and nowhere near sufficient. What remains is correlation,
+and correlation does not care that the cryptography is separate.
 
-## 2. What this leg must accept in order to participate
+**The DOM output is the sharpest edge.** Operation 1 pays a DOM output to the user.
+If operation 2 funds its reserve by spending *that same output*, the DOM chain
+itself links the two operations in plain sight, and the hop bought nothing. This is
+not hypothetical bookkeeping: this leg's DOM claim pays a specific commitment, and
+the next operation's reserve is funded from some commitment. Whether they are the
+same one is a decision made outside this leg, and it is the decision the whole
+privacy argument rests on.
 
-Three things, all small, and the first is already possible.
+**Amounts.** One SOL in and the equivalent out, with nothing else moving nearby,
+correlates the two operations whatever the cryptography does. The privacy budget is
+whatever else is happening on the DOM chain in that window at comparable value.
 
-**(a) Take the witness instead of minting one.** Today `SolanaLegV1::establish`
-calls `prepare_route_secret`, which generates a fresh secret. Under Level 1 the
-witness is either derived from the route seed (`derive_leg_witness_v1`) or is the
-*translation* of the other leg's witness by δ. The leg must therefore be able to
-be established from a witness it is handed.
+**Timing.** The user holds DOM between the two operations. That holding period is
+the budget. Two operations seconds apart are two halves of one observable event.
 
-The hook exists and needs no new cryptography: `SolanaRouteSecret::restore(witness_le,
-proof, rng)` already rebuilds a session from a supplied witness and refuses one
-that does not reproduce the registered public claim. What is missing is only an
-entry point on `SolanaLegV1` that uses it — the same shape as `EstablishedLegV1::resume`,
-which already does exactly this for a restart.
+**Counterparties.** If the same party serves both operations, it knows both sides
+regardless of what any chain observer can see. Off-chain metadata does the same:
+this leg's terms carry a `solver_id` and a roster, and two operations sharing them
+are linked for anyone holding both sets of terms — off chain, but linked.
 
-Constraint to respect: `derive_leg_witness_v1` produces values below 2^251 and a
-translated value may use the extra bit, so up to 2^252. This leg's on-chain check
-is `little_endian[31] & 0xf0 == 0`, i.e. below 2^252, so both fit. A witness at or
-above 2^252 would be refused by the escrow, not by the client, which is the right
-place but an expensive one to find out.
+None of these are defects in the leg, and none can be fixed inside it. They are the
+reason the hop exists, and they are where it can silently fail.
 
-**(b) Verify the relation against its own claim point.** A leg receiving a
-translated witness should check `S_this = S_other + D` with
-`verify_offset_relation_v1` before it funds anything, rather than trusting that
-the hub translated correctly. The leg already refuses an opening that does not
-open both of its faces; this is the same discipline one level up.
+## 3. The price of independence, stated plainly
 
-**(c) Take its deadline from the route, not from itself.** `LegScheduleV1` in this
-laboratory enforces the per-leg inequality — the second claimant gets the later
-deadline — and chooses one side freely. A route needs more: the outer leg must
-dominate the inner one on both clocks. That policy already exists as
-`route_composer::ComposedWindowPolicyV1`, with a `hub_margin` in DOM blocks and a
-`counterparty_margin` in the counterparty clock's seconds. Composition is
-therefore: the route fixes the two margins, and each leg's schedule is derived
-inside them instead of picking its own relative deadline.
+Two independent operations are not atomic. Between them the user holds DOM. If the
+second operation never happens — no counterparty, a price move, a refund — the user
+holds DOM rather than the asset they wanted. A composed route would have made that
+impossible and would have made the two legs linkable; this design chose the
+opposite trade. It is a choice, not an oversight, and it is worth being explicit
+that the refund paths this leg proves protect *one* operation. Nothing protects a
+user who completed the first and could not start the second.
 
-## 3. What must not change, and why
+## 4. What `DR-PRIV-001` is, and why it is not this
 
-The escrow program, the condition check on both curves, the observation path, the
-evidence records and the per-leg inequality are all unaffected by leg blinding. The
-blinding is arithmetic on the witness *above* the leg: the leg still receives one
-scalar, still proves one DLEQ under role 3, still verifies `s·G_ed == P` on chain.
-Anything that changed inside the leg to accommodate the hub would be a sign the
-layering is wrong.
+`docs/specifications/design/DR-PRIV-001-leg-unlinkability-blinding-and-a2lplus.en.md`
+exists in this tree and is implemented in part (`route-composer::leg_blinding`,
+`ComposedBindingV3`). It solves the composed-route problem: when two legs *are* one
+route and therefore carry one witness, Level 1 gives each leg its own witness joined
+by a secret offset `δ` with `D = δ·G` and a Schnorr proof under DLEQ role 4, so an
+observer of both chains cannot link them; Level 2 blinds the solver itself, A²L+
+shape, restricted in its first version to routes whose two counterparty locks share
+a curve.
 
-One consequence worth stating plainly: `ROLE_SOLANA_CONDITION_LOCK = 3` stays as
-it is. The record says so — "Roles 1–3 are unchanged by the per-leg witness split
-— each leg still proves its own witness" — and the role registry is closed, so a
-leg that wanted a new byte would be a ratification line of its own.
-
-## 4. What is open, and whose call it is
-
-- **Does DXP1 keep DR-PRIV-001?** The record and its implementation belong to the
-  current composed-route design. If DXP1 replaces that spine, the question is
-  whether leg blinding is carried over as a property or re-derived. Either way the
-  three items in §2 are the same, because they are about the leg, not the spine.
-- **Ratification.** The record is unsigned, and unsigned bytes grant no authority.
-  Level 1 running in `route-composer` does not settle that.
-- **Who holds δ, and what happens when the hub vanishes mid-route.** The record
-  freezes constructions and state machines; the operational question of a hub that
-  stops answering between the two legs' claims is a recovery question, and this
-  document does not pretend to answer it.
+It is a real answer to a real problem, and it is a different problem. Under the
+stated objective the legs are already unlinked because they are not one route. Which
+of the two architectures DXP1 keeps is the operator's decision; this document only
+records that the leg satisfies the stated one today and would need §1's three
+additions for the other.
 
 ## 5. What this document is not
 
-It is not a plan to edit anything. It reports a decision that already exists,
-measures this leg against it, and names the three points of contact. The merge of
-the two working trees, and the timing of it, stay with the operator.
+It is not a plan to change code. The DOM-side modules this laboratory copied are
+being edited in another working tree, and the merge stays with the operator. The
+first version of this file also claimed that a Bitcoin leg carries
+`LockMechanism::SchnorrAdaptor`; no BTC crate in this tree references that byte, the
+claim was not supported, and it is gone. What those crates do say is that the
+Bitcoin side is a Taproot contract with a MuSig2 2-of-2 adaptor.
