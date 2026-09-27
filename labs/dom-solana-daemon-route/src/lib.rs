@@ -68,6 +68,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod declared_inputs;
 pub mod owner_only;
 pub mod participants;
 pub mod registry;
@@ -80,7 +81,8 @@ use std::path::{Path, PathBuf};
 use dom_interopd::{
     ProductionBootstrapConfigV1, ProductionBootstrapModeV1, ProductionChainFamilyV11,
     ProductionConfigErrorV1, ProductionContractsBootstrapPinsV5, ProductionF6PathReferencesV4,
-    ProductionFamilyInputsV5, ProductionFamilyInputsV6, ProductionPathReferencesV1,
+    ProductionF6PathRoleV4, ProductionF6PathRoleV8, ProductionFamilyInputsV5,
+    ProductionFamilyInputsV6, ProductionPathReferencesV1, ProductionPathRoleV1,
     ProductionRelayAuthorityPinsV6, ProductionRoutePinsV1, ProductionRuntimeBoundsV1,
     ProductionUniversalBootstrapFieldsV11, ProductionUniversalLegV11,
     PRODUCTION_CREATE_CONFIG_FILE_V11, PRODUCTION_F6_PATH_ROLE_COUNT_V4,
@@ -114,6 +116,17 @@ fn placeholder(label: &str) -> [u8; 32] {
 /// The 28 base path roles, in the order `ProductionPathRoleV1` declares them.
 /// Names are relative and distinct; path isolation across the whole set is what
 /// the daemon validates, so every name in this crate appears exactly once.
+/// The layout, in `ProductionPathRoleV1::ALL` order.
+///
+/// The order is load-bearing and silent if wrong: the loader resolves role N to entry
+/// N, so a transposed pair would put the upstream terms where the DOM wallet belongs
+/// and nothing would say so until authentication failed for an unrelated-looking
+/// reason. `the_layout_assigns_every_role_the_path_it_is_named_for` asserts the whole
+/// mapping against the loaded layout.
+///
+/// The last nine roles are `ManagedDirectory`, not files -- the daemon creates
+/// directories there -- so they are named as directories. Naming one `.sqlite3` would
+/// describe a database that never exists.
 const BASE_PATHS: [&str; PRODUCTION_PATH_ROLE_COUNT_V1] = [
     "artifacts/registry.v1.sqlite3",
     "artifacts/registry-authorities.v1",
@@ -134,44 +147,64 @@ const BASE_PATHS: [&str; PRODUCTION_PATH_ROLE_COUNT_V1] = [
     "state/dom-upstream-participant.v1.sqlite3",
     "state/dom-downstream-participant.v1.sqlite3",
     "state/solver-inventory.v1.sqlite3",
-    "state/relay-queue.v1.sqlite3",
-    "state/upstream-relay-sender.v1.sqlite3",
-    "state/upstream-relay-inbox.v1.sqlite3",
-    "state/upstream-relay-frames.v1.sqlite3",
-    "state/upstream-contracts.v1.sqlite3",
-    "state/downstream-relay-sender.v1.sqlite3",
-    "state/downstream-relay-inbox.v1.sqlite3",
-    "state/downstream-relay-frames.v1.sqlite3",
-    "state/downstream-contracts.v1.sqlite3",
+    "state/relay/queue.v1",
+    "state/relay/upstream-sender.v1",
+    "state/relay/upstream-inbox.v1",
+    "state/relay/upstream-frames.v1",
+    "state/contracts/upstream.v1",
+    "state/relay/downstream-sender.v1",
+    "state/relay/downstream-inbox.v1",
+    "state/relay/downstream-frames.v1",
+    "state/contracts/downstream.v1",
 ];
 
 /// The eleven F6 V4 roles.
+/// The eleven F6 V4 leaves, in `ProductionF6PathRoleV4::ALL` order.
+///
+/// Six of these were previously named for other roles: the order runs
+/// upstream-book and upstream-attestation BEFORE the downstream binding log, not
+/// after it. Every one is a managed file, so the daemon created whatever path the
+/// role pointed at and nothing failed -- an operator reading
+/// `upstream-observation` would have been looking at the downstream binding log.
+/// `the_layout_assigns_every_role_the_path_it_is_named_for` now asserts the mapping.
 const F6_V4_PATHS: [&str; PRODUCTION_F6_PATH_ROLE_COUNT_V4] = [
     "state/f6/solver-status.v1.sqlite3",
     "state/f6/upstream-pre-f6-time.v1.sqlite3",
     "state/f6/downstream-pre-f6-time.v1.sqlite3",
     "state/f6/upstream-binding-log.v1.sqlite3",
     "state/f6/upstream-receipts.v1.sqlite3",
+    "state/f6/upstream-candidate-book.v1.sqlite3",
+    "state/f6/upstream-candidate-attestation.v1.sqlite3",
     "state/f6/downstream-binding-log.v1.sqlite3",
     "state/f6/downstream-receipts.v1.sqlite3",
-    "state/f6/upstream-observation.v1.sqlite3",
-    "state/f6/downstream-observation.v1.sqlite3",
-    "state/f6/upstream-exposure.v1.sqlite3",
-    "state/f6/downstream-exposure.v1.sqlite3",
+    "state/f6/downstream-candidate-book.v1.sqlite3",
+    "state/f6/downstream-candidate-attestation.v1.sqlite3",
 ];
 
 /// The seven F6 V8 roles the universal family adds.
+/// The seven F6 V8 leaves, in `ProductionF6PathRoleV8::ALL` order.
+///
+/// `AuthorityBundleV7` is role SIX, the last, and it is the only `InputFile` among
+/// them. This list had it first, which would have made the loader demand an input
+/// file at the claim-lineage path and demand the bundle's own path be absent -- and
+/// it would have said `InputArtifactUnavailable` about a path no one had written,
+/// naming nothing about the real cause.
 const F6_V8_PATHS: [&str; PRODUCTION_F6_PATH_ROLE_COUNT_V8] = [
+    "state/f6/v8-upstream-status.v1.sqlite3",
+    "state/f6/v8-downstream-status.v1.sqlite3",
+    "state/f6/v8-upstream-time.v1.sqlite3",
+    "state/f6/v8-downstream-time.v1.sqlite3",
+    "state/f6/v8-upstream-candidate.v1.sqlite3",
+    "state/f6/v8-downstream-candidate.v1.sqlite3",
     "artifacts/f6/authority-bundle.v8",
-    "state/f6/v8-upstream-admission.v1.sqlite3",
-    "state/f6/v8-downstream-admission.v1.sqlite3",
-    "state/f6/v8-upstream-exposure.v1.sqlite3",
-    "state/f6/v8-downstream-exposure.v1.sqlite3",
-    "state/f6/v8-refund-arming.v1.sqlite3",
-    "state/f6/v8-claim-lineage.v1.sqlite3",
 ];
 
-const CONTRACTS_IDENTITY_STORE: &str = "state/contracts-transport-identity.v1.sqlite3";
+/// The Contracts transport identity authority.
+///
+/// A DIRECTORY, and one the layout requires to exist in create and in reopen alike --
+/// "provisioned outside the daemon, never created and never repaired here". It was
+/// named `.sqlite3`, which describes a database the daemon never opens.
+const CONTRACTS_IDENTITY_STORE: &str = "state/contracts/transport-identity.v1";
 const CONTRACTS_BUDGET_POLICY: &str = "artifacts/contracts-budget-policy.v1";
 const CONTRACTS_BOOTSTRAP: &str = "artifacts/contracts-bootstrap.v1";
 
@@ -244,6 +277,11 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// The six declared identities, once a caller has supplied them. Absent means the
     /// plan is using derived laboratory labels.
     pub identities: Option<RouteIdentitiesV1>,
+    /// Digest of the F6 authority bundle, once one has been written. It is not one of
+    /// the nineteen route pins -- it is a field of the universal V11 configuration --
+    /// but `authenticate_f6_bundle_file_v8` compares it with the file's own digest, so
+    /// it is a measurement of an artifact exactly like the other thirteen.
+    pub f6_authority_bundle: Option<[u8; 32]>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -280,6 +318,7 @@ impl SolanaRouteBootstrapPlanV1 {
             participants: None,
             route_time: None,
             identities: None,
+            f6_authority_bundle: None,
         }
     }
 
@@ -387,6 +426,60 @@ impl SolanaRouteBootstrapPlanV1 {
     /// and wrong for a deployment: `process_owner_id` in particular is the identity a
     /// fenced store will refuse another process for, so it belongs to whoever runs the
     /// daemon and not to whoever wrote the manifest.
+    /// Bind the digest of the F6 authority bundle that was written.
+    pub fn with_f6_authority_bundle(mut self, digest: [u8; 32]) -> Self {
+        self.f6_authority_bundle = Some(digest);
+        self
+    }
+
+    /// True once the F6 authority bundle on disk and the digest the manifest declares
+    /// are the same measurement.
+    pub const fn f6_authority_bundle_is_measured(&self) -> bool {
+        self.f6_authority_bundle.is_some()
+    }
+
+    /// Every relative path this layout declares, in role order: the twenty-eight V1
+    /// roles, then the eleven F6 V4 roles, then the seven F6 V8 roles.
+    ///
+    /// Exposed so a caller can create the parent directories the loader walks, and so a
+    /// test can assert the role-to-path mapping against the loaded layout rather than
+    /// trusting that two lists were written in the same order.
+    pub fn path_relatives() -> Vec<&'static str> {
+        BASE_PATHS
+            .iter()
+            .chain(F6_V4_PATHS.iter())
+            .chain(F6_V8_PATHS.iter())
+            .copied()
+            .collect()
+    }
+
+    /// The layout's own relative path for one V1 role.
+    ///
+    /// Resolved through `ProductionPathRoleV1::ALL` rather than by a hard-coded index,
+    /// because a positional assumption about these lists is exactly what went wrong in
+    /// the F6 ones.
+    pub fn relative(role: ProductionPathRoleV1) -> &'static str {
+        BASE_PATHS[Self::position(&ProductionPathRoleV1::ALL, role)]
+    }
+
+    /// The layout's own relative path for one F6 V4 role.
+    pub fn f6_v4_relative(role: ProductionF6PathRoleV4) -> &'static str {
+        F6_V4_PATHS[Self::position(&ProductionF6PathRoleV4::ALL, role)]
+    }
+
+    /// The layout's own relative path for one F6 V8 role.
+    ///
+    /// `ProductionF6PathRoleV8::AuthorityBundleV7` is the only input file among them.
+    pub fn f6_v8_relative(role: ProductionF6PathRoleV8) -> &'static str {
+        F6_V8_PATHS[Self::position(&ProductionF6PathRoleV8::ALL, role)]
+    }
+
+    fn position<T: PartialEq>(all: &[T], role: T) -> usize {
+        all.iter()
+            .position(|candidate| *candidate == role)
+            .expect("every role appears in its own ALL")
+    }
+
     pub fn with_identities(mut self, identities: RouteIdentitiesV1) -> Self {
         self.route_id = identities.route_id;
         self.identities = Some(identities);
@@ -588,7 +681,9 @@ impl SolanaRouteBootstrapPlanV1 {
             .map_err(|_| ProductionConfigErrorV1::InvalidPathReference)?;
         Ok(ProductionUniversalBootstrapFieldsV11 {
             f6_paths,
-            f6_authority_bundle_digest: placeholder("f6-authority-bundle"),
+            f6_authority_bundle_digest: self
+                .f6_authority_bundle
+                .unwrap_or_else(|| placeholder("f6-authority-bundle")),
             refund_arming_authority_epoch: 1,
             remote_relay_database_ids: [
                 placeholder("upstream-remote-relay-database"),

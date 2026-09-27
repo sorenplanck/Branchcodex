@@ -120,3 +120,133 @@ fn both_manifests_are_written_and_each_belongs_to_its_own_mode() {
         "the reopen manifest decoded as a create"
     );
 }
+
+/// Every role, and the path it is named for, stated independently of the lists the
+/// crate holds.
+///
+/// This exists because two of those lists were transposed and nothing said so. The F6
+/// V8 list had `AuthorityBundleV7` -- the only input file among the seven -- in the
+/// first slot instead of the last, so the loader would have demanded an input file at
+/// the claim-lineage path. The F6 V4 list had six leaves under other roles' names,
+/// every one of them a managed file, so the daemon created whatever path the role
+/// pointed at and an operator reading `upstream-observation` was looking at the
+/// downstream binding log.
+///
+/// The accessors resolve a role through its own `ALL`, so a reordered list moves the
+/// answer and this table catches it.
+#[test]
+fn the_layout_assigns_every_role_the_path_it_is_named_for() {
+    use dom_interopd::{ProductionF6PathRoleV4 as V4, ProductionF6PathRoleV8 as V8};
+    use dom_interopd::ProductionPathRoleV1 as R;
+    use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1 as P;
+
+    for (role, expected) in [
+        (R::RegistryStore, "artifacts/registry.v1.sqlite3"),
+        (R::RegistryAuthorities, "artifacts/registry-authorities.v1"),
+        (R::UpstreamTerms, "artifacts/upstream-terms.v1"),
+        (R::DownstreamTerms, "artifacts/downstream-terms.v1"),
+        (R::ParticipantBindings, "artifacts/participant-bindings.v1"),
+        (R::RelayRoster, "artifacts/relay-roster.v1"),
+        (R::TimePolicy, "artifacts/time-policy.v1"),
+        (R::TimeEvidence, "artifacts/time-evidence.v1"),
+        (R::DomWallet, "state/dom-wallet"),
+        (R::RouteStore, "state/route.v1.sqlite3"),
+        (R::TimeAnchorStore, "state/time-anchor.v1.sqlite3"),
+        (R::CoordinatorStore, "state/coordinator.v1.sqlite3"),
+        (R::DomActuatorStore, "state/dom-actuator.v1.sqlite3"),
+        (R::EvmActuatorStore, "state/evm-actuator.v1.sqlite3"),
+        (R::BitcoinActuatorStore, "state/bitcoin-actuator.v1.sqlite3"),
+        (R::BitcoinParticipantState, "state/bitcoin-participant.v1.sqlite3"),
+        (
+            R::DomUpstreamParticipantState,
+            "state/dom-upstream-participant.v1.sqlite3",
+        ),
+        (
+            R::DomDownstreamParticipantState,
+            "state/dom-downstream-participant.v1.sqlite3",
+        ),
+        (R::SolverInventoryStore, "state/solver-inventory.v1.sqlite3"),
+        (R::RelayQueue, "state/relay/queue.v1"),
+        (R::UpstreamRelaySender, "state/relay/upstream-sender.v1"),
+        (R::UpstreamRelayInbox, "state/relay/upstream-inbox.v1"),
+        (R::UpstreamRelayFrames, "state/relay/upstream-frames.v1"),
+        (R::UpstreamContracts, "state/contracts/upstream.v1"),
+        (R::DownstreamRelaySender, "state/relay/downstream-sender.v1"),
+        (R::DownstreamRelayInbox, "state/relay/downstream-inbox.v1"),
+        (R::DownstreamRelayFrames, "state/relay/downstream-frames.v1"),
+        (R::DownstreamContracts, "state/contracts/downstream.v1"),
+    ] {
+        assert_eq!(P::relative(role), expected, "{role:?}");
+    }
+
+    for (role, expected) in [
+        (V4::SolverStatusStore, "state/f6/solver-status.v1.sqlite3"),
+        (
+            V4::UpstreamPreF6TimeStore,
+            "state/f6/upstream-pre-f6-time.v1.sqlite3",
+        ),
+        (
+            V4::DownstreamPreF6TimeStore,
+            "state/f6/downstream-pre-f6-time.v1.sqlite3",
+        ),
+        (
+            V4::UpstreamBindingLog,
+            "state/f6/upstream-binding-log.v1.sqlite3",
+        ),
+        (V4::UpstreamReceiptStore, "state/f6/upstream-receipts.v1.sqlite3"),
+        (
+            V4::UpstreamCandidateBook,
+            "state/f6/upstream-candidate-book.v1.sqlite3",
+        ),
+        (
+            V4::UpstreamCandidateAttestation,
+            "state/f6/upstream-candidate-attestation.v1.sqlite3",
+        ),
+        (
+            V4::DownstreamBindingLog,
+            "state/f6/downstream-binding-log.v1.sqlite3",
+        ),
+        (
+            V4::DownstreamReceiptStore,
+            "state/f6/downstream-receipts.v1.sqlite3",
+        ),
+        (
+            V4::DownstreamCandidateBook,
+            "state/f6/downstream-candidate-book.v1.sqlite3",
+        ),
+        (
+            V4::DownstreamCandidateAttestation,
+            "state/f6/downstream-candidate-attestation.v1.sqlite3",
+        ),
+    ] {
+        assert_eq!(P::f6_v4_relative(role), expected, "{role:?}");
+    }
+
+    for (role, expected) in [
+        (V8::UpstreamStatusStore, "state/f6/v8-upstream-status.v1.sqlite3"),
+        (
+            V8::DownstreamStatusStore,
+            "state/f6/v8-downstream-status.v1.sqlite3",
+        ),
+        (V8::UpstreamTimeStore, "state/f6/v8-upstream-time.v1.sqlite3"),
+        (V8::DownstreamTimeStore, "state/f6/v8-downstream-time.v1.sqlite3"),
+        (
+            V8::UpstreamCandidateStore,
+            "state/f6/v8-upstream-candidate.v1.sqlite3",
+        ),
+        (
+            V8::DownstreamCandidateStore,
+            "state/f6/v8-downstream-candidate.v1.sqlite3",
+        ),
+        // The only input file among the seven, and the last role.
+        (V8::AuthorityBundleV7, "artifacts/f6/authority-bundle.v8"),
+    ] {
+        assert_eq!(P::f6_v8_relative(role), expected, "{role:?}");
+    }
+
+    // Forty-six paths, all distinct: two roles sharing a path would make one of them
+    // silently adopt the other's state.
+    let all = P::path_relatives();
+    let distinct: std::collections::BTreeSet<&str> = all.iter().copied().collect();
+    assert_eq!(distinct.len(), all.len(), "two roles share a path");
+}
