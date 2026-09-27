@@ -24,6 +24,15 @@ antes de extrair a share e enviar a transação XMR. O intervalo
 Monero bloqueia outputs novos por dez blocos; portanto essa meta exige uma
 reserva preparada e madura. O tempo de preparação é medido separadamente.
 
+`examples/arbiter_party.rs` mantém cada share XMR num processo próprio. O
+coordenador vê somente as provas DLEQ públicas, solicita a conclusão DOM ao
+papel correto e entrega a abertura observada ao beneficiário, que assina XMR
+sem exportar a chave reconstruída. A matriz exige também a rejeição do papel
+errado nas duas operações e de outra oferta válida cujo digest não tenha sido
+autorizado para o contrato. O canal stdio é uma fronteira de teste local; as
+shares são efêmeras e a pré-assinatura DOM ainda não foi distribuída entre
+processos independentes.
+
 Após compilar o exemplo, a matriz paralela é executada assim:
 
 ```text
@@ -33,14 +42,14 @@ python3 scripts/run_arbiter_matrix.py \
   --evidence-dir /diretorio/novo/de/evidencia
 ```
 
-A campanha mais recente terminou em 118,45 s de parede, já com a barreira de
-duas confirmações DOM. Claim, Refund e Punish levaram 20,68 s, 24,92 s e 31,51
-s desde `Ready`. Os registros completos e os limites atuais estão em
-`../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
+A campanha mais recente terminou em 109,60 s de parede, com duas confirmações
+DOM e shares em processos separados. Claim, Refund e Punish levaram 20,94 s,
+25,99 s e 31,68 s desde `Ready`. Os registros completos e os limites atuais
+estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
 GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
-minutos para todo o job. A repetição local exata do workflow passou em 118,45 s
+minutos para todo o job. A repetição local exata do workflow passou em 109,60 s
 de parede e preserva os resultados como artefato quando executada no GitHub.
 
 ## Construção experimental

@@ -95,11 +95,21 @@ Isso fecha o reorg de um bloco para a política adotada, mas não transforma dua
 confirmações probabilísticas em finalidade absoluta. Uma reorganização mais
 profunda continua dentro do modelo adversarial que precisa ser quantificado.
 
+As shares DLEQ não ficam mais juntas no coordenador do ensaio. Dois processos
+geram as shares, validam a prova pública do peer e aplicam regras de papel:
+Claim/Punish são concluídos pelo dono de XMR e o gasto XMR pelo dono de DOM;
+Refund inverte essas duas responsabilidades. A chave XMR reconstruída existe
+somente no processo que assina. A matriz força operações com o papel errado e
+exige sua rejeição; também recusa outra oferta válida que não corresponda ao
+digest autorizado dentro do contrato fixado. Ainda é IPC local sem autenticação
+de rede, persistência da share privada ou pré-assinatura DOM totalmente
+distribuída.
+
 Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto.
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 13,42 s para Claim, 19,79 s para Refund e 24,46 s para Punish
+intervalo mediu 20,94 s para Claim, 25,99 s para Refund e 31,68 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

@@ -24,6 +24,9 @@ REQUIRED_TRUE = (
     "durable_ordering_journal_complete",
     "dom_release_recorded_before_submit",
     "dom_finality_recorded_before_xmr_submit",
+    "private_xmr_shares_held_by_separate_processes",
+    "wrong_role_operations_rejected",
+    "unauthorized_dom_offer_rejected",
     "prepared_mature_reserve_required_for_three_minute_target",
 )
 
