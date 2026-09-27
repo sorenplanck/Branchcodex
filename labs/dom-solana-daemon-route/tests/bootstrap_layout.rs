@@ -164,6 +164,58 @@ fn tree(root: &std::path::Path) -> String {
     out.join("\n")
 }
 
+/// Load a directory built up to one stage, and report what the daemon said.
+///
+/// `InvalidStateAuthority` names none of the four conditions it covers, and this crate's
+/// own verification of all four passes on every path -- the tree dump shows every
+/// directory at 0700 and every file at 0600, all owned by the running uid. So the useful
+/// question is no longer "which condition" but "which addition", and that is answered by
+/// building the directory in stages and loading after each one.
+fn staged_report() -> String {
+    let mut lines = Vec::new();
+    for stage in 0..4 {
+        let directory = tempfile::tempdir().expect("a working directory");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("a canonical directory");
+        let plan =
+            Plan::both_positions_on_solana([0x7c; 32], [0x8d; 32]).with_identities(identities());
+
+        if stage >= 1 {
+            declared_inputs::create_parent_directories(&root, &Plan::path_relatives())
+                .expect("parents");
+        }
+        if stage >= 2 {
+            declared_inputs::create_contracts_transport_identity(
+                &root,
+                Plan::contracts_transport_identity_relative(),
+            )
+            .expect("identity directory");
+        }
+        if stage >= 3 {
+            for relative in [
+                Plan::relative(ProductionPathRoleV1::DomWallet),
+                Plan::contracts_budget_policy_relative(),
+            ] {
+                declared_inputs::write_dom_wallet(&root, relative, &[0x11; 8])
+                    .expect("an input file");
+            }
+        }
+        // The manifests last: the loader reads them before the layout, and a missing one
+        // is a different error entirely.
+        plan.write_manifests(&root).expect("manifests");
+
+        let outcome =
+            match load_production_bootstrap_v11(&root, ProductionBootstrapModeV1::Create) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            };
+        lines.push(format!("  stage {stage}: {outcome}"));
+    }
+    lines.join("\n")
+}
+
 /// The milestone: the daemon validates the whole directory.
 #[test]
 fn the_daemon_accepts_the_layout_this_crate_provisions() {
@@ -171,8 +223,9 @@ fn the_daemon_accepts_the_layout_this_crate_provisions() {
     let bootstrap = load_production_bootstrap_v11(&root, ProductionBootstrapModeV1::Create)
         .unwrap_or_else(|error| {
             panic!(
-                "the daemon refused the state directory, the manifests or the layout:                  {error:?}\n{}",
-                tree(&root)
+                "the daemon refused the state directory, the manifests or the layout: {error:?}\n{}\nstaged, on fresh directories:\n{}",
+                tree(&root),
+                staged_report()
             )
         });
 
