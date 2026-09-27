@@ -36,6 +36,21 @@ executar o ensaio financiado ponta a ponta. A ativação de rede e a garantia de
 inclusão dentro da janela continuam decisões abertas; este código é candidato
 experimental de consenso.
 
+**A ligação adaptor↔share XMR também está implementada no laboratório novo.**
+Duas provas DLEQ são vinculadas à mesma operação com papéis distintos. Claim e
+punish usam a share do dono de XMR; refund usa a share do dono de DOM. Os três
+caminhos foram assinados por duas partes, aceitos pelo contrato `DXA1`, tiveram
+o segredo extraído da assinatura DOM final e reconstruíram a chave XMR conjunta
+do lado que não recebeu DOM. Cada reconstrução assinou uma transação Monero
+nativa CLSAG/Bulletproof+ com um input conjunto sintético. Papéis trocados,
+operação diferente e segredo do caminho oposto foram recusados.
+
+Passaram os dois testes novos em 26,06 s, os testes anteriores de assinatura
+DOM e transação XMR nativa e Clippy sem warnings. A reserva XMR deste ensaio é
+sintética; inclusão em `monerod` e funding do output `DXA1` pelo nó DOM ainda
+são a próxima fronteira. A corrida de divulgação perto da mudança de fase
+continua exigindo cutoff honesto e uma hipótese explícita de inclusão.
+
 ## Evidência obtida
 
 **Prioridade atual: corrigir uma premissa de segurança refutada.**

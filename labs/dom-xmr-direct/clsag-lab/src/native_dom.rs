@@ -50,6 +50,32 @@ impl PreparedDomClaim {
         Self::for_kernel(transaction, chain, KERNEL_FEAT_HEIGHT_LOCKED, not_before)
     }
 
+    /// Freeze one exact path of a consensus-bound DOM/XMR arbiter output.
+    ///
+    /// This prepares only the native adaptor signature. The caller must also
+    /// validate the transaction against the contract stored in the canonical
+    /// input UTXO at the actual block height.
+    pub fn new_swap_arbiter_path(
+        transaction: Transaction,
+        chain: [u8; 32],
+    ) -> Result<Self, DomError> {
+        let kernel = transaction
+            .kernels
+            .first()
+            .ok_or_else(|| invalid("missing DOM swap path kernel"))?;
+        if !matches!(
+            kernel.features,
+            dom_core::KERNEL_FEAT_SWAP_CLAIM
+                | dom_core::KERNEL_FEAT_SWAP_REFUND
+                | dom_core::KERNEL_FEAT_SWAP_PUNISH
+        ) {
+            return Err(invalid("unsupported DOM swap arbiter path"));
+        }
+        let features = kernel.features;
+        let lock_height = kernel.lock_height;
+        Self::for_kernel(transaction, chain, features, lock_height)
+    }
+
     fn for_kernel(
         transaction: Transaction,
         chain: [u8; 32],

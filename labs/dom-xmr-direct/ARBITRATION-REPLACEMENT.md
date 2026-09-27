@@ -1,6 +1,7 @@
 # Substituição da recuperação temporizada XMR: condições de projeto
 
-Estado em 27/09/2026: **pesquisa, não protocolo aprovado nem implementado**.
+Estado em 27/09/2026: **candidato experimental implementado, ainda não
+aprovado nem ativado em rede**.
 O ensaio [`FAST-RACE-AUDIT.md`](clsag-lab/FAST-RACE-AUDIT.md) mostrou que o
 candidato atual não é atômico quando a share XMR é recuperada cedo e o peer
 recebe os bytes completos do claim antes de sua inclusão. O relógio e o
@@ -48,6 +49,21 @@ primeira altura em que a transação assinada pode entrar num bloco. Usá-lo em
 uma devolução XMR não impediria a corrida que acabamos de reproduzir.
 
 ## Candidato a testar, sem cápsula de tempo
+
+O candidato agora possui um primitivo concreto `DXA1` no consenso DOM. O
+output compromete três gastos exatos e fases adjacentes: claim até `Hc`, refund
+de `Hc+1` até `Hr`, e punish depois de `Hr`. Claim e punish são adaptados pela
+share XMR do dono de XMR; refund é adaptado pela share do dono de DOM. As duas
+shares têm provas DLEQ distintas, ligadas à operação e ao papel. Assim, claim
+ou punish entrega DOM ao dono de XMR e revela a share que permite ao dono de
+DOM gastar a saída XMR conjunta; refund devolve DOM ao dono de DOM e revela a
+share que permite ao dono de XMR recuperar XMR.
+
+Testes nativos já validam as assinaturas DOM multipartes, a extração de cada
+share, a reconstrução da chave XMR conjunta e uma transação CLSAG/Bulletproof+
+Monero válida em cada um dos três resultados. O nó DOM aplica o contrato no
+mempool, bloco direto, reorganização e reconstrução após reinício. Ainda falta
+o ensaio financiado com os dois daemons e a política final de ativação.
 
 Uma direção é uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

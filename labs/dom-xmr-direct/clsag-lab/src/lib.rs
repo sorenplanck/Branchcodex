@@ -24,11 +24,9 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
-pub mod claim_resume;
+pub mod arbiter_pair;
 pub mod capsule_checkpoint;
-pub mod operation_checkpoint;
-#[cfg(unix)]
-pub mod preparation_gate;
+pub mod claim_resume;
 #[cfg(unix)]
 pub mod counterpart_delivery;
 pub mod dom_joint;
@@ -37,6 +35,9 @@ pub mod dom_reserve;
 pub mod joint;
 pub mod native;
 pub mod native_dom;
+pub mod operation_checkpoint;
+#[cfg(unix)]
+pub mod preparation_gate;
 pub mod recovery;
 pub mod recovery_challenge;
 #[cfg(unix)]
