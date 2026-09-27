@@ -1,5 +1,10 @@
 # Recuperação e assinatura XMR em processo novo
 
+Este documento conserva a evidência da etapa de assinatura. A etapa seguinte,
+`REFUND-DELIVERY.md`, acrescenta publicação/observação por processos novos e
+job v2 ligado ao checkpoint nativo. As descrições abaixo de publicação pelo
+pai correspondem aos ensaios históricos registrados aqui.
+
 O modo `direct-pair-abandon-local-receipt` agora entrega a recuperação e a
 assinatura da devolução a um processo Rust novo. O pai descarta suas duas
 shares originais e encerra o verificador Go antes de iniciar esse processo.

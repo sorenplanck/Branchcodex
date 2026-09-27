@@ -13,6 +13,22 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Devolução XMR agora é publicada e observada por workers independentes.**
+Job v2 fixa o checkpoint original de nó/genesis/bloco; worker verifica anel
+nativo, corpo/assinatura exatos, pool/inclusão ou input livre sob lock de
+RecoveryOnly. Intent durável precede o POST; não há nova assinatura ou prazo
+na retomada. Saídas antes do RPC e após ACK foram exercitadas no monerod;
+outros processos suprimiram duplicata no pool e confirmaram inclusão.
+
+Passaram 18 testes do exemplo, Clippy/build e cenário nativo: **196,115 s**
+totais, **42,163 s** na recuperação/publicação com retomadas. O total excedeu
+três minutos em16,115 s; sucesso funcional não significa meta temporal cumprida.
+XMR observado23 s antes do limite original; DOM lock220/refund221 e outputs
+gastos. Hashes/PIDs/grupo conferidos. `clsag-lab/REFUND-DELIVERY.md` registra
+detalhes e limites. O pai ainda hospeda/minera os nós; recuperação após
+exposição, orçamento global de retomadas, preparação independente, segurança
+criptográfica/temporal e integração ao dom-interopd continuam pendentes.
+
 **Troca e recuperação agora exigem decisões duráveis mutuamente exclusivas.**
 `PreparationGate` é criado antes dos depósitos. Antes dos adaptors, fixa a
 operação em ExchangePossible; antes da recuperação privada, fixa o job em
@@ -28,9 +44,9 @@ e contraparte por worker. Registros de decisão conferidos, outputs gastos,
 refund conflitante recusado; hashes/PIDs/grupos conferidos. Notas
 `clsag-lab/PREPARATION-GATE.md`. Resultados de laboratório com pouca margem,
 sem prova de prazo universal ou segurança bilateral.
-Segue pendente dar ao worker de refund observação/publicação nativas próprias,
-reconciliação do envio e recuperação após exposição; integração ao dom-interopd
-e fundamentos criptográficos/temporais também permanecem abertos.
+A etapa posterior acima acrescenta observação/publicação nativas próprias e
+reconciliação do envio privado. Recuperação após exposição, dom-interopd e
+fundamentos criptográficos/temporais permanecem abertos.
 
 **Recuperação e assinatura da devolução XMR passaram em um Rust novo.**
 O supervisor descarta suas shares originais e encerra o verificador. O worker

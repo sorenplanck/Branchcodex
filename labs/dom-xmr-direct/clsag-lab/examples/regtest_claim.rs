@@ -13,6 +13,8 @@ mod direct_recovery_bridge;
 mod dom_regtest;
 #[path = "support/recovery_bridge.rs"]
 mod recovery_bridge;
+#[path = "support/refund_delivery.rs"]
+mod refund_delivery;
 #[path = "support/refund_recovery_worker.rs"]
 mod refund_recovery_worker;
 #[path = "support/settlement_resume.rs"]
@@ -1025,12 +1027,21 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             &mut OsRng,
         )
         .unwrap();
+        let anchor_height = rpc.latest_block_number().await.unwrap();
+        let network = refund_delivery::Network {
+            port: rpc_port,
+            genesis: rpc.block_by_number(0).await.unwrap().hash(),
+            anchor_height: anchor_height as u64,
+            anchor: rpc.block_by_number(anchor_height).await.unwrap().hash(),
+        }
+        .persist(&root);
         let job = refund_recovery_worker::Job {
             local_identity: local_state_identity.unwrap(),
             capsule: capsule.binding(),
             link: link.binding(),
             received: capsule.received_unix_seconds(),
             latest: paired.as_ref().unwrap().window.latest_honest().0,
+            network,
             offset: Zeroizing::new(offset),
             unsigned: prepared.to_recovery_bytes().unwrap(),
         };
@@ -1124,6 +1135,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             "local-verifier-authority.key",
             "local-xmr-recovery.record",
             "refund-recovery.job",
+            "refund-network.record",
         ];
         let before = protected
             .map(|name| Sha256::digest(&*Zeroizing::new(fs::read(root.join(name)).unwrap())));
@@ -1171,7 +1183,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         details["capsule_record_unchanged_after_restart"] = json!(true);
         details["local_setup_receipt_and_authority_unchanged"] = json!(true);
         details["local_state_and_unsigned_refund_job_unchanged"] = json!(true);
-        details["refund_publication_by_parent"] = json!(true);
+        details["refund_publication_by_parent"] = json!(false);
         details["preparation_gate_created_before_funding"] = json!(true);
         details["stale_exchange_rejected_after_recovery"] = json!(true);
         details["recovery_backend"] = json!("experimental-direct-dlog");
@@ -1417,7 +1429,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     if let Some(RefundEvidence {
         binding: recovery_binding,
         seconds: recovery_seconds,
-        details,
+        mut details,
     }) = recovery_evidence
     {
         let refund_start = Instant::now();
@@ -1453,10 +1465,30 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
             (prepared, tx, refund_change)
         };
-        publish_local(&tx).await;
+        if !use_local_receipt {
+            publish_local(&tx).await;
+        }
         let (refund_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
         let block = rpc.scannable_block(refund_blocks[0]).await.unwrap();
         assert!(block.block.transactions.contains(&tx.hash()));
+        if use_local_receipt {
+            let worker_root = root.clone();
+            let identity = Sha256::digest(&*Zeroizing::new(
+                fs::read(root.join("refund-recovery.job")).unwrap(),
+            ))
+            .into();
+            let observed = tokio::task::spawn_blocking(move || {
+                refund_delivery::run(&worker_root, identity, "inspect")
+            })
+            .await
+            .unwrap();
+            assert!(observed["observation"]
+                .as_str()
+                .unwrap()
+                .starts_with("Included"));
+            assert_eq!(observed["submitted"], false);
+            details["refund_delivery_included"] = observed;
+        }
         let xmr_refund_observed_unix = unix_seconds();
         if let Some(state) = &paired {
             let latest_resolution = state.window.latest_honest().0.checked_add(1).unwrap();
@@ -3076,6 +3108,14 @@ async fn exercise(binary: PathBuf, mode: Mode) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args_os().skip(1);
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--xmr-refund-delivery-worker")
+    {
+        args.next();
+        refund_delivery::worker(args).await;
+        return;
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--xmr-refund-recovery-worker")

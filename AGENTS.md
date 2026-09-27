@@ -804,5 +804,43 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   orçamento global, preparação independente, provas criptográficas/temporais
   e dom-interopd continuam pendentes.
 
+- Commit241b4fc salvou PreparationGate com identidade Soren e árvore limpa.
+- Etapa seguinte refund_delivery.rs: Job v2 inclui digest de checkpoint
+  refund-network.record (porta loopback/genesis/altura+hash após funding).
+  Workers separados do signer carregam job assinado e RecoveryOnly exato,
+  mantêm lock e validam fakechain/offline/genesis/anchor/anel nativo unlocked,
+  bytes/assinatura, pool/inclusão ou ausência+keyimage livre. Ponta estável
+  antes/depois, deadline original; sem solver/chaves recebidas no publisher.
+  refund-send.intent create_new/0600/fsync antes do POST, job+digest da tx;
+  reconsulta antes do envio. Nunca retry POST automático nem assinatura nova.
+  Job/signature faltante/parcial falha fechado. Storage/clock/nó confiáveis,
+  ABA e rollback hostil excluídos. Timeout8s por processo não é budget global.
+- run do signer usa publishers novos: saída80 antes RPC, saída81 após ACK,
+  depois processo novo observa pool sem enviar; pai apenas minera e outro
+  worker verifica inclusão nativa. Refund XMR não é publicado pelo pai nesse
+  modo. Seis arquivos protegidos, signed bytes e send intent iguais.
+- 18 testes example (incluindo dois novos native-response/network-pinning),
+  Clippy all-targets -D warnings e build passaram session37907. Primeira
+  compilação apontou tipo RPC transporte vs MoneroDaemon; corrigida antes do
+  ensaio. REFUND-DELIVERY-CHECKS.json guarda hashes/resultados. Sem testes ou
+  alterações Go novos. Somente três fontes example mudaram, codecs core intactos.
+- Native direct-pair-abandon-local-receipt PID1528381/session98733 exit0:
+  total196,115s, recovery42,163s, signer41,097s. Recebimento1790484240,
+  início1790484275 (+35), XMR observado1790484317 antes de4340 (mesmo prefixo).
+  DOM lock220/refund221, outputs gastos. Rust signer1529477, publishers1529592
+  (exit80),1529593(exit81),1529594(pool sem POST),1529595(incluído152 sem POST).
+  Go antigo1528852/novo1529479. Hashes/PIDs/grupo conferidos e encerrados.
+  Prefixo DIRECT-PAIR-ABANDON-REFUND-DELIVERY-*, notas REFUND-DELIVERY.md,
+  REFUND-DELIVERY-VERIFICATION.json. Nenhum ensaio pendente.
+- Total excedeu180s em16,115s: não declarar meta cumprida. Saldos40,452s,
+  cápsula verificada98,322s, refundXMR166,187s, depois altura/refundDOM.
+  Recuperação funcional dentro65s assumidos, sem prova universal/SLA.
+- Próximo: orçamento global durável de tentativas e recuperação após
+  interrupção durante assinatura/arquivo parcial sem renovar prazo; queda
+  antes de persistir job após funding continua descoberta. Separar recuperação
+  pós-exposição; não usar private-abandonment como atalho. Preparação entre
+  participantes independentes, prova de atomicidade/tempos e dom-interopd
+  continuam obrigatórios. Perfis temporais experimentais não fundamentados.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

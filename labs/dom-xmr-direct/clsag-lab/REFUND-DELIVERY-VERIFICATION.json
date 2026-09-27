@@ -1,0 +1,23 @@
+{
+  "pids_checked": [
+    1528381,
+    1529477,
+    1529592,
+    1529593,
+    1529594,
+    1529595,
+    1528852,
+    1529479
+  ],
+  "remaining_group": [],
+  "hashes_match": true,
+  "crash_before_rpc_exit": 80,
+  "crash_after_ack_exit": 81,
+  "pool_suppresses_duplicate": true,
+  "native_inclusion_observed_by_worker": true,
+  "total_seconds": 196.115476125,
+  "recovery_seconds": 42.163473806,
+  "whole_fixture_within_180_seconds": false,
+  "xmr_original_latest_unix": 1790484340,
+  "xmr_refund_observed_unix": 1790484317
+}

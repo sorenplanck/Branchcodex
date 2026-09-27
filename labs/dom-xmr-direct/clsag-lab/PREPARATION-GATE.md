@@ -1,5 +1,9 @@
 # Decisão durável antes de trocar adaptors
 
+A publicação independente posterior a esta etapa está descrita em
+`REFUND-DELIVERY.md`. Os tempos e limitações de publicação pelo pai abaixo
+registram a versão ensaiada originalmente, antes dessa integração.
+
 O journal da primeira claim só existia depois da preparação dos adaptors.
 Sua ausência não provava que uma operação ainda estava privada. O worker de
 devolução agora exige uma decisão anterior, criada antes dos dois depósitos:

@@ -1,5 +1,5 @@
 //! Owned-regtest recovery/signing worker. No spend shares are returned to the
-//! supervisor. The parent still hosts nodes, publishes and observes the refund.
+//! supervisor. A separate delivery worker publishes the persisted exact bytes.
 use super::{direct_recovery_bridge, fresh_secret, presign, unix_seconds};
 use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
 use dxp1_clsag_lab::{
@@ -24,7 +24,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8] = b"DXP1/owned-refund-worker/v1\0";
+const MAGIC: &[u8] = b"DXP1/owned-refund-worker/v2\0";
 const LIMIT: usize = 2 * 1024 * 1024;
 
 pub fn write_private(path: &Path, bytes: &[u8]) {
@@ -41,7 +41,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) {
         .sync_all()
         .unwrap();
 }
-fn read_private(path: &Path) -> Zeroizing<Vec<u8>> {
+pub(super) fn read_private(path: &Path) -> Zeroizing<Vec<u8>> {
     let meta = fs::symlink_metadata(path).unwrap();
     assert!(
         meta.is_file() && meta.permissions().mode() & 0o777 == 0o600 && meta.len() <= LIMIT as u64
@@ -70,6 +70,7 @@ pub struct Job {
     pub link: [u8; 64],
     pub received: u64,
     pub latest: u64,
+    pub network: [u8; 32],
     pub offset: Zeroizing<Scalar>,
     pub unsigned: Zeroizing<Vec<u8>>,
 }
@@ -81,6 +82,7 @@ impl Job {
         bytes.extend(self.link);
         bytes.extend(self.received.to_le_bytes());
         bytes.extend(self.latest.to_le_bytes());
+        bytes.extend(self.network);
         let offset = Zeroizing::new(self.offset.to_bytes());
         bytes.extend_from_slice(&*offset);
         bytes.extend_from_slice(&self.unsigned);
@@ -88,7 +90,7 @@ impl Job {
         write_private(&root.join("refund-recovery.job"), &bytes);
         Sha256::digest(&*bytes).into()
     }
-    fn load(root: &Path, expected: [u8; 32]) -> Self {
+    pub(super) fn load(root: &Path, expected: [u8; 32]) -> Self {
         let bytes = read_private(&root.join("refund-recovery.job"));
         assert_ne!(expected, [0; 32]);
         assert_eq!(<[u8; 32]>::from(Sha256::digest(&*bytes)), expected);
@@ -98,6 +100,8 @@ impl Job {
         let link = take(&mut input);
         let received = u64::from_le_bytes(take(&mut input));
         let latest = u64::from_le_bytes(take(&mut input));
+        let network = take(&mut input);
+        assert_ne!(network, [0; 32]);
         let encoded = Zeroizing::new(take(&mut input));
         let offset =
             Zeroizing::new(Option::<Scalar>::from(Scalar::from_canonical_bytes(*encoded)).unwrap());
@@ -112,11 +116,12 @@ impl Job {
             link,
             received,
             latest,
+            network,
             offset,
             unsigned: Zeroizing::new(input.to_vec()),
         }
     }
-    fn prepared(&self) -> PreparedClaim {
+    pub(super) fn prepared(&self) -> PreparedClaim {
         let value = PreparedClaim::from_recovery_bytes(
             &self.unsigned,
             dxp1_clsag_lab::claim_resume::digest(&self.unsigned),
@@ -158,6 +163,21 @@ pub fn run(
     let mut report: Value =
         serde_json::from_slice(&read_private(&root.join("refund-worker-report.json"))).unwrap();
     report["refund_recovery_worker_pid"] = json!(pid);
+    // The signing process has exited. These processes receive no keys or
+    // solver path and can only reconcile/publish the durable signed bytes.
+    let before_rpc = super::refund_delivery::run(&root, expected, "send-crash-before-rpc");
+    let intent = read_private(&root.join("refund-send.intent"));
+    let failed = super::refund_delivery::run(&root, expected, "send-crash-after-ack");
+    let resumed = super::refund_delivery::run(&root, expected, "send");
+    assert_eq!(resumed["observation"], "InPool");
+    assert_eq!(resumed["submitted"], false);
+    assert_eq!(*read_private(&root.join("refund-signed.tx")), *bytes);
+    assert_eq!(*read_private(&root.join("refund-send.intent")), *intent);
+    report["refund_delivery_before_rpc_crashed_pid"] = before_rpc["pid"].clone();
+    report["refund_delivery_crashed_pid"] = failed["pid"].clone();
+    report["refund_delivery_resumed"] = resumed;
+    report["refund_worker_independently_publishes"] = json!(true);
+    report["refund_signed_bytes_and_send_intent_unchanged"] = json!(true);
     (prepared, tx, report)
 }
 
@@ -274,6 +294,7 @@ mod tests {
             link: [3; 64],
             received,
             latest: received + 100,
+            network: [9; 32],
             offset: Zeroizing::new(Scalar::ZERO),
             unsigned: Zeroizing::new(vec![7; 16]),
         };
@@ -380,6 +401,7 @@ mod tests {
             link,
             received: 1000,
             latest: 1100,
+            network: [9; 32],
             offset: Zeroizing::new(Scalar::ZERO),
             unsigned: bytes,
         };
@@ -402,6 +424,7 @@ mod tests {
             link: [3; 64],
             received: 1000,
             latest: 1100,
+            network: [9; 32],
             offset: Zeroizing::new(Scalar::ONE),
             unsigned: Zeroizing::new(vec![7; 16]),
         };
