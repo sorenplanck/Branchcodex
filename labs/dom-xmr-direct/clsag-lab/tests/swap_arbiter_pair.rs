@@ -297,9 +297,15 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         .unwrap();
     let wrong_claim_offer = offer(&claim, wrong_adaptor, 74);
 
-    let binding =
-        ArbiterSessionBinding::new(CHAIN_ID, &contract, &shares, &refund_offer, &punish_offer)
-            .unwrap();
+    let binding = ArbiterSessionBinding::new(
+        CHAIN_ID,
+        &contract,
+        &shares,
+        &refund_offer,
+        &punish_offer,
+        1,
+    )
+    .unwrap();
     let directory = std::env::temp_dir().join(format!(
         "dxa1-session-{}-{}",
         std::process::id(),
@@ -327,6 +333,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
             &context(10),
         )
         .unwrap();
+    journal.record_dom_release(&session_claim, 10).unwrap();
     journal.record_dom_settlement(&session_claim, 10).unwrap();
     journal.record_xmr_settlement([4; 32]).unwrap();
     assert!(journal.record_xmr_settlement([5; 32]).is_err());
@@ -345,9 +352,28 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         )
         .unwrap();
     assert!(recovery.record_dom_settlement(&session_refund, 10).is_err());
+    recovery.record_dom_release(&session_refund, 11).unwrap();
     recovery.record_dom_settlement(&session_refund, 11).unwrap();
     assert!(recovery.record_xmr_settlement([8; 32]).is_err());
     drop(recovery);
+
+    let bounded_path = directory.join("bounded.wal");
+    let bounded = ArbiterSessionBinding::new(
+        CHAIN_ID,
+        &contract,
+        &shares,
+        &refund_offer,
+        &punish_offer,
+        2,
+    )
+    .unwrap();
+    let mut bounded = ArbiterSessionJournal::create(&bounded_path, bounded).unwrap();
+    bounded.record_dom_funding([9; 32], 8).unwrap();
+    bounded.record_xmr_ready([10; 32], 140).unwrap();
+    bounded.record_claim_ready(&claim_offer).unwrap();
+    assert!(bounded.record_dom_release(&session_claim, 10).is_err());
+    bounded.record_dom_release(&session_claim, 9).unwrap();
+    drop(bounded);
 
     let mut corrupted = std::fs::read(&journal_path).unwrap();
     *corrupted.last_mut().unwrap() ^= 1;

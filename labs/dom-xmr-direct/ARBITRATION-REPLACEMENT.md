@@ -61,8 +61,8 @@ mempool, bloco direto, reorganização e reconstrução após reinício. Um ensa
 financiado isolado também executou Claim, Refund e Punish separadamente pelo
 nó DOM e pelo `monerod`: cada abertura extraída do bloco DOM canônico assinou
 um gasto XMR CLSAG/Bulletproof+ aceito e minerado pelo daemon. Uma campanha
-paralela dos três resultados terminou em 99,57 s de parede; Claim, Refund e
-Punish levaram 87,41 s, 93,99 s e 99,56 s completos, respectivamente.
+paralela dos três resultados terminou em 95,33 s de parede; Claim, Refund e
+Punish levaram 84,58 s, 89,91 s e 95,32 s completos, respectivamente.
 
 A ordem do protocolo importa. Refund e Punish ficam pré-assinados e duráveis
 antes do funding DOM. O Claim só é concluído e persistido depois que a reserva
@@ -79,11 +79,18 @@ das duas chains. O ensaio a reabre duas vezes antes de completar, e testes
 recusam corrupção, repetição e ordem inválida. A próxima integração deve ligar
 as observações independentes do coordenador a esses mesmos eventos.
 
+A versão v2 grava uma decisão de liberação antes do RPC. Ela fixa o caminho,
+hash e primeira altura possível, exige que a margem inteira de inclusão caiba
+na fase e aceita como settlement somente a mesma transação dentro da margem.
+Isso impede fallback local para um caminho concorrente depois de divulgar uma
+share. A margem continua sendo uma hipótese explícita de liveness da chain;
+nenhum journal local pode obrigar mineradores a incluir a transação.
+
 Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto.
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 13,45 s para Claim, 19,16 s para Refund e 24,78 s para Punish
+intervalo mediu 13,42 s para Claim, 19,79 s para Refund e 24,46 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

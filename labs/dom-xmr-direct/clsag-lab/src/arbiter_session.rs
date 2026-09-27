@@ -25,9 +25,9 @@ use crate::{
     arbiter_pair::VerifiedArbiterSharesV1, claim_resume::digest, native_dom::DomClaimOffer,
 };
 
-const MAGIC: &[u8] = b"DXA1/arbiter-session/v1\0";
+const MAGIC: &[u8] = b"DXA1/arbiter-session/v2\0";
 const HEADER_BODY: usize =
-    MAGIC.len() + 32 + 32 + 32 + SWAP_ARBITER_CONTRACT_SIZE + 32 + 32 + 32 + 33;
+    MAGIC.len() + 32 + 32 + 32 + SWAP_ARBITER_CONTRACT_SIZE + 32 + 32 + 32 + 33 + 8;
 const HEADER: usize = HEADER_BODY + 32;
 const MAX_FILE_BYTES: u64 = 4096;
 
@@ -57,6 +57,7 @@ pub struct ArbiterSessionBinding {
     punish_offer: [u8; 32],
     joint_xmr_key: [u8; 32],
     claim_adaptor: [u8; 33],
+    max_dom_inclusion_blocks: u64,
 }
 
 impl ArbiterSessionBinding {
@@ -66,6 +67,7 @@ impl ArbiterSessionBinding {
         shares: &VerifiedArbiterSharesV1,
         refund_offer: &DomClaimOffer,
         punish_offer: &DomClaimOffer,
+        max_dom_inclusion_blocks: u64,
     ) -> Result<Self, ArbiterSessionError> {
         let refund_bytes = refund_offer
             .to_swap_arbiter_resume_bytes()
@@ -87,6 +89,7 @@ impl ArbiterSessionBinding {
                 .adaptor_point(SwapArbiterPath::Claim)
                 .map_err(|_| ArbiterSessionError::Binding)?
                 .to_compressed_bytes(),
+            max_dom_inclusion_blocks,
         };
         result.validate_offer(refund_offer, SwapArbiterPath::Refund, result.refund_offer)?;
         result.validate_offer(punish_offer, SwapArbiterPath::Punish, result.punish_offer)?;
@@ -145,6 +148,7 @@ impl ArbiterSessionBinding {
             || self.punish_offer == [0; 32]
             || self.refund_offer == self.punish_offer
             || self.joint_xmr_key == [0; 32]
+            || self.max_dom_inclusion_blocks == 0
         {
             return Err(ArbiterSessionError::Binding);
         }
@@ -158,6 +162,7 @@ impl ArbiterSessionBinding {
         bytes.extend(self.punish_offer);
         bytes.extend(self.joint_xmr_key);
         bytes.extend(self.claim_adaptor);
+        bytes.extend(self.max_dom_inclusion_blocks.to_le_bytes());
         debug_assert_eq!(bytes.len(), HEADER_BODY);
         bytes.extend(Sha256::digest(&bytes));
         Ok(bytes)
@@ -185,6 +190,7 @@ pub struct ArbiterSessionState {
     pub dom_funding: Option<ChainObservation>,
     pub xmr_ready: Option<ChainObservation>,
     pub claim_offer: Option<[u8; 32]>,
+    pub dom_release: Option<DomSettlement>,
     pub dom_settlement: Option<DomSettlement>,
     pub xmr_settlement: Option<[u8; 32]>,
 }
@@ -230,8 +236,8 @@ fn sync_parent(path: &Path) -> Result<(), ArbiterSessionError> {
 fn event_payload_len(tag: u8) -> Option<usize> {
     match tag {
         1 | 2 => Some(40),
-        3 | 5 => Some(32),
-        4 => Some(41),
+        3 | 6 => Some(32),
+        4 | 5 => Some(41),
         _ => None,
     }
 }
@@ -352,6 +358,7 @@ impl ArbiterSessionJournal {
             }
             2 if state.dom_funding.is_some()
                 && state.xmr_ready.is_none()
+                && state.dom_release.is_none()
                 && state.dom_settlement.is_none() =>
             {
                 state.xmr_ready = Some(nonzero_observation(payload)?);
@@ -359,6 +366,7 @@ impl ArbiterSessionJournal {
             3 if state.dom_funding.is_some()
                 && state.xmr_ready.is_some()
                 && state.claim_offer.is_none()
+                && state.dom_release.is_none()
                 && state.dom_settlement.is_none() =>
             {
                 let value: [u8; 32] = payload
@@ -369,7 +377,10 @@ impl ArbiterSessionJournal {
                 }
                 state.claim_offer = Some(value);
             }
-            4 if state.dom_funding.is_some() && state.dom_settlement.is_none() => {
+            4 if state.dom_funding.is_some()
+                && state.dom_release.is_none()
+                && state.dom_settlement.is_none() =>
+            {
                 let path = decode_path(payload[0])?;
                 if path == SwapArbiterPath::Claim
                     && (state.xmr_ready.is_none() || state.claim_offer.is_none())
@@ -378,20 +389,42 @@ impl ArbiterSessionJournal {
                 }
                 let transaction = nonzero_observation(&payload[1..])?;
                 let contract = binding.contract()?;
+                let last_bounded_height = transaction
+                    .height
+                    .checked_add(binding.max_dom_inclusion_blocks - 1)
+                    .ok_or(ArbiterSessionError::Denied)?;
                 let allowed = match path {
-                    SwapArbiterPath::Claim => transaction.height <= contract.claim_until(),
+                    SwapArbiterPath::Claim => last_bounded_height <= contract.claim_until(),
                     SwapArbiterPath::Refund => {
                         transaction.height > contract.claim_until()
-                            && transaction.height <= contract.refund_until()
+                            && last_bounded_height <= contract.refund_until()
                     }
                     SwapArbiterPath::Punish => transaction.height > contract.refund_until(),
                 };
                 if !allowed {
                     return Err(ArbiterSessionError::Denied);
                 }
+                state.dom_release = Some(DomSettlement { path, transaction });
+            }
+            5 if state.dom_release.is_some() && state.dom_settlement.is_none() => {
+                let path = decode_path(payload[0])?;
+                let transaction = nonzero_observation(&payload[1..])?;
+                let released = state.dom_release.unwrap();
+                let last_bounded_height = released
+                    .transaction
+                    .height
+                    .checked_add(binding.max_dom_inclusion_blocks - 1)
+                    .ok_or(ArbiterSessionError::Denied)?;
+                if path != released.path
+                    || transaction.id != released.transaction.id
+                    || transaction.height < released.transaction.height
+                    || transaction.height > last_bounded_height
+                {
+                    return Err(ArbiterSessionError::Denied);
+                }
                 state.dom_settlement = Some(DomSettlement { path, transaction });
             }
-            5 if state.xmr_ready.is_some()
+            6 if state.xmr_ready.is_some()
                 && state.dom_settlement.is_some()
                 && state.xmr_settlement.is_none() =>
             {
@@ -467,11 +500,11 @@ impl ArbiterSessionJournal {
         Ok(offer_digest)
     }
 
-    pub fn record_dom_settlement(
-        &mut self,
+    fn validated_dom_transaction(
+        &self,
         transaction: &Transaction,
         height: u64,
-    ) -> Result<[u8; 32], ArbiterSessionError> {
+    ) -> Result<(SwapArbiterPath, [u8; 32]), ArbiterSessionError> {
         let kernel = transaction
             .kernels
             .first()
@@ -492,7 +525,33 @@ impl ArbiterSessionJournal {
                 .map_err(|_| ArbiterSessionError::Binding)?,
         )
         .as_bytes();
+        Ok((path, transaction))
+    }
+
+    /// Persist the exact exposure before any network send. `target_height` is
+    /// the earliest block for which the transaction is being submitted.
+    pub fn record_dom_release(
+        &mut self,
+        transaction: &Transaction,
+        target_height: u64,
+    ) -> Result<[u8; 32], ArbiterSessionError> {
+        let (path, transaction) = self.validated_dom_transaction(transaction, target_height)?;
         let mut event = vec![4, encode_path(path)];
+        event.extend(transaction);
+        event.extend(target_height.to_le_bytes());
+        self.append(event)?;
+        Ok(transaction)
+    }
+
+    /// Record canonical inclusion only when it matches the previously synced
+    /// release and falls inside its declared bounded-inclusion margin.
+    pub fn record_dom_settlement(
+        &mut self,
+        transaction: &Transaction,
+        height: u64,
+    ) -> Result<[u8; 32], ArbiterSessionError> {
+        let (path, transaction) = self.validated_dom_transaction(transaction, height)?;
+        let mut event = vec![5, encode_path(path)];
         event.extend(transaction);
         event.extend(height.to_le_bytes());
         self.append(event)?;
@@ -503,7 +562,7 @@ impl ArbiterSessionJournal {
         &mut self,
         transaction: [u8; 32],
     ) -> Result<(), ArbiterSessionError> {
-        let mut event = vec![5];
+        let mut event = vec![6];
         event.extend(transaction);
         self.append(event)
     }

@@ -471,9 +471,15 @@ async fn funded_arbiter() -> FundedArbiter {
         swap_arbiter_intent(&punish.unsigned).unwrap(),
     )
     .unwrap();
-    let session_binding =
-        ArbiterSessionBinding::new(chain_id, &contract, &shares, &refund_offer, &punish_offer)
-            .unwrap();
+    let session_binding = ArbiterSessionBinding::new(
+        chain_id,
+        &contract,
+        &shares,
+        &refund_offer,
+        &punish_offer,
+        1,
+    )
+    .unwrap();
     let mut journal =
         ArbiterSessionJournal::create(&root.0.join("arbiter-session.wal"), session_binding.clone())
             .unwrap();
@@ -731,6 +737,10 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
             &validation_context(setup.chain_id, settlement_height),
         )
         .unwrap();
+    let released_dom_id = setup
+        .journal
+        .record_dom_release(&settlement, settlement_height)
+        .unwrap();
     let settlement_admission = handle.submit_tx(settlement.to_bytes().unwrap()).unwrap();
     assert_eq!(settlement_admission.state, TxAdmissionState::New);
     assert_eq!(mine(&setup.node).await, settlement_height);
@@ -739,6 +749,7 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
         .journal
         .record_dom_settlement(&observed, settlement_height)
         .unwrap();
+    assert_eq!(released_dom_id, settlement_admission.tx_hash);
     assert_eq!(durable_dom_id, settlement_admission.tx_hash);
     let opening = offer
         .extract(
@@ -847,6 +858,7 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
             "recovery_offers_persisted_before_dom_funding":true,
             "claim_offer_persisted_after_xmr_ready":true,
             "durable_ordering_journal_complete":true,
+            "dom_release_recorded_before_submit":true,
             "dom_settlement_height":settlement_height,
             "xmr_reserve_amount":reserve_amount,
             "xmr_payment_amount":payment,

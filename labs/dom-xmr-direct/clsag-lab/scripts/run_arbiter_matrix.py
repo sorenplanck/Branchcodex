@@ -22,6 +22,7 @@ REQUIRED_TRUE = (
     "recovery_offers_persisted_before_dom_funding",
     "claim_offer_persisted_after_xmr_ready",
     "durable_ordering_journal_complete",
+    "dom_release_recorded_before_submit",
     "prepared_mature_reserve_required_for_three_minute_target",
 )
 
