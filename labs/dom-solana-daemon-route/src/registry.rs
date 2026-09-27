@@ -115,6 +115,13 @@ pub struct ProvisionedSolanaRegistryV1 {
     /// The cluster the upstream position settles on, and its native asset.
     pub upstream_chain_id: [u8; 32],
     pub upstream_asset_id: [u8; 32],
+    /// `ChainProfileV1::profile_digest()` of that cluster's entry, measured from the
+    /// INSTALLED registry.
+    ///
+    /// This is the value the upstream terms' `counterparty_leg.adapter_profile_hash`
+    /// must carry. `admission`, `route_time_anchor::counterparty_binding` and the
+    /// ratified Monero boundary all compare that field with it.
+    pub upstream_profile_digest: [u8; 32],
     /// The cluster the downstream position settles on, and its native asset.
     ///
     /// A DIFFERENT cluster from the upstream one, and not by preference:
@@ -123,6 +130,8 @@ pub struct ProvisionedSolanaRegistryV1 {
     /// the module documentation.
     pub downstream_chain_id: [u8; 32],
     pub downstream_asset_id: [u8; 32],
+    /// The same digest for the downstream cluster's entry.
+    pub downstream_profile_digest: [u8; 32],
 }
 
 fn asset_id(domain: &[u8], seed: &[u8; 32]) -> AssetId {
@@ -193,26 +202,56 @@ pub fn solana_finality() -> FinalityPolicyV1 {
 /// two sets that are equal, and it is right to -- one key set authorising both the
 /// registry and the time evidence would collapse two independent authorities into
 /// one.
+/// The three independent authorities a route needs, in the order the bundle takes
+/// them. The label is part of the key derivation, so the roles cannot collide even
+/// if the byte were ever reused.
+pub(crate) const AUTHORITY_ROLES: [(u8, &str); 3] =
+    [(0, "registry"), (1, "time-policy"), (2, "time-evidence")];
+/// Index into [`AUTHORITY_ROLES`] for the route-time policy authority.
+pub(crate) const TIME_POLICY_ROLE: usize = 1;
+/// Index into [`AUTHORITY_ROLES`] for the route-time evidence authority.
+pub(crate) const TIME_EVIDENCE_ROLE: usize = 2;
+/// Signatures required of each 2-of-3 set.
+pub(crate) const AUTHORITY_THRESHOLD: u16 = 2;
+/// Members of each set.
+pub(crate) const AUTHORITY_MEMBERS: u8 = 3;
+
+/// One authority's secret scalar.
+///
+/// Derived, so a laboratory route has a reproducible authority set without a key
+/// ceremony, and so the module that signs the time artifacts can reach the same keys
+/// the registry set was built from without either module holding them. A real
+/// deployment's authorities hold their own secrets and this function does not exist
+/// for them -- which is the same distinction the terms provisioner draws about the
+/// condition scalar.
+pub(crate) fn authority_secret(role: u8, index: u8, label: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"DOM-SOLANA-DAEMON-ROUTE/AUTHORITY-SECRET/V1\0");
+    hasher.update([role, index]);
+    hasher.update(label.as_bytes());
+    hasher.finalize().into()
+}
+
+/// The auxiliary randomness for one authority's BIP340 signature.
+pub(crate) fn authority_aux(role: u8, index: u8) -> [u8; 32] {
+    let mut aux = Sha256::new();
+    aux.update(b"DOM-SOLANA-DAEMON-ROUTE/AUTHORITY-AUX/V1\0");
+    aux.update([role, index]);
+    aux.finalize().into()
+}
+
 fn authority_sets(
     secp: &SecpContext,
     digest: &[u8; 32],
 ) -> Result<([AuthoritySetV1; 3], Vec<RegistrySignatureV1>), String> {
     let mut sets = Vec::with_capacity(3);
     let mut registry_signatures = Vec::new();
-    for (role, label) in [(0u8, "registry"), (1, "time-policy"), (2, "time-evidence")] {
-        let mut keys = Vec::with_capacity(3);
-        for index in 0u8..3 {
-            let mut hasher = Sha256::new();
-            hasher.update(b"DOM-SOLANA-DAEMON-ROUTE/AUTHORITY-SECRET/V1\0");
-            hasher.update([role, index]);
-            hasher.update(label.as_bytes());
-            let secret: [u8; 32] = hasher.finalize().into();
-            let mut aux = Sha256::new();
-            aux.update(b"DOM-SOLANA-DAEMON-ROUTE/AUTHORITY-AUX/V1\0");
-            aux.update([role, index]);
-            let aux: [u8; 32] = aux.finalize().into();
+    for (role, label) in AUTHORITY_ROLES {
+        let mut keys = Vec::with_capacity(usize::from(AUTHORITY_MEMBERS));
+        for index in 0..AUTHORITY_MEMBERS {
+            let secret = authority_secret(role, index, label);
             let (signature, xonly) = secp
-                .sign_bip340(&secret, digest, &aux)
+                .sign_bip340(&secret, digest, &authority_aux(role, index))
                 .map_err(|error| format!("authority signature: {error:?}"))?;
             if role == 0 {
                 registry_signatures.push(RegistrySignatureV1 {
@@ -223,7 +262,8 @@ fn authority_sets(
             keys.push(xonly);
         }
         sets.push(
-            AuthoritySetV1::new(2, keys).map_err(|error| format!("authority set: {error:?}"))?,
+            AuthoritySetV1::new(AUTHORITY_THRESHOLD, keys)
+                .map_err(|error| format!("authority set: {error:?}"))?,
         );
     }
     let sets: [AuthoritySetV1; 3] = sets
@@ -435,6 +475,16 @@ pub fn provision(
     // registry, and that is the value the terms must carry.
     let dom_profile_digest = route_time_anchor::resolved_dom_profile_digest_v1(&resolved)
         .map_err(|error| format!("dom profile digest: {error:?}"))?;
+    let chain_profile_digest = |facts: &SolanaChainFactsV1| -> Result<[u8; 32], String> {
+        resolved
+            .resolve_chain(ChainId(facts.genesis_hash))
+            .ok_or_else(|| "the installed registry does not declare that cluster".to_owned())?
+            .profile()
+            .profile_digest()
+            .map_err(|error| format!("chain profile digest: {error:?}"))
+    };
+    let upstream_profile_digest = chain_profile_digest(input.upstream)?;
+    let downstream_profile_digest = chain_profile_digest(input.downstream)?;
 
     let bundle = ProductionAuthorityBundleV1::new(
         registry_set.clone(),
@@ -463,7 +513,9 @@ pub fn provision(
         dom_profile_digest,
         upstream_chain_id: input.upstream.genesis_hash,
         upstream_asset_id: solana_asset_id(input.upstream).0,
+        upstream_profile_digest,
         downstream_chain_id: input.downstream.genesis_hash,
         downstream_asset_id: solana_asset_id(input.downstream).0,
+        downstream_profile_digest,
     })
 }

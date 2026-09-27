@@ -196,12 +196,14 @@ fn profile(
 /// Build one position's plan input. The claim order is not a field: it follows from
 /// which deadline the caller fixes, which is why `chosen_deadline` is the only place
 /// the two positions differ in kind.
+#[allow(clippy::too_many_arguments)]
 fn plan_input(
     position: &SolanaPositionTermsPlanV1,
     input: &RouteTermsInputV1<'_>,
     solana: &SolanaChainFactsV1,
     solana_chain_id: [u8; 32],
     solana_asset_id: [u8; 32],
+    solana_profile_digest: [u8; 32],
     chosen_deadline: ScheduleAnchorV1,
 ) -> LegPlanInputV1 {
     LegPlanInputV1 {
@@ -221,6 +223,10 @@ fn plan_input(
         // Measured from the installed registry, never derived here: the route-time
         // policy refuses terms whose DOM leg carries any other value.
         dom_leg_profile_hash: input.registry.dom_profile_digest,
+        // The registry's chain-profile digest for this cluster, not the adapter
+        // profile's own hash: three components of an admitted route compare the
+        // counterparty leg's adapter_profile_hash with exactly this value.
+        counterparty_profile_digest: Some(solana_profile_digest),
         cluster_genesis: solana_chain_id,
         solana_asset_id,
         asset: SolanaAssetV1::NativeSol,
@@ -292,6 +298,7 @@ pub fn provision(
         input.upstream_solana,
         input.registry.upstream_chain_id,
         input.registry.upstream_asset_id,
+        input.registry.upstream_profile_digest,
         &input.upstream,
         RelativeDeadlineV1::DomRefundBlocksAhead(600)
             .resolve(&anchor, now)
@@ -304,6 +311,7 @@ pub fn provision(
         input.downstream_solana,
         input.registry.downstream_chain_id,
         input.registry.downstream_asset_id,
+        input.registry.downstream_profile_digest,
         &input.downstream,
         RelativeDeadlineV1::EscrowRefundSecondsAhead(3_600)
             .resolve(&anchor, now)
@@ -340,6 +348,7 @@ fn establish(
     solana: &SolanaChainFactsV1,
     solana_chain_id: [u8; 32],
     solana_asset_id: [u8; 32],
+    solana_profile_digest: [u8; 32],
     position: &SolanaPositionTermsPlanV1,
     chosen_deadline: ScheduleAnchorV1,
     label: &str,
@@ -357,6 +366,7 @@ fn establish(
         solana,
         solana_chain_id,
         solana_asset_id,
+        solana_profile_digest,
         chosen_deadline,
     );
     let established = SolanaLegV1::establish(&plan, profile, &store, &mut rand::rngs::OsRng)

@@ -20,6 +20,7 @@ use common::{provision_all, PARTICIPANT_BINDINGS};
 use dom_interopd::{
     ProductionParticipantBindingBundleV1, ProductionRoutePositionV1, ProductionSolanaLegSetupV1,
 };
+use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1;
 
 #[test]
 fn the_artifact_decodes_and_hashes_to_the_pin_it_declares() {
@@ -128,18 +129,26 @@ fn the_dleq_is_present_and_bounded_as_the_constructor_requires() {
     }
 }
 
-/// The bindings are the last artifact the fixture provisions, so this is also the
-/// running total, and it is asserted in exactly one place for that reason.
+/// What the bindings add, and nothing else: the plan carrying only the artifacts this
+/// one depends on, then the step.
 #[test]
-fn binding_the_setups_turns_the_ninth_pin_into_a_measurement() {
+fn binding_the_setups_turns_one_more_pin_into_a_measurement() {
     let provisioned = provision_all();
-    assert_eq!(
-        provisioned.plan.measured_pin_count(),
-        9,
-        "four from the registry, three from the terms, one from the roster, one here"
+    let before = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        provisioned.upstream_facts.genesis_hash,
+        provisioned.downstream_facts.genesis_hash,
+    )
+    .with_registry(provisioned.registry)
+    .with_terms(provisioned.plan.terms.expect("the provisioned terms"))
+    .with_roster(provisioned.plan.roster.expect("the provisioned roster"));
+    assert_eq!(before.measured_pin_count(), 8);
+
+    let after = before.with_participants(
+        provisioned
+            .plan
+            .participants
+            .expect("the provisioned bindings"),
     );
-    assert!(
-        provisioned.plan.pins_are_placeholders(),
-        "ten pins are still labels and the plan must keep saying so"
-    );
+    assert_eq!(after.measured_pin_count(), 9, "participant_bindings_digest");
+    assert!(after.pins_are_placeholders());
 }

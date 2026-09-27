@@ -356,6 +356,9 @@ fn leg_input(
         },
         dom_fee_max: CLAIM_FEE,
         // No registry in this laboratory, so the leg's own stable derivation.
+        // Standalone laboratory: no registry resolves a chain profile here, so the
+        // adapter profile's own hash is the digest the terms carry.
+        counterparty_profile_digest: None,
         dom_leg_profile_hash: LegPlanInputV1::derived_dom_leg_profile_hash(
             dom_chain_id,
             dom_asset_id,

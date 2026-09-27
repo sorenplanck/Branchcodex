@@ -16,6 +16,7 @@ use dom_solana_daemon_route::{
     },
     participants::provision as provision_participants,
     roster::provision as provision_roster,
+    route_time::{provision as provision_route_time, ChainObservationV1, RouteTimeInputV1},
     terms::{
         provision as provision_terms, ProvisionedPositionV1, RouteTermsInputV1,
         SolanaPositionAccountsV1, SolanaPositionTermsPlanV1,
@@ -30,6 +31,32 @@ pub const UPSTREAM_TERMS: &str = "artifacts/upstream-terms.v1";
 pub const DOWNSTREAM_TERMS: &str = "artifacts/downstream-terms.v1";
 pub const RELAY_ROSTER: &str = "artifacts/relay-roster.v1";
 pub const PARTICIPANT_BINDINGS: &str = "artifacts/participant-bindings.v1";
+pub const TIME_POLICY: &str = "artifacts/time-policy.v1";
+pub const TIME_EVIDENCE: &str = "artifacts/time-evidence.v1";
+
+/// One chain's observation, chosen to satisfy the rules `validate_checkpoint` applies.
+///
+/// * every hash non-zero, and the tip's distinct from the anchor's, because a tip at
+///   the anchor's own height must carry the anchor's own hash;
+/// * the interval 240 seconds wide, inside the policy's 600-second ceiling;
+/// * its lower endpoint in the past, so it is not further ahead than the 120 seconds of
+///   future skew the policy admits;
+/// * its upper endpoint recent enough that the observation is not later than
+///   `time_upper + 900`;
+/// * the tip five blocks past the anchor, which clears
+///   `anchor_height + min_confirmations - 1` for a policy requiring one confirmation.
+pub fn observation(seed: u8, anchor_height: u64) -> ChainObservationV1 {
+    ChainObservationV1 {
+        anchor_height,
+        anchor_hash: [seed; 32],
+        parent_hash: [seed.wrapping_add(1); 32],
+        time_lower_seconds: NOW_SECONDS - 300,
+        time_upper_seconds: NOW_SECONDS - 60,
+        tip_height: anchor_height + 5,
+        tip_hash: [seed.wrapping_add(2); 32],
+        canonicality_evidence_digest: [seed.wrapping_add(3); 32],
+    }
+}
 
 /// A trusted second that is neither zero nor near an overflow, so the manifest's
 /// window, the policy's window and the two schedules can all be expressed relative to
@@ -102,6 +129,36 @@ pub struct Provisioned {
     /// The provisioned registry itself, so a test can rebuild the plan with only the
     /// artifacts its own subject depends on and assert what that one artifact adds.
     pub registry: ProvisionedSolanaRegistryV1,
+}
+
+impl Provisioned {
+    /// The registry as the daemon resolves it: loaded from the store through the
+    /// authenticated bundle, never from the manifest that was handed to the store.
+    pub fn resolved_registry(&self) -> deployment_registry::ResolvedRegistryV1 {
+        let bytes = std::fs::read(
+            self.directory
+                .path()
+                .join("artifacts/registry-authorities.v1"),
+        )
+        .expect("the authority bundle was written");
+        let bundle = dom_interopd::ProductionAuthorityBundleV1::decode_canonical(&bytes)
+            .expect("the authority bundle decodes");
+        deployment_registry::RegistryStoreV1::open_existing(
+            &self.directory.path().join("artifacts/registry.v1.sqlite3"),
+        )
+        .expect("the registry store opens")
+        .load_current(
+            bundle.registry(),
+            &btc_crypto::SecpContext::new(&[0x5a; 32]),
+            deployment_registry::RegistryValidationPolicyV1 {
+                now_seconds: NOW_SECONDS,
+                expected_network_id: self.registry.network_id,
+                minimum_epoch: self.registry.epoch,
+            },
+        )
+        .expect("the registry loads")
+        .expect("the store holds a current registry")
+    }
 }
 
 pub fn provision_all() -> Provisioned {
@@ -178,15 +235,41 @@ pub fn provision_all() -> Provisioned {
     let plan = plan.with_participants(participants);
 
     // The check the daemon itself performs on a Solana position, run here on the
-    // artifacts as provisioned rather than on values assembled for the assertion.
-    for provisioned in [&upstream, &downstream] {
-        solana_profile::validate_setup(
+    // artifacts as provisioned rather than on values assembled for the assertion --
+    // and with the digest the daemon resolves, which is the registry's chain-profile
+    // digest and not the adapter profile's own hash.
+    for (provisioned, expected) in [
+        (&upstream, registry.upstream_profile_digest),
+        (&downstream, registry.downstream_profile_digest),
+    ] {
+        solana_profile::validate_setup_with_profile_digest(
             &provisioned.profile,
             &provisioned.terms,
             provisioned.binding.clone(),
+            expected,
         )
-        .expect("the position authenticates under the profile the terms commit to");
+        .expect("the position authenticates against the registry-resolved profile digest");
     }
+
+    // The time authority: the policy is rebuilt from the registry and both terms by the
+    // daemon's own constructor, so it is provisioned last, from everything before it.
+    let route_time = provision_route_time(&RouteTimeInputV1 {
+        state_dir: directory.path(),
+        registry_relative: "artifacts/registry.v1.sqlite3",
+        authorities_relative: "artifacts/registry-authorities.v1",
+        policy_relative: TIME_POLICY,
+        evidence_relative: TIME_EVIDENCE,
+        registry: &registry,
+        upstream: &upstream.terms,
+        downstream: &downstream.terms,
+        now_seconds: NOW_SECONDS,
+        hub: observation(0x61, 900),
+        upstream_chain: observation(0x71, 4_000),
+        downstream_chain: observation(0x81, 5_000),
+        sequence: 1,
+    })
+    .expect("the time policy and its evidence provision");
+    let plan = plan.with_route_time(route_time);
 
     Provisioned {
         directory,

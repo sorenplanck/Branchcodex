@@ -44,13 +44,15 @@ use kaystra_core::{
 use sha2::{Digest, Sha256};
 use solana_escrow_wire::{EscrowStateV1, EscrowStatus};
 use solana_profile::{
-    proof_context_hash, validate_setup, setup_id, SolanaAdapterProfileV1, SolanaAssetV1,
+    proof_context_hash, setup_id, validate_setup_with_profile_digest, SolanaAdapterProfileV1,
+    SolanaAssetV1,
     SolanaProofContextV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
 };
 use solana_route_secret::{verify_counterparty_bundle, SolanaRouteSecret};
 use solana_secret_store::WitnessMaterialStore;
 use solana_session_init::{
-    finalize_session, persist_route_witness, prepare_route_secret, resume_session,
+    finalize_session_with_profile_digest, persist_route_witness, prepare_route_secret,
+    resume_session_with_profile_digest,
     InitializedSolanaSession,
 };
 use solana_setup_store::SolanaSetupStore;
@@ -132,6 +134,16 @@ pub struct LegPlanInputV1 {
     pub dom_refund_to: ParticipantId,
     pub dom_finality: FinalityPolicyV1,
     pub dom_fee_max: u64,
+    /// Digest the counterparty leg's `adapter_profile_hash` must carry.
+    ///
+    /// `None` means the adapter profile's own hash, which is what a standalone leg
+    /// uses. A route admitted by `dom-interopd` must carry the AUTHENTICATED
+    /// registry's chain-profile digest instead: `admission`,
+    /// `route_time_anchor::counterparty_binding` and the ratified Monero boundary all
+    /// compare this field with that value, so a leg that insists on the adapter's own
+    /// hash cannot be part of an admitted route. The adapter profile's identity is
+    /// unaffected either way -- `proof_context_hash` binds it inside the DLEQ context.
+    pub counterparty_profile_digest: Option<[u8; 32]>,
     /// Digest of the adapter profile that interprets the DOM leg.
     ///
     /// A route provisioned against a daemon must pass the digest its registry
@@ -186,6 +198,14 @@ impl LegPlanInputV1 {
         hasher.update(dom_chain_id);
         hasher.update(dom_asset_id);
         hasher.finalize().into()
+    }
+
+    /// The digest the counterparty leg's `adapter_profile_hash` carries, and the digest
+    /// every validation of this leg checks it against. One function, so the terms and
+    /// the validation cannot disagree.
+    fn expected_profile_digest(&self, profile: &SolanaAdapterProfileV1) -> [u8; 32] {
+        self.counterparty_profile_digest
+            .unwrap_or_else(|| profile.profile_hash())
     }
 
     fn roster(&self) -> [ParticipantId; 2] {
@@ -413,7 +433,7 @@ impl SolanaLegV1 {
         let lock = ConditionLockV1::from_verified_claim(claim)?;
         let terms = Self::frozen_terms(input, profile, &schedule, lock.dom_adaptor_point())?;
         let proof = route.proof().clone();
-        let session = finalize_session(
+        let session = finalize_session_with_profile_digest(
             profile,
             &terms,
             input.asset,
@@ -421,6 +441,7 @@ impl SolanaLegV1 {
             input.program_data_hash,
             route,
             store,
+            input.expected_profile_digest(profile),
         )?;
         // Two independent derivations of the same setup: the adapter's own
         // `finalize_session` and this module's. They must agree on the setup
@@ -454,7 +475,7 @@ impl SolanaLegV1 {
         adaptor_point_sec1: [u8; 33],
     ) -> Result<SettlementTermsV1, LegError> {
         let mut terms = input.terms(schedule, adaptor_point_sec1);
-        terms.counterparty_leg.adapter_profile_hash = profile.profile_hash();
+        terms.counterparty_leg.adapter_profile_hash = input.expected_profile_digest(profile);
         terms.validate()?;
         Ok(terms)
     }
@@ -499,7 +520,12 @@ impl SolanaLegV1 {
             setup_id: [0; 32],
         };
         binding.setup_id = setup_id(&binding)?;
-        Ok(validate_setup(profile, terms, binding)?)
+        Ok(validate_setup_with_profile_digest(
+            profile,
+            terms,
+            binding,
+            input.expected_profile_digest(profile),
+        )?)
     }
 
     // ── the four escrow instructions ────────────────────────────────────────
@@ -676,7 +702,14 @@ impl EstablishedLegV1 {
         let claim = verify_counterparty_bundle(&proof, &input.settlement_id, &context_hash)?;
         let lock = ConditionLockV1::from_verified_claim(claim)?;
         let terms = SolanaLegV1::frozen_terms(input, profile, &schedule, lock.dom_adaptor_point())?;
-        let session = resume_session(profile, &terms, setup_store, witness_store, rng)?;
+        let session = resume_session_with_profile_digest(
+            profile,
+            &terms,
+            setup_store,
+            witness_store,
+            rng,
+            input.expected_profile_digest(profile),
+        )?;
         let derived = SolanaLegV1::derive_setup(input, profile, &terms, proof)?;
         if derived.setup_id() != session.setup().setup_id()
             || derived.binding_hash() != session.setup().binding_hash()

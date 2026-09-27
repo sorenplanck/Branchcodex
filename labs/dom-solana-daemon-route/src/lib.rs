@@ -72,6 +72,7 @@ pub mod owner_only;
 pub mod participants;
 pub mod registry;
 pub mod roster;
+pub mod route_time;
 pub mod terms;
 
 use std::path::{Path, PathBuf};
@@ -89,6 +90,7 @@ use dom_interopd::{
 use participants::ProvisionedParticipantBindingsV1;
 use registry::ProvisionedSolanaRegistryV1;
 use roster::ProvisionedRelayRosterV1;
+use route_time::ProvisionedRouteTimeV1;
 use terms::ProvisionedRouteTermsV1;
 use sha2::{Digest, Sha256};
 
@@ -206,6 +208,10 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// The two Solana setups, once both positions have been established. Present
     /// means the route carries the DLEQ the daemon authenticates each position with.
     pub participants: Option<ProvisionedParticipantBindingsV1>,
+    /// The signed time policy and its evidence, once both exist. Present means the
+    /// route has a time authority: the daemon can tell whether a deadline is still
+    /// reachable instead of trusting a clock.
+    pub route_time: Option<ProvisionedRouteTimeV1>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -240,6 +246,7 @@ impl SolanaRouteBootstrapPlanV1 {
             terms: None,
             roster: None,
             participants: None,
+            route_time: None,
         }
     }
 
@@ -279,6 +286,13 @@ impl SolanaRouteBootstrapPlanV1 {
         self
     }
 
+    /// Bind the provisioned time policy and evidence, so the four pins they determine
+    /// stop being labels.
+    pub fn with_route_time(mut self, provisioned: ProvisionedRouteTimeV1) -> Self {
+        self.route_time = Some(provisioned);
+        self
+    }
+
     /// How many of the nineteen route pins are measurements of a real artifact.
     ///
     /// Reported as a number rather than a boolean because the bootstrap is built
@@ -305,7 +319,12 @@ impl SolanaRouteBootstrapPlanV1 {
             Some(_) => 1,
             None => 0,
         };
-        registry + terms + roster + participants
+        let route_time = match self.route_time {
+            // The two authority-set digests, the policy digest and the evidence digest.
+            Some(_) => 4,
+            None => 0,
+        };
+        registry + terms + roster + participants + route_time
     }
 
     /// True while any pin is still a derived label rather than the digest of a
@@ -342,14 +361,21 @@ impl SolanaRouteBootstrapPlanV1 {
                 placeholder("route-scope"),
             ),
         };
+        let time = self.route_time;
         ProductionRoutePinsV1 {
             network_id: self.network_id,
             route_id: self.route_id,
             registry_manifest_digest: manifest_digest,
             registry_minimum_epoch: minimum_epoch,
             registry_authority_set_digest: authority_set_digest,
-            time_policy_authority_set_digest: placeholder("time-policy-authority-set"),
-            time_evidence_authority_set_digest: placeholder("time-evidence-authority-set"),
+            time_policy_authority_set_digest: time
+                .map_or_else(|| placeholder("time-policy-authority-set"), |value| {
+                    value.time_policy_authority_set_digest
+                }),
+            time_evidence_authority_set_digest: time
+                .map_or_else(|| placeholder("time-evidence-authority-set"), |value| {
+                    value.time_evidence_authority_set_digest
+                }),
             upstream_terms_digest: upstream_terms,
             downstream_terms_digest: downstream_terms,
             route_scope_digest: route_scope,
@@ -361,8 +387,12 @@ impl SolanaRouteBootstrapPlanV1 {
                 Some(provisioned) => provisioned.relay_binding_digest,
                 None => placeholder("relay-binding"),
             },
-            time_policy_digest: placeholder("time-policy"),
-            time_evidence_digest: placeholder("time-evidence"),
+            time_policy_digest: time
+                .map_or_else(|| placeholder("time-policy"), |value| value.time_policy_digest),
+            time_evidence_digest: time.map_or_else(
+                || placeholder("time-evidence"),
+                |value| value.time_evidence_digest,
+            ),
             process_owner_id: placeholder("process-owner"),
             coordinator_id: placeholder("coordinator"),
             coordinator_plan_authority_id: placeholder("coordinator-plan-authority"),

@@ -358,17 +358,56 @@ pub fn setup_id(binding: &SolanaSetupBindingV1) -> Result<[u8; 32], SetupError> 
     Ok(hasher.finalize().into())
 }
 
+/// Validates a setup against the adapter profile's OWN hash.
+///
+/// Kept for a caller with no authenticated registry to resolve a chain profile
+/// against -- a standalone leg, or a test. A route admitted by `dom-interopd` is not
+/// such a caller: see [`validate_setup_with_profile_digest`].
 pub fn validate_setup(
     profile: &SolanaAdapterProfileV1,
     terms: &SettlementTermsV1,
     binding: SolanaSetupBindingV1,
+) -> Result<ValidatedSolanaSetup, SetupError> {
+    validate_setup_with_profile_digest(profile, terms, binding, profile.profile_hash())
+}
+
+/// Validates a setup while checking `terms.counterparty_leg.adapter_profile_hash`
+/// against a digest the CALLER resolved, rather than against the adapter profile's
+/// own hash.
+///
+/// # Why this parameter exists
+///
+/// Three components that run over the same route demand that this field hold the
+/// authenticated registry's chain-profile digest, `ChainProfileV1::profile_digest()`:
+///
+/// * `dom_interopd::admission` compares it with `upstream_profile_digest`, which it
+///   takes from `resolve_chain(..).profile().profile_digest()`;
+/// * `route_time_anchor::counterparty_binding` compares it with the same value before
+///   it will build a checkpoint binding for the leg;
+/// * `xmr_setup_profile::require_chain_profile_v24` does the same for Monero, which is
+///   the ratified precedent for this boundary.
+///
+/// [`validate_setup`] compared it with `SolanaAdapterProfileV1::profile_hash()`, which
+/// is a BLAKE2b over different inputs and can never equal the other value. A Solana
+/// counterparty position therefore satisfied one side or the other and never both, so
+/// no Solana route could be admitted at all.
+///
+/// The adapter profile's identity is not weakened by taking it out of this field: it
+/// is bound cryptographically where it belongs, inside the DLEQ context, because
+/// [`proof_context_hash`] hashes `profile.profile_hash()` into the context the proof
+/// is verified against. That is exactly the Monero shape.
+pub fn validate_setup_with_profile_digest(
+    profile: &SolanaAdapterProfileV1,
+    terms: &SettlementTermsV1,
+    binding: SolanaSetupBindingV1,
+    expected_profile_digest: [u8; 32],
 ) -> Result<ValidatedSolanaSetup, SetupError> {
     terms.validate()?;
     let terms_hash = terms.terms_hash()?;
     if binding.settlement_id != terms.settlement_id.0
         || binding.terms_hash != terms_hash
         || binding.program_id != profile.program_id
-        || terms.counterparty_leg.adapter_profile_hash != profile.profile_hash()
+        || terms.counterparty_leg.adapter_profile_hash != expected_profile_digest
         || terms.counterparty_leg.mechanism != LockMechanism::CrossCurveConditionLock
         || binding.recipient.0 != terms.counterparty_leg.beneficiary.0
         || binding.refund_recipient.0 != terms.counterparty_leg.refund_to.0

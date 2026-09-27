@@ -63,8 +63,9 @@ use route_time_anchor::{
     RouteTimePolicyVerificationContextV2, SignedRouteTimeEvidenceV2, SignedRouteTimePolicyV2,
 };
 use solana_profile::{
-    validate_setup as validate_solana_setup, SolanaAdapterProfileV1, SolanaAssetV1,
-    SolanaNetwork as SolanaAdapterNetworkV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
+    validate_setup_with_profile_digest as validate_solana_setup, SolanaAdapterProfileV1,
+    SolanaAssetV1, SolanaNetwork as SolanaAdapterNetworkV1, SolanaSetupBindingV1,
+    ValidatedSolanaSetup,
 };
 use solana_types::SolanaPubkey;
 use xmr_dleq_sigma::{BoundCrossCurveProofV1, CrossCurveProofBytes, CrossCurvePublicClaim};
@@ -3439,8 +3440,28 @@ fn authenticate_participant_bundle(
                 // The DLEQ inside the binding is the authentication anchor:
                 // validate_setup verifies it against the frozen terms, the
                 // adaptor point, the closed role byte and the derived PDAs.
-                let setup = validate_solana_setup(&leg.profile, terms, leg.binding.clone())
-                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                //
+                // The expected adapter-profile digest is the AUTHENTICATED
+                // registry's chain-profile digest, which is the same value
+                // `admission` and `route_time_anchor::counterparty_binding`
+                // compare that field with, and the same boundary
+                // `xmr_setup_profile::require_chain_profile_v24` applies to
+                // Monero. Passing the adapter profile's own hash instead made
+                // the field carry two different values on one route, so no
+                // Solana position could satisfy admission and authentication
+                // at once. The adapter profile's identity is unaffected: it is
+                // bound inside the DLEQ context by `proof_context_hash`.
+                let expected_profile_digest = chain
+                    .profile()
+                    .profile_digest()
+                    .map_err(|_| ProductionInputErrorV1::RegistryRefused)?;
+                let setup = validate_solana_setup(
+                    &leg.profile,
+                    terms,
+                    leg.binding.clone(),
+                    expected_profile_digest,
+                )
+                .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
                 solana_sessions[index] = Some(AuthenticatedSolanaSessionBindingsV1 {
                     position,
                     network_id: context.registry.manifest().network_id,

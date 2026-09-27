@@ -10,7 +10,8 @@ use kaystra_core::terms::SettlementTermsV1;
 use rand::{CryptoRng, RngCore};
 use solana_pda::derive_escrow_pdas;
 use solana_profile::{
-    proof_context_from_terms, proof_context_hash, setup_id, validate_setup, SetupError,
+    proof_context_from_terms, proof_context_hash, setup_id, validate_setup_with_profile_digest,
+    SetupError,
     SolanaAdapterProfileV1, SolanaAssetV1, SolanaProofContextV1, SolanaSetupBindingV1,
     ValidatedSolanaSetup,
 };
@@ -76,6 +77,10 @@ impl InitializedSolanaSession {
 }
 
 /// Finalize the setup after the generated adaptor point is frozen into terms.
+///
+/// Checks `terms.counterparty_leg.adapter_profile_hash` against the adapter profile's
+/// own hash. A route admitted by `dom-interopd` needs the authenticated registry's
+/// chain-profile digest instead: see [`finalize_session_with_profile_digest`].
 pub fn finalize_session(
     profile: &SolanaAdapterProfileV1,
     terms: &SettlementTermsV1,
@@ -84,6 +89,35 @@ pub fn finalize_session(
     program_data_hash: [u8; 32],
     route_secret: SolanaRouteSecret,
     store: &SolanaSetupStore,
+) -> Result<InitializedSolanaSession, SessionInitError> {
+    finalize_session_with_profile_digest(
+        profile,
+        terms,
+        asset,
+        funder,
+        program_data_hash,
+        route_secret,
+        store,
+        profile.profile_hash(),
+    )
+}
+
+/// Finalize the setup, checking the terms' counterparty adapter-profile hash against a
+/// digest the caller resolved.
+///
+/// See `solana_profile::validate_setup_with_profile_digest` for why that field holds
+/// the registry's chain-profile digest on an admitted route, and why taking the adapter
+/// profile's own hash out of it weakens nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_session_with_profile_digest(
+    profile: &SolanaAdapterProfileV1,
+    terms: &SettlementTermsV1,
+    asset: SolanaAssetV1,
+    funder: SolanaPubkey,
+    program_data_hash: [u8; 32],
+    route_secret: SolanaRouteSecret,
+    store: &SolanaSetupStore,
+    expected_profile_digest: [u8; 32],
 ) -> Result<InitializedSolanaSession, SessionInitError> {
     let context = proof_context_from_terms(terms, asset, funder)?;
     let context_hash = proof_context_hash(profile, &context)?;
@@ -128,7 +162,8 @@ pub fn finalize_session(
         setup_id: [0; 32],
     };
     binding.setup_id = setup_id(&binding)?;
-    let validated = validate_setup(profile, terms, binding)?;
+    let validated =
+        validate_setup_with_profile_digest(profile, terms, binding, expected_profile_digest)?;
     store.register(validated.binding())?;
     Ok(InitializedSolanaSession {
         route_secret,
@@ -172,11 +207,32 @@ pub fn resume_session<S: WitnessMaterialStore>(
     witness_store: &S,
     rng: &mut (impl CryptoRng + RngCore),
 ) -> Result<InitializedSolanaSession, SessionInitError> {
+    resume_session_with_profile_digest(
+        profile,
+        terms,
+        setup_store,
+        witness_store,
+        rng,
+        profile.profile_hash(),
+    )
+}
+
+/// Resume a session, checking the terms' counterparty adapter-profile hash against a
+/// digest the caller resolved.
+pub fn resume_session_with_profile_digest<S: WitnessMaterialStore>(
+    profile: &SolanaAdapterProfileV1,
+    terms: &SettlementTermsV1,
+    setup_store: &SolanaSetupStore,
+    witness_store: &S,
+    rng: &mut (impl CryptoRng + RngCore),
+    expected_profile_digest: [u8; 32],
+) -> Result<InitializedSolanaSession, SessionInitError> {
     let binding = setup_store
         .load(&terms.settlement_id.0)?
         .ok_or(SessionInitError::UnknownSettlement)?;
     let proof = binding.dleq.clone();
-    let validated = validate_setup(profile, terms, binding)?;
+    let validated =
+        validate_setup_with_profile_digest(profile, terms, binding, expected_profile_digest)?;
     let material = witness_store.load(&validated.settlement_id(), &validated.terms_hash())?;
     let route_secret =
         material.expose(|witness| SolanaRouteSecret::restore(*witness, proof.clone(), rng))?;
