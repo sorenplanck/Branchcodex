@@ -39,12 +39,15 @@
 
 mod support;
 
-use dom_core::Timestamp;
+use dom_core::{BlockHeight, Timestamp};
 use dom_solana_direct_lab::{
     cluster::ClusterSessionV1,
     condition::ConditionOpeningV1,
     leg::{EstablishedLegV1, LegPlanInputV1, SolanaLegV1},
-    time_bounds::{AssumedLegDelaysV1, ClaimOrderV1, DomClockNetwork, RelativeDeadlineV1},
+    time_bounds::{
+        AssumedDomAnchor, AssumedLegDelaysV1, ClaimOrderV1, DomClockNetwork, RelativeDeadlineV1,
+        ScheduleAnchorV1,
+    },
 };
 use kaystra_core::{
     settlement_engine::ChainRecordV1,
@@ -69,7 +72,10 @@ use solana_secret_store::{EncryptedSqliteWitnessStore, SecretStoreMasterKey};
 use solana_setup_store::SolanaSetupStore;
 // The trait must be in scope to call `get_transaction` on the HTTP client.
 use solana_rpc::{HttpSolanaRpc, SolanaRpc as _};
-use solana_types::{Commitment, LegacyTokenAccount, SolanaPubkey, SolanaSignature};
+use solana_types::{
+    Commitment, LegacyTokenAccount, SolanaAccountMeta, SolanaInstruction, SolanaPubkey,
+    SolanaSignature, SYSTEM_PROGRAM_ID,
+};
 use std::{
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -296,10 +302,13 @@ impl Fixture {
 /// The public input both parties agree on. `chosen` fixes one deadline; the other
 /// is derived, and which one is fixed decides the claim order.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn leg_input(
     fixture: &Fixture,
     settlement_id: [u8; 32],
-    dom: &FundedDom,
+    dom_chain_id: [u8; 32],
+    anchor: AssumedDomAnchor,
+    chosen_deadline: ScheduleAnchorV1,
     funder: SolanaPubkey,
     beneficiary: SolanaPubkey,
     refund_recipient: SolanaPubkey,
@@ -313,9 +322,6 @@ fn leg_input(
         SolanaAssetV1::NativeSol => None,
         SolanaAssetV1::LegacySpl { .. } => Some(account),
     };
-    let schedule = dom
-        .leg_schedule()
-        .expect("the reserve was funded for a Solana leg");
     LegPlanInputV1 {
         settlement_id,
         session_id: {
@@ -331,11 +337,11 @@ fn leg_input(
             hasher.finalize().into()
         },
         solver_id: participant(&settlement_id, "solver").0,
-        dom_chain_id: *dom.claim.chain(),
+        dom_chain_id,
         dom_asset_id: {
             let mut hasher = Sha256::new();
             hasher.update(b"DOM-SOLANA-DIRECT-LAB/dom-asset/v1\0");
-            hasher.update(dom.claim.chain());
+            hasher.update(dom_chain_id);
             hasher.finalize().into()
         },
         dom_amount_noms: RESERVE_VALUE - CLAIM_FEE,
@@ -380,12 +386,12 @@ fn leg_input(
         },
         solana_fee_max: 100_000,
         program_data_hash: fixture.program.code_hash,
-        anchor: dom.anchor(),
+        anchor,
         now,
         network: DomClockNetwork::Regtest,
         validator_clock_ahead_secs: 0,
         delays: DELAYS,
-        chosen_deadline: schedule.chosen(),
+        chosen_deadline,
         evidence_retention_blocks: 1_000,
         policy_version: 1,
     }
@@ -659,7 +665,9 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
     let input = leg_input(
         &fixture,
         settlement_id,
-        &dom,
+        *dom.claim.chain(),
+        dom.anchor(),
+        schedule.chosen(),
         sol_giver.public(),
         sol_receiver.public(),
         sol_refund.public(),
@@ -931,7 +939,9 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
     let input = leg_input(
         &fixture,
         settlement_id,
-        &dom,
+        *dom.claim.chain(),
+        dom.anchor(),
+        schedule.chosen(),
         sol_giver.public(),
         sol_receiver.public(),
         sol_refund.public(),
@@ -1223,7 +1233,9 @@ fn solana_live_both_refunds_return_each_side() {
     let input = leg_input(
         &fixture,
         settlement_id,
-        &dom,
+        *dom.claim.chain(),
+        dom.anchor(),
+        schedule.chosen(),
         sol_giver.public(),
         sol_receiver.public(),
         sol_refund.public(),
@@ -1483,7 +1495,9 @@ fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
     let input = leg_input(
         &fixture,
         settlement_id,
-        &dom,
+        *dom.claim.chain(),
+        dom.anchor(),
+        schedule.chosen(),
         sol_giver.public(),
         sol_receiver.public(),
         sol_refund.public(),
@@ -1664,6 +1678,298 @@ fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
             "funding_record_block_anchor": hex32(&funding_ref.block_anchor),
             "claim_record_block_anchor": hex32(&claim_ref.block_anchor),
             "timing_bounds_proven": false,
+        }),
+    );
+}
+
+// ── what the escrow must refuse ─────────────────────────────────────────────
+
+fn meta(pubkey: SolanaPubkey, is_signer: bool, is_writable: bool) -> SolanaAccountMeta {
+    SolanaAccountMeta {
+        pubkey,
+        is_signer,
+        is_writable,
+    }
+}
+
+/// A native `Fund` whose funder is somebody else. Hand-built, because the leg's
+/// own builder always names the funder the terms froze -- which is the point: the
+/// refusal being tested is the program's, not the client's.
+fn native_fund_by(leg: &SolanaLegV1, funder: SolanaPubkey) -> SolanaInstruction {
+    SolanaInstruction {
+        program_id: leg.setup().program_id(),
+        accounts: vec![
+            meta(funder, true, true),
+            meta(leg.setup().state_pda(), false, true),
+            meta(leg.setup().vault_pda(), false, true),
+            meta(SYSTEM_PROGRAM_ID, false, false),
+        ],
+        data: solana_escrow_wire::EscrowInstructionV1::Fund.encode(),
+    }
+}
+
+/// A native `Claim` with any secret and any destination, for the same reason.
+fn native_claim_with(
+    leg: &SolanaLegV1,
+    revealed_secret_be: [u8; 32],
+    destination: SolanaPubkey,
+) -> SolanaInstruction {
+    SolanaInstruction {
+        program_id: leg.setup().program_id(),
+        accounts: vec![
+            meta(leg.setup().state_pda(), false, true),
+            meta(leg.setup().vault_pda(), false, true),
+            meta(destination, false, true),
+        ],
+        data: solana_escrow_wire::EscrowInstructionV1::Claim { revealed_secret_be }.encode(),
+    }
+}
+
+/// Every path the escrow must refuse, and the property that makes a refusal worth
+/// anything: nothing moved.
+///
+/// The four settlement scenarios prove what works. This one proves the rest, which
+/// is the half that protects the money: a refusal that quietly changed the state
+/// or drained the vault would pass a test that only checked for an error.
+///
+/// No DOM node is started. Every refusal here is the escrow's own, and the DOM
+/// side of a leg is established by the scenarios that settle one. The DOM facts in
+/// the plan are an assumption record and a chain id that nothing executes.
+#[test]
+#[ignore = "requires the live harness: scripts/f8-run-solana-live-v1.sh"]
+fn solana_live_the_escrow_refuses_what_it_must() {
+    let fixture = Fixture::open();
+    let directory = tempfile::tempdir().expect("a private working directory");
+    let settlement_id = [0xE5; 32];
+
+    let funder = LiveEnvironment::keypair(&fixture.environment.funder);
+    let beneficiary = LiveEnvironment::keypair(&fixture.environment.beneficiary);
+    let refund = LiveEnvironment::keypair(&fixture.environment.refund);
+
+    let now = Timestamp(now_seconds());
+    let anchor = AssumedDomAnchor::new(BlockHeight(1), now);
+    let chosen = RelativeDeadlineV1::DomRefundBlocksAhead(400)
+        .resolve(&anchor, now)
+        .expect("a DOM-first schedule choice");
+    let input = leg_input(
+        &fixture,
+        settlement_id,
+        [0xEE; 32],
+        anchor,
+        chosen,
+        funder.public(),
+        beneficiary.public(),
+        refund.public(),
+        now,
+        SolanaAssetV1::NativeSol,
+        LAMPORTS,
+    );
+    let established = SolanaLegV1::establish(
+        &input,
+        &fixture.profile,
+        &store(directory.path(), "setup.sqlite"),
+        &mut rand::thread_rng(),
+    )
+    .expect("establish the condition");
+    let leg = established.leg();
+    let opening = established.opening().expect("the established opening");
+
+    // A refusal is only a refusal if nothing moved with it.
+    let untouched = |status: solana_escrow_wire::EscrowStatus, funded: u64, step: &str| {
+        let state = escrow_state(&fixture.cluster, leg);
+        assert_eq!(state.status, status, "{step} changed the escrow status");
+        assert_eq!(state.funded_amount, funded, "{step} changed the funded amount");
+        assert_eq!(
+            state.revealed_secret_be,
+            if status == solana_escrow_wire::EscrowStatus::Claimed {
+                opening.escrow_claim_bytes()
+            } else {
+                [0; 32]
+            },
+            "{step} changed the recorded secret"
+        );
+    };
+
+    fixture
+        .cluster
+        .execute(
+            &[leg.initialize_instruction()],
+            &funder,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("initialize the escrow");
+    untouched(solana_escrow_wire::EscrowStatus::Initialized, 0, "initialize");
+
+    // Before funding.
+    for (step, instruction, payer) in [
+        (
+            "a second initialize",
+            leg.initialize_instruction(),
+            &funder,
+        ),
+        (
+            "a claim before funding",
+            leg.claim_instruction(&opening).expect("a claim"),
+            &beneficiary,
+        ),
+        (
+            "a refund before funding",
+            leg.refund_instruction().expect("a refund"),
+            &refund,
+        ),
+        (
+            "a fund by somebody who is not the frozen funder",
+            native_fund_by(leg, beneficiary.public()),
+            &beneficiary,
+        ),
+    ] {
+        fixture
+            .cluster
+            .expect_refusal(&[instruction], payer, &[], CONFIRM_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{step} was not refused: {error}"));
+        untouched(solana_escrow_wire::EscrowStatus::Initialized, 0, step);
+    }
+
+    let vault_before = fixture
+        .cluster
+        .lamports(leg.setup().vault_pda())
+        .expect("the vault balance");
+    fixture
+        .cluster
+        .execute(
+            &[leg.fund_instruction().expect("a fund instruction")],
+            &funder,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("fund the escrow");
+    untouched(solana_escrow_wire::EscrowStatus::Funded, LAMPORTS, "fund");
+    let vault_funded = fixture
+        .cluster
+        .lamports(leg.setup().vault_pda())
+        .expect("the vault balance");
+    assert_eq!(vault_funded - vault_before, LAMPORTS);
+
+    // After funding, before any terminal step. The deadline has not passed, and a
+    // wrong secret is inside the proved 252-bit domain so the refusal comes from
+    // the curve check rather than from the wire decoder.
+    assert!(
+        fixture
+            .cluster
+            .cluster_unix_time()
+            .expect("the cluster clock")
+            < leg.setup().refund_after_unix(),
+        "the frozen deadline had already passed before it could be tested"
+    );
+    for (step, instruction, payer) in [
+        (
+            "a second fund",
+            leg.fund_instruction().expect("a fund instruction"),
+            &funder,
+        ),
+        (
+            "a claim with a wrong secret",
+            native_claim_with(leg, [0x01; 32], beneficiary.public()),
+            &beneficiary,
+        ),
+        (
+            "a claim to a destination the terms did not name",
+            native_claim_with(leg, opening.escrow_claim_bytes(), refund.public()),
+            &refund,
+        ),
+        (
+            "a refund before the frozen deadline",
+            leg.refund_instruction().expect("a refund instruction"),
+            &refund,
+        ),
+    ] {
+        fixture
+            .cluster
+            .expect_refusal(&[instruction], payer, &[], CONFIRM_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{step} was not refused: {error}"));
+        untouched(solana_escrow_wire::EscrowStatus::Funded, LAMPORTS, step);
+        assert_eq!(
+            fixture
+                .cluster
+                .lamports(leg.setup().vault_pda())
+                .expect("the vault balance"),
+            vault_funded,
+            "{step} moved lamports out of the vault"
+        );
+    }
+
+    // The one that must work, so the refusals above are not simply a broken escrow.
+    let before = fixture
+        .cluster
+        .lamports(beneficiary.public())
+        .expect("the beneficiary balance");
+    fixture
+        .cluster
+        .execute(
+            &[leg.claim_instruction(&opening).expect("a claim instruction")],
+            &beneficiary,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("claim the escrow with the right secret");
+    untouched(solana_escrow_wire::EscrowStatus::Claimed, 0, "the claim");
+    let after = fixture
+        .cluster
+        .lamports(beneficiary.public())
+        .expect("the beneficiary balance");
+    assert!(after - before >= LAMPORTS - 1_000_000);
+    let vault_after = fixture
+        .cluster
+        .lamports(leg.setup().vault_pda())
+        .expect("the vault balance");
+    assert_eq!(
+        vault_funded - vault_after,
+        LAMPORTS,
+        "the claim moved something other than the frozen principal out of the vault"
+    );
+
+    // After the terminal step, both paths are closed.
+    for (step, instruction, payer) in [
+        (
+            "a second claim",
+            leg.claim_instruction(&opening).expect("a claim instruction"),
+            &beneficiary,
+        ),
+        (
+            "a refund after the claim",
+            leg.refund_instruction().expect("a refund instruction"),
+            &refund,
+        ),
+    ] {
+        fixture
+            .cluster
+            .expect_refusal(&[instruction], payer, &[], CONFIRM_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{step} was not refused: {error}"));
+        untouched(solana_escrow_wire::EscrowStatus::Claimed, 0, step);
+    }
+
+    fixture.environment.record(
+        "escrow_refusals",
+        serde_json::json!({
+            "status": "passed",
+            "settlement_id": hex32(&settlement_id),
+            "setup_id": hex32(&leg.setup().setup_id()),
+            "refused_before_funding": [
+                "a second initialize",
+                "a claim before funding",
+                "a refund before funding",
+                "a fund by somebody who is not the frozen funder",
+            ],
+            "refused_while_funded": [
+                "a second fund",
+                "a claim with a wrong secret",
+                "a claim to a destination the terms did not name",
+                "a refund before the frozen deadline",
+            ],
+            "refused_after_the_claim": ["a second claim", "a refund after the claim"],
+            "state_and_vault_unchanged_after_every_refusal": true,
+            "no_dom_node_started": true,
         }),
     );
 }
