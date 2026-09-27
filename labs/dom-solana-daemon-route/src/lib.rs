@@ -219,20 +219,38 @@ impl SolanaRouteBootstrapPlanV1 {
         }
     }
 
-    /// Bounds chosen to be plainly valid rather than tuned: this crate provisions
-    /// a route, it does not decide a deployment's timing policy.
+    /// Bounds chosen to satisfy the daemon's own rules rather than tuned: this
+    /// crate provisions a route, it does not decide a deployment's timing policy.
+    ///
+    /// The rules are a chain of inequalities, and the first attempt at this
+    /// function broke four of them at once. They are written out so an edit has to
+    /// look at them:
+    ///
+    /// * `60_000 <= lease_duration <= 600_000`;
+    /// * `0 < renew_before < lease_duration`;
+    /// * `0 < dispatch_lease <= renew_before`  -- a dispatch lease may not outlive
+    ///   the moment the owner must renew by;
+    /// * `dispatch_lease <= coordinator_lease <= 600_000`, same for the actuator;
+    /// * `1_000 <= external_call_timeout <= 60_000` AND
+    ///   `external_call_timeout <= dispatch_lease` -- an external call may not
+    ///   outlast the lease that authorises it;
+    /// * `recovery_backoff <= waiting_backoff` and `relay_poll <= waiting_backoff`;
+    /// * every backoff within `[10, 30_000]` and no larger than
+    ///   `lease_duration - renew_before`, the interval it is safe to sleep for;
+    /// * `per_queue_batch_limit == 1` exactly -- the driver is structurally
+    ///   single-action and says so.
     fn bounds() -> ProductionRuntimeBoundsV1 {
         ProductionRuntimeBoundsV1 {
-            lease_duration_ms: 30_000,
-            renew_before_ms: 10_000,
-            dispatch_lease_ms: 30_000,
-            coordinator_lease_ms: 30_000,
-            actuator_lease_ms: 30_000,
+            lease_duration_ms: 120_000,
+            renew_before_ms: 60_000,
+            dispatch_lease_ms: 60_000,
+            coordinator_lease_ms: 120_000,
+            actuator_lease_ms: 120_000,
             external_call_timeout_ms: 30_000,
-            waiting_backoff_ms: 1_000,
+            waiting_backoff_ms: 5_000,
             recovery_backoff_ms: 5_000,
             relay_poll_backoff_ms: 1_000,
-            per_queue_batch_limit: 16,
+            per_queue_batch_limit: 1,
         }
     }
 
