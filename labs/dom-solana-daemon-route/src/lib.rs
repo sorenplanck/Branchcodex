@@ -87,6 +87,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ceremony;
 pub mod declared_inputs;
 pub mod owner_only;
 pub mod participants;
