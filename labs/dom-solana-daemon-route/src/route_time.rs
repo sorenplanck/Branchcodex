@@ -48,8 +48,9 @@ use dom_interopd::ProductionAuthorityBundleV1;
 use kaystra_core::terms::SettlementTermsV1;
 use route_time_anchor::{
     CanonicalAnchorObservationV2, CanonicalCheckpointObservationV2, CanonicalTimeCheckpointV2,
-    CanonicalTimeRangeV2, CanonicalTipObservationV2, RouteTimeEvidenceV2, RouteTimePolicyLimitsV2,
-    RouteTimePolicyV2, SignedRouteTimeEvidenceV2, SignedRouteTimePolicyV2, TimeAnchorSignatureV2,
+    CanonicalTimeRangeV2, CanonicalTipObservationV2, RouteTimeAnchorStoreConfigV2,
+    RouteTimeEvidenceV2, RouteTimePolicyLimitsV2, RouteTimePolicyV2, SignedRouteTimeEvidenceV2,
+    SignedRouteTimePolicyV2, TimeAnchorSignatureV2,
 };
 
 use crate::registry::{
@@ -158,10 +159,7 @@ fn resolve_registry(
     input: &RouteTimeInputV1<'_>,
     secp: &SecpContext,
 ) -> Result<deployment_registry::ResolvedRegistryV1, String> {
-    let authority_bytes = std::fs::read(input.state_dir.join(input.authorities_relative))
-        .map_err(|error| format!("authority bundle: {error}"))?;
-    let bundle = ProductionAuthorityBundleV1::decode_canonical(&authority_bytes)
-        .map_err(|error| format!("authority bundle decode: {error:?}"))?;
+    let bundle = decode_authority_bundle(input)?;
     let store = RegistryStoreV1::open_existing(&input.state_dir.join(input.registry_relative))
         .map_err(|error| format!("registry store: {error:?}"))?;
     store
@@ -265,20 +263,57 @@ pub fn provision(input: &RouteTimeInputV1<'_>) -> Result<ProvisionedRouteTimeV1,
             .map_err(|error| format!("signed evidence bytes: {error:?}"))?,
     )?;
 
-    let authority_bytes = std::fs::read(input.state_dir.join(input.authorities_relative))
-        .map_err(|error| format!("authority bundle: {error}"))?;
-    let bundle = ProductionAuthorityBundleV1::decode_canonical(&authority_bytes)
-        .map_err(|error| format!("authority bundle decode: {error:?}"))?;
+    // The two authority-set pins come from the daemon's OWN computation, not from
+    // `AuthoritySetV1::authority_set_digest`.
+    //
+    // Those are two different values for the same key set: `deployment-registry` hashes
+    // an authority set under "DOM-INTEROP/DEPLOYMENT..." and `route-time-anchor` hashes
+    // it under its own `ROUTE_TIME_AUTHORITY_SET_DOMAIN_V2`. The registry pin wants the
+    // first; `time_policy_authority_set_digest` and `time_evidence_authority_set_digest`
+    // want the second, because the loader compares them with
+    // `RouteTimeAnchorStoreConfigV2`'s accessors. Measuring them with the registry's
+    // formula produced a `PinMismatch` the artifacts could not explain, since every
+    // artifact did hash to the pin that named it.
+    //
+    // `route_time_anchor::authority_set_digest` is `pub(crate)`, so rather than restate
+    // its formula -- which would drift the first time it changed -- this builds the same
+    // store config the loader builds and reads the two values off it.
+    let bundle = decode_authority_bundle(input)?;
+    let time_config = RouteTimeAnchorStoreConfigV2::new(
+        &resolved,
+        input.upstream,
+        input.downstream,
+        bundle.time_policy(),
+        bundle.time_evidence(),
+        &secp,
+    )
+    .map_err(|error| format!("route time store config: {error:?}"))?;
+    // The same config carries three values the loader also compares with pins the
+    // registry and the terms determine. Checking them here turns a later `PinMismatch`
+    // into a named disagreement at the point where both sides are in hand.
+    if time_config.network_id() != input.registry.network_id {
+        return Err("the time config names another interop network".to_owned());
+    }
+    if time_config.registry_digest() != input.registry.manifest_digest {
+        return Err("the time config names another registry manifest".to_owned());
+    }
+    if time_config.route_scope_digest() != policy.route_scope_digest() {
+        return Err("the time config names another route scope".to_owned());
+    }
+
     Ok(ProvisionedRouteTimeV1 {
-        time_policy_authority_set_digest: bundle
-            .time_policy()
-            .authority_set_digest()
-            .map_err(|error| format!("time policy authority digest: {error:?}"))?,
-        time_evidence_authority_set_digest: bundle
-            .time_evidence()
-            .authority_set_digest()
-            .map_err(|error| format!("time evidence authority digest: {error:?}"))?,
+        time_policy_authority_set_digest: time_config.policy_authority_set_digest(),
+        time_evidence_authority_set_digest: time_config.evidence_authority_set_digest(),
         time_policy_digest: policy_digest,
         time_evidence_digest: evidence_digest,
     })
+}
+
+fn decode_authority_bundle(
+    input: &RouteTimeInputV1<'_>,
+) -> Result<ProductionAuthorityBundleV1, String> {
+    let bytes = std::fs::read(input.state_dir.join(input.authorities_relative))
+        .map_err(|error| format!("authority bundle: {error}"))?;
+    ProductionAuthorityBundleV1::decode_canonical(&bytes)
+        .map_err(|error| format!("authority bundle decode: {error:?}"))
 }
