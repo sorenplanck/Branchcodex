@@ -58,7 +58,7 @@ use solana_rpc::SolanaRpc as _;
 use solana_types::{Commitment, SolanaPubkey};
 use std::{
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use support::{
     dom_regtest::{FundedDom, CLAIM_FEE, RESERVE_VALUE},
@@ -156,9 +156,38 @@ fn attest_program(
         )
         .expect("a pool matching the profile's declared quorum");
 
-    let account = cluster
-        .account_data(environment.programdata)
-        .expect("the programdata account");
+    // The harness revoked the authority and saw it confirmed. Confirmed is not
+    // finalized, and at `Finalized` the account can still carry the authority it
+    // had before: run 36286771205 failed here with `UpgradeAuthorityPresent`
+    // against a program whose revocation the harness had already verified. So wait
+    // for the revocation to reach the commitment the attestation reads at -- which
+    // is a different question from "has any slot been finalized", the one that was
+    // being asked.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let snapshot = pool
+            .account(environment.programdata, Commitment::Finalized)
+            .expect("the quorum answers for the programdata account");
+        let revoked = snapshot
+            .as_ref()
+            .is_some_and(|account| account.data.len() > 12 && account.data[12] == 0);
+        if revoked {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the revocation did not reach finalized commitment within 120s"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // Read the region at the SAME commitment the attestation hashes it at, so the
+    // bytes compared against the built object are the bytes attested.
+    let account = pool
+        .account(environment.programdata, Commitment::Finalized)
+        .expect("the quorum answers for the programdata account")
+        .expect("the programdata account exists")
+        .data;
     assert!(
         account.len() > PROGRAM_DATA_METADATA_LEN,
         "programdata holds {} bytes, too few for the loader header and a program",
