@@ -25,10 +25,12 @@
 //! BTC<->SOL settlement is two legs, BTC<->DOM and DOM<->SOL, and this module
 //! is only ever the second of them.
 //!
-//! The asset is native SOL, fixed by construction: `SolanaAssetV1::NativeSol` is
-//! written into the proof context and into the setup binding by this module, so
-//! the escrow's legacy-SPL path cannot be selected here even by a profile that
-//! permits it. That path exists and is covered by the program's own suite.
+//! Both assets the escrow supports are settled here: native SOL and a legacy SPL
+//! token. The asset is part of the frozen plan -- it enters the DLEQ proof context
+//! and the setup binding -- so the two sides cannot disagree about it, and the
+//! token accounts a token settlement needs are part of the same plan rather than
+//! arguments a caller may forget. A plan whose asset and token accounts disagree
+//! is refused before anything is signed.
 
 use dom_core::{BlockHeight, Timestamp};
 use kaystra_core::{
@@ -95,6 +97,8 @@ pub enum LegError {
     NoRevealedSecret,
     #[error("the opening belongs to a different condition")]
     ForeignOpening,
+    #[error("a token settlement needs all three token accounts, a native one needs none")]
+    TokenAccountsMismatch,
     #[error("witness storage: {0}")]
     Witness(#[from] solana_secret_store::SecretStoreError),
     #[error("no setup is registered for this settlement")]
@@ -131,10 +135,20 @@ pub struct LegPlanInputV1 {
     // ── Solana leg ──────────────────────────────────────────────────────────
     pub cluster_genesis: [u8; 32],
     pub solana_asset_id: [u8; 32],
+    /// Which asset the escrow holds. Frozen into the proof context and the setup.
+    pub asset: SolanaAssetV1,
+    /// Amount in the asset's smallest unit: lamports for SOL, base units for a
+    /// token, where the mint's decimals decide what a base unit means.
     pub lamports: u64,
     pub funder: SolanaPubkey,
     pub beneficiary: SolanaPubkey,
     pub refund_recipient: SolanaPubkey,
+    /// Token accounts, required exactly when the asset is a token. The escrow's
+    /// terminal transfer refuses a destination whose owner is not the recipient
+    /// the terms froze, so these are accounts owned by the roles above.
+    pub funder_token_account: Option<SolanaPubkey>,
+    pub beneficiary_token_account: Option<SolanaPubkey>,
+    pub refund_token_account: Option<SolanaPubkey>,
     pub solana_finality: FinalityPolicyV1,
     pub solana_fee_max: u64,
     pub program_data_hash: [u8; 32],
@@ -175,9 +189,29 @@ impl LegPlanInputV1 {
             refund_after_unix: schedule.escrow_refund_after.0,
             min_confirmations: self.solana_finality.min_confirmations,
             max_reorg_depth: self.solana_finality.max_reorg_depth,
-            asset: SolanaAssetV1::NativeSol,
+            asset: self.asset,
             funder: self.funder,
         }
+    }
+
+    /// A token settlement needs all three token accounts and a native one needs
+    /// none. Refusing the mixed shapes here means no instruction builder has to
+    /// decide what a missing account meant.
+    fn validate_token_accounts(&self) -> Result<(), LegError> {
+        let accounts = [
+            self.funder_token_account,
+            self.beneficiary_token_account,
+            self.refund_token_account,
+        ];
+        let present = accounts.iter().filter(|slot| slot.is_some()).count();
+        let required = match self.asset {
+            SolanaAssetV1::NativeSol => 0,
+            SolanaAssetV1::LegacySpl { .. } => accounts.len(),
+        };
+        if present != required {
+            return Err(LegError::TokenAccountsMismatch);
+        }
+        Ok(())
     }
 
     /// The frozen terms. `adaptor_point_sec1` is the condition's secp256k1
@@ -248,6 +282,9 @@ pub struct SolanaLegV1 {
     schedule: LegScheduleV1,
     lock: ConditionLockV1,
     setup: ValidatedSolanaSetup,
+    funder_token_account: Option<SolanaPubkey>,
+    beneficiary_token_account: Option<SolanaPubkey>,
+    refund_token_account: Option<SolanaPubkey>,
 }
 
 impl core::fmt::Debug for SolanaLegV1 {
@@ -305,6 +342,7 @@ impl SolanaLegV1 {
         proof: BoundCrossCurveProofV1,
         store: &SolanaSetupStore,
     ) -> Result<Self, LegError> {
+        input.validate_token_accounts()?;
         let schedule = LegScheduleV1::plan(
             &input.anchor,
             input.chosen_deadline,
@@ -328,6 +366,9 @@ impl SolanaLegV1 {
             schedule,
             lock,
             setup,
+            funder_token_account: input.funder_token_account,
+            beneficiary_token_account: input.beneficiary_token_account,
+            refund_token_account: input.refund_token_account,
         })
     }
 
@@ -340,6 +381,7 @@ impl SolanaLegV1 {
         store: &SolanaSetupStore,
         rng: &mut (impl rand::CryptoRng + rand::RngCore),
     ) -> Result<EstablishedLegV1, LegError> {
+        input.validate_token_accounts()?;
         let schedule = LegScheduleV1::plan(
             &input.anchor,
             input.chosen_deadline,
@@ -358,7 +400,7 @@ impl SolanaLegV1 {
         let session = finalize_session(
             profile,
             &terms,
-            SolanaAssetV1::NativeSol,
+            input.asset,
             input.funder,
             input.program_data_hash,
             route,
@@ -380,6 +422,9 @@ impl SolanaLegV1 {
             schedule,
             lock,
             setup: derived,
+            funder_token_account: input.funder_token_account,
+            beneficiary_token_account: input.beneficiary_token_account,
+            refund_token_account: input.refund_token_account,
         };
         Ok(EstablishedLegV1 { leg, session })
     }
@@ -406,18 +451,24 @@ impl SolanaLegV1 {
     ) -> Result<ValidatedSolanaSetup, LegError> {
         let pdas = solana_pda::derive_escrow_pdas(profile.program_id, input.settlement_id)
             .map_err(|_| LegError::Setup(solana_profile::SetupError::BindingMismatch))?;
+        // A token escrow holds its balance in a token account, a native one in a
+        // lamport account, and they are different PDAs under different seeds.
+        let (vault_pda, vault_bump) = match input.asset {
+            SolanaAssetV1::NativeSol => (pdas.native_vault, pdas.native_vault_bump),
+            SolanaAssetV1::LegacySpl { .. } => (pdas.token_vault, pdas.token_vault_bump),
+        };
         let mut binding = SolanaSetupBindingV1 {
             settlement_id: input.settlement_id,
             terms_hash: terms.terms_hash()?,
             dleq: proof,
             program_id: profile.program_id,
             state_pda: pdas.state,
-            vault_pda: pdas.native_vault,
+            vault_pda,
             vault_authority: pdas.vault_authority,
             state_bump: pdas.state_bump,
-            vault_bump: pdas.native_vault_bump,
+            vault_bump,
             authority_bump: pdas.vault_authority_bump,
-            asset: SolanaAssetV1::NativeSol,
+            asset: input.asset,
             funder: input.funder,
             recipient: input.beneficiary,
             refund_recipient: input.refund_recipient,
@@ -443,9 +494,13 @@ impl SolanaLegV1 {
         solana_program_client::initialize(&self.setup)
     }
 
-    /// Deposit exactly `amount`. Signed by the funder.
+    /// Deposit exactly `amount`. Signed by the funder. For a token asset the
+    /// source is the funder's own token account, carried in the plan.
     pub fn fund_instruction(&self) -> Result<SolanaInstruction, LegError> {
-        Ok(solana_program_client::fund(&self.setup, None)?)
+        Ok(solana_program_client::fund(
+            &self.setup,
+            self.funder_token_account,
+        )?)
     }
 
     /// Transfer to the beneficiary against the revealed scalar. No signature
@@ -461,13 +516,16 @@ impl SolanaLegV1 {
         Ok(solana_program_client::claim(
             &self.setup,
             opening.escrow_claim_bytes(),
-            None,
+            self.beneficiary_token_account,
         )?)
     }
 
     /// Transfer back to the refund recipient after the frozen deadline.
     pub fn refund_instruction(&self) -> Result<SolanaInstruction, LegError> {
-        Ok(solana_program_client::refund(&self.setup, None)?)
+        Ok(solana_program_client::refund(
+            &self.setup,
+            self.refund_token_account,
+        )?)
     }
 
     // ── observation ─────────────────────────────────────────────────────────
@@ -616,6 +674,9 @@ impl EstablishedLegV1 {
                 schedule,
                 lock,
                 setup: derived,
+                funder_token_account: input.funder_token_account,
+                beneficiary_token_account: input.beneficiary_token_account,
+                refund_token_account: input.refund_token_account,
             },
             session,
         })

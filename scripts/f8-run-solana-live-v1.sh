@@ -25,6 +25,12 @@
 #   DOM_SOLANA_LIVE_REFUND_V1        funded refund-recipient keypair path
 #   DOM_SOLANA_LIVE_PROGRAM_SO_V1    the object that was loaded, so the scenario
 #                                    can prove the on-chain bytes are those bytes
+#   DOM_SOLANA_LIVE_MINT_V1          legacy SPL mint, base58
+#   DOM_SOLANA_LIVE_MINT_DECIMALS_V1 its decimals; the escrow's transfer_checked
+#                                    fails if the frozen setup disagrees
+#   DOM_SOLANA_LIVE_FUNDER_TOKEN_V1       funded source token account
+#   DOM_SOLANA_LIVE_BENEFICIARY_TOKEN_V1  destination owned by the beneficiary
+#   DOM_SOLANA_LIVE_REFUND_TOKEN_V1       destination owned by the refund role
 #
 # The scenario does not mint: the faucet is the cluster's, and these three keys
 # are funded here so the daemon's Solana face only ever pays fees it already
@@ -75,6 +81,8 @@ write_evidence() {
   "upgrade_authority": "${UPGRADE_AUTHORITY:-unknown}",
   "curve_syscall_enabled": ${CURVE_OK:-false},
   "curve_syscall_gate": "${CURVE_GATE_STATE:-unknown}",
+  "spl_mint": "${MINT:-}",
+  "spl_mint_decimals": ${MINT_DECIMALS:-0},
   "validator_log": "$VALIDATOR_LOG",
   "limits": [
     "A local cluster is not mainnet-beta: fees, congestion and validator set differ.",
@@ -101,7 +109,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in solana solana-test-validator solana-keygen; do
+for tool in solana solana-test-validator solana-keygen spl-token; do
   command -v "$tool" >/dev/null 2>&1 || {
     log "missing $tool; run scripts/f8-install-solana-tools.sh and add its bin to PATH"
     exit 1
@@ -224,6 +232,59 @@ done
 # whose account does not exist is a needless way for that step to fail.
 solana --url "$RPC_URL" airdrop 1 "$(solana-keygen pubkey "$UPGRADE_AUTHORITY_KEYPAIR")" >/dev/null
 
+# ── the legacy SPL asset ────────────────────────────────────────────────────
+# The escrow's token path requires `spl_token::id()`, the LEGACY program, so it is
+# named outright rather than left to the CLI's default, which can follow
+# Token-2022. Every address below is the pubkey of a keypair generated here: this
+# harness does not read addresses out of a CLI's prose, which is where several of
+# its earlier failures came from.
+LEGACY_TOKEN_PROGRAM="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+MINT_DECIMALS="${DOM_SOLANA_LIVE_MINT_DECIMALS_V1:-6}"
+MINT_SUPPLY_UI="${DOM_SOLANA_LIVE_MINT_SUPPLY_UI_V1:-1000}"
+MINT_KEYPAIR="$WORK/mint.json"
+FUNDER_TOKEN_KEYPAIR="$WORK/funder-token.json"
+BENEFICIARY_TOKEN_KEYPAIR="$WORK/beneficiary-token.json"
+REFUND_TOKEN_KEYPAIR="$WORK/refund-token.json"
+for keypair in "$MINT_KEYPAIR" "$FUNDER_TOKEN_KEYPAIR" "$BENEFICIARY_TOKEN_KEYPAIR" \
+  "$REFUND_TOKEN_KEYPAIR"; do
+  solana-keygen new --no-bip39-passphrase --silent --force --outfile "$keypair" >/dev/null
+done
+MINT="$(solana-keygen pubkey "$MINT_KEYPAIR")"
+FUNDER_TOKEN="$(solana-keygen pubkey "$FUNDER_TOKEN_KEYPAIR")"
+BENEFICIARY_TOKEN="$(solana-keygen pubkey "$BENEFICIARY_TOKEN_KEYPAIR")"
+REFUND_TOKEN="$(solana-keygen pubkey "$REFUND_TOKEN_KEYPAIR")"
+
+log "creating the legacy SPL mint $MINT with $MINT_DECIMALS decimals"
+spl-token --url "$RPC_URL" --fee-payer "$PAYER" --program-id "$LEGACY_TOKEN_PROGRAM" \
+  create-token --decimals "$MINT_DECIMALS" "$MINT_KEYPAIR" >"$WORK/spl.log" 2>&1 || {
+  log "could not create the SPL mint; see $WORK/spl.log"
+  exit 1
+}
+# One token account per settlement role, OWNED BY that role: the escrow's terminal
+# transfer refuses a destination whose owner is not the recipient the terms froze.
+for entry in "funder:$FUNDER:$FUNDER_TOKEN_KEYPAIR" \
+  "beneficiary:$BENEFICIARY:$BENEFICIARY_TOKEN_KEYPAIR" \
+  "refund:$REFUND:$REFUND_TOKEN_KEYPAIR"; do
+  role="${entry%%:*}"
+  rest="${entry#*:}"
+  owner_keypair="${rest%%:*}"
+  account_keypair="${rest#*:}"
+  owner="$(solana-keygen pubkey "$owner_keypair")"
+  spl-token --url "$RPC_URL" --fee-payer "$PAYER" \
+    create-account "$MINT" "$account_keypair" --owner "$owner" \
+    >>"$WORK/spl.log" 2>&1 || {
+    log "could not create the $role token account; see $WORK/spl.log"
+    exit 1
+  }
+  log "token account for $role: $(solana-keygen pubkey "$account_keypair") owned by $owner"
+done
+log "minting $MINT_SUPPLY_UI tokens to the funder's token account"
+spl-token --url "$RPC_URL" --fee-payer "$PAYER" \
+  mint "$MINT" "$MINT_SUPPLY_UI" "$FUNDER_TOKEN" >>"$WORK/spl.log" 2>&1 || {
+  log "could not mint to the funder's token account; see $WORK/spl.log"
+  exit 1
+}
+
 log "verifying the genesis-loaded program $PROGRAM_ID"
 solana --url "$RPC_URL" program show "$PROGRAM_ID" >"$WORK/program-show.log" 2>&1 || {
   log "the program is not present at its declared id; see $WORK/program-show.log"
@@ -296,6 +357,11 @@ export DOM_SOLANA_LIVE_FUNDER_V1="$FUNDER"
 export DOM_SOLANA_LIVE_BENEFICIARY_V1="$BENEFICIARY"
 export DOM_SOLANA_LIVE_REFUND_V1="$REFUND"
 export DOM_SOLANA_LIVE_PROGRAM_SO_V1="$PROGRAM_SO"
+export DOM_SOLANA_LIVE_MINT_V1="$MINT"
+export DOM_SOLANA_LIVE_MINT_DECIMALS_V1="$MINT_DECIMALS"
+export DOM_SOLANA_LIVE_FUNDER_TOKEN_V1="$FUNDER_TOKEN"
+export DOM_SOLANA_LIVE_BENEFICIARY_TOKEN_V1="$BENEFICIARY_TOKEN"
+export DOM_SOLANA_LIVE_REFUND_TOKEN_V1="$REFUND_TOKEN"
 export DOM_SOLANA_LIVE_DIR_V1="$WORK"
 
 if [ "$#" -eq 0 ]; then

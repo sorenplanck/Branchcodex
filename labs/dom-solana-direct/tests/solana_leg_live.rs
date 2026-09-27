@@ -58,7 +58,7 @@ use solana_evidence::{
 };
 use solana_kaystra_records::{claim_record, funding_record, refund_record};
 use solana_observer::{ObservationKind, ObserverError, SolanaSettlementObserver};
-use solana_profile::{SolanaAdapterProfileV1, SolanaNetwork};
+use solana_profile::{SolanaAdapterProfileV1, SolanaAssetV1, SolanaNetwork};
 use solana_program_attestation::{
     attest_immutable_program, code_hash, PROGRAM_DATA_METADATA_LEN,
 };
@@ -66,7 +66,7 @@ use solana_secret_store::{EncryptedSqliteWitnessStore, SecretStoreMasterKey};
 use solana_setup_store::SolanaSetupStore;
 // The trait must be in scope to call `get_transaction` on the HTTP client.
 use solana_rpc::{HttpSolanaRpc, SolanaRpc as _};
-use solana_types::{Commitment, SolanaPubkey, SolanaSignature};
+use solana_types::{Commitment, LegacyTokenAccount, SolanaPubkey, SolanaSignature};
 use std::{
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -78,6 +78,10 @@ use support::{
 
 /// One SOL. Well inside what the harness airdrops to each role.
 const LAMPORTS: u64 = 1_000_000_000;
+
+/// One whole token at the mint's six decimals, in base units. Well inside what
+/// the harness mints to the funder.
+const SPL_BASE_UNITS: u64 = 1_000_000;
 
 /// Bounds on each step, deliberately generous: a bound that is too tight turns a
 /// slow CI runner into a false refusal, and these are assumptions, not
@@ -111,11 +115,14 @@ fn participant(settlement_id: &[u8; 32], role: &str) -> ParticipantId {
 /// the harness really does revoke the upgrade authority and really does measure
 /// the programdata account, so the local run enforces the same rule production
 /// enforces instead of a weaker one.
-fn profile(program_id: SolanaPubkey) -> SolanaAdapterProfileV1 {
+fn profile(program_id: SolanaPubkey, allow_legacy_spl: bool) -> SolanaAdapterProfileV1 {
     let mut profile = SolanaAdapterProfileV1::new(SolanaNetwork::LocalValidator, program_id, 1, 1)
         .expect("a one-node local profile");
     profile.require_immutable_program = true;
-    profile.allow_legacy_spl = false;
+    // `allow_legacy_spl` is inside `profile_hash`, which the terms bind, so a
+    // native settlement and a token settlement are not the same profile and the
+    // two sides of one leg must use the same one.
+    profile.allow_legacy_spl = allow_legacy_spl;
     profile
 }
 
@@ -262,7 +269,7 @@ struct Fixture {
 impl Fixture {
     fn open() -> Self {
         let environment = LiveEnvironment::from_env();
-        let profile = profile(environment.program_id);
+        let profile = profile(environment.program_id, false);
         let cluster = ClusterSessionV1::connect(
             &environment.rpc_url,
             profile.max_signed_transaction_bytes as usize,
@@ -294,7 +301,15 @@ fn leg_input(
     beneficiary: SolanaPubkey,
     refund_recipient: SolanaPubkey,
     now: Timestamp,
+    asset: SolanaAssetV1,
+    amount: u64,
 ) -> LegPlanInputV1 {
+    // Token accounts belong to a token settlement and to no other; the leg
+    // refuses a plan that mixes the two shapes.
+    let token = |account: SolanaPubkey| match asset {
+        SolanaAssetV1::NativeSol => None,
+        SolanaAssetV1::LegacySpl { .. } => Some(account),
+    };
     let schedule = dom
         .leg_schedule()
         .expect("the reserve was funded for a Solana leg");
@@ -330,17 +345,32 @@ fn leg_input(
         dom_fee_max: CLAIM_FEE,
         cluster_genesis: fixture.environment.genesis.0,
         solana_asset_id: {
-            // Native SOL has no mint; name the asset by the cluster it is native
-            // to rather than by a zero mint that would look like an SPL asset.
+            // Native SOL has no mint, so it is named by the cluster it is native
+            // to rather than by a zero mint that would look like a token. A token
+            // is named by its mint, which is what distinguishes two of them.
             let mut hasher = Sha256::new();
-            hasher.update(b"DOM-SOLANA-DIRECT-LAB/native-sol/v1\0");
-            hasher.update(fixture.environment.genesis.0);
+            match asset {
+                SolanaAssetV1::NativeSol => {
+                    hasher.update(b"DOM-SOLANA-DIRECT-LAB/native-sol/v1\0");
+                    hasher.update(fixture.environment.genesis.0);
+                }
+                SolanaAssetV1::LegacySpl { mint, decimals } => {
+                    hasher.update(b"DOM-SOLANA-DIRECT-LAB/legacy-spl/v1\0");
+                    hasher.update(fixture.environment.genesis.0);
+                    hasher.update(mint.0);
+                    hasher.update([decimals]);
+                }
+            }
             hasher.finalize().into()
         },
-        lamports: LAMPORTS,
+        asset,
+        lamports: amount,
         funder,
         beneficiary,
         refund_recipient,
+        funder_token_account: token(fixture.environment.funder_token),
+        beneficiary_token_account: token(fixture.environment.beneficiary_token),
+        refund_token_account: token(fixture.environment.refund_token),
         solana_finality: FinalityPolicyV1 {
             min_confirmations: 1,
             max_reorg_depth: 32,
@@ -384,6 +414,15 @@ fn escrow_state(
         .expect("the escrow state account");
     leg.read_escrow_state(&data)
         .expect("the escrow state belongs to this leg")
+}
+
+/// A legacy token account as the cluster holds it.
+fn token_account(cluster: &ClusterSessionV1, account: SolanaPubkey) -> LegacyTokenAccount {
+    let data = cluster
+        .account_data(account)
+        .unwrap_or_else(|error| panic!("token account {}: {error}", account.to_base58()));
+    LegacyTokenAccount::decode(&data)
+        .unwrap_or_else(|_| panic!("{} is not a legacy token account", account.to_base58()))
 }
 
 fn assert_opening_agrees(left: &ConditionOpeningV1, right: &ConditionOpeningV1) {
@@ -574,6 +613,8 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
         sol_receiver.public(),
         sol_refund.public(),
         now,
+        SolanaAssetV1::NativeSol,
+        LAMPORTS,
     );
 
     // The secret holder establishes; the counterparty accepts from the proof
@@ -829,6 +870,8 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         sol_receiver.public(),
         sol_refund.public(),
         now,
+        SolanaAssetV1::NativeSol,
+        LAMPORTS,
     );
     // Both durable halves live here: the registered binding in the setup store,
     // the encrypted witness in the witness store. The session itself is dropped
@@ -1052,6 +1095,8 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
             "funding_observed_slot": funding.slot,
             "claim_observed_slot": claim.slot,
             "claim_terminal_state_hash": hex32(&claim.terminal_state_hash),
+            "funding_record_block_anchor": hex32(&funding_ref.block_anchor),
+            "claim_record_block_anchor": hex32(&claim_ref.block_anchor),
             "timing_bounds_proven": false,
         }),
     );
@@ -1096,6 +1141,8 @@ fn solana_live_both_refunds_return_each_side() {
         sol_receiver.public(),
         sol_refund.public(),
         now,
+        SolanaAssetV1::NativeSol,
+        LAMPORTS,
     );
     let established = SolanaLegV1::establish(
         &input,
@@ -1266,7 +1313,239 @@ fn solana_live_both_refunds_return_each_side() {
             "funding_observed_slot": funding.slot,
             "refund_observed_slot": refund.slot,
             "refund_terminal_state_hash": hex32(&refund.terminal_state_hash),
+            "funding_record_block_anchor": hex32(&funding_ref.block_anchor),
             "refund_record_block_anchor": hex32(&refund_ref.block_anchor),
+            "timing_bounds_proven": false,
+        }),
+    );
+}
+
+// ── SOL -> DOM, with a token instead of native SOL ──────────────────────────
+
+#[test]
+#[ignore = "requires the live harness: scripts/f8-run-solana-live-v1.sh"]
+fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
+    let fixture = Fixture::open();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime for the DOM node");
+    let directory = tempfile::tempdir().expect("a private working directory");
+    let settlement_id = [0xD4; 32];
+
+    // The same roles as the native scenario. What differs is the asset: the
+    // escrow holds a legacy SPL balance in a token vault it owns, and the
+    // terminal transfer goes to a token account owned by the beneficiary.
+    let sol_giver = LiveEnvironment::keypair(&fixture.environment.funder);
+    let sol_receiver = LiveEnvironment::keypair(&fixture.environment.beneficiary);
+    let sol_refund = LiveEnvironment::keypair(&fixture.environment.refund);
+    let asset = SolanaAssetV1::LegacySpl {
+        mint: fixture.environment.mint,
+        decimals: fixture.environment.mint_decimals,
+    };
+    // A token profile is a different profile: `allow_legacy_spl` is inside the
+    // profile hash the terms bind.
+    let spl_profile = profile(fixture.environment.program_id, true);
+
+    // The harness wired the accounts; check it rather than assume it, because a
+    // destination owned by the wrong key is refused by the escrow at the very
+    // last step, which is an expensive place to learn it.
+    let funder_token = token_account(&fixture.cluster, fixture.environment.funder_token);
+    assert_eq!(funder_token.mint, fixture.environment.mint);
+    assert_eq!(funder_token.authority, sol_giver.public());
+    assert!(
+        funder_token.amount >= SPL_BASE_UNITS,
+        "the funder holds {} base units, fewer than the {} to be escrowed",
+        funder_token.amount,
+        SPL_BASE_UNITS
+    );
+    let beneficiary_token =
+        token_account(&fixture.cluster, fixture.environment.beneficiary_token);
+    assert_eq!(beneficiary_token.authority, sol_receiver.public());
+    assert_eq!(
+        token_account(&fixture.cluster, fixture.environment.refund_token).authority,
+        sol_refund.public()
+    );
+
+    let prepared = runtime.block_on(FundedDom::prepare_unfunded(&directory.path().join("dom")));
+    let now = Timestamp(now_seconds());
+    let mut dom = runtime.block_on(FundedDom::fund_for_solana_leg(
+        prepared,
+        RelativeDeadlineV1::DomRefundBlocksAhead(400),
+        DELAYS,
+        now,
+    ));
+    let schedule = dom.leg_schedule().expect("a Solana leg schedule");
+    assert_eq!(schedule.order, ClaimOrderV1::DomFirst);
+
+    let input = leg_input(
+        &fixture,
+        settlement_id,
+        &dom,
+        sol_giver.public(),
+        sol_receiver.public(),
+        sol_refund.public(),
+        now,
+        asset,
+        SPL_BASE_UNITS,
+    );
+    let established = SolanaLegV1::establish(
+        &input,
+        &spl_profile,
+        &store(directory.path(), "giver-setup.sqlite"),
+        &mut rand::thread_rng(),
+    )
+    .expect("the SOL giver establishes the condition");
+    let accepted = SolanaLegV1::accept(
+        &input,
+        &spl_profile,
+        established.proof(),
+        &store(directory.path(), "receiver-setup.sqlite"),
+    )
+    .expect("the SOL receiver accepts the condition");
+    assert_eq!(accepted.setup().setup_id(), established.leg().setup().setup_id());
+
+    // ── the escrow is stood up and funded from the funder's token account ────
+    fixture
+        .cluster
+        .execute(
+            &[accepted.initialize_instruction()],
+            &sol_giver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("initialize the token escrow");
+    let fund_signature = fixture
+        .cluster
+        .execute(
+            &[accepted
+                .fund_instruction()
+                .expect("a token fund instruction")],
+            &sol_giver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("fund the token escrow");
+    let observer = observer_for(&fixture, &accepted);
+    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let funding = funding_evidence(&funding_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &funding.settlement_id,
+        &funding.terms_hash,
+        &funding.program_data_hash,
+        funding.amount,
+    );
+    let funding_chain_record = funding_record(
+        solana_chain_id(&accepted),
+        funding,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the funding evidence converts to a neutral record");
+    let funding_ref =
+        assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
+    assert_eq!(funding.mint, fixture.environment.mint);
+
+    // The escrow's own token vault, owned by the vault authority PDA, now holds
+    // exactly the escrowed amount.
+    let vault = token_account(&fixture.cluster, accepted.setup().vault_pda());
+    assert_eq!(vault.mint, fixture.environment.mint);
+    assert_eq!(vault.authority, accepted.setup().vault_authority());
+    assert_eq!(vault.amount, SPL_BASE_UNITS);
+
+    // ── the DOM claim is completed with the secret and published ─────────────
+    let opening = established.opening().expect("the established opening");
+    let offer = dom.offer(
+        &established.leg().lock().dom_adaptor_point(),
+        established.leg().setup().setup_id(),
+    );
+    let context = runtime.block_on(dom.context());
+    let claim_transaction = offer
+        .complete(opening.dom_secret(), &context)
+        .expect("the adapted DOM claim");
+    let (published, dom_height) = runtime.block_on(dom.include(&claim_transaction));
+    let extracted = offer
+        .extract(&published, &runtime.block_on(dom.context()))
+        .expect("the scalar the published DOM claim discloses");
+    let from_chain = accepted
+        .opening_from_dom_secret(extracted)
+        .expect("the extracted scalar opens both faces");
+    assert_opening_agrees(&from_chain, &opening);
+
+    // ── and the token escrow is claimed with it ──────────────────────────────
+    let before = token_account(&fixture.cluster, fixture.environment.beneficiary_token).amount;
+    let claim_signature = fixture
+        .cluster
+        .execute(
+            &[accepted
+                .claim_instruction(&from_chain)
+                .expect("a token claim instruction")],
+            &sol_receiver,
+            &[],
+            CONFIRM_TIMEOUT,
+        )
+        .expect("claim the token escrow with the disclosed scalar");
+    let claim_envelope = observe_when_final(&observer, claim_signature, ObservationKind::Claim);
+    let claim = claim_evidence(&claim_envelope);
+    assert_binds_leg(
+        &accepted,
+        &fixture.program.code_hash,
+        &claim.settlement_id,
+        &claim.terms_hash,
+        &claim.program_data_hash,
+        claim.amount,
+    );
+    assert_eq!(claim.revealed_secret_be, opening.escrow_claim_bytes());
+    assert_eq!(claim.mint, fixture.environment.mint);
+    let claim_chain_record = claim_record(
+        solana_chain_id(&accepted),
+        claim,
+        &accepted.setup().settlement_id(),
+        &accepted.setup().terms_hash(),
+    )
+    .expect("the claim evidence converts to a neutral record");
+    let claim_ref =
+        assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_ne!(claim_ref.tx_id, funding_ref.tx_id);
+
+    // Exactly the escrowed amount moved, and it moved out of the vault: a token
+    // transfer that credited the beneficiary from somewhere else would satisfy a
+    // balance check on the destination alone.
+    let after = token_account(&fixture.cluster, fixture.environment.beneficiary_token).amount;
+    assert_eq!(after - before, SPL_BASE_UNITS);
+    assert_eq!(
+        token_account(&fixture.cluster, accepted.setup().vault_pda()).amount,
+        0,
+        "the vault still holds a balance after paying the frozen principal"
+    );
+
+    let onward_height = runtime.block_on(dom.prove_onward_spend_and_reject_double_spend());
+
+    fixture.environment.record(
+        "spl_sol_to_dom",
+        serde_json::json!({
+            "status": "passed",
+            "claim_order": "DomFirst",
+            "asset": "legacy-spl",
+            "mint": fixture.environment.mint.to_base58(),
+            "mint_decimals": fixture.environment.mint_decimals,
+            "base_units": SPL_BASE_UNITS,
+            "settlement_id": hex32(&settlement_id),
+            "setup_id": hex32(&accepted.setup().setup_id()),
+            "token_vault": accepted.setup().vault_pda().to_base58(),
+            "vault_authority": accepted.setup().vault_authority().to_base58(),
+            "dom_claim_height": dom_height,
+            "dom_onward_spend_height": onward_height,
+            "escrow_claim_signature": claim_signature.to_base58(),
+            "revealed_scalar_matches": true,
+            "observed_min_confirmations":
+                accepted.terms().counterparty_leg.finality.min_confirmations,
+            "funding_observed_slot": funding.slot,
+            "claim_observed_slot": claim.slot,
+            "funding_record_block_anchor": hex32(&funding_ref.block_anchor),
+            "claim_record_block_anchor": hex32(&claim_ref.block_anchor),
             "timing_bounds_proven": false,
         }),
     );

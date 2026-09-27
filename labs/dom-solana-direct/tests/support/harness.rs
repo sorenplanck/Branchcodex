@@ -32,6 +32,15 @@ pub struct LiveEnvironment {
     /// The object the program job built and the harness loaded, so a scenario can
     /// prove the bytes on chain are those bytes rather than trust that they are.
     pub program_so: PathBuf,
+    /// The legacy SPL mint the harness created, and its decimals. The escrow's
+    /// `transfer_checked` fails if the frozen setup declares different decimals
+    /// than the mint has, so this value is read, never assumed.
+    pub mint: SolanaPubkey,
+    pub mint_decimals: u8,
+    /// Token accounts, each owned by the settlement role of the same name.
+    pub funder_token: SolanaPubkey,
+    pub beneficiary_token: SolanaPubkey,
+    pub refund_token: SolanaPubkey,
 }
 
 fn require(name: &str) -> String {
@@ -79,6 +88,19 @@ impl LiveEnvironment {
             beneficiary: PathBuf::from(require("DOM_SOLANA_LIVE_BENEFICIARY_V1")),
             refund: PathBuf::from(require("DOM_SOLANA_LIVE_REFUND_V1")),
             program_so: PathBuf::from(require("DOM_SOLANA_LIVE_PROGRAM_SO_V1")),
+            mint: SolanaPubkey::from_base58(&require("DOM_SOLANA_LIVE_MINT_V1"))
+                .expect("DOM_SOLANA_LIVE_MINT_V1 is base58"),
+            mint_decimals: require("DOM_SOLANA_LIVE_MINT_DECIMALS_V1")
+                .parse()
+                .expect("DOM_SOLANA_LIVE_MINT_DECIMALS_V1 is a small integer"),
+            funder_token: SolanaPubkey::from_base58(&require("DOM_SOLANA_LIVE_FUNDER_TOKEN_V1"))
+                .expect("DOM_SOLANA_LIVE_FUNDER_TOKEN_V1 is base58"),
+            beneficiary_token: SolanaPubkey::from_base58(&require(
+                "DOM_SOLANA_LIVE_BENEFICIARY_TOKEN_V1",
+            ))
+            .expect("DOM_SOLANA_LIVE_BENEFICIARY_TOKEN_V1 is base58"),
+            refund_token: SolanaPubkey::from_base58(&require("DOM_SOLANA_LIVE_REFUND_TOKEN_V1"))
+                .expect("DOM_SOLANA_LIVE_REFUND_TOKEN_V1 is base58"),
             directory,
             campaign,
         }
