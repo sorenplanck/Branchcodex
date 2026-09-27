@@ -79,7 +79,8 @@ jobs:
             -p solana-types -p solana-pda -p solana-escrow-wire -p solana-profile \
             -p solana-route-secret -p solana-session-init -p solana-setup-store \
             -p solana-program-client -p solana-transaction-builder -p solana-rpc \
-            -p solana-observation-store -p solana-observer -p solana-secret-store \
+            -p solana-observation-store -p solana-observer -p solana-observer-pump \
+            -p solana-secret-store \
             -p solana-kaystra-bridge -p solana-kaystra-source -p solana-kaystra-records \
             -p solana-actuator \
             -p solana-rpc-pool -p solana-program-attestation -p solana-evidence \

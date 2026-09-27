@@ -70,6 +70,11 @@ solana-evidence = { path = "../../crates/adapters/solana-evidence" }
 # Turns an observed envelope into the neutral record the settlement layer
 # ingests, so the evidence this leg takes is evidence something can act on.
 solana-kaystra-records = { path = "../../crates/adapters/solana-kaystra-records" }
+# Persists each verified observation, so an observation survives the process that
+# made it and a resumed leg recovers what it had seen, not only its keys.
+solana-observer-pump = { path = "../../crates/adapters/solana-observer-pump" }
+solana-observation-store = { path = "../../crates/adapters/solana-observation-store" }
+solana-kaystra-source = { path = "../../crates/adapters/solana-kaystra-source" }
 # ── shared terms ────────────────────────────────────────────────────────────
 kaystra-core = { path = "../../crates/kaystra-core" }
 counterparty-api = { path = "../../crates/counterparty-api" }

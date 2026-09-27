@@ -57,6 +57,9 @@ use solana_evidence::{
     SolanaRefundEvidenceV1,
 };
 use solana_kaystra_records::{claim_record, funding_record, refund_record};
+use solana_kaystra_source::{VerifiedSolanaEventKind, VerifiedSolanaFeed};
+use solana_observation_store::SqliteVerifiedSolanaFeed;
+use solana_observer_pump::{observe_and_persist, PumpError};
 use solana_observer::{ObservationKind, ObserverError, SolanaSettlementObserver};
 use solana_profile::{SolanaAdapterProfileV1, SolanaAssetV1, SolanaNetwork};
 use solana_program_attestation::{
@@ -460,7 +463,25 @@ fn observer_for(fixture: &Fixture, leg: &SolanaLegV1) -> SolanaSettlementObserve
     .expect("an observer for this leg's frozen setup")
 }
 
-/// Observe a landed transaction once it satisfies the declared finality.
+/// The durable feed for one settlement. One file per settlement, because the feed
+/// is bound to a settlement and its terms and refuses to be shared.
+fn feed(root: &Path, name: &str, leg: &SolanaLegV1) -> SqliteVerifiedSolanaFeed {
+    SqliteVerifiedSolanaFeed::open(
+        root.join(name),
+        solana_chain_id(leg),
+        leg.setup().settlement_id(),
+        leg.setup().terms_hash(),
+    )
+    .expect("a fresh verified observation feed")
+}
+
+/// Observe a landed transaction once it satisfies the declared finality, and
+/// persist what was verified.
+///
+/// An observation that lives only in the observing process is lost with it, and a
+/// leg that resumed would have to verify the chain again to learn what it already
+/// knew -- or worse, act as though nothing had happened. Persisting is therefore
+/// part of observing here, not a later convenience.
 ///
 /// Only two outcomes are waited on: not yet finalized, and not yet deep enough.
 /// Everything else is a disagreement between the chain and what this leg
@@ -468,18 +489,22 @@ fn observer_for(fixture: &Fixture, leg: &SolanaLegV1) -> SolanaSettlementObserve
 /// it into a vague one.
 fn observe_when_final(
     observer: &SolanaSettlementObserver<HttpSolanaRpc>,
+    feed: &SqliteVerifiedSolanaFeed,
+    chain_id: ChainId,
     signature: SolanaSignature,
     kind: ObservationKind,
 ) -> SolanaEvidenceEnvelopeV1 {
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
-        match observer.observe(signature, kind) {
+        match observe_and_persist(observer, feed, chain_id, signature, kind) {
             Ok(envelope) => return envelope,
             Err(error) => {
                 assert!(
                     matches!(
-                        error,
-                        ObserverError::NotFinalized | ObserverError::InsufficientDepth
+                        &error,
+                        PumpError::Observer(
+                            ObserverError::NotFinalized | ObserverError::InsufficientDepth
+                        )
                     ),
                     "observing {kind:?} for {}: {error}",
                     signature.to_base58()
@@ -493,6 +518,32 @@ fn observe_when_final(
             }
         }
     }
+}
+
+/// The feed must hold exactly the observation that was just verified, at the slot
+/// it was verified in, and its tip must have advanced to cover it. A feed that
+/// answered nothing would leave a resumed leg blind while looking healthy.
+fn assert_feed_holds(
+    feed: &SqliteVerifiedSolanaFeed,
+    kind: VerifiedSolanaEventKind,
+    evidence: &EvidenceRefV1,
+) {
+    let events = feed
+        .events(evidence.block_height, evidence.block_height)
+        .expect("the feed answers for the observed slot");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == kind && event.evidence == *evidence),
+        "the feed does not hold the {kind:?} observation at slot {}; it holds {events:?}",
+        evidence.block_height
+    );
+    let tip = feed.tip().expect("the feed answers for its tip");
+    assert!(
+        tip.is_some_and(|slot| slot >= evidence.block_height),
+        "the feed tip {tip:?} does not cover the observed slot {}",
+        evidence.block_height
+    );
 }
 
 /// The neutral record the observed evidence becomes, and the checks that make it
@@ -662,7 +713,14 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
         .expect("fund the escrow");
     // Funding is settled only once it satisfies the finality the terms declare.
     let observer = observer_for(&fixture, &accepted);
-    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let observations = feed(directory.path(), "observations.sqlite", &accepted);
+    let funding_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        fund_signature,
+        ObservationKind::Funding,
+    );
     let funding = funding_evidence(&funding_envelope);
     assert_binds_leg(
         &accepted,
@@ -681,6 +739,7 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
     .expect("the funding evidence converts to a neutral record");
     let funding_ref =
         assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Funding, &funding_ref);
     let funded = escrow_state(&fixture.cluster, &accepted);
     assert_eq!(funded.status, solana_escrow_wire::EscrowStatus::Funded);
     assert_eq!(funded.funded_amount, LAMPORTS);
@@ -768,7 +827,13 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
     // the scalar the escrow accepted is the one the DOM claim disclosed. The
     // observer re-derives it from the claim instruction and re-checks it against
     // the cross-curve claim, so this is not the leg agreeing with itself.
-    let claim_envelope = observe_when_final(&observer, claim_signature, ObservationKind::Claim);
+    let claim_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        claim_signature,
+        ObservationKind::Claim,
+    );
     let claim = claim_evidence(&claim_envelope);
     assert_binds_leg(
         &accepted,
@@ -788,6 +853,7 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
     .expect("the claim evidence converts to a neutral record");
     let claim_ref =
         assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Claim, &claim_ref);
     assert_ne!(
         claim_ref.tx_id, funding_ref.tx_id,
         "funding and claim must not resolve to the same transaction"
@@ -926,7 +992,14 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
         .expect("fund the escrow");
     // Funding is settled only once it satisfies the finality the terms declare.
     let observer = observer_for(&fixture, &accepted);
-    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let observations = feed(directory.path(), "observations.sqlite", &accepted);
+    let funding_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        fund_signature,
+        ObservationKind::Funding,
+    );
     let funding = funding_evidence(&funding_envelope);
     assert_binds_leg(
         &accepted,
@@ -945,12 +1018,19 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
     .expect("the funding evidence converts to a neutral record");
     let funding_ref =
         assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Funding, &funding_ref);
     assert_eq!(
         escrow_state(&fixture.cluster, &accepted).status,
         solana_escrow_wire::EscrowStatus::Funded
     );
 
     // ── the restarted leg rebuilds its session and claims ───────────────────
+    // Close the feed and reopen it from the same file: a restarted leg recovers
+    // what was written, not what an open handle happened to still hold.
+    drop(observations);
+    let observations = feed(directory.path(), "observations.sqlite", &accepted);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Funding, &funding_ref);
+
     let resumed = EstablishedLegV1::resume(
         &input,
         &fixture.profile,
@@ -997,7 +1077,13 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
     // direction the escrow claim is what discloses the scalar, so acting on a
     // claim that had not yet finalized would be acting on a disclosure the chain
     // could still take back.
-    let claim_envelope = observe_when_final(&observer, claim_signature, ObservationKind::Claim);
+    let claim_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        claim_signature,
+        ObservationKind::Claim,
+    );
     let claim = claim_evidence(&claim_envelope);
     assert_binds_leg(
         &accepted,
@@ -1017,6 +1103,7 @@ fn solana_live_dom_to_sol_reveals_through_the_escrow_claim() {
     .expect("the claim evidence converts to a neutral record");
     let claim_ref =
         assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Claim, &claim_ref);
     assert_ne!(claim_ref.tx_id, funding_ref.tx_id);
 
     // ── the DOM side reads the scalar off the cluster, two ways ─────────────
@@ -1179,7 +1266,14 @@ fn solana_live_both_refunds_return_each_side() {
         .expect("fund the escrow");
     // Funding is settled only once it satisfies the finality the terms declare.
     let observer = observer_for(&fixture, &accepted);
-    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let observations = feed(directory.path(), "observations.sqlite", &accepted);
+    let funding_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        fund_signature,
+        ObservationKind::Funding,
+    );
     let funding = funding_evidence(&funding_envelope);
     assert_binds_leg(
         &accepted,
@@ -1198,6 +1292,7 @@ fn solana_live_both_refunds_return_each_side() {
     .expect("the funding evidence converts to a neutral record");
     let funding_ref =
         assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Funding, &funding_ref);
 
     // Build the adapted DOM claim now, while the shares are still available. It
     // is valid; it must still lose to the confirmed refund below.
@@ -1266,7 +1361,13 @@ fn solana_live_both_refunds_return_each_side() {
         refunded.revealed_secret_be, [0; 32],
         "a refund must not publish the scalar"
     );
-    let refund_envelope = observe_when_final(&observer, refund_signature, ObservationKind::Refund);
+    let refund_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        refund_signature,
+        ObservationKind::Refund,
+    );
     let refund = refund_evidence(&refund_envelope);
     assert_binds_leg(
         &accepted,
@@ -1285,6 +1386,7 @@ fn solana_live_both_refunds_return_each_side() {
     .expect("the refund evidence converts to a neutral record");
     let refund_ref =
         assert_record_pins_evidence(&refund_chain_record, &accepted, refund_signature, refund.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Refund, &refund_ref);
     assert_ne!(refund_ref.tx_id, funding_ref.tx_id);
 
     // ── the DOM refund is refused before its height and accepted after ─────
@@ -1427,7 +1529,14 @@ fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
         )
         .expect("fund the token escrow");
     let observer = observer_for(&fixture, &accepted);
-    let funding_envelope = observe_when_final(&observer, fund_signature, ObservationKind::Funding);
+    let observations = feed(directory.path(), "observations.sqlite", &accepted);
+    let funding_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        fund_signature,
+        ObservationKind::Funding,
+    );
     let funding = funding_evidence(&funding_envelope);
     assert_binds_leg(
         &accepted,
@@ -1446,6 +1555,7 @@ fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
     .expect("the funding evidence converts to a neutral record");
     let funding_ref =
         assert_record_pins_evidence(&funding_chain_record, &accepted, fund_signature, funding.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Funding, &funding_ref);
     assert_eq!(funding.mint, fixture.environment.mint);
 
     // The escrow's own token vault, owned by the vault authority PDA, now holds
@@ -1487,7 +1597,13 @@ fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
             CONFIRM_TIMEOUT,
         )
         .expect("claim the token escrow with the disclosed scalar");
-    let claim_envelope = observe_when_final(&observer, claim_signature, ObservationKind::Claim);
+    let claim_envelope = observe_when_final(
+        &observer,
+        &observations,
+        solana_chain_id(&accepted),
+        claim_signature,
+        ObservationKind::Claim,
+    );
     let claim = claim_evidence(&claim_envelope);
     assert_binds_leg(
         &accepted,
@@ -1508,6 +1624,7 @@ fn solana_live_spl_token_sol_to_dom_reveals_through_the_dom_claim() {
     .expect("the claim evidence converts to a neutral record");
     let claim_ref =
         assert_record_pins_evidence(&claim_chain_record, &accepted, claim_signature, claim.slot);
+    assert_feed_holds(&observations, VerifiedSolanaEventKind::Claim, &claim_ref);
     assert_ne!(claim_ref.tx_id, funding_ref.tx_id);
 
     // Exactly the escrowed amount moved, and it moved out of the vault: a token
