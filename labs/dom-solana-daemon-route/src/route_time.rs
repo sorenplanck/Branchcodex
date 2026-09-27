@@ -48,9 +48,10 @@ use dom_interopd::ProductionAuthorityBundleV1;
 use kaystra_core::terms::SettlementTermsV1;
 use route_time_anchor::{
     CanonicalAnchorObservationV2, CanonicalCheckpointObservationV2, CanonicalTimeCheckpointV2,
-    CanonicalTimeRangeV2, CanonicalTipObservationV2, RouteTimeAnchorStoreConfigV2,
-    RouteTimeEvidenceV2, RouteTimePolicyLimitsV2, RouteTimePolicyV2, SignedRouteTimeEvidenceV2,
-    SignedRouteTimePolicyV2, TimeAnchorSignatureV2,
+    CanonicalTimeRangeV2, CanonicalTipObservationV2, DurableRouteTimeAnchorStoreV2,
+    RouteTimeAnchorStoreConfigV2, RouteTimeEvidenceV2, RouteTimeEvidenceVerificationContextV2,
+    RouteTimePolicyLimitsV2, RouteTimePolicyV2, RouteTimePolicyVerificationContextV2,
+    SignedRouteTimeEvidenceV2, SignedRouteTimePolicyV2, TimeAnchorSignatureV2,
 };
 
 use crate::registry::{
@@ -113,6 +114,12 @@ pub struct RouteTimeInputV1<'a> {
     pub downstream: &'a SettlementTermsV1,
     /// Trusted wall clock, seconds. The same second the registry was validated at.
     pub now_seconds: u64,
+    /// Where the throwaway time-anchor store used to verify these artifacts goes.
+    ///
+    /// Not inside `state_dir`: the daemon's own time-anchor store is a managed path it
+    /// requires to be absent on create, so a store left there would make the layout
+    /// refuse the directory.
+    pub provisioning_dir: &'a Path,
     /// The three observations, in the policy's own checkpoint order: hub, upstream
     /// counterparty, downstream counterparty.
     pub hub: ChainObservationV1,
@@ -301,12 +308,71 @@ pub fn provision(input: &RouteTimeInputV1<'_>) -> Result<ProvisionedRouteTimeV1,
         return Err("the time config names another route scope".to_owned());
     }
 
+    // Prove the ladder these two artifacts imply, through the daemon's own store.
+    //
+    // The loader installs the policy and the evidence and then proves the ladder, and
+    // every distinct failure on that path -- an invalid policy, invalid evidence, a
+    // registry mismatch, an anchor outside its window, an interval that cannot hold --
+    // reaches the caller as one word: `TimeRefused`. Proving it here, where the concrete
+    // `RouteTimeAnchorErrorV2` is still in hand, means a provisioner that writes an
+    // unusable schedule learns which rule it broke instead of learning that the daemon
+    // declined.
+    prove_the_ladder(
+        input,
+        &resolved,
+        &secp,
+        &bundle,
+        &signed_policy,
+        &signed_evidence,
+        time_config,
+    )?;
+
     Ok(ProvisionedRouteTimeV1 {
         time_policy_authority_set_digest: time_config.policy_authority_set_digest(),
         time_evidence_authority_set_digest: time_config.evidence_authority_set_digest(),
         time_policy_digest: policy_digest,
         time_evidence_digest: evidence_digest,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_the_ladder(
+    input: &RouteTimeInputV1<'_>,
+    resolved: &deployment_registry::ResolvedRegistryV1,
+    secp: &SecpContext,
+    bundle: &ProductionAuthorityBundleV1,
+    signed_policy: &SignedRouteTimePolicyV2,
+    signed_evidence: &SignedRouteTimeEvidenceV2,
+    config: RouteTimeAnchorStoreConfigV2,
+) -> Result<(), String> {
+    crate::owner_only::directory(input.provisioning_dir)?;
+    let path = input.provisioning_dir.join("route-time-anchor-check.v1.sqlite3");
+    // A fresh store each time: this proves the artifacts, not the history of a store.
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| format!("stale check store: {error}"))?;
+    }
+    let mut store = DurableRouteTimeAnchorStoreV2::create(&path, config)
+        .map_err(|error| format!("time anchor check store: {error:?}"))?;
+    let policy_context = RouteTimePolicyVerificationContextV2::new(
+        bundle.time_policy(),
+        secp,
+        resolved,
+        input.upstream,
+        input.downstream,
+    );
+    store
+        .install_policy(signed_policy, policy_context, input.now_seconds)
+        .map_err(|error| format!("the signed policy does not install: {error:?}"))?;
+    // Both contexts are `Copy`, so one of each is enough.
+    let evidence_context =
+        RouteTimeEvidenceVerificationContextV2::new(policy_context, bundle.time_evidence());
+    store
+        .install_evidence(signed_evidence, evidence_context, input.now_seconds)
+        .map_err(|error| format!("the signed evidence does not install: {error:?}"))?;
+    store
+        .prove_route_ladder(evidence_context, input.now_seconds)
+        .map_err(|error| format!("the route ladder does not verify: {error:?}"))?;
+    Ok(())
 }
 
 fn decode_authority_bundle(

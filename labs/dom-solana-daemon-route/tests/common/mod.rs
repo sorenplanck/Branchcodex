@@ -284,6 +284,7 @@ pub fn provision_all() -> Provisioned {
         upstream: &upstream.terms,
         downstream: &downstream.terms,
         now_seconds: NOW_SECONDS,
+        provisioning_dir: &leg_store_dir,
         hub: observation(0x61, 900),
         upstream_chain: observation(0x71, 4_000),
         downstream_chain: observation(0x81, 5_000),
