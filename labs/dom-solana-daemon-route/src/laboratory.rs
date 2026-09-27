@@ -195,6 +195,11 @@ pub struct LaboratoryRouteV1 {
     pub parties: [ParticipantId; 2],
     /// Each party's identity authority, in party order.
     pub identity_stores: [std::path::PathBuf; 2],
+    /// Each party's identity key, in party order, so a caller can check that a plan names the
+    /// participant its own authority derives.
+    pub identity_keys: [[u8; 33]; 2],
+    /// The direction each party's roster role implies, in party order.
+    pub identity_directions: [dom_adaptor::DirectionV1; 2],
 }
 
 /// Provision the whole route into `state_dir`, using `provisioning_dir` for everything the
@@ -241,18 +246,19 @@ pub fn provision(
             relative,
             IDENTITY_PASSPHRASE.as_bytes(),
         )?;
+        // The direction does not enter the derivation; the roster role it implies does.
+        let direction = if index == 0 {
+            dom_adaptor::DirectionV1::Initiator
+        } else {
+            dom_adaptor::DirectionV1::Responder
+        };
         let participant = ParticipantId(declared_inputs::participant_id_for_identity(
             registry.dom_genesis_hash,
             registry.dom_network_magic,
             &key,
-            // The direction does not enter the derivation; the roster role it implies does.
-            if index == 0 {
-                dom_adaptor::DirectionV1::Initiator
-            } else {
-                dom_adaptor::DirectionV1::Responder
-            },
+            direction,
         )?);
-        pairs.push((participant, root.join(relative)));
+        pairs.push((participant, root.join(relative), key, direction));
     }
 
     // Sorted as PAIRS, never as two lists.
@@ -268,12 +274,17 @@ pub fn provision(
     // each run, so the sort swaps about half the time. The ceremony completed on one run and
     // refused on the next with no relevant change between them, which is what sent this
     // hunting through the intent hash and the adaptor point before the evidence named it.
-    pairs.sort_by_key(|(participant, _)| *participant);
+    pairs.sort_by_key(|(participant, ..)| *participant);
     if pairs[0].0 == pairs[1].0 {
         return Err("both identities derived the same participant".to_owned());
     }
     let parties = [pairs[0].0, pairs[1].0];
     let identity_stores = [pairs[0].1.clone(), pairs[1].1.clone()];
+    // The key and the direction travel INSIDE the pair for the same reason the store does:
+    // the sort reorders the parties, so anything indexed by the pre-sort position afterwards
+    // is the same defect wearing a different name.
+    let identity_keys = [pairs[0].2, pairs[1].2];
+    let identity_directions = [pairs[0].3, pairs[1].3];
 
     let (terms, positions) = provision_terms(&RouteTermsInputV1 {
         state_dir,
@@ -359,6 +370,8 @@ pub fn provision(
         now_seconds,
         parties,
         identity_stores,
+        identity_keys,
+        identity_directions,
     })
 }
 

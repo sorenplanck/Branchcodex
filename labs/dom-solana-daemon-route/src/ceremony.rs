@@ -467,10 +467,20 @@ pub fn verify_plan_names_its_own_identity(
     let declared = plan["local_participant_id"]
         .as_array()
         .ok_or_else(|| "local_participant_id is not an array".to_owned())?;
+    if declared.len() != 32 {
+        return Err(format!(
+            "local_participant_id is {} bytes, not 32",
+            declared.len()
+        ));
+    }
     let mut expected_bytes = [0u8; 32];
-    for (slot, value) in declared.iter().enumerate().take(32) {
-        expected_bytes[slot] =
-            u8::try_from(value.as_u64().unwrap_or(256)).map_err(|_| "not a byte".to_owned())?;
+    for (slot, value) in declared.iter().enumerate() {
+        expected_bytes[slot] = u8::try_from(
+            value
+                .as_u64()
+                .ok_or_else(|| "local_participant_id is not bytes".to_owned())?,
+        )
+        .map_err(|_| "local_participant_id has a value past a byte".to_owned())?;
     }
     let derived = crate::declared_inputs::participant_id_for_identity(
         dom_genesis_hash,

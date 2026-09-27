@@ -81,6 +81,16 @@ fn main() -> Result<(), String> {
     for (index, path) in plans.paths.iter().enumerate() {
         ceremony::verify_ceremony_inputs(path, &secrets[index], now_seconds)
             .map_err(|error| format!("party {index}: {error}"))?;
+        // And that this plan names the participant ITS OWN authority derives. Both halves of
+        // a mismatched pair are individually correct, so nothing above catches it.
+        ceremony::verify_plan_names_its_own_identity(
+            path,
+            &route.identity_keys[index],
+            route.registry.dom_genesis_hash,
+            route.registry.dom_network_magic,
+            route.identity_directions[index],
+        )
+        .map_err(|error| format!("party {index}: {error}"))?;
     }
 
     println!("state_dir={}", state_dir.display());
