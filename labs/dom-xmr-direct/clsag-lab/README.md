@@ -83,13 +83,13 @@ python3 scripts/run_arbiter_matrix.py \
   --workers 2
 ```
 
-A campanha mais recente usou dois workers e terminou em 242,19 s de parede,
+A campanha mais recente usou dois workers e terminou em 217,82 s de parede,
 com duas confirmações DOM, shares XMR e DOM em processos separados, prova de
 faixa colaborativa, reinício dos dois participantes, rechecagem canônica antes
 da assinatura XMR e todas as operações pelo canal Noise. Claim, Refund e
-Punish levaram 34,23 s, 40,56 s e 46,79 s desde `Ready`. Um quarto caso
+Punish levaram 27,47 s, 32,67 s e 38,23 s desde `Ready`. Um quarto caso
 promoveu uma cadeia DOM concorrente, removeu o Claim e recusou qualquer
-assinatura XMR em 45,13 s desde `Ready`. Os registros completos e os limites
+assinatura XMR em 37,16 s desde `Ready`. Os registros completos e os limites
 atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
 O Claim financiado pelo caminho de servidores persistentes, estado cifrado,
@@ -103,10 +103,18 @@ sem capacidades, com sistemas de arquivos privados e namespaces/endereço de
 rede distintos. A rede Docker é interna e não possui rota externa; o
 coordenador não monta nenhum estado dos participantes. Cada participante obtém
 sua chave de wrapping por um provedor externo, inclusive após reiniciar, e não
-cria arquivo local de chave. O Claim financiado passou em 91,51 s dentro do
-protocolo, 27,06 s desde `Ready` e 153,28 s incluindo a preparação dos
+cria arquivo local de chave. O Claim financiado passou em 86,81 s dentro do
+protocolo, 26,46 s desde `Ready` e 121,78 s incluindo a preparação dos
 contêineres. A imagem Ubuntu é fixada por digest. Esse teste remove o
 compartilhamento de pilha de rede do loopback, mas continua no mesmo host físico.
+
+Essa latência usa mineração Regtest solicitada pelo ensaio. A rede DOM pública
+tem alvo de 120 s por bloco. Duas confirmações consomem nominalmente 240 s antes
+de qualquer trabalho criptográfico e não cabem no teto de 180 s. Mesmo sob um
+modelo Poisson idealizado, a chance de dois blocos chegarem em três minutos é
+44,2%; não existe limite determinístico para PoW. O módulo
+`finality_budget` e os verificadores de evidência impedem que o resultado rápido
+do Regtest seja apresentado como cumprimento do prazo em rede pública.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o ensaio em três
 contêineres e a matriz no GitHub com Monero 0.18.4.0 verificado por hash, limite

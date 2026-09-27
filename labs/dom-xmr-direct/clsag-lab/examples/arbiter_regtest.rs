@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Funded DXA1 DOM↔XMR experiment using one isolated DOM Regtest node and one
 //! isolated `monerod --regtest`. Bitcoin is not part of this flow. Mining is
 //! requested on demand, so elapsed time is evidence for this test fixture and
@@ -34,6 +36,7 @@ use dxp1_clsag_lab::{
     arbiter_session::{ArbiterSessionBinding, ArbiterSessionJournal},
     claim_resume::digest,
     dom_reserve::ReserveIntent,
+    finality_budget::PowFinalityBudget,
     native_dom::{DomClaimOffer, PreparedDomClaim},
 };
 use monero_simple_request_rpc::{prelude::*, SimpleRequestTransport};
@@ -57,6 +60,7 @@ const CONTEXT_HASH: [u8; 32] = [0x73; 32];
 const ARBITER_VALUE: u64 = 100_000_000;
 const FEE: u64 = 1_000_000;
 const MIN_DOM_CONFIRMATIONS: u64 = 2;
+const ACTIVE_SETTLEMENT_BUDGET_SECONDS: u64 = 180;
 
 struct ManagedDaemon(Child);
 
@@ -1245,6 +1249,13 @@ async fn exercise(
     remote_parties: Option<RemoteParties>,
 ) {
     let started = Instant::now();
+    let public_finality_budget = PowFinalityBudget::new(
+        dom_core::TARGET_BLOCK_TIME_SECS,
+        MIN_DOM_CONFIRMATIONS,
+        ACTIVE_SETTLEMENT_BUDGET_SECONDS,
+        0,
+    )
+    .unwrap();
     let mut setup = funded_arbiter(
         &party_binary,
         outcome == Outcome::ReorgGuard,
@@ -1366,7 +1377,16 @@ async fn exercise(
         assert_eq!(response["result"]["status"], "OK", "{response}");
         break;
     }
-    let (_, height) = rpc.generate_blocks(&reserve_address, 139).await.unwrap();
+    // Keep each daemon request short enough to remain reliable when the matrix
+    // prepares multiple isolated Monero reserves concurrently.
+    let mut height = 0;
+    let mut remaining_reserve_blocks = 139;
+    while remaining_reserve_blocks != 0 {
+        let batch = remaining_reserve_blocks.min(20);
+        let (_, batch_height) = rpc.generate_blocks(&reserve_address, batch).await.unwrap();
+        height = batch_height;
+        remaining_reserve_blocks -= batch;
+    }
     let first_hash = rpc.block_by_number(1).await.unwrap().hash();
     let funding_block = rpc.scannable_block(first_hash).await.unwrap();
     assert_eq!(funding_block.block.header.hardfork_version, 16);
@@ -1632,7 +1652,9 @@ async fn exercise(
             )
             .is_err());
         let active_seconds = active_settlement.elapsed().as_secs_f64();
-        assert!(active_settlement.elapsed() <= Duration::from_secs(180));
+        assert!(
+            active_settlement.elapsed() <= Duration::from_secs(ACTIVE_SETTLEMENT_BUDGET_SECONDS)
+        );
         println!(
             "{}",
             json!({
@@ -1656,6 +1678,13 @@ async fn exercise(
                 "xmr_signing_requested":false,
                 "xmr_transaction_submitted":false,
                 "dom_min_confirmations":MIN_DOM_CONFIRMATIONS,
+                "dom_target_block_seconds":public_finality_budget.target_block_seconds(),
+                "dom_nominal_confirmation_wait_seconds":public_finality_budget.nominal_confirmation_seconds(),
+                "dom_max_nominal_confirmations_within_three_minutes":public_finality_budget.maximum_nominal_confirmations(),
+                "dom_two_confirmations_nominally_fit_three_minutes":public_finality_budget.nominally_fits(),
+                "dom_pow_has_deterministic_confirmation_deadline":public_finality_budget.deterministic_deadline(),
+                "dom_two_confirmation_probability_within_three_minutes_poisson":public_finality_budget.poisson_completion_probability(),
+                "regtest_fast_mining_timing_only":true,
                 "dom_confirmation_depth_before_reorg":dom_confirmation_depth,
                 "competing_tip_height":canonical_height,
                 "ready_to_reorg_rejection_seconds":active_seconds,
@@ -1779,7 +1808,7 @@ async fn exercise(
         .is_none());
     let active_settlement_seconds = active_settlement.elapsed().as_secs_f64();
     assert!(
-        active_settlement.elapsed() <= Duration::from_secs(180),
+        active_settlement.elapsed() <= Duration::from_secs(ACTIVE_SETTLEMENT_BUDGET_SECONDS),
         "ready-to-complete settlement exceeded three minutes"
     );
 
@@ -1811,6 +1840,13 @@ async fn exercise(
             "unauthorized_dom_offer_rejected":true,
             "participant_restart_restored_bound_shares":true,
             "dom_min_confirmations":MIN_DOM_CONFIRMATIONS,
+            "dom_target_block_seconds":public_finality_budget.target_block_seconds(),
+            "dom_nominal_confirmation_wait_seconds":public_finality_budget.nominal_confirmation_seconds(),
+            "dom_max_nominal_confirmations_within_three_minutes":public_finality_budget.maximum_nominal_confirmations(),
+            "dom_two_confirmations_nominally_fit_three_minutes":public_finality_budget.nominally_fits(),
+            "dom_pow_has_deterministic_confirmation_deadline":public_finality_budget.deterministic_deadline(),
+            "dom_two_confirmation_probability_within_three_minutes_poisson":public_finality_budget.poisson_completion_probability(),
+            "regtest_fast_mining_timing_only":true,
             "dom_confirmation_depth":dom_confirmation_depth,
             "dom_pre_xmr_recheck_depth":recheck_depth,
             "dom_canonicality_rechecked_before_xmr_signing":true,
@@ -1848,7 +1884,7 @@ async fn main() {
     );
     let remote_parties = RemoteParties::from_environment();
     tokio::time::timeout(
-        Duration::from_secs(180),
+        Duration::from_secs(ACTIVE_SETTLEMENT_BUDGET_SECONDS),
         exercise(monerod, party_binary, outcome, remote_parties),
     )
     .await

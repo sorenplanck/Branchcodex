@@ -133,9 +133,9 @@ reproduzível está em
 O mesmo Claim passou com coordenador e participantes em três contêineres sem
 capacidades, estados privados separados, namespaces/endereço distintos e rede
 interna sem rota externa. Cada participante recuperou sua chave por um provedor
-externo depois do restart e não gravou chave local. O protocolo levou 91,51 s no
-total e 27,06 s desde `Ready`; a preparação completa dos contêineres levou
-153,28 s. Isso comprova isolamento lógico no mesmo host, não um ensaio em
+externo depois do restart e não gravou chave local. O protocolo levou 86,81 s no
+total e 26,46 s desde `Ready`; a preparação completa dos contêineres levou
+121,78 s. Isso comprova isolamento lógico no mesmo host, não um ensaio em
 máquinas físicas distintas.
 
 As chaves de pré-assinatura DOM agora também ficam distribuídas. Cada processo
@@ -160,9 +160,18 @@ Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 34,23 s para Claim, 40,56 s para Refund e 46,79 s para Punish
-sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
+intervalo mediu 27,47 s para Claim, 32,67 s para Refund e 38,23 s para Punish
+sob execução paralela. A rechecagem rejeitou a reorganização em 37,16 s, sem
+pedir assinatura XMR. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
+
+O lado DOM impõe outra fronteira: `TARGET_SPACING` é 120 s. As duas
+confirmações conservadoras do candidato exigem nominalmente 240 s somente para
+os blocos. Em um modelo Poisson idealizado, dois blocos chegam em 180 s com
+probabilidade de 44,2%, e não há máximo determinístico. Logo, a evidência
+Regtest abaixo de três minutos não prova o requisito na rede pública. Manter
+duas confirmações preserva a política de reorg e viola o prazo nominal; reduzir
+para uma cabe nominalmente, mas enfraquece a segurança e não cria garantia.
 
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

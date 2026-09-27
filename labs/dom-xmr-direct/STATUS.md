@@ -178,8 +178,8 @@ contêineres sem capacidades, três namespaces/endereço de rede e estados priva
 separados. A rede interna não tinha rota externa e o coordenador não recebeu o
 mount de nenhum participante. Cada processo obteve sua chave de wrapping por um
 provedor Unix externo antes da criação e novamente após o restart; nenhum
-arquivo local de chave foi criado. O Claim levou **91,51 s** dentro do protocolo,
-**27,06 s** desde `Ready` e **153,28 s** incluindo a criação dos contêineres. A
+arquivo local de chave foi criado. O Claim levou **86,81 s** dentro do protocolo,
+**26,46 s** desde `Ready` e **121,78 s** incluindo a criação dos contêineres. A
 imagem Ubuntu foi fixada por digest. Essa topologia é mais forte que loopback,
 mas ainda compartilha o mesmo kernel e host físico.
 
@@ -201,10 +201,19 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **34,23 s**, Refund **40,56 s** e Punish **46,79 s**. O runner
+Claim levou **27,47 s**, Refund **32,67 s** e Punish **38,23 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
-mainnet. Ainda faltam executar o transporte em máquinas físicas distintas,
+mainnet.
+
+Há também uma incompatibilidade no lado DOM que o Regtest ocultava: o alvo
+público é 120 s por bloco. A política conservadora de duas confirmações consome
+nominalmente **240 s**, antes do restante do protocolo, e portanto não cabe em
+180 s. Sob o modelo Poisson idealizado, a probabilidade de dois blocos em três
+minutos é **44,2%**; PoW não oferece prazo máximo determinístico. O ensaio agora
+grava esses fatos e os runners os exigem. O candidato ainda não satisfaz ao
+mesmo tempo o teto público estrito de três minutos e a política atual de duas
+confirmações. Ainda faltam executar o transporte em máquinas físicas distintas,
 quantificar a política para reorgs mais profundos e ativar com segurança as
 novas regras de consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
@@ -226,10 +235,11 @@ que contenção do runner seja confundida com latência do protocolo. Depois da
 barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
 reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **242,19 s** de parede com dois workers. Claim,
-Refund e Punish completos levaram **114,70 s**, **121,07 s** e **120,26 s**; o
-reorg foi recusado em **121,09 s** totais. Desde `Ready`, os settlements levaram
-**34,23 s**, **40,56 s** e **46,79 s**. A
+mesmo arquivo oficial passou em **217,82 s** de parede com dois workers. Claim,
+Refund e Punish completos levaram **105,05 s**, **110,38 s** e **104,78 s**; o
+reorg foi recusado em **107,42 s** totais. Desde `Ready`, os settlements levaram
+**27,47 s**, **32,67 s** e **38,23 s**, e a reorganização foi rejeitada em
+**37,16 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

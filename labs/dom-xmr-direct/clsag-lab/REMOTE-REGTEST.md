@@ -101,8 +101,11 @@ DXA1_REMOTE_PARTIES=/secure/dxa1/remote-parties.json \
 O resultado final deve conter `"remote_participant_servers":true`,
 `"participant_restart_restored_bound_shares":true` e um tempo positivo de
 `ready_to_complete_seconds` de no máximo 180 segundos. Ele também deve registrar
-`"bounded_noise_handshake_and_message_deadlines":true`. Para validar todo o
-caminho numa única máquina antes de distribuir os hosts:
+`"bounded_noise_handshake_and_message_deadlines":true`, alvo DOM de 120 s,
+espera nominal de 240 s para duas confirmações e
+`"dom_two_confirmations_nominally_fit_three_minutes":false`. O tempo rápido
+mede somente o Regtest acelerado. Para validar todo o caminho numa única máquina
+antes de distribuir os hosts:
 
 ```sh
 python3 -B scripts/test_arbiter_remote.py \

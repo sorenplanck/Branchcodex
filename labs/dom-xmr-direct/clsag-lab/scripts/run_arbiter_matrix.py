@@ -89,6 +89,23 @@ def verify(outcome: str, result: dict) -> None:
         raise ValueError(f"wrong outcome: {result.get('outcome')!r}")
     if result.get("bitcoin_involved") is not False:
         raise ValueError("BTC appeared in the DOM-XMR leg")
+    if result.get("dom_target_block_seconds") != 120:
+        raise ValueError("unexpected public DOM target block interval")
+    if result.get("dom_nominal_confirmation_wait_seconds") != 240:
+        raise ValueError("two-confirmation nominal wait was hidden")
+    if result.get("dom_max_nominal_confirmations_within_three_minutes") != 1:
+        raise ValueError("three-minute confirmation capacity was misstated")
+    if result.get("dom_two_confirmations_nominally_fit_three_minutes") is not False:
+        raise ValueError("Regtest timing was presented as public-network timing")
+    if result.get("dom_pow_has_deterministic_confirmation_deadline") is not False:
+        raise ValueError("PoW finality was presented as deterministic")
+    probability = result.get(
+        "dom_two_confirmation_probability_within_three_minutes_poisson"
+    )
+    if not isinstance(probability, (int, float)) or not 0.44 < probability < 0.45:
+        raise ValueError("unexpected Poisson timing evidence")
+    if result.get("regtest_fast_mining_timing_only") is not True:
+        raise ValueError("accelerated Regtest timing was not disclosed")
     if outcome == "reorg-guard":
         for field in REORG_REQUIRED_TRUE:
             if result.get(field) is not True:
