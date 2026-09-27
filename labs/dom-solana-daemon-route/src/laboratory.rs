@@ -1,0 +1,294 @@
+//! One complete laboratory route, provisioned end to end.
+//!
+//! Everything this crate writes, in the order the artifacts depend on each other: the
+//! signed registry, both frozen terms, the Relay roster, the participant bindings, the
+//! signed time policy and evidence, the Contracts budget policy and the transport identity
+//! authority.
+//!
+//! # Why this is not test code
+//!
+//! It began as a test fixture, and that was wrong twice over. A ceremony has to be driven
+//! by a program rather than by a test harness -- `bootstrap_command_v13` is a command that
+//! reads a plan from a path and secrets from stdin -- so the route it is given has to be
+//! provisionable outside `cargo test`. And a fixture that provisions half the route lets a
+//! path the ceremony names go missing without anything noticing, which is exactly what
+//! happened twice while the plans were being written.
+//!
+//! # What is laboratory about it
+//!
+//! The values: two stand-in clusters, one participant pair, one passphrase, one set of
+//! chain observations. A deployment supplies its own and holds its own secrets. Every
+//! module this calls says the same thing about its own material -- the condition scalar,
+//! the authority keys, the roster secrets -- and this one says it about the route.
+
+use std::path::Path;
+
+use kaystra_core::types::ParticipantId;
+use solana_types::SolanaPubkey;
+
+use crate::ceremony::CeremonyPlanInputV1;
+use crate::declared_inputs;
+use crate::participants::provision as provision_participants;
+use crate::registry::{
+    provision as provision_registry, ProvisionedSolanaRegistryV1, RegistryProvisioningInputV1,
+    SolanaChainFactsV1,
+};
+use crate::roster::{provision as provision_roster, ProvisionedRelayRosterV1};
+use crate::route_time::{provision as provision_route_time, ChainObservationV1, RouteTimeInputV1};
+use crate::terms::{
+    provision as provision_terms, ProvisionedPositionV1, ProvisionedRouteTermsV1,
+    RouteTermsInputV1, SolanaPositionAccountsV1, SolanaPositionTermsPlanV1,
+};
+use crate::{RouteIdentitiesV1, SolanaRouteBootstrapPlanV1};
+
+/// The interop network this laboratory route belongs to.
+pub const NETWORK: [u8; 32] = [0x90; 32];
+
+/// A trusted second that is neither zero nor near an overflow, so the manifest's window,
+/// the policy's window and both schedules can be expressed relative to it. Fixed rather
+/// than read from the clock: a route whose artifacts change with the wall clock cannot be
+/// reasoned about when it fails.
+pub const NOW_SECONDS: u64 = 1_800_000_000;
+
+/// The DOM chain position everything is anchored at.
+///
+/// ONE value, used both to plan the schedules and to build the hub checkpoint, because
+/// they are the same chain position. Planning from one height and telling the evidence the
+/// hub was at another puts a refund deadline behind the hub's own anchor, and the route
+/// ladder refuses that with `DeadlinePassed`.
+pub const DOM_ANCHOR_HEIGHT: u64 = 1;
+
+/// The laboratory passphrase that opens the Contracts transport identity authority.
+pub const IDENTITY_PASSPHRASE: &str = "a laboratory contracts identity passphrase";
+
+/// The two parties of the route, shared by BOTH positions.
+///
+/// A route is two settlements between the same two participants, which is why
+/// `RouteTimePolicyV2::from_registry` requires both terms to name the same DOM chain, asset
+/// and adapter profile: the hub leg is one leg seen twice. The Contracts bootstrap ceremony
+/// reads the same way -- it is bilateral.
+pub const PARTY_A: ParticipantId = ParticipantId([0xa1; 32]);
+pub const PARTY_B: ParticipantId = ParticipantId([0xb2; 32]);
+
+/// The layout paths this route provisions into, named once.
+pub const REGISTRY_STORE: &str = "artifacts/registry.v1.sqlite3";
+pub const REGISTRY_AUTHORITIES: &str = "artifacts/registry-authorities.v1";
+pub const UPSTREAM_TERMS: &str = "artifacts/upstream-terms.v1";
+pub const DOWNSTREAM_TERMS: &str = "artifacts/downstream-terms.v1";
+pub const RELAY_ROSTER: &str = "artifacts/relay-roster.v1";
+pub const PARTICIPANT_BINDINGS: &str = "artifacts/participant-bindings.v1";
+pub const TIME_POLICY: &str = "artifacts/time-policy.v1";
+pub const TIME_EVIDENCE: &str = "artifacts/time-evidence.v1";
+
+/// The upstream cluster: where the operation that BEGINS on Solana settles.
+pub fn upstream_facts() -> SolanaChainFactsV1 {
+    SolanaChainFactsV1 {
+        genesis_hash: [0x7c; 32],
+        escrow_program: [0x3c; 32],
+        program_data_hash: [0x44; 32],
+        network: chain_profile::SolanaNetworkV1::LocalValidator,
+        max_fee_lamports: 50_000,
+    }
+}
+
+/// The downstream cluster: where the operation that ENDS on Solana settles. A different
+/// cluster, because the route-time policy refuses two counterparty legs on one chain.
+pub fn downstream_facts() -> SolanaChainFactsV1 {
+    SolanaChainFactsV1 {
+        genesis_hash: [0x8d; 32],
+        escrow_program: [0x4e; 32],
+        program_data_hash: [0x55; 32],
+        network: chain_profile::SolanaNetworkV1::LocalValidator,
+        max_fee_lamports: 50_000,
+    }
+}
+
+/// The six declared identities.
+pub fn identities() -> RouteIdentitiesV1 {
+    RouteIdentitiesV1 {
+        route_id: [0x31; 32],
+        process_owner_id: [0x32; 32],
+        coordinator_id: [0x33; 32],
+        coordinator_plan_authority_id: [0x34; 32],
+        actuator_bindings_digest: [0x35; 32],
+        solver_inventory_binding_digest: [0x36; 32],
+    }
+}
+
+/// Distinct, non-zero accounts. A zero funder is refused by `validate_setup`.
+pub fn accounts(seed: u8) -> SolanaPositionAccountsV1 {
+    SolanaPositionAccountsV1 {
+        funder: SolanaPubkey([seed; 32]),
+        beneficiary: SolanaPubkey([seed.wrapping_add(1); 32]),
+        refund_recipient: SolanaPubkey([seed.wrapping_add(2); 32]),
+        amount: 5_000_000,
+    }
+}
+
+/// One position's plan. The two parties are the same on both; only the settlement and the
+/// session differ, because a route is two settlements between the same two people.
+pub fn position(seed: u8) -> SolanaPositionTermsPlanV1 {
+    SolanaPositionTermsPlanV1 {
+        settlement_id: [seed; 32],
+        session_id: [seed.wrapping_add(0x40); 32],
+        dom_beneficiary: PARTY_A,
+        dom_refund_to: PARTY_B,
+        dom_amount_noms: 4_000_000,
+        accounts: accounts(seed),
+    }
+}
+
+/// One chain's observation, chosen to satisfy what `validate_checkpoint` requires: every
+/// hash non-zero with the tip's distinct from the anchor's, an interval inside the policy's
+/// width ceiling whose lower end is not further ahead than the future skew and whose upper
+/// end is recent enough for the observation, and a tip clearing the anchor's confirmations.
+pub fn observation(seed: u8, anchor_height: u64) -> ChainObservationV1 {
+    ChainObservationV1 {
+        anchor_height,
+        anchor_hash: [seed; 32],
+        parent_hash: [seed.wrapping_add(1); 32],
+        time_lower_seconds: NOW_SECONDS - 300,
+        time_upper_seconds: NOW_SECONDS - 60,
+        tip_height: anchor_height + 5,
+        tip_hash: [seed.wrapping_add(2); 32],
+        canonicality_evidence_digest: [seed.wrapping_add(3); 32],
+    }
+}
+
+/// Everything one provisioned route is.
+#[derive(Clone, Debug)]
+pub struct LaboratoryRouteV1 {
+    pub plan: SolanaRouteBootstrapPlanV1,
+    pub registry: ProvisionedSolanaRegistryV1,
+    pub terms: ProvisionedRouteTermsV1,
+    pub roster: ProvisionedRelayRosterV1,
+    pub upstream: ProvisionedPositionV1,
+    pub downstream: ProvisionedPositionV1,
+    pub upstream_facts: SolanaChainFactsV1,
+    pub downstream_facts: SolanaChainFactsV1,
+}
+
+/// Provision the whole route into `state_dir`, using `provisioning_dir` for everything the
+/// daemon's layout does not declare.
+pub fn provision(
+    state_dir: &Path,
+    provisioning_dir: &Path,
+) -> Result<LaboratoryRouteV1, String> {
+    let leg_store_dir = provisioning_dir.join("leg");
+    let upstream_facts = upstream_facts();
+    let downstream_facts = downstream_facts();
+
+    let registry = provision_registry(&RegistryProvisioningInputV1 {
+        state_dir,
+        registry_relative: REGISTRY_STORE,
+        authorities_relative: REGISTRY_AUTHORITIES,
+        network_id: NETWORK,
+        epoch: 7,
+        now_seconds: NOW_SECONDS,
+        // Wide enough that the route-time policy's own window fits inside it, which the
+        // policy requires of the manifest that authorises it.
+        valid_from_offset_seconds: 86_400,
+        valid_until_offset_seconds: 86_400,
+        upstream: &upstream_facts,
+        downstream: &downstream_facts,
+    })?;
+
+    let (terms, positions) = provision_terms(&RouteTermsInputV1 {
+        state_dir,
+        upstream_relative: UPSTREAM_TERMS,
+        downstream_relative: DOWNSTREAM_TERMS,
+        registry: &registry,
+        upstream_solana: &upstream_facts,
+        downstream_solana: &downstream_facts,
+        provisioning_dir: &leg_store_dir,
+        upstream: position(0x11),
+        downstream: position(0x22),
+        now_seconds: NOW_SECONDS,
+        dom_anchor_height: DOM_ANCHOR_HEIGHT,
+    })?;
+    let [upstream, downstream] = positions;
+
+    // Identities before the roster and the bindings: both carry the route id, and the
+    // loader refuses either one whose route id is not the pinned one.
+    let plan = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        upstream_facts.genesis_hash,
+        downstream_facts.genesis_hash,
+    )
+    .with_identities(identities())
+    .with_registry(registry)
+    .with_terms(terms);
+
+    let roster = provision_roster(
+        state_dir,
+        RELAY_ROSTER,
+        plan.network_id,
+        plan.route_id,
+        &upstream.terms,
+        &downstream.terms,
+    )?;
+    let plan = plan.with_roster(roster);
+
+    let participants = provision_participants(
+        state_dir,
+        PARTICIPANT_BINDINGS,
+        plan.route_id,
+        &upstream,
+        &downstream,
+    )?;
+    let plan = plan.with_participants(participants);
+
+    let route_time = provision_route_time(&RouteTimeInputV1 {
+        state_dir,
+        registry_relative: REGISTRY_STORE,
+        authorities_relative: REGISTRY_AUTHORITIES,
+        policy_relative: TIME_POLICY,
+        evidence_relative: TIME_EVIDENCE,
+        registry: &registry,
+        upstream: &upstream.terms,
+        downstream: &downstream.terms,
+        now_seconds: NOW_SECONDS,
+        provisioning_dir: &leg_store_dir,
+        hub: observation(0x61, DOM_ANCHOR_HEIGHT),
+        upstream_chain: observation(0x71, 4_000),
+        downstream_chain: observation(0x81, 5_000),
+        sequence: 1,
+    })?;
+    let plan = plan.with_route_time(route_time);
+
+    // Two inputs the layout requires and the ceremony plan names. They belong to the route.
+    declared_inputs::write_contracts_budget_policy(
+        state_dir,
+        SolanaRouteBootstrapPlanV1::contracts_budget_policy_relative(),
+        b"a budget policy this deployment decided",
+    )?;
+    declared_inputs::create_contracts_transport_identity(
+        state_dir,
+        SolanaRouteBootstrapPlanV1::contracts_transport_identity_relative(),
+        IDENTITY_PASSPHRASE.as_bytes(),
+    )?;
+
+    Ok(LaboratoryRouteV1 {
+        plan,
+        registry,
+        terms,
+        roster,
+        upstream,
+        downstream,
+        upstream_facts,
+        downstream_facts,
+    })
+}
+
+impl LaboratoryRouteV1 {
+    /// The ceremony plan input this route implies.
+    pub fn ceremony_input<'a>(&'a self, state_dir: &'a Path) -> CeremonyPlanInputV1<'a> {
+        CeremonyPlanInputV1 {
+            state_dir,
+            registry: &self.registry,
+            terms: &self.terms,
+            roster: &self.roster,
+            route_id: self.plan.route_id,
+            parties: [PARTY_A.0, PARTY_B.0],
+        }
+    }
+}

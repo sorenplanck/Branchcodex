@@ -89,6 +89,7 @@
 
 pub mod ceremony;
 pub mod declared_inputs;
+pub mod laboratory;
 pub mod owner_only;
 pub mod participants;
 pub mod registry;
