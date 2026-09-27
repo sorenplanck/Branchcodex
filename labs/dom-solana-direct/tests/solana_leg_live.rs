@@ -105,27 +105,86 @@ fn profile(program_id: SolanaPubkey) -> SolanaAdapterProfileV1 {
     profile
 }
 
-/// Read the programdata account and establish, in this process, that the program
-/// is immutable and what its data hashes to. The bincode `ProgramData` layout is
-/// a u32 discriminant, a u64 slot, then `Option<Pubkey>`: a zero option tag is
-/// an absent upgrade authority.
-fn programdata_facts(cluster: &ClusterSessionV1, programdata: SolanaPubkey) -> ([u8; 32], u64) {
+/// What the programdata account itself says, measured in this process rather
+/// than taken from the harness.
+struct ProgramDataFacts {
+    sha256: [u8; 32],
+    slot: u64,
+    /// Which of the two unsignable authority shapes was found.
+    authority: &'static str,
+}
+
+/// Read the programdata account and establish here that no upgrade can ever be
+/// authorized, and what its bytes hash to.
+///
+/// The bincode `UpgradeableLoaderState::ProgramData` layout is a u32
+/// discriminant (3), a u64 slot, then `Option<Pubkey>`: one tag byte and, when
+/// the tag is 1, the 32-byte authority.
+///
+/// Two shapes are accepted, and only these two. An absent authority (tag 0) is
+/// the shape a revoked mainnet deployment has. The all-zero address (tag 1 with
+/// a zero key) is what `solana-test-validator --upgradeable-program ... none`
+/// writes: it is the System Program's address, which nobody holds a key for and
+/// which the runtime never presents as a transaction signer, so no upgrade can
+/// be authorized under it either. Any other address is a real authority and
+/// fails the test, naming the key.
+fn programdata_facts(cluster: &ClusterSessionV1, programdata: SolanaPubkey) -> ProgramDataFacts {
     let data = cluster
         .account_data(programdata)
-        .expect("the programdata account the deployment created");
+        .expect("the programdata account the loader created");
     assert!(
         data.len() > 45,
-        "programdata account is too short to hold a program"
+        "programdata account holds {} bytes, too few for a header and a program",
+        data.len()
     );
-    let mut slot_bytes = [0u8; 8];
-    slot_bytes.copy_from_slice(&data[4..12]);
+    let discriminant = u32::from_le_bytes(
+        data[..4]
+            .try_into()
+            .expect("four bytes for the loader state discriminant"),
+    );
     assert_eq!(
-        data[12], 0,
-        "the upgrade authority is still set; the daemon requires an immutable program"
+        discriminant,
+        3,
+        "this is not a ProgramData account; its first 45 bytes are {}",
+        hex_bytes(&data[..45])
     );
+    let slot = u64::from_le_bytes(
+        data[4..12]
+            .try_into()
+            .expect("eight bytes for the deployment slot"),
+    );
+    let authority = match data[12] {
+        0 => "absent",
+        1 => {
+            let key: [u8; 32] = data[13..45]
+                .try_into()
+                .expect("thirty-two bytes for the authority");
+            assert_eq!(
+                key,
+                [0u8; 32],
+                "the program has a real upgrade authority ({}); the daemon requires a \
+                 program nobody can replace",
+                SolanaPubkey(key).to_base58()
+            );
+            "unsignable-system-address"
+        }
+        other => panic!(
+            "the authority option tag is {other}, which is neither 0 nor 1; \
+             the first 45 bytes are {}",
+            hex_bytes(&data[..45])
+        ),
+    };
     let mut hasher = Sha256::new();
     hasher.update(&data);
-    (hasher.finalize().into(), u64::from_le_bytes(slot_bytes))
+    ProgramDataFacts {
+        sha256: hasher.finalize().into(),
+        slot,
+        authority,
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 struct Fixture {
@@ -134,6 +193,7 @@ struct Fixture {
     profile: SolanaAdapterProfileV1,
     program_data_hash: [u8; 32],
     deployment_slot: u64,
+    upgrade_authority: &'static str,
 }
 
 impl Fixture {
@@ -150,14 +210,14 @@ impl Fixture {
             environment.genesis,
             "the cluster this test reached is not the one the harness started"
         );
-        let (program_data_hash, deployment_slot) =
-            programdata_facts(&cluster, environment.programdata);
+        let facts = programdata_facts(&cluster, environment.programdata);
         Self {
             environment,
             cluster,
             profile,
-            program_data_hash,
-            deployment_slot,
+            program_data_hash: facts.sha256,
+            deployment_slot: facts.slot,
+            upgrade_authority: facts.authority,
         }
     }
 }
@@ -450,7 +510,7 @@ fn solana_live_sol_to_dom_reveals_through_the_dom_claim() {
             "programdata_sha256_reported_by_harness":
                 hex32(&fixture.environment.programdata_sha256),
             "deployment_slot": fixture.deployment_slot,
-            "upgrade_authority_absent": true,
+            "upgrade_authority": fixture.upgrade_authority,
             "timing_bounds_proven": false,
         }),
     );

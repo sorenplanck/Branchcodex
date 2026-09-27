@@ -70,13 +70,15 @@ write_evidence() {
   "programdata_sha256": "${PROGRAMDATA_SHA256:-}",
   "genesis_hash": "${GENESIS:-}",
   "upgrade_authority_revoked": ${REVOKED:-false},
+  "upgrade_authority": "${UPGRADE_AUTHORITY:-unknown}",
   "curve_syscall_enabled": ${CURVE_OK:-false},
   "curve_syscall_gate": "${CURVE_GATE_STATE:-unknown}",
   "validator_log": "$VALIDATOR_LOG",
   "limits": [
     "A local cluster is not mainnet-beta: fees, congestion and validator set differ.",
     "The genesis hash is this cluster's own; it pins identity, not economics.",
-    "Revoking the upgrade authority here proves the sequence, not a production deployment."
+    "The program is loaded into genesis at its declared id with an unsignable upgrade authority. That makes upgrades impossible on this cluster, which is not the same act as deploying to mainnet and revoking a real authority.",
+    "The program id is the one declare_id! fixes in the source, because the program refuses to run under any other; no keypair for it exists in this repository, so a normal deployment to that id is not possible here."
   ]
 }
 JSON
@@ -216,21 +218,40 @@ solana --url "$RPC_URL" program show "$PROGRAM_ID" >"$WORK/program-show.log" 2>&
   log "the program is not present at its declared id; see $WORK/program-show.log"
   exit 1
 }
-# "none" at genesis means there is no upgrade authority to revoke. Verify that
-# rather than assume it: an explicit authority line that names a key is a
-# refusal, and the scenario re-checks the same fact in-process from the
-# programdata account's own bytes.
-if grep -qi "Authority: none" "$WORK/program-show.log"; then
+# What the authority must be: something that cannot ever authorize an upgrade.
+# Two shapes qualify, and run 36283102726 showed why both must be named:
+#
+#   * absent -- the CLI prints "Authority: none";
+#   * 11111111111111111111111111111111, the System Program's address, which is
+#     what `--upgradeable-program ... none` actually writes into the programdata
+#     account. It is not a key anyone holds and the runtime never presents the
+#     System Program as a transaction signer, so no upgrade can be authorized
+#     under it.
+#
+# Any OTHER address is a real authority and is refused. The scenario re-checks
+# the same fact in-process from the programdata account's own bytes, so this is
+# not the only place it is established.
+UNSIGNABLE_AUTHORITY="11111111111111111111111111111111"
+AUTHORITY_LINE="$(grep -i "^Authority:" "$WORK/program-show.log" | head -1 | sed 's/^[Aa]uthority: *//')"
+if [ -z "$AUTHORITY_LINE" ]; then
   REVOKED=true
-elif grep -qi "Authority:" "$WORK/program-show.log"; then
+  UPGRADE_AUTHORITY="absent"
+  log "the program has no upgrade authority line; upgrades are impossible"
+elif [ "$AUTHORITY_LINE" = "none" ] || [ "$AUTHORITY_LINE" = "None" ]; then
+  REVOKED=true
+  UPGRADE_AUTHORITY="none"
+  log "the program has no upgrade authority; upgrades are impossible"
+elif [ "$AUTHORITY_LINE" = "$UNSIGNABLE_AUTHORITY" ]; then
+  REVOKED=true
+  UPGRADE_AUTHORITY="unsignable-system-address"
+  log "upgrade authority is the System Program address, which cannot sign"
+else
   REVOKED=false
-  log "the program still has an upgrade authority; the daemon requires an immutable program"
+  UPGRADE_AUTHORITY="$AUTHORITY_LINE"
+  log "the program has a real upgrade authority ($AUTHORITY_LINE); refusing"
   sed -n '1,20p' "$WORK/program-show.log" >&2
   exit 1
-else
-  REVOKED=true
 fi
-log "program is immutable (no upgrade authority)"
 
 # Read it out of the answer already saved above rather than asking twice.
 PROGRAMDATA="$(awk -F': *' '/ProgramData Address/ {print $2}' "$WORK/program-show.log")"
