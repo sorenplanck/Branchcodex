@@ -128,12 +128,28 @@ pub fn accounts(seed: u8) -> SolanaPositionAccountsV1 {
     }
 }
 
+/// The two parties of the route, shared by BOTH positions.
+///
+/// A route is two settlements between the same two participants, which is why
+/// `RouteTimePolicyV2::from_registry` requires both terms to name the same DOM chain, the
+/// same native asset and the same DOM adapter profile: the hub leg is one leg seen twice.
+/// The Contracts bootstrap ceremony reads the same way -- it is bilateral, and a party
+/// declares which legs it is in by which relay secrets it supplies.
+///
+/// An earlier fixture derived a different pair per position from the position's own seed.
+/// Nothing had refused it yet, because nothing before the ceremony compares the two legs'
+/// rosters, but it described a route whose two settlements were between four people.
+pub const PARTY_A: ParticipantId = ParticipantId([0xa1; 32]);
+pub const PARTY_B: ParticipantId = ParticipantId([0xb2; 32]);
+
 pub fn position(seed: u8) -> SolanaPositionTermsPlanV1 {
     SolanaPositionTermsPlanV1 {
         settlement_id: [seed; 32],
         session_id: [seed.wrapping_add(0x40); 32],
-        dom_beneficiary: ParticipantId([seed.wrapping_add(0x80); 32]),
-        dom_refund_to: ParticipantId([seed.wrapping_add(0xa0); 32]),
+        // Sorted by `LegPlanInputV1::roster`, so which one is beneficiary and which is
+        // refund is the route's choice and not an ordering accident.
+        dom_beneficiary: PARTY_A,
+        dom_refund_to: PARTY_B,
         dom_amount_noms: 4_000_000,
         accounts: accounts(seed),
     }
