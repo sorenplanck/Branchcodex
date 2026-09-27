@@ -327,6 +327,15 @@ pub fn provision_all() -> Provisioned {
     .expect("the time policy and its evidence provision");
     let plan = plan.with_route_time(route_time);
 
+    // The Contracts budget policy: an input the layout requires and the ceremony plan
+    // names, so it belongs to provisioning the route like the identity authority below.
+    declared_inputs::write_contracts_budget_policy(
+        directory.path(),
+        SolanaRouteBootstrapPlanV1::contracts_budget_policy_relative(),
+        b"a budget policy this deployment decided",
+    )
+    .expect("the Contracts budget policy");
+
     // The Contracts transport identity authority. Part of provisioning the route, not of
     // one test: the ceremony plans name it, and the layout requires it to exist.
     declared_inputs::create_contracts_transport_identity(

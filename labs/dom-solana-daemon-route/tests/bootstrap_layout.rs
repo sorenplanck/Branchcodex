@@ -61,12 +61,6 @@ fn prepared() -> (tempfile::TempDir, std::path::PathBuf) {
         b"a wallet this crate did not create",
     )
     .expect("the DOM wallet input");
-    declared_inputs::write_contracts_budget_policy(
-        &root,
-        Plan::contracts_budget_policy_relative(),
-        b"a budget policy this deployment decided",
-    )
-    .expect("the budget policy input");
     declared_inputs::place_contracts_bootstrap(
         &root,
         Plan::contracts_bootstrap_relative(),
