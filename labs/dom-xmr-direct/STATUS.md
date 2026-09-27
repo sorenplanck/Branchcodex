@@ -13,6 +13,128 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Mesma primeira claim reincluída em outro bloco:** corrigida a rejeição do
+journal por diferença de âncora. `DeliveryPayment` fixa manifesto, transação
+exata e cadeia alvo; `open_for_payment` valida o registro completo e preserva
+o bloco/altura históricos. O worker exige inclusão canônica atual antes dessa
+abertura e verifica novamente corpo/witness da contraparte. A API de abertura
+com binding completo continua estrita. Não há reset de prazo nem reescrita.
+
+59 testes e Clippy passaram. `direct-pair-xmr-first-reinclude` passou com o
+burst DOM padrão 100: **176,728 s** total, **90,383 s** até ambas as claims,
+**1,180 s** para retirada/reinclusão/restauração. A claim mudou de 152 para
+153; o journal e os registros de início permaneceram idênticos. Pool/ausência
+recusaram envio; após reinclusão, o worker nativo publicou a contraparte,
+outputs foram gastos e refund conflitante rejeitado. Fontes/binário conferidos,
+processos encerrados. Detalhes em `clsag-lab/FIRST-PAYMENT-REINCLUSION.md` e
+artefatos `DIRECT-PAIR-XMR-FIRST-REINCLUDE-*`.
+
+Isso fecha a rejeição de uma primeira claim reincluída descrita abaixo. A
+republicação da primeira transação no ensaio ainda é do supervisor; restart
+integral, política/orçamento sob throttling, forks concorrentes, segurança
+criptográfica/temporal e integração ao daemon permanecem pendentes.
+
+**Retirada e reinclusão XMR reais no nó isolado:** o modo
+`direct-pair-dom-first-xmr-detach` usa `pop_blocks`, verifica retorno ao pool,
+retira somente essa transação do pool, minera substituição vazia e exige que
+um worker novo consulte ausência/key image livre antes de reenviar os mesmos
+bytes. Não é ainda escolha de fork entre peers. O ensaio padrão encontrou
+HTTP 429 do DOM; o emissor retornou Reconcile sem tentativa de publicação.
+Falhas em 108,376 s / 114,082 s preservadas em `*-INITIAL-FAILURE*` e
+`*-DIAGNOSTIC-*`; a segunda localizou 429 em `/chain/identity` depois da retirada.
+
+Com **DOM_RPC_RATELIMIT_READ=256**, explicitamente só no nó de laboratório,
+o cenário passou: **173,427 s** total, **86,800 s** até claims/reinclusão,
+**0,815 s** para retirada/evicção/reenvio/reinclusão. Mesmo journal, nova altura
+152→153, todos os outputs gastos e refund conflitante rejeitado. Fontes/binário
+conferidos e processos encerrados. Evidências
+`DIRECT-PAIR-DOM-FIRST-XMR-DETACH-CAPACITY256-*`; detalhes e limites em
+`clsag-lab/XMR-NATIVE-DETACH.md`. Não alegar que os defaults passaram: burst
+100/reposição 1/s bloqueou a sequência de verificações. Tratar disponibilidade
+do RPC no orçamento e testar reinclusão da PRIMEIRA claim são próximos passos;
+hoje a âncora imutável da obrigação rejeita essa mudança mesmo com bytes iguais.
+
+**Envio nativo pelo worker restaurado:** a etapa seguinte passou nos dois
+sentidos; detalhes em `clsag-lab/NATIVE-SENDER.md`. O worker agora consulta
+os RPCs e publica diretamente a contraparte persistida, após fsync de
+exposição e nova consulta, sem encaminhamento inicial pelo supervisor.
+Queda antes do RPC (77), queda após receber admissão nativa (76) e retomadas
+preservam os mesmos bytes. A queda 76 não simula perda da resposta do nó.
+Pedidos de envio em pool, bloco e RPC indisponível não despacharam transação.
+57 testes, Clippy e build passaram. XMR-first: **183,011 s** totais / **93,891 s**
+até claims; DOM-first: **200,772 s** / **111,636 s**. Ambos excederam 180 s.
+Gastos posteriores e rejeição da devolução conflitante passaram. Fontes e
+binários conferidos; ensaios encerrados. Artefatos `DIRECT-PAIR-*-NATIVE-SEND-*`.
+
+A lacuna de encaminhamento descrita nas etapas históricas abaixo está fechada
+nesse caminho de laboratório. Continuam abertos restart integral, persistência
+anterior a depósitos/divulgação, solver, reorg nativo e concorrência, preparação
+independente/autenticada, limites temporais e revisão criptográfica, além da
+integração ao dom-interopd. Consultas sequenciais a nós próprios não provam
+snapshot atômico ou segurança frente a nós hostis. A próxima validação deve
+exercitar mudanças reais de cadeia e o orçamento integral de retomada sem
+renovar o prazo original. O mecanismo segue experimental.
+
+**Obrigação reconstruída antes de haver arquivos pós-inclusão:**
+`clsag-lab/OBLIGATION-RECONSTRUCTION.md` descreve o novo caminho. Bytes da
+primeira claim são persistidos antes do envio; o manifesto v2 preserva também
+o orçamento original de candidatos. O worker restaura a política, confere o
+journal de exposição inicial e consulta inclusão nativa antes de completar o
+adaptor e criar o journal da contraparte. Journal existente é reaproveitado
+sem nova assinatura; exposição nunca vira preparação privada. O pai ainda
+hospeda os nós e encaminha o envio pela ponte do ensaio.
+Passaram 54 testes, Clippy all-targets e build separado. XMR-first passou em
+**167,841 s** totais, claims em **80,239 s**, três workers de queda/reconstrução/
+reuso em **0,550 s**. A primeira claim apenas no pool foi recusada; houve
+exit 75 antes de criar a obrigação, reconstrução sem `observed.tx` ou
+`counterpart.tx`, reuso byte a byte e exit 74 no envio sem resposta. Pool,
+bloco e RPC indisponível foram reconciliados; todos os outputs foram gastos
+e a devolução DOM conflitante foi rejeitada. Evidência
+`DIRECT-PAIR-XMR-FIRST-OBLIGATION-RECONSTRUCTION-*`. Isso não apaga as rodadas
+anteriores acima de 180 s nem comprova limites de tempo ou atomicidade.
+DOM-first também passou, em **205,188 s** totais, claims em **116,390 s** e
+queda/reconstrução/reuso em **0,983 s**. Todos os controles funcionais passaram,
+mas o total excedeu a meta. Preparação individual consumiu 44,455 s nessa
+rodada, contra 16,721 s no sentido inverso. Evidência
+`DIRECT-PAIR-DOM-FIRST-OBLIGATION-RECONSTRUCTION-*`; diagnóstico de relógios
+em `OBLIGATION-RECONSTRUCTION-TIMING.json`. A folga observada entre inclusão
+XMR e a recuperação adversarial condicional foi de 13 s / 5 s. Esses dados
+não fundamentam as premissas de um segundo por etapa ou um limite global.
+
+Próximo trabalho concreto: o worker já constrói a obrigação, mas o supervisor
+ainda encaminha sua publicação pela ponte. Transferir envio/reconciliação ao
+coordenador restaurado, preservando bytes/exposição e evitando tomar not-found
+como prova de input livre. O custo completo de IO, retomadas e observações
+precisa estar explícito no orçamento original; não fechar uma contraparte
+devida pela expiração do gate de iniciação. Continuam faltando restart anterior
+a funding/disclosure, solver, participantes independentes/autenticados,
+reorgs nativos, fundamentação temporal/criptográfica e integração ao daemon.
+
+**Observador de retomada independente:** a nova etapa em
+`clsag-lab/SETTLEMENT-RESUME.md` persiste um checkpoint original antes da
+primeira liberação. Depois de envio sem resposta, processos novos recebem
+somente diretório e operação, restauram manifesto/envelopes e consultam os
+RPCs nativos DOM/XMR. Reconstroem a vinculação da primeira inclusão e da
+contraparte por conta própria, preservando os instantes originais. O pai
+permanece como host dos nós e minerador do ensaio; não é restart completo.
+Passaram 52 testes, Clippy all-targets e build separado. O primeiro ensaio
+revelou ausência no índice auxiliar DOM após inclusão; foi preservado como
+`DIRECT-PAIR-XMR-FIRST-SETTLEMENT-RESUME-INDEX-MISS-*`. A correção usa o kernel
+para localizar o bloco e exige corpo exato no scan nativo, sem alterar o nó.
+O novo XMR-first passou em **189,613 s** totais, claims em **101,893 s**:
+pool, inclusão e RPC realmente indisponível foram consultados em processos
+distintos (0,222 / 0,116 / 0,079 s). Não houve reenvio nem nova assinatura;
+outputs gastos e devolução conflitante rejeitada. O total **ultrapassou três
+minutos**; não selecionar apenas o tempo das claims como prova da meta total.
+Evidência `DIRECT-PAIR-XMR-FIRST-SETTLEMENT-RESUME-*`.
+DOM-first também passou, em **169,919 s** totais, claims em **83,693 s** e
+observadores em 0,166 / 0,111 / 0,074 s, inclusive fallback kernel+scan para a
+primeira perna e falha real de RPC após inclusão. Evidência
+`DIRECT-PAIR-DOM-FIRST-SETTLEMENT-RESUME-*`. A observação restaurada ainda
+depende de arquivos da primeira claim/contraparte gravados após a inclusão;
+não cobre queda antes desses arquivos ou do journal da obrigação. Segurança,
+limites de tempo e integração ao daemon permanecem em aberto.
+
 **Envio da contraparte sem resposta:** `counterpart_delivery.rs` persiste os
 bytes exatos e exposição antes do envio, vinculados ao manifesto original e
 à primeira claim observada. Emissão ambígua mantém exposição e exige nova

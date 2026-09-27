@@ -29,7 +29,24 @@ pub struct DeliveryBinding {
     pub target_chain: [u8; 32],
 }
 
+/// Stable identity of the approved payment, independent of its inclusion.
+/// This is not evidence that the payment is presently canonical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeliveryPayment {
+    pub manifest: [u8; 32],
+    pub first_claim: [u8; 32],
+    pub target_chain: [u8; 32],
+}
+
 impl DeliveryBinding {
+    pub fn payment(self) -> DeliveryPayment {
+        DeliveryPayment {
+            manifest: self.manifest,
+            first_claim: self.first_claim,
+            target_chain: self.target_chain,
+        }
+    }
+
     fn encode(self) -> Result<Vec<u8>, DeliveryError> {
         if [
             self.manifest,
@@ -157,15 +174,50 @@ impl CounterpartDelivery {
     /// No create-on-missing or tail repair. A complete record is resynced on
     /// reopen in case the creator died before syncing the directory entry.
     pub fn open(path: &Path, expected: DeliveryBinding) -> Result<Self, DeliveryError> {
-        let prefix = expected.encode()?;
+        Self::open_checked(
+            path,
+            expected.payment(),
+            Some((expected.first_block, expected.first_height)),
+        )
+    }
+
+    /// Reopen an obligation after the caller independently reverified the SAME
+    /// exact first payment in the current canonical chain. Its historical
+    /// inclusion anchor remains immutable and is still checksum-validated.
+    /// This does NOT authorize send, prove finality, or waive fresh native
+    /// observations. It cannot create an obligation or replace its bytes.
+    pub fn open_for_payment(path: &Path, expected: DeliveryPayment) -> Result<Self, DeliveryError> {
+        Self::open_checked(path, expected, None)
+    }
+
+    fn open_checked(
+        path: &Path,
+        expected: DeliveryPayment,
+        exact_location: Option<([u8; 32], u64)>,
+    ) -> Result<Self, DeliveryError> {
+        const PREFIX_LEN: usize = MAGIC.len() + 4 * 32 + 8;
         let mut file = open_file(path, false)?;
         let mut bytes = vec![];
         (&mut file)
-            .take((prefix.len() + 4 + MAX_RECORD_BYTES + 64 + EXPOSED.len() + 1) as u64)
+            .take((PREFIX_LEN + 4 + MAX_RECORD_BYTES + 64 + EXPOSED.len() + 1) as u64)
             .read_to_end(&mut bytes)?;
-        let mut rest = bytes
-            .strip_prefix(prefix.as_slice())
-            .ok_or(DeliveryError::Binding)?;
+        let mut rest = bytes.strip_prefix(MAGIC).ok_or(DeliveryError::Binding)?;
+        let binding = DeliveryBinding {
+            manifest: take(&mut rest).ok_or(DeliveryError::Corrupt)?,
+            first_claim: take(&mut rest).ok_or(DeliveryError::Corrupt)?,
+            first_block: take(&mut rest).ok_or(DeliveryError::Corrupt)?,
+            first_height: u64::from_le_bytes(take(&mut rest).ok_or(DeliveryError::Corrupt)?),
+            target_chain: take(&mut rest).ok_or(DeliveryError::Corrupt)?,
+        };
+        // Encoding also rejects zero commitments. Keep the original anchor in
+        // the checksum-covered record, never rewrite it on reinclusion.
+        binding.encode()?;
+        if binding.payment() != expected
+            || exact_location
+                .is_some_and(|location| location != (binding.first_block, binding.first_height))
+        {
+            return Err(DeliveryError::Binding);
+        }
         let len = u32::from_le_bytes(take(&mut rest).ok_or(DeliveryError::Corrupt)?) as usize;
         if len == 0 || len > MAX_RECORD_BYTES {
             return Err(DeliveryError::Corrupt);
@@ -173,7 +225,7 @@ impl CounterpartDelivery {
         let (payload, tail) = rest.split_at_checked(len).ok_or(DeliveryError::Corrupt)?;
         let mut tail = tail;
         let record_digest: [u8; 32] = take(&mut tail).ok_or(DeliveryError::Corrupt)?;
-        if digest(&bytes[..prefix.len() + 4 + len]) != record_digest {
+        if digest(&bytes[..PREFIX_LEN + 4 + len]) != record_digest {
             return Err(DeliveryError::Corrupt);
         }
         let exposed = if tail.is_empty() {
@@ -190,7 +242,7 @@ impl CounterpartDelivery {
         sync_directory(path)?;
         Ok(Self {
             file,
-            binding: expected,
+            binding,
             payload: payload.to_vec(),
             record_digest,
             exposed,

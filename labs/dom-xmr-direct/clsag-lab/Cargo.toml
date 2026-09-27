@@ -38,6 +38,7 @@ dom-rpc = { path = "../../../crates/dom-rpc" }
 monero-simple-request-rpc = { git = "https://github.com/kayabaNerve/monero-oxide", rev = "c8be5d3d1287669946a83fbfcb296ce2a8852e47" }
 tokio = { version = "=1.52.3", features = ["macros", "rt", "time"] }
 serde_json = "=1.0.151"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
 
 [profile.release]
 overflow-checks = true

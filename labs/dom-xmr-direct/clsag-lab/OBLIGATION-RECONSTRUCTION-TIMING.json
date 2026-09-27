@@ -1,0 +1,32 @@
+[
+  {
+    "direction": "XMR-first",
+    "total_seconds": 167.840611078,
+    "whole_fixture_within_180_seconds": true,
+    "initial_exposure_event_unix": 1790469816,
+    "xmr_claim_observed_unix": 1790469816,
+    "event_to_xmr_inclusion_seconds": 0,
+    "conditional_earliest_recovery_unix": 1790469829,
+    "observed_headroom_seconds": 13,
+    "reconstruction_sequence_seconds": 0.549505155,
+    "initial_pending_probe_seconds": 0.158812287,
+    "pre_inclusion_counterpart_pool_probe_seconds": 0.116443088,
+    "exposed_reconstruction_probe_seconds": 0.116019358,
+    "scope": "Exposure event timestamp precedes fsync/final gate; this difference is not a precise wire-to-inclusion latency or an upper bound. All injected checks consume the original window."
+  },
+  {
+    "direction": "DOM-first",
+    "total_seconds": 205.188139593,
+    "whole_fixture_within_180_seconds": false,
+    "initial_exposure_event_unix": 1790470016,
+    "xmr_claim_observed_unix": 1790470021,
+    "event_to_xmr_inclusion_seconds": 5,
+    "conditional_earliest_recovery_unix": 1790470026,
+    "observed_headroom_seconds": 5,
+    "reconstruction_sequence_seconds": 0.983371447,
+    "initial_pending_probe_seconds": 0.289730483,
+    "pre_inclusion_counterpart_pool_probe_seconds": 0.455822448,
+    "exposed_reconstruction_probe_seconds": 0.410770846,
+    "scope": "Exposure event timestamp precedes fsync/final gate; this difference is not a precise wire-to-inclusion latency or an upper bound. All injected checks consume the original window."
+  }
+]

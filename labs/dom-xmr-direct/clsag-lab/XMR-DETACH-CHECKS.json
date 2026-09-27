@@ -1,0 +1,86 @@
+[
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--release",
+      "--locked",
+      "--all-targets",
+      "-j2",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "log": "target/xmr-detach-clippy.log",
+    "result_lines": []
+  },
+  {
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--release",
+      "--locked",
+      "--test",
+      "counterpart_delivery",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/xmr-detach-tests.log",
+    "result_lines": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    ]
+  },
+  {
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--release",
+      "--locked",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/xmr-detach-build.log",
+    "result_lines": []
+  },
+  {
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--release",
+      "--locked",
+      "--example",
+      "regtest_claim",
+      "-j2"
+    ],
+    "exit_code": 0,
+    "log": "target/xmr-detach-diagnostic-build.log",
+    "scope": "diagnostic status and phase markers; same executable for diagnostic failure and capacity256 success"
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--release",
+      "--locked",
+      "--all-targets",
+      "-j2",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "log": "target/xmr-detach-final-clippy.log",
+    "scope": "final sources including diagnostic status and phase markers"
+  }
+]

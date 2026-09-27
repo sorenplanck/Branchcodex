@@ -98,6 +98,30 @@ pub enum InitialClaimOrder {
 }
 
 impl AssumedXmrRecoveryWindow {
+    /// Restore original assumptions from a pinned local manifest, never from
+    /// the current clock. This is not evidence that those bounds are true.
+    pub(crate) fn restore_original(
+        capsule_binding: [u8; 64],
+        candidates: u16,
+        disclosed_at: Timestamp,
+        earliest_adversarial: Timestamp,
+        latest_honest: Timestamp,
+    ) -> Result<Self, TimingError> {
+        if capsule_binding == [0; 64]
+            || candidates == 0
+            || earliest_adversarial < disclosed_at
+            || latest_honest < earliest_adversarial
+        {
+            return Err(TimingError::InvalidAssumption);
+        }
+        Ok(Self {
+            capsule_binding,
+            candidates,
+            disclosed_at,
+            earliest_adversarial,
+            latest_honest,
+        })
+    }
     /// The link binds roster, role and capsule but does not verify the backend
     /// or establish delay. The caller must establish those premises separately.
     pub fn from_direct_costs(

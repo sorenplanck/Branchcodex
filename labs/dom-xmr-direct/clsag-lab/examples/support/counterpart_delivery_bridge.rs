@@ -39,6 +39,26 @@ pub struct PendingDelivery {
     pub evidence: serde_json::Value,
 }
 impl PendingDelivery {
+    /// Test-only tracking: verifies the result of an independent native sender.
+    /// This helper does not create an obligation, submit bytes or authorize it.
+    pub fn track_native_sender(
+        root: &Path,
+        binding: DeliveryBinding,
+        payload: &[u8],
+        evidence: serde_json::Value,
+    ) -> Self {
+        let path = root.join("counterpart-delivery.wal");
+        let journal = CounterpartDelivery::open(&path, binding).unwrap();
+        assert_eq!(journal.payload(), payload);
+        assert!(journal.possibly_exposed().unwrap());
+        drop(journal);
+        Self {
+            path,
+            binding,
+            digest: digest(payload),
+            evidence,
+        }
+    }
     pub fn reconcile(&self, observation: Observation, expected: DeliveryAction) {
         let journal = CounterpartDelivery::open(&self.path, self.binding).unwrap();
         assert!(journal.possibly_exposed().unwrap());
@@ -68,7 +88,12 @@ pub async fn send_without_reply<F: Future<Output = ()>>(
 ) -> PendingDelivery {
     let started = Instant::now();
     let path = root.join("counterpart-delivery.wal");
-    drop(CounterpartDelivery::create(&path, binding, payload).unwrap());
+    // The fresh recovery worker, not this host/sender, created the obligation
+    // after independently verifying the original first payment.
+    let prepared = CounterpartDelivery::open(&path, binding).unwrap();
+    assert_eq!(prepared.payload(), payload);
+    assert!(!prepared.possibly_exposed().unwrap());
+    drop(prepared);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut token = [0; 32];

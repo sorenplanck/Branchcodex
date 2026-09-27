@@ -298,6 +298,23 @@ pub struct FundedDom {
     height_refund: Option<HeightRefund>,
 }
 
+/// Native RPC over an owned loopback socket. No process-global token or signal.
+pub struct OwnedRpc {
+    pub port: u16,
+    task: tokio::task::JoinHandle<()>,
+}
+impl OwnedRpc {
+    pub async fn stop(&mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+}
+impl Drop for OwnedRpc {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 struct HeightRefund {
     transaction: Transaction,
     recipient: BlindingFactor,
@@ -325,6 +342,22 @@ pub struct UnfundedDom {
 }
 
 impl FundedDom {
+    pub async fn start_owned_rpc(&self, token: String) -> OwnedRpc {
+        let listener = dom_rpc::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = Arc::new(NodeHandleImpl(self.node.clone()));
+        let task = tokio::spawn(async move {
+            dom_rpc::serve_with_token_until_shutdown(
+                handle,
+                listener,
+                Some(token),
+                std::future::pending::<()>(),
+            )
+            .await
+            .unwrap();
+        });
+        OwnedRpc { port, task }
+    }
     pub async fn new(root: &Path) -> Self {
         Self::create(root, None, None).await
     }

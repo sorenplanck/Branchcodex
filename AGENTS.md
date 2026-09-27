@@ -362,5 +362,185 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   preparação independente, limites temporais e integração ao dom-interopd.
   A missão continua ativa e o mecanismo não está provado seguro em produção.
 
+- Commit local solicitado pelo operador concluído: `30e5d9c398e41447c3e533cb480e4574933803be`,
+  Soren Planck como único autor/committer, sem push. Salvou journals iniciais,
+  envelopes e envio sem resposta. A etapa abaixo é posterior a esse commit.
+- `operation_checkpoint.rs` fixa antes da primeira liberação operação,
+  manifesto e identidades/endpoints dos nós próprios; parser canônico limitado,
+  checksum, arquivo 0600/fsync, armazenamento local confiável (não defesa
+  contra escritor hostil/rollback). ClaimManifest reconstitui os instantes
+  originais sem novo prazo. Credencial DOM é privada e não entra em evidências.
+  `settlement_resume.rs` recebe SOMENTE root + operação via CLI. Lê envelopes,
+  verifica claims e witness comum, consulta identidade e transações dos RPCs
+  nativos, verifica corpo/bloco e tips novamente, reconstrói DeliveryBinding
+  e abre journal. Não recebe interpretação de cadeia/digests do pai via IPC.
+  Não assina/envia nem infere AbsentAndUnspent de not-found. Decide apenas
+  MonitorPool/MonitorInclusion/Reconcile. Pai e nós ainda vivem: não confundir
+  com restart completo. Continuidade detalhada em SETTLEMENT-RESUME.md.
+- O primeiro ensaio revelou `/tx/{hash}` DOM sem entrada auxiliar depois
+  de inclusão real. Worker conservou Reconcile; falha preservada em
+  DIRECT-PAIR-XMR-FIRST-SETTLEMENT-RESUME-INDEX-MISS-* (PID 876851, exit 101,
+  82,518 s). Correção consulta kernel, localiza bloco e exige corpo exato no
+  scan nativo autenticado; não mexe no índice/consenso DOM. Também mantém
+  checagem de primeira inclusão e nova consulta de tips. Isso detecta mudança
+  visível, não prova snapshot atômico, finalização ou defesa contra reorg ABA.
+- 52 testes Rust, Clippy all-targets -D warnings e build separados aprovados;
+  SETTLEMENT-RESUME-CHECKS.json. O XMR-first corrigido (PID 877590) passou:
+  189,613 s total, claims 101,893 s; três workers independentes observaram
+  pool (0,222 s), inclusão (0,116 s) e RPC DOM realmente desligado (0,079 s).
+  Usou fallback kernel+scan na inclusão; outputs gastos e refund rejeitado
+  em 214. Total ACIMA de 180 s; não ocultar esse resultado selecionando o
+  tempo das claims. Evidências DIRECT-PAIR-XMR-FIRST-SETTLEMENT-RESUME-*.
+- A próxima lacuna estrutural não é mais somente interpretar cadeias fora
+  do pai. O observador ainda depende de `observed.tx`/`counterpart.tx` que
+  foram gravados após a primeira inclusão, e o journal da obrigação nasce
+  nesse ponto. `journaled_initial_send` persiste digest/política/exposição,
+  mas não os bytes completos da primeira claim. Próximo: persistir antes
+  do primeiro envio o material exato para descobrir essa claim, reconstruir
+  a obrigação a partir dos envelopes e RPC após queda ANTES desses arquivos,
+  e fazer o novo coordenador controlar envio/reconciliação (sem recriar
+  assinatura nem prazo). Ainda faltam persistência anterior a depósitos e
+  divulgação, solver, preparação independente/autenticação, reorg nativo,
+  limites temporais fundamentados, prova de segurança e dom-interopd.
+  Uma inclusão/reorg incerta jamais cancela por si só a contraparte devida.
+- DOM-first corrigido (PID 880709) também passou: total 169,919 s,
+  claims 83,693 s, observadores 0,166 / 0,111 / 0,074 s. Pool/inclusão usaram
+  kernel+scan DOM; endpoint desligado voltou a Reconcile. Todos os outputs
+  gastos, refund DOM rejeitado em 214. Evidência
+  DIRECT-PAIR-DOM-FIRST-SETTLEMENT-RESUME-*. Session 27995 terminou exit 0.
+  Resultados guardam a variação real de tempo (XMR-first acima de 180 s),
+  não provam SLA ou segurança. Fontes/binário dos dois corrigidos conferidos.
+
+- Etapa seguinte concluída funcionalmente: `journaled_initial_send` agora
+  grava `initial-claim.tx` 0600/create_new/fsync ANTES de criar/expor o journal.
+  ClaimManifest é v2 e inclui candidates original; não converter artefatos v1
+  antigos nem inventar candidatos. `original_release_policy` restaura campos
+  originais e digest desses bytes; worker exige initial-claim.wal coerente e
+  ExposurePossible, nunca evento novo/prazo renovado. `restore_original` é
+  somente restauração de premissas, não prova de prazo.
+- `settlement_resume` recebe root/operação/ação. Em reconstruct, verifica
+  primeira claim e inclusão nativa, completa somente o adaptor aprovado e
+  cria CounterpartDelivery com bytes/binding. Se existe, abre estritamente,
+  verifica body/witness e NÃO completa outra assinatura. Exposto existente
+  retorna Reconcile, nunca CounterpartPrepared. Não usa observed.tx nem
+  counterpart.tx posteriores à inclusão. Erro após possível criação reporta
+  signature_created desconhecido, não falso. Transporte ainda é da ponte do pai.
+- Modos ack-loss agora testam: primeira claim no pool recusa criar obrigação;
+  worker após inclusão morre exit 75 ANTES do journal; próximo cria; terceiro
+  reusa byte a byte; emissor separado recebe EOF e morre exit 74; processos
+  independentes observam pool/bloco/RPC DOM desligado. Há nova reconstrução
+  após exposição que conserva Reconcile e journal intacto. Manifesto/envelopes
+  são anteriores ao primeiro envio e arquivos pós-inclusão permanecem ausentes.
+  Pai e nós vivem: não chamar de restart completo do daemon.
+- Passaram 54 testes Rust e Clippy all-targets -D warnings/build separados;
+  OBLIGATION-RECONSTRUCTION-CHECKS.json. XMR-first PID 887515 passou em
+  167,841 s, claims 80,239 s, queda/reconstrução/reuso 0,550 s, refund rejeitado
+  em 215. DOM-first PID 887951 passou em 205,188 s, claims 116,390 s, retomada
+  0,983 s, refund rejeitado em 214. Todos os outputs gastos. Evidências
+  DIRECT-PAIR-{XMR,DOM}-FIRST-OBLIGATION-RECONSTRUCTION-* e notas
+  OBLIGATION-RECONSTRUCTION.md. Session 91768 terminou exit 0, fontes/binário
+  conferidos, workers/grupos próprios ausentes. Nenhum ensaio ficou ativo.
+- DOM-first ficou ACIMA de três minutos; preparação individual 44,455 s
+  versus 16,721 s na inversa. Não reexecutar apenas para escolher resultado
+  rápido. OBLIGATION-RECONSTRUCTION-TIMING.json registra folgas observadas
+  de 13 s / 5 s até earliest adversarial ASSUMIDO. Evento de exposição até
+  inclusão XMR marcou 0 / 5 segundos inteiros; evento precede fsync/gate final,
+  logo não é medida exata da latência de envio nem prova de orçamento.
+  Custos de IO, restart e probes devem entrar na janela original; premissas
+  de 1 s por etapa seguem sem fundamento e não virar garantia.
+- Próxima lacuna: coordenador novo já cria obrigação mas ainda não controla
+  transporte/envio; pai prepara observações de ausência/input livre e encaminha
+  bytes por sua ponte. Transferir envio e reconciliação com estado durável ao
+  novo coordenador, testando queda antes de registrar receipt e mantendo bytes
+  e exposição. Nunca inferir ausência/unspent de not-found ou fechar obrigação
+  devida pelo gate inicial. Orçamento completo de retomada, preparação/solver
+  duráveis, participantes independentes/autenticação, reorg nativo, limites
+  temporais e revisão criptográfica/dom-interopd ainda pendentes.
+
+- O envio nativo independente agora passou nos modos
+  direct-pair-{xmr,dom}-first-native-send. Worker restaura checkpoint e obrigação,
+  exige ausência exata/input livre via RPC, fsync exposição e reconsulta antes
+  de publicar bytes imutáveis diretamente no nó. Exit 77 antes do RPC; outro
+  worker verifica RetryExactBytes; exit 76 depois de receber admissão nativa
+  mas antes de comunicar/persistir resultado. Não chamar 76 de resposta perdida
+  pelo monerod. Pai continua host/minerador e emissor inicial; replay diagnóstico
+  DOM ocorre depois de confirmado. Não é restart completo nem dom-interopd.
+- 57 testes Rust, Clippy all-targets -D warnings e build separados passaram;
+  NATIVE-SENDER-CHECKS.json. XMR-first PID 901649: total 183,011 s,
+  claims 93,891 s, reconstrução 0,689 s, entrega com quedas 0,604 s.
+  DOM-first PID 903609: total 200,772 s, claims 111,636 s,
+  reconstrução 1,184 s, entrega 1,706 s. Ambos acima de 180 s; preservar essas
+  medições. Pool/bloco/RPC indisponível suprimiram pedidos explícitos de envio;
+  todos os outputs gastos e refund conflitante rejeitado em 215. Artefatos
+  DIRECT-PAIR-{XMR,DOM}-FIRST-NATIVE-SEND-*; notas NATIVE-SENDER.md.
+  Session 22311 terminou exit 0, hashes fontes/binários conferidos e PIDs
+  registrados ausentes. Não há ensaio dessa etapa pendente a reiniciar.
+- Próximo: reorg nativo/concorrência e orçamento integral das retomadas.
+  Observações sequenciais e rechecks de tips em nós próprios não são snapshot
+  atômico, defesa ABA ou autenticação de nó público. Não declarar segurança
+  completa nem meta temporal cumprida. Preparação/solver duráveis antes de
+  funding/disclosure, participantes independentes, fundamentos temporais e
+  criptográficos e integração ao dom-interopd continuam pendentes. A lacuna de
+  envio da contraparte pelo pai foi fechada somente no novo caminho descrito.
+
+- Continuidade seguinte: `direct-pair-dom-first-xmr-detach` retira o bloco
+  XMR via pop_blocks, exige MonitorPool, faz flush só do hash aprovado, minera
+  substituição vazia e reenvia os bytes imutáveis por novo worker depois de
+  ausência/key image livre. Reinclusão em outra altura/bloco, journal idêntico,
+  dentro da janela ORIGINAL assumida. Não é reorg por fork-choice entre peers.
+  Primeira execução PID 909696 falhou em 108,376 s com status DOM genérico;
+  diagnóstico PID 913498 falhou em 114,082 s: HTTP 429 em /chain/identity após
+  retirada/evicção, emissor Reconcile sem tentar publicar. Logs/fases/watchdogs
+  e provenance preservados em DIRECT-PAIR-DOM-FIRST-XMR-DETACH-INITIAL-FAILURE*
+  e -DIAGNOSTIC-*. Erros agora registram código/rota sem token nem corpo.
+- Middleware DOM atual tem burst 100 e reposição 1/s, apesar do comentário
+  100 req/sec. Não foi alterado. Ensaio separado com override explícito
+  DOM_RPC_RATELIMIT_READ=256 somente no processo do laboratório passou:
+  PID 915028, total 173,427 s, claims/reinclusão 86,800 s, retirada/evicção/
+  reenvio/reinclusão 0,815 s, altura XMR 152→153, folga condicional assumida
+  nove segundos. Outputs gastos e refund rejeitado em 214. Artefatos
+  DIRECT-PAIR-DOM-FIRST-XMR-DETACH-CAPACITY256-*; XMR-NATIVE-DETACH.md.
+  Session 5694 terminou exit 0, hashes fontes/binário conferidos, PIDs/grupo
+  encerrados. Onze testes relacionados/Clippy/build passaram; ver
+  XMR-DETACH-CHECKS.json. Não generalizar sucesso para configuração padrão
+  nem esconder falhas/tempos anteriores. Não houve ensaio de peers concorrentes.
+- Próximas lacunas concretas: (1) throttling/reconciliação precisa de política
+  e orçamento original, sem envio cego nem extensão de prazo; (2) worker cria
+  DeliveryBinding usando bloco/altura ATUAIS da primeira claim e open exige
+  igualdade com âncora ORIGINAL. Uma reinclusão da primeira claim em outro
+  bloco fica presa em Reconcile. Separar âncora histórica de evidência canônica
+  atual da mesma transação, preservando manifesto, bytes, exposição e journal;
+  testar perda e reinclusão NATIVAS antes de afirmar recuperação dessa situação.
+  Não simplesmente ignorar inclusão ausente, nem sobrescrever/descartar journal.
+
+- A rejeição da primeira claim reincluída foi corrigida: DeliveryPayment fixa
+  manifesto, digest da transação inicial e cadeia alvo. open_for_payment lê
+  e bloqueia o mesmo arquivo, valida formato/checksum/exposição e preserva a
+  âncora histórica; open(binding completo) continua estrito. Worker só usa a
+  nova API APÓS verificar bytes/envelope e inclusão nativa canônica atuais,
+  depois revalida corpo/witness guardados e tips. Não transformar identidade
+  estável/checksum em prova de cadeia, nem permitir envio com primeira claim
+  apenas no pool/ausente. Esses casos conservam a obrigação em Reconcile.
+- Passaram 59 testes Rust, Clippy all-targets -D warnings e build separado;
+  FIRST-REINCLUSION-CHECKS.json. Modo direct-pair-xmr-first-reinclude PID 931558
+  passou em 176,728 s total, claims 90,383 s, trecho de exposição/retirada/
+  evicção/reinclusão/restauração 1,180 s. Burst DOM explicitamente 100 (padrão).
+  Depois de exit 77 antes do RPC, primeira claim foi retirada: send/reconstruct
+  no pool e na ausência recusaram envio e preservaram journal. Supervisor
+  republicou bytes XMR originais; altura 152→153, novo worker aceitou inclusão
+  atual conservando âncora 152 e bytes/prazos/exposição originais. Contraparte
+  enviada por worker, outputs gastos, refund rejeitado em 214. Folga até
+  limite adversarial ASSUMIDO dez segundos; não é prova temporal.
+  Artefatos DIRECT-PAIR-XMR-FIRST-REINCLUDE-*, FIRST-REINCLUSION-VERIFICATION.json
+  e FIRST-PAYMENT-REINCLUSION.md. Session 42712 terminou exit 0, fontes/binário
+  conferidos, PIDs/grupo encerrados; nenhum ensaio desta etapa pendente.
+- Próximo: política/orçamento de retomada sob HTTP 429 e transporte durável da
+  PRIMEIRA perna (a republicação inicial após retirada ainda é do supervisor).
+  Não reintroduzir gate inicial sobre obrigação exposta, renovar prazo ou
+  recriar assinatura. A mudança de âncora está fechada no cenário nativo
+  isolado; forks concorrentes/ABA, setup/solver duráveis, participantes
+  independentes, fundamentação criptográfica/temporal e dom-interopd continuam
+  abertos. O sucesso com burst 100 nesta ordem não apaga a falha 429 DOM-first.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.

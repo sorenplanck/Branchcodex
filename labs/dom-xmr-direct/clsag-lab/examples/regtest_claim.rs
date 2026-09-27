@@ -13,6 +13,8 @@ mod direct_recovery_bridge;
 mod dom_regtest;
 #[path = "support/recovery_bridge.rs"]
 mod recovery_bridge;
+#[path = "support/settlement_resume.rs"]
+mod settlement_resume;
 
 use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
 use dalek_ff_group::EdwardsPoint as GroupPoint;
@@ -106,6 +108,10 @@ enum PairOutcome {
     DomFirstResume,
     XmrFirstAckLoss,
     DomFirstAckLoss,
+    XmrFirstNativeSend,
+    DomFirstNativeSend,
+    DomFirstXmrDetach,
+    XmrFirstReinclude,
     Abandon,
     ClaimWins,
     RefundWins,
@@ -120,10 +126,32 @@ impl PairOutcome {
                 | Self::DomFirstResume
                 | Self::XmrFirstAckLoss
                 | Self::DomFirstAckLoss
+                | Self::XmrFirstNativeSend
+                | Self::DomFirstNativeSend
+                | Self::DomFirstXmrDetach
+                | Self::XmrFirstReinclude
         )
     }
     fn loses_ack(self) -> bool {
-        matches!(self, Self::XmrFirstAckLoss | Self::DomFirstAckLoss)
+        // Lost result may be in the bridge or in the native sender's process.
+        matches!(
+            self,
+            Self::XmrFirstAckLoss
+                | Self::DomFirstAckLoss
+                | Self::XmrFirstNativeSend
+                | Self::DomFirstNativeSend
+                | Self::DomFirstXmrDetach
+                | Self::XmrFirstReinclude
+        )
+    }
+    fn native_send(self) -> bool {
+        matches!(
+            self,
+            Self::XmrFirstNativeSend
+                | Self::DomFirstNativeSend
+                | Self::DomFirstXmrDetach
+                | Self::XmrFirstReinclude
+        )
     }
     fn races(self) -> bool {
         matches!(
@@ -259,6 +287,10 @@ async fn journaled_initial_send<T, F: std::future::Future<Output = T>>(
         .unwrap();
     fs::File::open(root).unwrap().sync_all().unwrap();
     let path = root.join("initial-claim.wal");
+    // Exact discovery material is durable BEFORE any possible network release.
+    // The original policy below pins these bytes. A missing/corrupt journal on
+    // restart is not permission to publish or manufacture an exposure event.
+    claim_resume_bridge::write_new(&root.join("initial-claim.tx"), payload);
     let policy = ReleasePolicy::new(
         operation,
         window,
@@ -329,11 +361,16 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         || matches!(
             pair_outcome,
             Some(
-                PairOutcome::DomFirst | PairOutcome::DomFirstResume | PairOutcome::DomFirstAckLoss
+                PairOutcome::DomFirst
+                    | PairOutcome::DomFirstResume
+                    | PairOutcome::DomFirstAckLoss
+                    | PairOutcome::DomFirstNativeSend
+                    | PairOutcome::DomFirstXmrDetach
             )
         );
     let resume_worker = pair_outcome.is_some_and(PairOutcome::resumes);
     let loses_ack = pair_outcome.is_some_and(PairOutcome::loses_ack);
+    let native_send = pair_outcome.is_some_and(PairOutcome::native_send);
     let height_refund =
         matches!(&mode, Mode::HeightXmrFirst | Mode::HeightDomFirst) || pair_outcome.is_some();
     const DOM_REFUND_HEIGHT: u64 = 12;
@@ -1395,6 +1432,33 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     let mut resumed_dom_transaction = None;
     let mut first_claim_reference = None;
     let mut pending_delivery = None;
+    let mut settlement_observations = Vec::new();
+    let mut native_send_probes = Vec::new();
+    let mut xmr_detach_evidence = None;
+    let mut first_reinclusion_evidence = None;
+    let mut initial_pending_probe = None;
+    let mut settlement_rpc = if loses_ack {
+        let mut token = [0; 32];
+        OsRng.fill_bytes(&mut token);
+        let server = dom.start_owned_rpc(settlement_resume::hex(&token)).await;
+        let checkpoint = dxp1_clsag_lab::operation_checkpoint::OperationCheckpoint {
+            operation: joint_operation_binding,
+            manifest: resume_artifacts.as_ref().unwrap().manifest_digest(),
+            dom_chain: *dom.claim.chain(),
+            dom_genesis: dom.canonical_hash(0),
+            xmr_genesis: xmr_chain.unwrap(),
+            dom_port: server.port,
+            xmr_port: rpc_port,
+            dom_token: token,
+        };
+        claim_resume_bridge::write_new(
+            &root.join("operation.checkpoint"),
+            &checkpoint.encode().unwrap(),
+        );
+        Some(server)
+    } else {
+        None
+    };
     let paired_offer_elapsed = direct_recovery.as_ref().map(|(_, _, capsule)| {
         capsule.preparation_report()["offer_received_elapsed_seconds"]
             .as_f64()
@@ -1675,7 +1739,27 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 )
                 .expect("initial DOM publication expired");
         }
-        let (observed_dom, height) = if let Some(window) = &paired_release_window {
+        let (observed_dom, height) = if loses_ack {
+            journaled_initial_send(
+                &root,
+                joint_operation_binding,
+                paired_release_window.as_ref().unwrap(),
+                InitialClaimOrder::DomFirst,
+                &decoded_dom.to_bytes().unwrap(),
+                || async {
+                    dom.submit_without_mining(&decoded_dom);
+                },
+            )
+            .await;
+            initial_pending_probe = Some(
+                settlement_resume::assert_pending_first_cannot_create_obligation(
+                    &root,
+                    joint_operation_binding,
+                )
+                .await,
+            );
+            dom.include_submitted(&decoded_dom).await
+        } else if let Some(window) = &paired_release_window {
             journaled_initial_send(
                 &root,
                 joint_operation_binding,
@@ -1692,11 +1776,28 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             // No original signing preparation, witness or live offer object is
             // passed into either new process. Nodes remain owned by this parent.
             drop((prepared, dom_offer));
-            let (raw, evidence) = artifacts.crash_then_complete(
-                true,
-                &observed_dom.to_bytes().unwrap(),
-                &dom.context().await,
-            );
+            let (raw, evidence) = if loses_ack {
+                settlement_resume::crash_then_reconstruct(
+                    &root,
+                    joint_operation_binding,
+                    DeliveryBinding {
+                        manifest: artifacts.manifest_digest(),
+                        first_claim: dxp1_clsag_lab::claim_resume::digest(
+                            &observed_dom.to_bytes().unwrap(),
+                        ),
+                        first_block: dom.canonical_hash(height),
+                        first_height: height,
+                        target_chain: xmr_chain.unwrap(),
+                    },
+                )
+                .await
+            } else {
+                artifacts.crash_then_complete(
+                    true,
+                    &observed_dom.to_bytes().unwrap(),
+                    &dom.context().await,
+                )
+            };
             (prepared, dom_offer) = artifacts.load();
             let mut input = raw.as_slice();
             let tx = monero_wallet::transaction::Transaction::read(&mut input).unwrap();
@@ -1781,14 +1882,40 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 first_height,
                 target_chain: xmr_chain.unwrap(),
             };
-            let delivery = counterpart_delivery_bridge::send_without_reply(
-                &root,
-                binding,
-                &tx.serialize(),
-                || publish_local(&tx),
-            )
-            .await;
+            let delivery = if native_send {
+                let evidence =
+                    settlement_resume::native_send_after_restart(&root, joint_operation_binding)
+                        .await;
+                counterpart_delivery_bridge::PendingDelivery::track_native_sender(
+                    &root,
+                    binding,
+                    &tx.serialize(),
+                    evidence,
+                )
+            } else {
+                counterpart_delivery_bridge::send_without_reply(
+                    &root,
+                    binding,
+                    &tx.serialize(),
+                    || publish_local(&tx),
+                )
+                .await
+            };
             delivery.reconcile(observe_xmr(&tx).await, DeliveryAction::MonitorPool);
+            let resumed =
+                settlement_resume::observe_in_fresh_process(&root, joint_operation_binding).await;
+            assert_eq!(resumed["action"], "MonitorPool", "{resumed}");
+            settlement_observations.push(resumed);
+            if native_send {
+                native_send_probes.push(
+                    settlement_resume::assert_native_send_suppressed(
+                        &root,
+                        joint_operation_binding,
+                        "MonitorPool",
+                    )
+                    .await,
+                );
+            }
             pending_delivery = Some(delivery);
         } else {
             publish_local(&tx).await;
@@ -1800,8 +1927,17 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     } else {
         Some(xmr_witness)
     };
+    if loses_ack && !dom_first {
+        initial_pending_probe = Some(
+            settlement_resume::assert_pending_first_cannot_create_obligation(
+                &root,
+                joint_operation_binding,
+            )
+            .await,
+        );
+    }
     let (claim_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
-    let block = rpc.scannable_block(claim_blocks[0]).await.unwrap();
+    let mut block = rpc.scannable_block(claim_blocks[0]).await.unwrap();
     assert!(
         block.block.transactions.contains(&tx.hash()),
         "claim must be included"
@@ -1835,6 +1971,20 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                 },
                 DeliveryAction::MonitorInclusion,
             );
+            let resumed =
+                settlement_resume::observe_in_fresh_process(&root, joint_operation_binding).await;
+            assert_eq!(resumed["action"], "MonitorInclusion", "{resumed}");
+            settlement_observations.push(resumed);
+            if native_send {
+                native_send_probes.push(
+                    settlement_resume::assert_native_send_suppressed(
+                        &root,
+                        joint_operation_binding,
+                        "MonitorInclusion",
+                    )
+                    .await,
+                );
+            }
         } else {
             first_claim_reference = Some((
                 dxp1_clsag_lab::claim_resume::digest(&observed.serialize()),
@@ -1843,11 +1993,127 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             ));
         }
     }
+    if pair_outcome == Some(PairOutcome::DomFirstXmrDetach) {
+        // Mutate only the fresh owned fakechain. Native detachment exercises
+        // actual consensus storage/pool state, not a fabricated observation.
+        // This is not yet a competing-peer fork-choice/reorg experiment.
+        let began = Instant::now();
+        let before_height = rpc.latest_block_number().await.unwrap();
+        let old_hash = block.block.hash();
+        assert_eq!(
+            rpc.block_by_number(before_height).await.unwrap().hash(),
+            old_hash
+        );
+        let frozen = fs::read(root.join("counterpart-delivery.wal")).unwrap();
+        checkpoint(
+            "xmr_detach_started",
+            json!({"original_height":before_height}),
+        );
+        let popped: serde_json::Value = serde_json::from_str(
+            &rpc.rpc_call("pop_blocks", Some(json!({"nblocks":1}).to_string()), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(popped["status"], "OK", "{popped}");
+        checkpoint("xmr_block_detached", json!({"native_reply":popped}));
+        assert_eq!(rpc.latest_block_number().await.unwrap() + 1, before_height);
+        let in_pool = settlement_resume::assert_native_send_suppressed(
+            &root,
+            joint_operation_binding,
+            "MonitorPool",
+        )
+        .await;
+        let flushed: serde_json::Value = serde_json::from_str(
+            &rpc.json_rpc_call(
+                "flush_txpool",
+                Some(json!({"txids":[settlement_resume::hex(&tx.hash())]}).to_string()),
+                16384,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(flushed["status"], "OK", "{flushed}");
+        checkpoint("xmr_detached_claim_removed_from_pool", json!({}));
+        // Replace the removed block WITHOUT the claim; reinclusion must occur
+        // at another height/hash, avoiding an identical regenerated block.
+        let (empty_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+        assert!(!rpc
+            .block_by_number(before_height)
+            .await
+            .unwrap()
+            .transactions
+            .contains(&tx.hash()));
+        assert_ne!(empty_blocks[0], old_hash);
+        let retransmitted = settlement_resume::retry_absent_counterpart_in_fresh_process(
+            &root,
+            joint_operation_binding,
+        )
+        .await;
+        assert_eq!(
+            rpc.transactions(&[tx.hash()]).await.unwrap()[0].serialize(),
+            tx.serialize()
+        );
+        let (replacement, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+        block = rpc.scannable_block(replacement[0]).await.unwrap();
+        assert!(block.block.transactions.contains(&tx.hash()));
+        assert_ne!(block.block.hash(), old_hash);
+        checkpoint("xmr_detached_claim_remined", json!({}));
+        let reincluded = settlement_resume::assert_native_send_suppressed(
+            &root,
+            joint_operation_binding,
+            "MonitorInclusion",
+        )
+        .await;
+        assert_eq!(
+            fs::read(root.join("counterpart-delivery.wal")).unwrap(),
+            frozen
+        );
+        let recovered_at = unix_seconds();
+        assert!(
+            recovered_at < paired_earliest_recovery.unwrap().0,
+            "detachment recovery exceeded the ORIGINAL conditional recovery boundary"
+        );
+        let evidence = json!({
+            "native_detachment":true,"competing_peer_reorg":false,
+            "removed_block":settlement_resume::hex(&old_hash),
+            "replacement_empty_block":settlement_resume::hex(&empty_blocks[0]),
+            "reinclusion_block":settlement_resume::hex(&replacement[0]),
+            "original_height":before_height,
+            "reinclusion_height":rpc.latest_block_number().await.unwrap(),
+            "pool_after_detach":in_pool,"absent_retry":retransmitted,
+            "reincluded":reincluded,"journal_unchanged":true,
+            "same_native_transaction":true,"recovered_at_unix":recovered_at,
+            "original_conditional_earliest_recovery_unix":paired_earliest_recovery.unwrap().0,
+            "seconds":began.elapsed().as_secs_f64()
+        });
+        checkpoint(
+            "xmr_counterpart_reincluded_after_native_detachment",
+            evidence.clone(),
+        );
+        xmr_detach_evidence = Some(evidence);
+    }
     if !dom_first {
         if let Some(artifacts) = &resume_artifacts {
             drop((prepared, dom_offer));
-            let (raw, evidence) =
-                artifacts.crash_then_complete(false, &observed.serialize(), &dom.context().await);
+            let (raw, evidence) = if loses_ack {
+                let (first_claim, first_block, first_height) = first_claim_reference.unwrap();
+                settlement_resume::crash_then_reconstruct(
+                    &root,
+                    joint_operation_binding,
+                    DeliveryBinding {
+                        manifest: artifacts.manifest_digest(),
+                        first_claim,
+                        first_block,
+                        first_height,
+                        target_chain: *dom.claim.chain(),
+                    },
+                )
+                .await
+            } else {
+                artifacts.crash_then_complete(false, &observed.serialize(), &dom.context().await)
+            };
             (prepared, dom_offer) = artifacts.load();
             let tx = dom_consensus::Transaction::from_bytes(&raw).unwrap();
             assert_eq!(tx.to_bytes().unwrap(), raw);
@@ -1856,6 +2122,111 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             resume_evidence = Some(evidence);
             checkpoint("claim_worker_restored_after_xmr_payment", json!({}));
         }
+    }
+    if pair_outcome == Some(PairOutcome::XmrFirstReinclude) {
+        let began = Instant::now();
+        let old_height = rpc.latest_block_number().await.unwrap();
+        let old_block = block.block.hash();
+        assert_eq!(
+            rpc.block_by_number(old_height).await.unwrap().hash(),
+            old_block
+        );
+        let crashed =
+            settlement_resume::expose_before_first_detachment(&root, joint_operation_binding).await;
+        let record_paths = [
+            root.join("counterpart-delivery.wal"),
+            root.join("initial-claim.wal"),
+            root.join("initial-claim.tx"),
+            root.join("claim-resume/manifest.record"),
+        ];
+        let frozen: Vec<_> = record_paths.iter().map(|p| fs::read(p).unwrap()).collect();
+        checkpoint("first_xmr_detachment_started", json!({"height":old_height}));
+        let popped: serde_json::Value = serde_json::from_str(
+            &rpc.rpc_call("pop_blocks", Some(json!({"nblocks":1}).to_string()), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(popped["status"], "OK");
+        assert_eq!(rpc.latest_block_number().await.unwrap() + 1, old_height);
+        assert_eq!(observe_xmr(&tx).await, Observation::InPool);
+        let in_pool = settlement_resume::assert_noncanonical_first_preserves_obligation(
+            &root,
+            joint_operation_binding,
+        )
+        .await;
+        let flushed: serde_json::Value = serde_json::from_str(
+            &rpc.json_rpc_call(
+                "flush_txpool",
+                Some(json!({"txids":[settlement_resume::hex(&tx.hash())]}).to_string()),
+                16384,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(flushed["status"], "OK");
+        assert_eq!(observe_xmr(&tx).await, Observation::AbsentAndUnspent);
+        let absent = settlement_resume::assert_noncanonical_first_preserves_obligation(
+            &root,
+            joint_operation_binding,
+        )
+        .await;
+        checkpoint(
+            "first_xmr_noncanonical_obligation_preserved",
+            json!({"pool":in_pool,"absent":absent}),
+        );
+        let (empty, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+        assert_ne!(empty[0], old_block);
+        assert!(!rpc
+            .block_by_number(old_height)
+            .await
+            .unwrap()
+            .transactions
+            .contains(&tx.hash()));
+        // Fixture republishes the already-exposed INITIAL transaction exactly.
+        // This is not an independent initial-leg recovery coordinator yet.
+        assert_eq!(
+            fs::read(root.join("initial-claim.tx")).unwrap(),
+            tx.serialize()
+        );
+        publish_local(&tx).await;
+        let (reincluded_blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+        block = rpc.scannable_block(reincluded_blocks[0]).await.unwrap();
+        assert!(block.block.transactions.contains(&tx.hash()));
+        let new_height = rpc.latest_block_number().await.unwrap();
+        assert_eq!(new_height, old_height + 1);
+        assert_ne!(reincluded_blocks[0], old_block);
+        let restored = settlement_resume::assert_first_reincluded(
+            &root,
+            joint_operation_binding,
+            old_block,
+            old_height as u64,
+            reincluded_blocks[0],
+            new_height as u64,
+        )
+        .await;
+        for (path, bytes) in record_paths.iter().zip(&frozen) {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+        }
+        let included_at = unix_seconds();
+        assert!(
+            included_at < paired_earliest_recovery.unwrap().0,
+            "first reinclusion missed ORIGINAL conditional recovery boundary"
+        );
+        let evidence = json!({
+            "native_detachment":true,"competing_peer_reorg":false,
+            "first_transaction_rebroadcast_by_fixture":true,
+            "counterpart_exposure_before_detachment":crashed,
+            "pool_reconciliation":in_pool,"absent_reconciliation":absent,
+            "restored":restored,"original_block":settlement_resume::hex(&old_block),
+            "original_height":old_height,"new_block":settlement_resume::hex(&reincluded_blocks[0]),
+            "new_height":new_height,"original_records_unchanged":true,
+            "included_at_unix":included_at,"original_conditional_earliest_recovery_unix":paired_earliest_recovery.unwrap().0,
+            "seconds":began.elapsed().as_secs_f64()
+        });
+        checkpoint("first_xmr_reincluded_obligation_restored", evidence.clone());
+        first_reinclusion_evidence = Some(evidence);
     }
     prepared.verify_final(&observed, &mut OsRng).unwrap();
     let recovered = prepared.extract(&observed, &mut OsRng).unwrap();
@@ -1930,17 +2301,46 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                     first_height,
                     target_chain: *dom.claim.chain(),
                 };
-                let delivery = counterpart_delivery_bridge::send_without_reply(
-                    &root,
-                    binding,
-                    &decoded_dom.to_bytes().unwrap(),
-                    || async {
-                        dom.submit_without_mining(&decoded_dom);
-                    },
-                )
-                .await;
+                let delivery = if native_send {
+                    let evidence = settlement_resume::native_send_after_restart(
+                        &root,
+                        joint_operation_binding,
+                    )
+                    .await;
+                    counterpart_delivery_bridge::PendingDelivery::track_native_sender(
+                        &root,
+                        binding,
+                        &decoded_dom.to_bytes().unwrap(),
+                        evidence,
+                    )
+                } else {
+                    counterpart_delivery_bridge::send_without_reply(
+                        &root,
+                        binding,
+                        &decoded_dom.to_bytes().unwrap(),
+                        || async {
+                            dom.submit_without_mining(&decoded_dom);
+                        },
+                    )
+                    .await
+                };
                 dom.assert_in_pool(&decoded_dom);
                 delivery.reconcile(Observation::InPool, DeliveryAction::MonitorPool);
+                let resumed =
+                    settlement_resume::observe_in_fresh_process(&root, joint_operation_binding)
+                        .await;
+                assert_eq!(resumed["action"], "MonitorPool", "{resumed}");
+                settlement_observations.push(resumed);
+                if native_send {
+                    native_send_probes.push(
+                        settlement_resume::assert_native_send_suppressed(
+                            &root,
+                            joint_operation_binding,
+                            "MonitorPool",
+                        )
+                        .await,
+                    );
+                }
                 let (observed, height) = dom.include_submitted(&decoded_dom).await;
                 delivery.reconcile(
                     Observation::Included {
@@ -1949,6 +2349,21 @@ async fn exercise(binary: PathBuf, mode: Mode) {
                     },
                     DeliveryAction::MonitorInclusion,
                 );
+                let resumed =
+                    settlement_resume::observe_in_fresh_process(&root, joint_operation_binding)
+                        .await;
+                assert_eq!(resumed["action"], "MonitorInclusion", "{resumed}");
+                settlement_observations.push(resumed);
+                if native_send {
+                    native_send_probes.push(
+                        settlement_resume::assert_native_send_suppressed(
+                            &root,
+                            joint_operation_binding,
+                            "MonitorInclusion",
+                        )
+                        .await,
+                    );
+                }
                 pending_delivery = Some(delivery);
                 (observed, height)
             } else {
@@ -1969,6 +2384,26 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         "both_claims_included",
         json!({"dom_claim_height":dom_claim_height}),
     );
+    if let Some(server) = &mut settlement_rpc {
+        // A new process must not reuse an earlier successful observation when
+        // an actual required native endpoint is unavailable.
+        server.stop().await;
+        let resumed =
+            settlement_resume::observe_in_fresh_process(&root, joint_operation_binding).await;
+        assert_eq!(resumed["action"], "Reconcile", "{resumed}");
+        assert_eq!(resumed["reason"], "DOM RPC unavailable", "{resumed}");
+        settlement_observations.push(resumed);
+        if native_send {
+            native_send_probes.push(
+                settlement_resume::assert_native_send_suppressed(
+                    &root,
+                    joint_operation_binding,
+                    "Reconcile",
+                )
+                .await,
+            );
+        }
+    }
     let dom_onward_height = if dom_claim_height.is_some() {
         Some(if height_refund {
             dom.spend_claim_output().await
@@ -2144,6 +2579,15 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             .unwrap()
             .extend(delivery.evidence.as_object().unwrap().clone());
         report["counterpart_reconciled_from_native_pool_and_block_after_sender_exit"] = json!(true);
+        report["settlement_observers"] = json!(settlement_observations);
+        report["native_send_suppression_probes"] = json!(native_send_probes);
+        report["xmr_native_detachment"] = json!(xmr_detach_evidence);
+        report["first_payment_native_reinclusion"] = json!(first_reinclusion_evidence);
+        report["initial_pending_reconstruction_probe"] = json!(initial_pending_probe);
+        report["settlement_observer_receives_parent_chain_interpretation"] = json!(false);
+        report["operation_checkpoint_synced_before_initial_release"] = json!(true);
+        report["settlement_observer_queries_native_nodes_independently"] = json!(true);
+        report["parent_remains_native_node_host_and_fixture_miner"] = json!(true);
     }
     if let Some(evidence) = resume_evidence {
         report
@@ -2211,6 +2655,14 @@ async fn main() {
     let mut args = std::env::args_os().skip(1);
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|arg| arg == "--settlement-resume-worker")
+    {
+        args.next();
+        settlement_resume::worker(args).await;
+        return;
+    }
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|arg| arg == "--counterpart-delivery-worker")
     {
         args.next();
@@ -2242,6 +2694,10 @@ async fn main() {
                 || arg == "direct-pair-dom-first-resume"
                 || arg == "direct-pair-xmr-first-ack-loss"
                 || arg == "direct-pair-dom-first-ack-loss"
+                || arg == "direct-pair-xmr-first-native-send"
+                || arg == "direct-pair-dom-first-native-send"
+                || arg == "direct-pair-dom-first-xmr-detach"
+                || arg == "direct-pair-xmr-first-reinclude"
                 || arg == "direct-pair-abandon"
                 || arg == "direct-pair-claim-wins"
                 || arg == "direct-pair-refund-wins"
@@ -2249,7 +2705,15 @@ async fn main() {
         {
             let bridge = PathBuf::from(args.next().expect("absolute direct bridge path required"));
             assert!(bridge.is_absolute() && bridge.is_file());
-            let outcome = if arg == "direct-pair-xmr-first-ack-loss" {
+            let outcome = if arg == "direct-pair-xmr-first-reinclude" {
+                PairOutcome::XmrFirstReinclude
+            } else if arg == "direct-pair-dom-first-xmr-detach" {
+                PairOutcome::DomFirstXmrDetach
+            } else if arg == "direct-pair-xmr-first-native-send" {
+                PairOutcome::XmrFirstNativeSend
+            } else if arg == "direct-pair-dom-first-native-send" {
+                PairOutcome::DomFirstNativeSend
+            } else if arg == "direct-pair-xmr-first-ack-loss" {
                 PairOutcome::XmrFirstAckLoss
             } else if arg == "direct-pair-dom-first-ack-loss" {
                 PairOutcome::DomFirstAckLoss

@@ -200,3 +200,83 @@ fn exclusive_creation_and_open_lock_prevent_competing_delivery_handles() {
         PAYLOAD
     );
 }
+
+#[test]
+fn reverified_same_payment_preserves_historical_anchor_payload_and_exposure() {
+    let s = Scratch::new();
+    let b = binding();
+    let mut j = CounterpartDelivery::create(&s.path(), b, PAYLOAD).unwrap();
+    j.prepare_attempt(b.target_chain, j.payload_digest(), Seen::AbsentAndUnspent)
+        .unwrap();
+    assert!(matches!(
+        CounterpartDelivery::open_for_payment(&s.path(), b.payment()),
+        Err(DeliveryError::Locked)
+    ));
+    drop(j);
+    let original = fs::read(s.path()).unwrap();
+    let reincluded = DeliveryBinding {
+        first_block: [9; 32],
+        first_height: 81,
+        ..b
+    };
+    // The exact-anchor API stays strict. The payment API does not pretend that
+    // the original anchor became the new inclusion or grant send permission.
+    assert!(CounterpartDelivery::open(&s.path(), reincluded).is_err());
+    let mut j = CounterpartDelivery::open_for_payment(&s.path(), reincluded.payment()).unwrap();
+    assert_eq!(j.binding(), b);
+    assert_eq!(j.payload(), PAYLOAD);
+    assert!(j.possibly_exposed().unwrap());
+    assert!(matches!(
+        j.prepare_attempt(b.target_chain, j.payload_digest(), Seen::Unknown),
+        Err(DeliveryError::NeedsReconciliation)
+    ));
+    drop(j);
+    assert_eq!(fs::read(s.path()).unwrap(), original);
+}
+
+#[test]
+fn payment_reopen_rejects_foreign_identity_and_every_corrupted_byte_without_repair() {
+    let s = Scratch::new();
+    let b = binding();
+    assert!(CounterpartDelivery::open_for_payment(&s.path(), b.payment()).is_err());
+    assert!(!s.path().exists());
+    let mut j = CounterpartDelivery::create(&s.path(), b, PAYLOAD).unwrap();
+    let header_len = fs::metadata(s.path()).unwrap().len() as usize;
+    j.prepare_attempt(b.target_chain, j.payload_digest(), Seen::AbsentAndUnspent)
+        .unwrap();
+    drop(j);
+    let original = fs::read(s.path()).unwrap();
+    for foreign in [
+        DeliveryBinding {
+            manifest: [7; 32],
+            ..b
+        },
+        DeliveryBinding {
+            first_claim: [7; 32],
+            ..b
+        },
+        DeliveryBinding {
+            target_chain: [7; 32],
+            ..b
+        },
+    ] {
+        assert!(CounterpartDelivery::open_for_payment(&s.path(), foreign.payment()).is_err());
+    }
+    for i in 0..original.len() {
+        let mut altered = original.clone();
+        altered[i] ^= 1;
+        fs::write(s.path(), &altered).unwrap();
+        assert!(
+            CounterpartDelivery::open_for_payment(&s.path(), b.payment()).is_err(),
+            "byte {i}"
+        );
+        assert_eq!(fs::read(s.path()).unwrap(), altered);
+    }
+    // Includes truncated historical anchor and partial exposure. A malicious
+    // rollback removing the complete exposure event remains outside this model.
+    for end in (0..header_len).chain(header_len + 1..original.len()) {
+        fs::write(s.path(), &original[..end]).unwrap();
+        assert!(CounterpartDelivery::open_for_payment(&s.path(), b.payment()).is_err());
+        assert_eq!(fs::metadata(s.path()).unwrap().len(), end as u64);
+    }
+}

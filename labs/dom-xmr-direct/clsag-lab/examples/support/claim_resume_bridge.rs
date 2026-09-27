@@ -25,7 +25,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-fn write_new(path: &Path, bytes: &[u8]) {
+pub(super) fn write_new(path: &Path, bytes: &[u8]) {
     assert!(bytes.len() <= MAX_RECORD_BYTES);
     let mut file = OpenOptions::new()
         .write(true)
@@ -96,11 +96,12 @@ impl ResumeArtifacts {
         let dom = dom.to_resume_bytes().unwrap();
         write_new(&root.join("xmr.record"), &xmr);
         write_new(&root.join("dom.record"), &dom);
-        let mut manifest = b"DXP1/claim-manifest/v1\0".to_vec();
+        let mut manifest = b"DXP1/claim-manifest/v2\0".to_vec();
         manifest.extend(operation);
         manifest.extend(digest(&xmr));
         manifest.extend(digest(&dom));
         manifest.extend(window.capsule_binding());
+        manifest.extend(window.candidates().to_le_bytes());
         manifest.extend(window.disclosed_at().0.to_le_bytes());
         manifest.extend(window.earliest_adversarial().0.to_le_bytes());
         manifest.extend(window.latest_honest().0.to_le_bytes());

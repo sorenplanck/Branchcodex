@@ -1,0 +1,33 @@
+{
+  "total_seconds": 176.727981387,
+  "claims_seconds": 90.383371929,
+  "first_reinclusion_seconds": 1.180355394,
+  "original_height": 152,
+  "reincluded_height": 153,
+  "conditional_headroom_seconds": 10,
+  "refund_height": 214,
+  "owned_recorded_pids_exited": [
+    931558,
+    933473,
+    933474,
+    933475,
+    933476,
+    933477,
+    933478,
+    933479,
+    933480,
+    933481,
+    933487,
+    933488,
+    933489,
+    933490,
+    933491,
+    933492,
+    933493,
+    933494,
+    933495,
+    933496,
+    933497
+  ],
+  "sources_and_binary_match": true
+}
