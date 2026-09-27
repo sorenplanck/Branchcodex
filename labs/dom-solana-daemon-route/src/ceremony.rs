@@ -62,6 +62,47 @@ pub struct CeremonyPlansV1 {
     pub paths: [PathBuf; 2],
 }
 
+/// Write one party's secrets, as the ceremony reads them from stdin.
+///
+/// Three fields: the passphrase that opens the Contracts transport identity authority, and
+/// one Relay secret per position. Both secrets are present because both parties are in both
+/// legs of this route, and the ceremony checks that correspondence exactly -- a party
+/// supplies a secret for a leg if and only if that leg's roster names it, and the secret's
+/// x-only public key must be the key the roster names.
+///
+/// The secrets are lowercase hex of exactly sixty-four characters, which is what the
+/// ceremony's own parser accepts, and they are written owner-only like every other file
+/// this crate produces. They are laboratory material: a deployment's party holds its own
+/// and types the passphrase itself, which is why the ceremony reads this from stdin rather
+/// than from a path in the plan.
+pub fn write_secrets(
+    party: &[u8; 32],
+    identity_passphrase: &str,
+    out_dir: &Path,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    crate::owner_only::directory(out_dir)?;
+    let hex = |bytes: [u8; 32]| -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    };
+    let secrets = serde_json::json!({
+        "identity_passphrase": identity_passphrase,
+        "upstream_relay_secret": hex(crate::roster::participant_relay_secret(
+            party,
+            crate::roster::UPSTREAM_LABEL,
+        )),
+        "downstream_relay_secret": hex(crate::roster::participant_relay_secret(
+            party,
+            crate::roster::DOWNSTREAM_LABEL,
+        )),
+    });
+    let bytes =
+        serde_json::to_vec(&secrets).map_err(|error| format!("ceremony secrets: {error}"))?;
+    let path = out_dir.join(file_name);
+    crate::owner_only::write(&path, &bytes)?;
+    Ok(path)
+}
+
 /// Write one plan per party and return their paths.
 pub fn write_plans(
     input: &CeremonyPlanInputV1<'_>,

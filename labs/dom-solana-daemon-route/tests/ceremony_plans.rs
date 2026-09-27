@@ -165,3 +165,71 @@ fn a_plan_pair_for_one_party_is_refused() {
     .expect_err("a bilateral ceremony needs two parties");
     assert!(error.contains("two distinct parties"), "{error}");
 }
+
+/// The correspondence the ceremony checks, asserted where both sides are in hand.
+///
+/// A party supplies a Relay secret for a leg if and only if that leg's roster names it, and
+/// the secret's x-only public key must BE the key the roster names. A mismatch is refused
+/// by the ceremony as a binding failure, which says nothing about which of the four
+/// (party, position) pairs is wrong.
+#[test]
+fn each_emitted_relay_secret_is_the_key_the_roster_names() {
+    let provisioned = provision_all();
+    let out = tempfile::tempdir().expect("a secrets directory");
+    let secp = btc_crypto::SecpContext::new(&[0x5a; 32]);
+
+    let bytes = std::fs::read(
+        provisioned
+            .directory
+            .path()
+            .join(common::RELAY_ROSTER),
+    )
+    .expect("the roster artifact");
+    let roster = dom_interopd::ProductionRelayRosterBundleV1::decode_canonical(&bytes)
+        .expect("the roster decodes");
+
+    for (index, party) in [PARTY_A, PARTY_B].into_iter().enumerate() {
+        let path = dom_solana_daemon_route::ceremony::write_secrets(
+            &party.0,
+            std::str::from_utf8(common::IDENTITY_PASSPHRASE).expect("a utf-8 passphrase"),
+            out.path(),
+            &format!("secrets-{index}.json"),
+        )
+        .expect("one party's secrets");
+        let secrets: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("the secrets")).expect("json");
+
+        for (field, leg) in [
+            ("upstream_relay_secret", 0usize),
+            ("downstream_relay_secret", 1),
+        ] {
+            let hex = secrets[field].as_str().expect("a hex string");
+            assert_eq!(hex.len(), 64, "{field} is not the length the ceremony parses");
+            assert!(
+                hex.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "{field} is not lowercase hex"
+            );
+            let mut secret = [0u8; 32];
+            for (slot, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+                secret[slot] = u8::from_str_radix(
+                    std::str::from_utf8(pair).expect("ascii"),
+                    16,
+                )
+                .expect("a hex byte");
+            }
+            let public = secp
+                .xonly_public_key(&secret)
+                .expect("a valid BIP340 secret");
+            let member = roster.legs()[leg]
+                .members
+                .iter()
+                .find(|member| member.participant_id == party)
+                .unwrap_or_else(|| panic!("{party:?} is not in leg {leg}"));
+            assert_eq!(
+                public, member.xonly_key,
+                "the {field} does not open the key the roster names for this party"
+            );
+        }
+    }
+}

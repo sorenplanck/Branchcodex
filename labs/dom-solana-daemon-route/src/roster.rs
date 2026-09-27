@@ -49,16 +49,40 @@ pub struct ProvisionedRelayRosterV1 {
 /// the participant instead; the difference is that there the secret is theirs, and
 /// here it is this function's -- which is the same difference the terms provisioner
 /// already states about the condition scalar.
+/// The label each position's roster keys are derived under.
+///
+/// Part of the derivation, so they are named once and used both by the roster and by the
+/// ceremony's secrets. Two positions sharing a label would give a party one key for both.
+pub const UPSTREAM_LABEL: &str = "upstream";
+pub const DOWNSTREAM_LABEL: &str = "downstream";
+
+/// One participant's Relay secret for one position.
+///
+/// Exposed because the Contracts bootstrap ceremony needs it: a party supplies a relay
+/// secret for each leg it is in, and the ceremony refuses unless that secret's x-only
+/// public key IS the key this leg's roster names for that party. The roster derives the
+/// key from this scalar, so the two cannot disagree.
+///
+/// Per POSITION, not per party: the label is part of the derivation, so a party holds a
+/// different secret upstream and downstream -- which is why the ceremony's secrets carry
+/// one field for each.
+///
+/// A real deployment's participant holds its own scalar and this function does not exist
+/// for them, exactly as with the condition scalar and the authority keys.
+pub fn participant_relay_secret(participant: &[u8; 32], label: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"DOM-SOLANA-DAEMON-ROUTE/ROSTER-PARTICIPANT-SECRET/V1\0");
+    hasher.update(participant);
+    hasher.update(label.as_bytes());
+    hasher.finalize().into()
+}
+
 fn participant_key(
     secp: &SecpContext,
     participant: &[u8; 32],
     label: &str,
 ) -> Result<[u8; 32], String> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"DOM-SOLANA-DAEMON-ROUTE/ROSTER-PARTICIPANT-SECRET/V1\0");
-    hasher.update(participant);
-    hasher.update(label.as_bytes());
-    let secret: [u8; 32] = hasher.finalize().into();
+    let secret = participant_relay_secret(participant, label);
     let key = secp
         .xonly_public_key(&secret)
         .map_err(|error| format!("{label} roster key: {error:?}"))?;
@@ -121,13 +145,13 @@ pub fn provision(
                 &secp,
                 ProductionRoutePositionV1::Upstream,
                 upstream,
-                "upstream",
+                UPSTREAM_LABEL,
             )?,
             leg(
                 &secp,
                 ProductionRoutePositionV1::Downstream,
                 downstream,
-                "downstream",
+                DOWNSTREAM_LABEL,
             )?,
         ],
     )
