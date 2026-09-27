@@ -97,17 +97,16 @@ jobs:
       # the first time here and `--locked` cannot apply yet. Its direct
       # dependencies are pinned exactly in its manifest; commit the lockfile this
       # step produces to close the transitive set too.
+      # No target filter on purpose: this builds and runs the unit tests AND
+      # every integration test, and the three live scenarios are `#[ignore]`d so
+      # they are compiled and skipped. That type-checks the live scenario in the
+      # cheap job -- it is also compiled in the live job, but that one waits on
+      # the sbf build, so a type error there would otherwise surface only after a
+      # full program build -- and it runs the reserve MPC guard, which needs
+      # neither a validator nor a DOM node.
       - name: DOM<->Solana leg laboratory, offline units
         run: |
-          cargo test --manifest-path labs/dom-solana-direct/Cargo.toml --lib
-
-      # Type-check the live scenario in the cheap job too. It also runs in the
-      # live job, but that one needs the program build first, so a type error in
-      # the scenario would otherwise only surface after a full sbf build.
-      - name: Compile the live scenario without running it
-        run: |
-          cargo test --manifest-path labs/dom-solana-direct/Cargo.toml \
-            --test solana_leg_live --no-run
+          cargo test --manifest-path labs/dom-solana-direct/Cargo.toml
 
       # The lockfile the resolution above produced: commit it and every later run
       # of this laboratory is fully pinned.

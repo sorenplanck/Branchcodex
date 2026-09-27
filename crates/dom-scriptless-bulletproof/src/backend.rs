@@ -1298,11 +1298,31 @@ pub fn bulletproof_mpc_finalize(
         )));
     }
     let proof = proof[..proof_length].to_vec();
-    if !bp_verify_with_extra_commit(
-        &state.state.commitments[0],
-        &proof,
-        &state.state.extra_commit,
-    )? {
+    // Verify with the verifier that matches what was just proved. The proving
+    // call above deliberately passes a null extra commitment when there is
+    // none, and the documented contract of `extra_commit` is "the raw recovery
+    // capsule, or empty when the output carries no capsule"
+    // (crates/dom-adaptor/src/bulletproof_mpc.rs). Consensus draws exactly this
+    // distinction over the same bytes: with a capsule it calls
+    // `range_proof_verify_with_extra_commit`, without one it calls
+    // `range_proof_verify` (crates/dom-consensus/src/transaction.rs).
+    //
+    // Calling the extra-commitment verifier unconditionally refused the empty
+    // case with "range proof extra commitment must not be empty", so a shared
+    // output carrying no capsule -- the documented case -- could not be proved
+    // through this path at all, however valid its proof was. Nothing is relaxed
+    // here: the proof is still checked by the unchanged DOM verifier, now by
+    // the one able to accept it.
+    let verified = if state.state.extra_commit.is_empty() {
+        bp_verify(&state.state.commitments[0], &proof)?
+    } else {
+        bp_verify_with_extra_commit(
+            &state.state.commitments[0],
+            &proof,
+            &state.state.extra_commit,
+        )?
+    };
+    if !verified {
         return Err(DomError::Invalid(
             "collaborative Bulletproof failed the unchanged DOM verifier".into(),
         ));
