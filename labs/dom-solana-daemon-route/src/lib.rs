@@ -48,6 +48,7 @@
 #![forbid(unsafe_code)]
 
 pub mod registry;
+pub mod terms;
 
 use std::path::{Path, PathBuf};
 
@@ -62,6 +63,7 @@ use dom_interopd::{
     PRODUCTION_REOPEN_CONFIG_FILE_V11,
 };
 use registry::ProvisionedSolanaRegistryV1;
+use terms::ProvisionedRouteTermsV1;
 use sha2::{Digest, Sha256};
 
 /// Domain for every derived placeholder digest, so a value from this crate can
@@ -168,6 +170,10 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// The registry, once it has been provisioned. Present means four pins are
     /// measurements of an artifact on disk instead of derived labels.
     pub registry: Option<ProvisionedSolanaRegistryV1>,
+    /// The two frozen terms, once both positions have been established. Present
+    /// means the route names its counterparty chain in the place the daemon reads it
+    /// from, which is what makes the positions resolvable as Solana at all.
+    pub terms: Option<ProvisionedRouteTermsV1>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -191,6 +197,7 @@ impl SolanaRouteBootstrapPlanV1 {
                 chain_id: cluster_genesis,
             },
             registry: None,
+            terms: None,
         }
     }
 
@@ -205,17 +212,34 @@ impl SolanaRouteBootstrapPlanV1 {
         self
     }
 
+    /// Bind the two provisioned terms, so the three pins they determine stop being
+    /// labels.
+    ///
+    /// `route_scope_digest` is taken from the pair rather than recomputed here: the
+    /// time authority signs a scope over both canonical terms in position order, and
+    /// a scope derived from anything else names a different route.
+    pub fn with_terms(mut self, provisioned: ProvisionedRouteTermsV1) -> Self {
+        self.terms = Some(provisioned);
+        self
+    }
+
     /// How many of the nineteen route pins are measurements of a real artifact.
     ///
     /// Reported as a number rather than a boolean because the bootstrap is built
     /// one artifact at a time and "some are real" is not a useful thing to know.
     pub const fn measured_pin_count(&self) -> usize {
-        match self.registry {
+        let registry = match self.registry {
             // network_id, registry_manifest_digest, registry_minimum_epoch and
             // registry_authority_set_digest.
             Some(_) => 4,
             None => 0,
-        }
+        };
+        let terms = match self.terms {
+            // upstream_terms_digest, downstream_terms_digest and route_scope_digest.
+            Some(_) => 3,
+            None => 0,
+        };
+        registry + terms
     }
 
     /// True while any pin is still a derived label rather than the digest of a
@@ -240,6 +264,18 @@ impl SolanaRouteBootstrapPlanV1 {
                 placeholder("registry-authority-set"),
             ),
         };
+        let (upstream_terms, downstream_terms, route_scope) = match &self.terms {
+            Some(provisioned) => (
+                provisioned.upstream_terms_digest,
+                provisioned.downstream_terms_digest,
+                provisioned.route_scope_digest,
+            ),
+            None => (
+                placeholder("upstream-terms"),
+                placeholder("downstream-terms"),
+                placeholder("route-scope"),
+            ),
+        };
         ProductionRoutePinsV1 {
             network_id: self.network_id,
             route_id: self.route_id,
@@ -248,9 +284,9 @@ impl SolanaRouteBootstrapPlanV1 {
             registry_authority_set_digest: authority_set_digest,
             time_policy_authority_set_digest: placeholder("time-policy-authority-set"),
             time_evidence_authority_set_digest: placeholder("time-evidence-authority-set"),
-            upstream_terms_digest: placeholder("upstream-terms"),
-            downstream_terms_digest: placeholder("downstream-terms"),
-            route_scope_digest: placeholder("route-scope"),
+            upstream_terms_digest: upstream_terms,
+            downstream_terms_digest: downstream_terms,
+            route_scope_digest: route_scope,
             participant_bindings_digest: placeholder("participant-bindings"),
             relay_binding_digest: placeholder("relay-binding"),
             time_policy_digest: placeholder("time-policy"),

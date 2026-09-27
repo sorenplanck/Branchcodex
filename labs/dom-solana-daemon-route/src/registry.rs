@@ -77,6 +77,11 @@ pub struct ProvisionedSolanaRegistryV1 {
     /// authority bundle rather than from the set it was handed.
     pub authority_set_digest: [u8; 32],
     pub dom_chain_id: [u8; 32],
+    /// The DOM hub's native asset, as the manifest names it. The terms of both
+    /// positions name this same asset on their DOM leg: a route whose terms named
+    /// an asset the registry does not declare would be settling something the
+    /// deployment does not know about.
+    pub dom_asset_id: [u8; 32],
     pub solana_chain_id: [u8; 32],
     pub solana_asset_id: [u8; 32],
 }
@@ -88,19 +93,57 @@ fn asset_id(domain: &[u8], seed: &[u8; 32]) -> AssetId {
     AssetId(hasher.finalize().into())
 }
 
-/// Timing and finality the entry declares. Conservative rather than tuned: this
-/// crate provisions a route and does not decide a chain's observation policy.
-fn timing() -> ChainTimingBoundsV1 {
+/// Timing the DOM hub declares.
+///
+/// `ChainProfileV1::validate` refuses a profile whose seconds budget for a reorg
+/// does not cover the depth its finality policy tolerates at the slowest admitted
+/// block interval: `max_reorg_seconds >= max_reorg_depth * max_block_seconds`. With
+/// a depth of 8 and a 20-second ceiling that floor is 160, so 240 clears it with
+/// room instead of sitting on the boundary. The first version of this function
+/// declared 200 seconds against a depth of 32 and was refused, which is the rule
+/// working.
+fn dom_timing() -> ChainTimingBoundsV1 {
     ChainTimingBoundsV1 {
         min_block_seconds: 1,
         max_block_seconds: 20,
-        max_reorg_seconds: 200,
+        max_reorg_seconds: 240,
         observation_seconds: 30,
         broadcast_seconds: 20,
     }
 }
 
-fn finality() -> FinalityPolicyV1 {
+/// Timing the Solana entry declares. A cluster produces blocks far faster than the
+/// DOM chain, so its ceiling is 2 seconds and the same depth needs a much smaller
+/// seconds budget: 32 * 2 = 64, cleared by 150.
+fn solana_timing() -> ChainTimingBoundsV1 {
+    ChainTimingBoundsV1 {
+        min_block_seconds: 1,
+        max_block_seconds: 2,
+        max_reorg_seconds: 150,
+        observation_seconds: 30,
+        broadcast_seconds: 20,
+    }
+}
+
+/// The DOM leg's finality, as both terms must declare it.
+///
+/// This is not a preference. `validate_composition_registry_parts` refuses a route
+/// unless `terms.dom_leg.finality` equals the DOM deployment's finality exactly, for
+/// both positions -- so this function is the single place the value exists, and the
+/// terms provisioner reads it from here rather than restating it.
+pub fn dom_finality() -> FinalityPolicyV1 {
+    FinalityPolicyV1 {
+        min_confirmations: 1,
+        max_reorg_depth: 8,
+    }
+}
+
+/// The Solana leg's finality, as both terms must declare it.
+///
+/// Same contract, one line further down the same function:
+/// `terms.counterparty_leg.finality` must equal the resolved chain profile's
+/// finality.
+pub fn solana_finality() -> FinalityPolicyV1 {
     FinalityPolicyV1 {
         min_confirmations: 1,
         max_reorg_depth: 32,
@@ -197,8 +240,8 @@ pub fn manifest(
             runtime_identity: DomRuntimeIdentityV1::pinned(DomNetworkV1::Regtest),
             consensus_rules_digest: *dom_crypto_consensus_digest(),
             scriptless_api_version: 1,
-            timing: timing(),
-            finality: finality(),
+            timing: dom_timing(),
+            finality: dom_finality(),
             native_asset: dom_asset,
         },
         chains: vec![RegistryChainProfileV1 {
@@ -209,8 +252,8 @@ pub fn manifest(
                     escrow_program: solana.escrow_program,
                     program_data_hash: solana.program_data_hash,
                 },
-                timing: timing(),
-                finality: finality(),
+                timing: solana_timing(),
+                finality: solana_finality(),
                 native_asset: solana_asset,
                 allowed_assets: vec![],
             },
@@ -305,6 +348,7 @@ pub fn provision(
         manifest_digest: digest,
         authority_set_digest,
         dom_chain_id: manifest.dom.chain_id.0,
+        dom_asset_id: manifest.dom.native_asset.0,
         solana_chain_id: solana_chain.0,
         solana_asset_id: manifest.chains[0].profile.native_asset.0,
     })

@@ -35,7 +35,30 @@ adapter-btc = { path = "../../crates/adapters/btc" }
 kaystra-core = { path = "../../crates/kaystra-core" }
 dom-consensus = { path = "../../crates/dom-consensus" }
 dom-core = { path = "../../crates/dom-core" }
+# The ordered terms scope the V2 time authority signs over. `dom-interopd` uses it
+# internally and does not re-export it.
+route-time-anchor = { path = "../../crates/route-time-anchor" }
+# The leg laboratory, as a library.
+#
+# The two terms artifacts and the two setup bindings this bootstrap needs are
+# exactly what the leg produces for its two claim orders, and the leg produces them
+# offline: `SolanaLegV1::establish` takes a setup store and an RNG, not a cluster.
+# Depending on it here means the artifacts the daemon authenticates are built by the
+# same code that settles them against a live validator, instead of a second
+# assembly of the same terms that could drift from it.
+#
+# It cannot activate `dom-interopd/development` and trip the feature exclusivity
+# guard, because it does not depend on `dom-interopd` at all.
+dom-solana-direct-lab = { path = "../dom-solana-direct" }
+# Reached through the leg, and named here because this crate builds the adapter
+# profile and reads the binding directly.
+solana-profile = { path = "../../crates/adapters/solana-profile" }
+solana-setup-store = { path = "../../crates/adapters/solana-setup-store" }
+solana-types = { path = "../../crates/adapters/solana-types" }
 sha2 = "=0.10.8"
+# The condition's secret scalar is generated when a position is established. Same
+# version the leg laboratory pins.
+rand = "=0.8.6"
 
 [dev-dependencies]
 tempfile = "=3.24.0"
