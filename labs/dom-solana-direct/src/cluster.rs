@@ -15,7 +15,9 @@
 //! only way a key enters this lab, so the funded roles a harness creates are the
 //! only roles that can pay a fee.
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
+use serde_json::{json, Value};
 use solana_rpc::{HttpSolanaRpc, RpcError, SolanaRpc};
 use solana_transaction_builder::{
     assemble_signed_transaction, build_legacy_message, TransactionBuildError,
@@ -40,6 +42,16 @@ const CLOCK_LEN: usize = 40;
 pub enum ClusterError {
     #[error("Solana RPC: {0}")]
     Rpc(#[from] RpcError),
+    /// A refused transaction, in the program's own words.
+    ///
+    /// `solana-rpc` maps every JSON-RPC error to one opaque variant, so a
+    /// refusal arrives as `Rpc(Remote)` with the reason discarded -- which says
+    /// nothing at all about why the runtime said no. When a submission fails the
+    /// harness re-asks the node to simulate the same bytes and reports what it
+    /// answers, so a refusal names itself instead of needing another run to
+    /// investigate.
+    #[error("the cluster refused the transaction: {err}\nprogram logs:\n{logs}")]
+    Refused { err: String, logs: String },
     #[error("transaction assembly: {0}")]
     Build(#[from] TransactionBuildError),
     #[error("no keypair was supplied for a required signer")]
@@ -115,6 +127,8 @@ impl KeypairV1 {
 /// connection was opened.
 pub struct ClusterSessionV1 {
     rpc: HttpSolanaRpc,
+    /// Kept so a refusal can be explained through the same endpoint.
+    url: String,
     genesis: SolanaHash,
     commitment: Commitment,
 }
@@ -128,6 +142,7 @@ impl ClusterSessionV1 {
         let genesis = rpc.genesis_hash()?;
         Ok(Self {
             rpc,
+            url: url.to_string(),
             genesis,
             commitment: Commitment::Confirmed,
         })
@@ -169,7 +184,64 @@ impl ClusterSessionV1 {
             signatures.push((*signer, keypair.sign(&plan.message)));
         }
         let raw = assemble_signed_transaction(&plan, &signatures)?;
-        Ok(self.rpc.send_transaction(&raw)?)
+        match self.rpc.send_transaction(&raw) {
+            Ok(signature) => Ok(signature),
+            Err(RpcError::Remote) => Err(self.explain_refusal(&raw)),
+            Err(other) => Err(other.into()),
+        }
+    }
+
+    /// Ask the node to simulate exactly the bytes it just refused, and turn its
+    /// answer into an error that names the cause. Failing to obtain an
+    /// explanation is itself reported rather than swallowed: the transaction was
+    /// still refused, and that fact must not be lost because the second call
+    /// also failed.
+    fn explain_refusal(&self, raw: &[u8]) -> ClusterError {
+        let encoded = BASE64.encode(raw);
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "simulateTransaction",
+            "params": [encoded, {"encoding": "base64", "sigVerify": false, "commitment": "processed"}],
+        });
+        let answer = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .ok()
+            .and_then(|client| client.post(&self.url).json(&body).send().ok())
+            .and_then(|response| response.text().ok());
+        let Some(text) = answer else {
+            return ClusterError::Refused {
+                err: "refused, and the node did not answer a simulation of the same bytes"
+                    .to_string(),
+                logs: String::new(),
+            };
+        };
+        let parsed: Option<Value> = serde_json::from_str(&text).ok();
+        let (err, logs) = match parsed.as_ref().and_then(|value| value.get("result")) {
+            Some(result) => (
+                result
+                    .get("err")
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "none reported by the simulation".to_string()),
+                result
+                    .get("logs")
+                    .and_then(Value::as_array)
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|line| format!("  {line}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default(),
+            ),
+            // No `result` at all: report the node's raw answer, bounded, rather
+            // than an empty explanation.
+            None => (text.chars().take(2000).collect::<String>(), String::new()),
+        };
+        ClusterError::Refused { err, logs }
     }
 
     /// Wait for a status. A status whose `failed` flag is set is an error: the
@@ -218,7 +290,7 @@ impl ClusterSessionV1 {
         timeout: Duration,
     ) -> Result<(), ClusterError> {
         match self.submit(instructions, fee_payer, cosigners) {
-            Err(ClusterError::Rpc(_)) => Ok(()),
+            Err(ClusterError::Refused { .. }) | Err(ClusterError::Rpc(_)) => Ok(()),
             Err(other) => Err(other),
             Ok(signature) => match self.confirm(signature, timeout) {
                 Err(ClusterError::Rejected) => Ok(()),

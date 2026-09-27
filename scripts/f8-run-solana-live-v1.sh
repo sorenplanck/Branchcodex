@@ -41,6 +41,18 @@ RPC_PORT="${DOM_SOLANA_LIVE_PORT_V1:-8899}"
 RPC_URL="http://127.0.0.1:${RPC_PORT}"
 FAUCET_PORT="${DOM_SOLANA_LIVE_FAUCET_PORT_V1:-9900}"
 PROGRAM_SO="${DOM_SOLANA_PROGRAM_SO_V1:-$ROOT/programs/dom-solana-escrow/target/sbf-solana-solana/release/dom_solana_escrow.so}"
+# The program id is NOT ours to pick. `processor::process` refuses any
+# invocation whose program_id differs from the one `declare_id!` fixes in the
+# source, so a deployment to a freshly generated keypair has every instruction
+# rejected at the door -- which is precisely how run 36282372857 failed, all
+# three scenarios dying on their first Solana transaction. Read the declared id
+# out of the source so it can never drift from what the program enforces.
+PROGRAM_SOURCE="$ROOT/programs/dom-solana-escrow/src/lib.rs"
+PROGRAM_ID="${DOM_SOLANA_PROGRAM_ID_V1:-$(sed -n 's/.*declare_id!("\([^"]*\)").*/\1/p' "$PROGRAM_SOURCE" | head -1)}"
+[ -n "$PROGRAM_ID" ] || {
+  printf 'f8-solana-live: could not read declare_id! from %s\n' "$PROGRAM_SOURCE" >&2
+  exit 1
+}
 VALIDATOR_LOG="$WORK/validator.log"
 STATUS="incomplete"
 VALIDATOR_PID=""
@@ -100,11 +112,10 @@ done
 
 mkdir -p "$WORK"
 PAYER="$WORK/payer.json"
-PROGRAM_KEYPAIR="$WORK/program.json"
 FUNDER="$WORK/funder.json"
 BENEFICIARY="$WORK/beneficiary.json"
 REFUND="$WORK/refund.json"
-for keypair in "$PAYER" "$PROGRAM_KEYPAIR" "$FUNDER" "$BENEFICIARY" "$REFUND"; do
+for keypair in "$PAYER" "$FUNDER" "$BENEFICIARY" "$REFUND"; do
   solana-keygen new --no-bip39-passphrase --silent --force --outfile "$keypair" >/dev/null
 done
 
@@ -112,11 +123,22 @@ log "starting validator on $RPC_URL"
 # A fresh ledger every run: a reused ledger would carry escrow accounts from a
 # previous scenario and a claim could pass on stale state.
 rm -rf "$LEDGER"
+# No `--quiet`: it silences exactly the `Program log` lines that say WHY a
+# transaction was refused, and run 36282372857 lost them -- its validator.log was
+# four lines long while three scenarios died on a refusal with no stated cause.
+# The log is verbose and is uploaded as an artifact, which is the right trade for
+# being able to diagnose a refusal without spending another run on it.
+# `--upgradeable-program <ADDRESS> <SO> none` puts the program at its declared
+# id, through the upgradeable loader -- so a programdata account exists and the
+# hash the daemon binds still means something -- and with the authority set to
+# "none" it is immutable from the genesis slot. That is stronger than deploying
+# and then revoking, and it removes two CLI steps whose output this harness would
+# otherwise have to parse.
 solana-test-validator \
   --ledger "$LEDGER" \
   --rpc-port "$RPC_PORT" \
   --faucet-port "$FAUCET_PORT" \
-  --quiet \
+  --upgradeable-program "$PROGRAM_ID" "$PROGRAM_SO" none \
   --reset >"$VALIDATOR_LOG" 2>&1 &
 VALIDATOR_PID=$!
 
@@ -189,43 +211,29 @@ for keypair in "$FUNDER" "$BENEFICIARY" "$REFUND"; do
   log "funded $(basename "$keypair" .json) $address"
 done
 
-log "deploying the escrow through the upgradeable loader"
-solana --url "$RPC_URL" program deploy \
-  --keypair "$PAYER" \
-  --program-id "$PROGRAM_KEYPAIR" \
-  "$PROGRAM_SO" >"$WORK/deploy.log" 2>&1 || {
-  log "deploy failed; see $WORK/deploy.log"
+log "verifying the genesis-loaded program $PROGRAM_ID"
+solana --url "$RPC_URL" program show "$PROGRAM_ID" >"$WORK/program-show.log" 2>&1 || {
+  log "the program is not present at its declared id; see $WORK/program-show.log"
   exit 1
 }
-PROGRAM_ID="$(solana-keygen pubkey "$PROGRAM_KEYPAIR")"
-log "deployed program $PROGRAM_ID"
-
-log "revoking the upgrade authority"
-# No `--skip-new-upgrade-authority-signer-check`: `--final` sets no new
-# authority, so there is no new signer to skip checking, and passing both risks
-# being refused as a conflicting argument.
-solana --url "$RPC_URL" program set-upgrade-authority \
-  --keypair "$PAYER" \
-  --final "$PROGRAM_ID" >"$WORK/finalize.log" 2>&1 || {
-  log "could not revoke the upgrade authority; see $WORK/finalize.log"
-  exit 1
-}
-if solana --url "$RPC_URL" program show "$PROGRAM_ID" | grep -qi "Authority: none"; then
+# "none" at genesis means there is no upgrade authority to revoke. Verify that
+# rather than assume it: an explicit authority line that names a key is a
+# refusal, and the scenario re-checks the same fact in-process from the
+# programdata account's own bytes.
+if grep -qi "Authority: none" "$WORK/program-show.log"; then
   REVOKED=true
+elif grep -qi "Authority:" "$WORK/program-show.log"; then
+  REVOKED=false
+  log "the program still has an upgrade authority; the daemon requires an immutable program"
+  sed -n '1,20p' "$WORK/program-show.log" >&2
+  exit 1
 else
-  # Agave phrasing has varied; treat an absent authority line as revoked only
-  # when the explicit one is gone, never assume it.
-  if solana --url "$RPC_URL" program show "$PROGRAM_ID" | grep -qi "Authority:"; then
-    REVOKED=false
-    log "upgrade authority is still set; the daemon requires an immutable program"
-    exit 1
-  fi
   REVOKED=true
 fi
-log "upgrade authority revoked"
+log "program is immutable (no upgrade authority)"
 
-PROGRAMDATA="$(solana --url "$RPC_URL" program show "$PROGRAM_ID" \
-  | awk -F': *' '/ProgramData Address/ {print $2}')"
+# Read it out of the answer already saved above rather than asking twice.
+PROGRAMDATA="$(awk -F': *' '/ProgramData Address/ {print $2}' "$WORK/program-show.log")"
 [ -n "$PROGRAMDATA" ] || {
   log "could not read the ProgramData address"
   exit 1

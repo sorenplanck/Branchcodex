@@ -306,8 +306,7 @@ jobs:
             ${{ runner.temp }}/dom-solana-live-evidence/campaign.json
             ${{ runner.temp }}/dom-solana-live-evidence/harness.json
             ${{ runner.temp }}/dom-solana-live/validator.log
-            ${{ runner.temp }}/dom-solana-live/deploy.log
-            ${{ runner.temp }}/dom-solana-live/finalize.log
+            ${{ runner.temp }}/dom-solana-live/program-show.log
           if-no-files-found: warn
           retention-days: 7
 

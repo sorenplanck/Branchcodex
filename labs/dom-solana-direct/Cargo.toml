@@ -63,6 +63,13 @@ rand = "=0.8.6"
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
 # Reads the `solana-keygen` keypair file and writes the leg evidence record.
 serde_json = "=1.0.151"
+# Only to turn a refused transaction into the program's own words: `solana-rpc`
+# maps every JSON-RPC error to one opaque variant, so the harness re-asks the
+# node with `simulateTransaction` and reports the logs it returns. Same version
+# and features as the workspace, which already builds this exact client.
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# Encodes the refused transaction for `simulateTransaction`.
+base64 = "=0.22.1"
 sha2 = "=0.10.8"
 thiserror = "=1.0.69"
 zeroize = { version = "=1.8.2", features = ["derive"] }
