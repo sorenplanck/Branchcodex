@@ -1,4 +1,4 @@
-# Continuidade — 26/09/2026
+# Continuidade — 27/09/2026
 
 Missão reiterada pelo operador e registrada em `../../AGENTS.md`: **criar um
 mecanismo novo**, não melhorar o protocolo anterior. A perna DOM↔XMR deve
@@ -20,13 +20,21 @@ do ponto Ed25519. Mesmo trabalho, sem fatores/segredo do produtor ou novos
 fundos. Logo, o mínimo adversarial de30 s do perfil atual é falso. Os tempos
 anteriores próximos de três minutos não demonstram um swap seguro.
 
+**A consequência foi reproduzida no regtest financiado.** Com a cápsula
+verificada antes do funding e os adaptors entregues, a abertura Montgomery
+pública terminou em7,369 s. O participante honesto viu o input XMR livre,
+passou no relógio e gravou o claim no journal. Sob divulgação completa ao peer
+antes da inclusão, a devolução XMR venceu no `monerod`, o claim honesto foi
+rejeitado e o peer incluiu e gastou DOM. O ensaio levou83,273 s incluindo
+preparação local, mas **perdeu atomicidade**. A ordem peer/daemon foi modelada;
+propagação P2P real não foi medida. Detalhes em `clsag-lab/FAST-RACE-AUDIT.md`.
+
 Passaram26 testes Go/vet/build, quatro comparações de aritmética C/Python e
 seis controles negativos. O teste Rust mostra que o guard de30 s admite
-publicação após a recuperação observada já ser possível. Não é ainda um roubo
-financiado reproduzido; é uma premissa necessária da janela refutada.
-`recovery-audit/FAST-OPEN-AUDIT.md` contém evidência/limites. Não substituir30
-por8 como se a medição fosse um novo mínimo. Próximo trabalho é reproduzir
-a corrida adversarial nos nós e revisar a recuperação temporizada/perfil,
+publicação após a recuperação observada já ser possível.
+`recovery-audit/FAST-OPEN-AUDIT.md` contém evidência/limites dessa medição.
+Não substituir30 por8 como se a medição fosse um novo mínimo. Próximo trabalho
+é substituir ou fundamentar a recuperação temporizada,
 antes de integrar retomada durante o solve ou declarar proximidade de produção.
 
 **Retomada após abertura e gravação parcial da assinatura passou.**

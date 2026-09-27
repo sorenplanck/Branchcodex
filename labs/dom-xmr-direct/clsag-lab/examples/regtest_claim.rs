@@ -91,6 +91,7 @@ enum Mode {
     DirectPair {
         bridge: PathBuf,
         outcome: PairOutcome,
+        montgomery_audit: Option<PathBuf>,
     },
     XmrDirectRecovery {
         bridge: PathBuf,
@@ -126,6 +127,7 @@ enum PairOutcome {
     ClaimWins,
     RefundWins,
     LateClaimLeakAudit,
+    FastRaceAudit,
 }
 
 impl PairOutcome {
@@ -178,7 +180,7 @@ impl PairOutcome {
     fn races(self) -> bool {
         matches!(
             self,
-            Self::ClaimWins | Self::RefundWins | Self::LateClaimLeakAudit
+            Self::ClaimWins | Self::RefundWins | Self::LateClaimLeakAudit | Self::FastRaceAudit
         )
     }
 }
@@ -385,6 +387,12 @@ fn presign(
 }
 
 async fn exercise(binary: PathBuf, mode: Mode) {
+    let montgomery_audit = match &mode {
+        Mode::DirectPair {
+            montgomery_audit, ..
+        } => montgomery_audit.clone(),
+        _ => None,
+    };
     let pair_outcome = match &mode {
         Mode::DirectPair { outcome, .. } => Some(*outcome),
         _ => None,
@@ -840,7 +848,11 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         let roster = XmrRecoveryRoster::new(reservation.finalize().into(),
             ids.map(|id| keys[0].original_verification_share(id).0)).unwrap();
         let material = XmrDirectRecoveryMaterial::create(&keys[1], &roster).unwrap();
-        let capsule = if use_local_receipt {
+        let capsule = if let Some(audit) = montgomery_audit.as_ref() {
+            direct_recovery_bridge::DirectPublicCapsule::prepare_with_montgomery_audit(
+                &bridge, material, squarings, audit,
+            )
+        } else if use_local_receipt {
             direct_recovery_bridge::DirectPublicCapsule::prepare_with_local_receipt(
                 &bridge, material, squarings, &root.join("local-verifier-authority.key"),
             )
@@ -1890,9 +1902,13 @@ async fn exercise(binary: PathBuf, mode: Mode) {
     }
     if matches!(
         pair_outcome,
-        Some(PairOutcome::RefundWins | PairOutcome::LateClaimLeakAudit)
+        Some(
+            PairOutcome::RefundWins | PairOutcome::LateClaimLeakAudit | PairOutcome::FastRaceAudit
+        )
     ) {
-        let audit = pair_outcome == Some(PairOutcome::LateClaimLeakAudit);
+        let fast_audit = pair_outcome == Some(PairOutcome::FastRaceAudit);
+        let late_audit = pair_outcome == Some(PairOutcome::LateClaimLeakAudit);
+        let audit = fast_audit || late_audit;
         let window = paired_release_window.as_ref().unwrap();
         // This completed claim remains PRIVATE to its sender until the later
         // explicitly marked exposure. Both adaptors have already been delivered.
@@ -1907,7 +1923,7 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         };
         checkpoint(
             "post_offer_recovery_started",
-            json!({"negative_control":audit}),
+            json!({"negative_control":late_audit,"fast_race_audit":fast_audit}),
         );
         let refund = recover_race_refund(
             race_reserve.take().unwrap(),
@@ -1920,8 +1936,61 @@ async fn exercise(binary: PathBuf, mode: Mode) {
         assert!(unix_seconds() <= window.latest_honest().0);
         assert_eq!(prepared.context().image, refund.prepared.context().image);
         assert_ne!(stale_claim.hash(), refund.transaction.hash());
-        publish_local(&refund.transaction).await;
-        let (blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+        // Model a peer who sees the complete claim as it leaves the honest
+        // sender, but orders its already signed refund into the native node
+        // first. The honest clock, native unspent probe and durable exposure
+        // journal are all exercised before these bytes leave the sender.
+        let fast_delivery = if fast_audit {
+            assert_eq!(
+                observe_xmr(&stale_claim).await,
+                Observation::AbsentAndUnspent
+            );
+            window
+                .check_initial_claim_release(
+                    dom_core::Timestamp(unix_seconds()),
+                    InitialClaimOrder::XmrFirst,
+                    LAB_CLAIM_DELAYS,
+                )
+                .expect("honest initial claim guard refused before adversarial ordering");
+            checkpoint(
+                "fast_race_honest_native_unspent_and_clock_accepted",
+                json!({}),
+            );
+            let exposed = stale_claim.serialize();
+            Some(
+                journaled_initial_send(
+                    &root,
+                    joint_operation_binding,
+                    window,
+                    InitialClaimOrder::XmrFirst,
+                    &exposed,
+                    || async {
+                        let exposed_unix = unix_seconds();
+                        let resolution_started = Instant::now();
+                        publish_local(&refund.transaction).await;
+                        let (blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+                        let resolution_seconds = resolution_started.elapsed().as_secs_f64();
+                        let rejection = reject_spent(&stale_claim).await;
+                        (blocks, rejection, exposed_unix, resolution_seconds)
+                    },
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let (blocks, early_rejection, exposed_unix, resolution_seconds) =
+            if let Some((blocks, rejection, exposed_unix, seconds)) = fast_delivery {
+                assert!(
+                    seconds <= LAB_CLAIM_DELAYS.xmr_resolution_secs as f64,
+                    "native adversarial resolution exceeded assumed one-second bound"
+                );
+                (blocks, Some(rejection), Some(exposed_unix), Some(seconds))
+            } else {
+                publish_local(&refund.transaction).await;
+                let (blocks, _) = rpc.generate_blocks(&reserve_address, 1).await.unwrap();
+                (blocks, None, None, None)
+            };
         let block = rpc.scannable_block(blocks[0]).await.unwrap();
         assert!(block
             .block
@@ -1941,11 +2010,19 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             InitialClaimOrder::XmrFirst,
             LAB_CLAIM_DELAYS,
         );
-        assert_eq!(refused, Err(TimingError::InitiationWindowExhausted));
+        if fast_audit {
+            assert_eq!(
+                refused,
+                Ok(()),
+                "honest window closed during fast-race audit"
+            );
+        } else {
+            assert_eq!(refused, Err(TimingError::InitiationWindowExhausted));
+        }
         checkpoint(
             "post_offer_refund_won",
             json!({
-                "late_initial_claim_refused":true, "negative_control_bypasses_refusal":audit,
+                "late_initial_claim_refused":!fast_audit, "negative_control_bypasses_refusal":late_audit,
                 "refund_observed_unix":refund_observed_unix,
             }),
         );
@@ -2004,11 +2081,15 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             .contains(&onward.hash()));
 
         let (dom_refund_height, dom_onward_height, dom_claim_height, rejection) = if audit {
-            // Deliberately violate the sender's refusal: disclose the losing
-            // claim bytes to the peer. Rejection by monerod cannot erase them.
-            // This does NOT claim that a private rejected RPC is auto-relayed.
+            // The fast race exposed bytes through the durable sender journal;
+            // the late negative control deliberately bypasses sender refusal.
+            // Neither assumes that a private rejected RPC auto-relays.
             dom.assert_height_refund_locked().await;
-            let rejection = reject_spent(&stale_claim).await;
+            let rejection = if let Some(rejection) = early_rejection {
+                rejection
+            } else {
+                reject_spent(&stale_claim).await
+            };
             let leaked = monero_wallet::transaction::Transaction::read(
                 &mut stale_claim.serialize().as_slice(),
             )
@@ -2021,7 +2102,11 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             let (_, height) = dom.include(&stolen_dom).await;
             let onward = dom.spend_claim_output().await;
             checkpoint(
-                "late_claim_exposure_lost_dom",
+                if fast_audit {
+                    "fast_race_exposure_lost_dom"
+                } else {
+                    "late_claim_exposure_lost_dom"
+                },
                 json!({"dom_claim_height":height,"dom_onward_height":onward}),
             );
             (None, onward, Some(height), rejection)
@@ -2052,7 +2137,8 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             (Some(height), onward, None, rejection)
         };
         let mut report = json!({
-            "experiment":if audit {"negative control: a peer extracts from a late losing XMR claim and takes DOM after refunding XMR"}
+            "experiment":if fast_audit {"native fast recovery race: honest journal releases XMR claim but adversarial refund wins and its peer takes DOM"}
+                else if late_audit {"negative control: a peer extracts from a late losing XMR claim and takes DOM after refunding XMR"}
                 else {"XMR refund wins after adaptor delivery; late initial claim refused before exposure; both owners recover"},
             "network":"owned offline regtest", "atomic_swap":false,"bitcoin_involved":false,
             "mainnet_latency_measurement":false,"setup_centralized":true,"safe_bilateral_window_proven":false,
@@ -2060,9 +2146,15 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             "adaptor_claims_delivered_before_recovery":true,"dom_original_signing_material_dropped":true,
             "same_xmr_key_image_for_claim_and_refund":true,"xmr_refund_included":true,
             "xmr_refund_paid_to_original_funding_owner":true,"all_refund_outputs_onward_spent":true,
-            "xmr_buyer_received_payment":false,"late_initial_claim_check_refused":true,
-            "late_initial_claim_refusal_deliberately_bypassed":audit,
+            "xmr_buyer_received_payment":false,"late_initial_claim_check_refused":!fast_audit,
+            "late_initial_claim_refusal_deliberately_bypassed":late_audit,
             "late_claim_exposed_before_dom_refund":audit,"losing_xmr_claim_rejected_as_spent":true,
+            "fast_race_honest_native_unspent_before_exposure":fast_audit,
+            "fast_race_honest_clock_accepted":fast_audit,
+            "fast_race_durable_initial_send_journal_used":fast_audit,
+            "fast_race_exposed_unix":exposed_unix,
+            "fast_race_native_resolution_seconds":resolution_seconds,
+            "fast_race_adversarial_refund_first":fast_audit,
             "monerod_losing_claim_response":rejection,
             "counterexample_reproduced":audit,"dom_original_owner_recovered":!audit,
             "dom_claim_included":audit,"dom_claim_height":dom_claim_height,
@@ -2074,6 +2166,9 @@ async fn exercise(binary: PathBuf, mode: Mode) {
             "offers_ready_elapsed_since_capsule_receipt_seconds":paired_offer_elapsed,
             "xmr_refund_observed_unix":refund_observed_unix,"total_seconds":whole.elapsed().as_secs_f64(),
         });
+        report["fast_race_peer_exposure_before_refund_modeled"] = json!(fast_audit);
+        report["fast_race_native_peer_relay_measured"] = json!(false);
+        report["timing_assumed_thirty_second_adversarial_minimum_refuted"] = json!(fast_audit);
         report
             .as_object_mut()
             .unwrap()
@@ -3181,7 +3276,8 @@ async fn main() {
                 || arg == "direct-pair-abandon-local-receipt"
                 || arg == "direct-pair-claim-wins"
                 || arg == "direct-pair-refund-wins"
-                || arg == "direct-pair-late-claim-audit" =>
+                || arg == "direct-pair-late-claim-audit"
+                || arg == "direct-pair-fast-race-audit" =>
         {
             let bridge = PathBuf::from(args.next().expect("absolute direct bridge path required"));
             assert!(bridge.is_absolute() && bridge.is_file());
@@ -3213,6 +3309,8 @@ async fn main() {
                 PairOutcome::RefundWins
             } else if arg == "direct-pair-late-claim-audit" {
                 PairOutcome::LateClaimLeakAudit
+            } else if arg == "direct-pair-fast-race-audit" {
+                PairOutcome::FastRaceAudit
             } else if arg == "direct-pair-abandon-solver-restart" {
                 PairOutcome::AbandonSolverRestart
             } else if arg == "direct-pair-abandon-local-receipt" {
@@ -3220,7 +3318,21 @@ async fn main() {
             } else {
                 PairOutcome::Abandon
             };
-            Mode::DirectPair { bridge, outcome }
+            let montgomery_audit = if outcome == PairOutcome::FastRaceAudit {
+                let path = PathBuf::from(
+                    args.next()
+                        .expect("absolute Montgomery audit binary required"),
+                );
+                assert!(path.is_absolute() && path.is_file());
+                Some(path)
+            } else {
+                None
+            };
+            Mode::DirectPair {
+                bridge,
+                outcome,
+                montgomery_audit,
+            }
         }
         Some(arg) if arg == "xmr-direct-recovery" => {
             let bridge = PathBuf::from(args.next().expect("absolute direct bridge path required"));

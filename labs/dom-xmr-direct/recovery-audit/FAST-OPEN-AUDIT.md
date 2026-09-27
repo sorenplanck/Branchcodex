@@ -78,8 +78,10 @@ aritmética do guard: o perfil antigo admite início em d+10, apesar de o
 avaliador observado poder concluir antes de d+8; também admite offers-ready
 em d+28. O mesmo prefixo é recusado ao modelar essa possibilidade de recuperação
 antecipada. É um contraexemplo da premissa/janela, não um roubo financiado
-reproduzido; assinatura/envio adversarial e corrida nativa não foram medidos
-neste ensaio. A altura conservadora do refund DOM não corrige esse mínimo XMR.
+reproduzido **neste primeiro ensaio**; assinatura/envio adversarial e corrida
+nativa foram medidos posteriormente no
+[`FAST-RACE-AUDIT.md`](../clsag-lab/FAST-RACE-AUDIT.md), sob escalonamento de
+divulgação explícito. A altura conservadora do refund DOM não corrige esse mínimo XMR.
 Passaram os 11 testes Rust desse módulo, incluindo o contraexemplo. Hashes,
 comandos e PIDs encerrados foram conferidos em `FAST-OPEN-AUDIT-VERIFICATION.json`.
 

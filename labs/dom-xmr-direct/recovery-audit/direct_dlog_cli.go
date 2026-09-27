@@ -288,9 +288,10 @@ func serveDirectSessionWithEvaluator(input io.Reader, output io.Writer, authorit
 		"proof_verification_seconds":  time.Since(started).Seconds(),
 		"proof_verification_workers":  directVerificationWorkers,
 		"setup_verified_before_offer": true, "public_verifier_no_share_secret": true,
-		"squarings":                    initial.Squarings,
-		"local_setup_receipt_verified": resuming,
-		"setup_relation_recomputed":    !resuming,
+		"squarings":                     initial.Squarings,
+		"local_setup_receipt_verified":  resuming,
+		"setup_relation_recomputed":     !resuming,
+		"non_reference_audit_evaluator": evaluator != nil,
 	}
 	// Issue only AFTER proof/context/public validation, never merely parsing
 	// a setup or accepting a peer's assertion that it has already been checked.

@@ -32,14 +32,28 @@ fn spawn_with_authority(
     mode: &str,
     authority: Option<&Path>,
 ) -> (LabProcess, ChildStdin, BufReader<ChildStdout>) {
+    spawn_with_config(binary, mode, authority, None)
+}
+
+fn spawn_with_config(
+    binary: &Path,
+    mode: &str,
+    authority: Option<&Path>,
+    montgomery_audit: Option<&Path>,
+) -> (LabProcess, ChildStdin, BufReader<ChildStdout>) {
     assert!(binary.is_absolute() && binary.is_file());
     let mut command = Command::new(binary);
     command
         .arg(mode)
-        .env_remove("DXP1_LOCAL_SETUP_AUTHORITY_FILE");
+        .env_remove("DXP1_LOCAL_SETUP_AUTHORITY_FILE")
+        .env_remove("DXP1_MONTGOMERY_AUDIT_BINARY");
     if let Some(path) = authority {
         assert!(path.is_absolute());
         command.env("DXP1_LOCAL_SETUP_AUTHORITY_FILE", path);
+    }
+    if let Some(path) = montgomery_audit {
+        assert!(path.is_absolute() && path.is_file());
+        command.env("DXP1_MONTGOMERY_AUDIT_BINARY", path);
     }
     let mut child = command
         .stdin(Stdio::piped())
@@ -144,7 +158,7 @@ impl DirectPublicCapsule {
         material: XmrDirectRecoveryMaterial,
         squarings: u64,
     ) -> Self {
-        Self::prepare_session(binary, material, squarings, None)
+        Self::prepare_session(binary, material, squarings, None, None)
     }
 
     #[allow(dead_code)]
@@ -160,7 +174,17 @@ impl DirectPublicCapsule {
         assert_ne!(*key, [0; 32]);
         write_private_new(authority, &key);
         drop(key);
-        Self::prepare_session(binary, material, squarings, Some(authority))
+        Self::prepare_session(binary, material, squarings, Some(authority), None)
+    }
+
+    #[allow(dead_code)]
+    pub fn prepare_with_montgomery_audit(
+        binary: &Path,
+        material: XmrDirectRecoveryMaterial,
+        squarings: u64,
+        montgomery_audit: &Path,
+    ) -> Self {
+        Self::prepare_session(binary, material, squarings, None, Some(montgomery_audit))
     }
 
     fn prepare_session(
@@ -168,6 +192,7 @@ impl DirectPublicCapsule {
         material: XmrDirectRecoveryMaterial,
         squarings: u64,
         authority: Option<&Path>,
+        montgomery_audit: Option<&Path>,
     ) -> Self {
         assert!(
             matches!(squarings, 200_000 | 10_000_000),
@@ -199,14 +224,17 @@ impl DirectPublicCapsule {
         );
         let setup = announced["setup"].as_str().unwrap();
         let setup_binding = hex(&Sha256::digest(setup.as_bytes()));
-        let (process, mut public_writer, mut public_reader) = spawn_with_authority(
+        let (process, mut public_writer, mut public_reader) = spawn_with_config(
             binary,
-            if authority.is_some() {
+            if montgomery_audit.is_some() {
+                "direct-prepare-montgomery-audit"
+            } else if authority.is_some() {
                 "direct-prepare-local-receipt"
             } else {
                 "direct-prepare"
             },
             authority,
+            montgomery_audit,
         );
         send(
             &mut public_writer,
@@ -253,6 +281,10 @@ impl DirectPublicCapsule {
         assert_eq!(ready["setup_verified_before_offer"], true);
         assert_eq!(ready["public_verifier_no_share_secret"], true);
         assert_eq!(ready["squarings"], squarings);
+        if montgomery_audit.is_some() {
+            assert_eq!(ready["non_reference_audit_evaluator"], true);
+            assert_eq!(ready["setup_relation_recomputed"], true);
+        }
         let verification_seconds = seconds(&ready, "proof_verification_seconds");
         let local_receipt = authority.map(|_| {
             assert_eq!(
@@ -278,7 +310,11 @@ impl DirectPublicCapsule {
             payload: payload.to_owned(),
             setup: setup.to_owned(),
             local_receipt,
-            restoration_report: json!({}),
+            restoration_report: if montgomery_audit.is_some() {
+                json!({"opening_evaluator":"openssl_montgomery_audit"})
+            } else {
+                json!({})
+            },
         }
     }
 

@@ -1,0 +1,19 @@
+{
+  "pid": 2704556,
+  "command": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "direct-pair-fast-race-audit",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-montgomery-bridge",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-montgomery-audit"
+  ],
+  "exit_code": 0,
+  "timed_out": false,
+  "wall_seconds": 83.29024619900156,
+  "timeout_seconds": 300,
+  "log": "FAST-RACE-AUDIT-1790526373283002881.log",
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  }
+}

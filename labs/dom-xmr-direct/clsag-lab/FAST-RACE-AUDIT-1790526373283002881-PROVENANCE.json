@@ -1,0 +1,24 @@
+{
+  "sha256": {
+    "examples/regtest_claim.rs": "70a9562d7f4232cbcddd5d06b990183ec705425b27169c26c58ecc5d23a2b338",
+    "examples/support/direct_recovery_bridge.rs": "0711eeb563d56d18460f09961d51d37f3f7a364b56a6e516f6d8e8b8be356c70",
+    "../recovery-audit/direct_dlog.go": "a840aa532686fc6a3c0d22174e98b7734989156d3481138d5d3495ec4d89d4ba",
+    "../recovery-audit/direct_dlog_cli.go": "f915f419ae43ff37741e961a7f8a8a49588048c2493a86eac52954e69177efeb",
+    "../recovery-audit/direct_fast_open_audit.go": "8953a56f0fed8402f1b56e9e72741c9727fbe57bb05bdb3be09efa9ce9043fe9",
+    "../recovery-audit/direct_montgomery_bridge.go": "046955b4a08c662b338e550fcb9a0f53a2b41bfb33b94531c73530d044d21d5d",
+    "../recovery-audit/direct_montgomery_audit.c": "1668c0b3f6abb7f5e221ece62a8ce67ebdeb58647e8488ee4dbdc0a12eb0725b",
+    "target/release/examples/regtest_claim": "f15490ecf7cede2374f9787a1a494b243b06965b8251070f93f5f2f7dd4524f3",
+    "target/recovery-research/direct-montgomery-bridge": "0ea26d039bce3fa0090ffcde7eec2b2ec9297dc9beb7a27f9d648dee2eca6252",
+    "target/recovery-research/direct-montgomery-audit": "d9e153d25218ba8afae2e92ab1cd46f0788878e541478839859cb56f1d6657cb"
+  },
+  "resource_pressure_before": {
+    "io": "some avg10=16.92 avg60=12.88 avg300=10.48 total=25940562741\nfull avg10=16.87 avg60=12.66 avg300=10.25 total=24705293455\n",
+    "memory": "some avg10=0.19 avg60=0.13 avg300=0.16 total=1678610093\nfull avg10=0.19 avg60=0.13 avg300=0.16 total=1583620213\n",
+    "cpu": "some avg10=0.00 avg60=0.07 avg300=0.10 total=1291441532\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+  },
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "scope": "Owned offline monerod and embedded DOM node; honest XMR release clock, native unspent probe, and durable journal intact; adversarial public capsule opener and refund-first network ordering."
+}

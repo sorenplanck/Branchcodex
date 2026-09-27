@@ -23,21 +23,29 @@ func (capsule *verifiedDirectCapsule) openFastAudit() ([32]byte, float64, error)
 	for i := int64(0); i < p.T.Int64(); i++ {
 		w.Mul(w, w).Mod(w, p.N)
 	}
+	scalar, err := capsule.decodeDelayedElement(w)
+	return scalar, time.Since(started).Seconds(), err
+}
+
+func (capsule *verifiedDirectCapsule) decodeDelayedElement(w *big.Int) ([32]byte, error) {
+	p := capsule.parameters
+	if p.Y != 2 || !unit(w, p.N) {
+		return [32]byte{}, fmt.Errorf("invalid delayed element")
+	}
 	// The verified policy requires Y=2. This is the j=1 specialization of
 	// pinned upstream SolvePuzzle's final Paillier extraction, without changing
 	// its residue convention. Reject a nonintegral quotient instead of rounding.
 	w.Exp(w, p.NExpYMinusOne, p.NExpY)
 	if w.ModInverse(w, p.NExpY) == nil {
-		return [32]byte{}, time.Since(started).Seconds(), fmt.Errorf("noninvertible delayed element")
+		return [32]byte{}, fmt.Errorf("noninvertible delayed element")
 	}
 	w.Mul(w, capsule.ciphertext.V).Mod(w, p.NExpY).Sub(w, big.NewInt(1))
 	value, remainder := new(big.Int), new(big.Int)
 	value.QuoRem(w, p.N, remainder)
 	if remainder.Sign() != 0 {
-		return [32]byte{}, time.Since(started).Seconds(), fmt.Errorf("nonintegral plaintext residue")
+		return [32]byte{}, fmt.Errorf("nonintegral plaintext residue")
 	}
-	scalar, err := capsule.decodePlaintext(value)
-	return scalar, time.Since(started).Seconds(), err
+	return capsule.decodePlaintext(value)
 }
 
 func init() {

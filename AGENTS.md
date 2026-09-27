@@ -933,3 +933,31 @@ Instrução explícita do operador, reiterada em 26/09/2026:
 
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.
+
+- Auditoria FAST-RACE de 27/09/2026: modo explícito
+  `direct-pair-fast-race-audit` no example usa verificador Go separado com
+  abertura C OpenSSL Montgomery. Producer não recebe configuração do avaliador;
+  setup e prova completos são verificados antes do funding. O participante
+  honesto mantém `PreparationGate`, consulta nativa de key image livre,
+  `AssumedXmrRecoveryWindow` e `InitialClaimJournal` durável antes da exposição.
+  Adversário usa somente sua share local e a share pública recuperada.
+- Ensaio owned offline PID2704556/Go+C PID2704623: saída0, total83,273 s,
+  abertura7,369 s, resolução XMR após exposição0,080 s. d=1790526437;
+  adaptors prontos d+10, clock/unspent aceitos d+17, divulgação/refund XMR
+  observado d+18, antes do mínimo suposto d+30. Refund XMR incluído e dois
+  outputs gastos; claim honesto rejeitado como gasto; assinatura perdedora
+  permitiu claim DOM altura7 e gasto altura8. O dono DOM original não recuperou
+  DOM nem recebeu XMR. `clsag-lab/FAST-RACE-AUDIT.md` e cinco JSONs
+  `FAST-RACE-AUDIT-1790526373283002881-*` guardam tempos/hash/PIDs/grupo vazio.
+- A ordem de entrega da transação completa ao peer antes de sua inclusão no
+  `monerod` é modelada pela callback de envio; não houve medição de relay P2P
+  ou interceptação de RPC privado. Aceitação/rejeição/inclusão e gastos são
+  nativos. Não declarar probabilidade de ataque na mainnet. O binário medido
+  marcou incorretamente `negative_control:true` num checkpoint; rótulo fonte
+  corrigido após medição sem alterar fluxo. Hashes do artefato correspondem
+  ao binário e fontes da rodada, não ao código após essa correção de rótulo.
+- O perfil30 s está refutado também por perda de atomicidade financiada sob
+  aquele escalonamento; não usá-lo em operações reais, não trocar30 por8 e
+  declarar segurança. Próximo trabalho obrigatório: substituir/fundamentar
+  mecanismo de recuperação e janelas, preservar a perna exclusiva DOM↔XMR,
+  integrar daemons e participantes independentes e provar segurança/prazo.

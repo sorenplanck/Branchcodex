@@ -5,7 +5,10 @@ de 10 milhões de quadraturas foi aberta em menos de oito segundos com
 OpenSSL, contra os 30 segundos mínimos adversariais assumidos pelo fixture.
 O perfil não pode autorizar operações reais. Os testes de assinaturas e
 retomadas anteriores permanecem válidos como testes funcionais; não comprovam
-atomicidade. Evidência: [auditoria de abertura](recovery-audit/FAST-OPEN-AUDIT.md).
+atomicidade. A [corrida nativa](clsag-lab/FAST-RACE-AUDIT.md) também reproduziu
+perda de atomicidade sob divulgação completa ao peer antes da inclusão XMR,
+mesmo com relógio, input livre e journal honestos aceitando o claim.
+Evidência da abertura: [auditoria de abertura](recovery-audit/FAST-OPEN-AUDIT.md).
 
 Proposta experimental, ainda não implementada como swap. O objetivo é criar
 um mecanismo novo, seguro e rápido, independente do executor atual, com a
