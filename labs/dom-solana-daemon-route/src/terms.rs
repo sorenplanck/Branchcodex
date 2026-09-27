@@ -160,7 +160,7 @@ pub struct ProvisionedPositionV1 {
 }
 
 /// The three pins the terms determine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProvisionedRouteTermsV1 {
     pub upstream_terms_digest: [u8; 32],
     pub downstream_terms_digest: [u8; 32],

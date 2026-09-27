@@ -84,7 +84,7 @@ pub struct SolanaChainFactsV1 {
 
 /// What provisioning the registry establishes, and what the bootstrap pins take
 /// from it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProvisionedSolanaRegistryV1 {
     pub network_id: [u8; 32],
     pub epoch: u64,

@@ -62,7 +62,18 @@ fn main() -> Result<(), String> {
         )?,
     ];
 
+    // The plan, so the admission step can carry the pins instead of recomputing them:
+    // provisioning generates a fresh condition scalar, so a rebuild would freeze different
+    // terms with different digests.
+    let plan_path = ceremony_dir.join("bootstrap-plan.json");
+    dom_solana_daemon_route::owner_only::write(
+        &plan_path,
+        &serde_json::to_vec_pretty(&route.plan)
+            .map_err(|error| format!("encode the plan: {error}"))?,
+    )?;
+
     println!("state_dir={}", state_dir.display());
+    println!("bootstrap_plan={}", plan_path.display());
     for (index, path) in plans.paths.iter().enumerate() {
         println!("plan_{index}={}", path.display());
     }

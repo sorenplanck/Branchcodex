@@ -130,7 +130,7 @@ pub struct RouteTimeInputV1<'a> {
 }
 
 /// The four pins the time artifacts determine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProvisionedRouteTimeV1 {
     pub time_policy_authority_set_digest: [u8; 32],
     pub time_evidence_authority_set_digest: [u8; 32],

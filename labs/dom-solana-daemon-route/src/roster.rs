@@ -36,7 +36,7 @@ use relay::SenderRoleV1;
 use sha2::{Digest, Sha256};
 
 /// The one pin this artifact determines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProvisionedRelayRosterV1 {
     /// Digest over both Relay wire contexts and roster snapshots.
     pub relay_binding_digest: [u8; 32],

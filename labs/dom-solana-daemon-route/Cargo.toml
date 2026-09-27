@@ -33,6 +33,10 @@ btc-crypto = { path = "../../crates/adapters/btc-crypto" }
 # not re-export.
 adapter-btc = { path = "../../crates/adapters/btc" }
 kaystra-core = { path = "../../crates/kaystra-core" }
+# `LegIdV1`, which names a route position for `solana_session`. The production feature is
+# selected to match what `dom-interopd/production` activates rather than unify `development`
+# in alongside it.
+route-executor = { path = "../../crates/route-executor", default-features = false, features = ["production"] }
 # `SenderRoleV1`, which the roster member carries and `dom-interopd` does not
 # re-export. Default features only: the fault-injection surface is not among them.
 relay = { path = "../../crates/relay" }
@@ -67,7 +71,13 @@ xmr-dleq-sigma = { path = "../../crates/adapters/xmr-dleq-sigma" }
 # public constructor and the capability handle it takes.
 dom-scriptless-identity-store = { path = "../../crates/dom-scriptless-identity-store" }
 cap-std = { version = "=4.0.2", default-features = false }
-# The ceremony plan is JSON, and its fields are exactly what this crate measures.
+# The ceremony plan is JSON, and its fields are exactly what this crate measures. The
+# bootstrap plan is serialized too: each provisioning generates a fresh condition scalar, so
+# the pins CANNOT be recomputed after the ceremony -- the plan has to survive between the
+# step that provisions the route and the step that admits it.
+# Unpinned minor, as the root workspace declares it: an exact pin invented here could name
+# a version that does not exist, and the derive surface this uses has been stable for years.
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.8"
 # The condition's secret scalar is generated when a position is established. Same

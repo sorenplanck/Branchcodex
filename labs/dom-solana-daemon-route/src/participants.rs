@@ -41,7 +41,7 @@ use dom_interopd::{
 use crate::terms::ProvisionedPositionV1;
 
 /// The one pin this artifact determines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProvisionedParticipantBindingsV1 {
     pub participant_bindings_digest: [u8; 32],
 }

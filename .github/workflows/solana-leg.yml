@@ -28,7 +28,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, offline, program, live]
+        options: [all, offline, program, live, ceremony]
   push:
     branches:
       - 'feat/solana-leg**'
@@ -324,17 +324,82 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  ceremony:
+    name: "Contracts bootstrap ceremony and route admission"
+    if: ${{ github.event_name == 'push' || inputs.suite == 'all' || inputs.suite == 'ceremony' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dom-solana-leg-ceremony
+          cache-on-failure: 'true'
+          workspaces: |
+            . -> target
+            labs/dom-solana-daemon-route -> target
+
+      - name: Build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+
+      # The ceremony command refuses a build that is not an operational artifact, and
+      # `operational_artifact = production && release && linux`. A debug binary declines
+      # before reading its plan.
+      - name: Release dom-interopd for the ceremony
+        run: |
+          cargo build --release --locked -p dom-interopd \
+            --no-default-features --features production --bin dom-interopd
+
+      - name: Provision the route, the ceremony plans and the secrets
+        run: |
+          set -euo pipefail
+          # The state directory is what the daemon validates; the provisioning directory
+          # holds what its layout does not declare and must not be inside it.
+          mkdir -p -m 700 "$RUNNER_TEMP/route" "$RUNNER_TEMP/provisioning" "$RUNNER_TEMP/ceremony"
+          cargo run --release --manifest-path labs/dom-solana-daemon-route/Cargo.toml \
+            --example provision_route -- \
+            "$RUNNER_TEMP/route" "$RUNNER_TEMP/provisioning" "$RUNNER_TEMP/ceremony" \
+            | tee "$RUNNER_TEMP/provisioned.env"
+
+      - name: Run the ceremony between the two parties
+        run: |
+          set -euo pipefail
+          mkdir -p -m 700 "$RUNNER_TEMP/ceremony-work"
+          DOM_INTEROPD_BIN="$PWD/target/release/dom-interopd" \
+          DOM_CEREMONY_DIR="$RUNNER_TEMP/ceremony" \
+          DOM_CEREMONY_WORK="$RUNNER_TEMP/ceremony-work" \
+          DOM_CONTRACTS_BOOTSTRAP_OUT="$RUNNER_TEMP/route/artifacts/contracts-bootstrap.v1" \
+            bash scripts/f8-run-contracts-ceremony-v1.sh | tee "$RUNNER_TEMP/ceremony.env"
+
+      # The mission, as two questions the daemon answers: can it start an operation that
+      # begins on Solana, and can it finish one that ends on Solana.
+      - name: Admit the route
+        run: |
+          set -euo pipefail
+          commit="$(sed -n 's/^commit_stage_digest=//p' "$RUNNER_TEMP/ceremony.env")"
+          reveal="$(sed -n 's/^reveal_stage_digest=//p' "$RUNNER_TEMP/ceremony.env")"
+          plan="$(sed -n 's/^bootstrap_plan=//p' "$RUNNER_TEMP/provisioned.env")"
+          cargo run --release --manifest-path labs/dom-solana-daemon-route/Cargo.toml \
+            --example admit_route -- "$RUNNER_TEMP/route" "$plan" "$commit" "$reveal"
+
   solana-leg-gate:
     name: Solana leg gate
     runs-on: ubuntu-latest
-    needs: [offline, program, live]
+    needs: [offline, program, live, ceremony]
     if: always()
     steps:
       # skipped is acceptable when a dispatch selects one suite; failure and
       # cancellation are not.
       - name: Require every selected suite to pass
         run: |
-          for r in "${{ needs.offline.result }}" "${{ needs.program.result }}" "${{ needs.live.result }}"; do
+          for r in "${{ needs.offline.result }}" "${{ needs.program.result }}" \
+                   "${{ needs.live.result }}" "${{ needs.ceremony.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "a selected Solana leg suite did not pass: $r"; exit 1 ;;

@@ -264,7 +264,7 @@ pub const ARTIFACT_PIN_COUNT: usize = 13;
 /// Grouped so a caller supplies them together and the type says what they are. Every
 /// one must be non-zero: `ProductionRoutePinsV1::validate` refuses a zero pin, which is
 /// the right refusal -- a zero owner id would fence nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RouteIdentitiesV1 {
     /// Composed route identity. Threaded into admission by the caller and checked for
     /// consistency against the route store's checkpoint; never derived from content.
@@ -282,7 +282,7 @@ pub struct RouteIdentitiesV1 {
 }
 
 /// One counterparty position of the route.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SolanaRoutePositionPlanV1 {
     /// Exact settlement bound by this position.
     pub settlement_id: [u8; 32],
@@ -295,7 +295,7 @@ pub struct SolanaRoutePositionPlanV1 {
 }
 
 /// Everything a caller chooses about the route.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SolanaRouteBootstrapPlanV1 {
     pub network_id: [u8; 32],
     pub route_id: [u8; 32],
