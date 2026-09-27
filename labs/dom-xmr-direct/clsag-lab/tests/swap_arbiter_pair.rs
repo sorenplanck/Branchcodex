@@ -304,6 +304,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         &refund_offer,
         &punish_offer,
         1,
+        2,
     )
     .unwrap();
     let directory = std::env::temp_dir().join(format!(
@@ -335,12 +336,36 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         .unwrap();
     journal.record_dom_release(&session_claim, 10).unwrap();
     journal.record_dom_settlement(&session_claim, 10).unwrap();
-    journal.record_xmr_settlement([4; 32]).unwrap();
-    assert!(journal.record_xmr_settlement([5; 32]).is_err());
+    assert!(journal.record_xmr_settlement([4; 32]).is_err());
+    assert!(journal
+        .record_dom_finality(&session_claim, 10, [3; 32], 10, [4; 32])
+        .is_err());
+    assert!(journal
+        .record_dom_finality(&session_claim, 10, [0; 32], 11, [4; 32])
+        .is_err());
+    let finality_depth = journal
+        .record_dom_finality(&session_claim, 10, [3; 32], 11, [4; 32])
+        .unwrap();
+    assert_eq!(finality_depth, 2);
+    journal.record_xmr_settlement([5; 32]).unwrap();
+    assert!(journal.record_xmr_settlement([6; 32]).is_err());
     drop(journal);
     let journal = ArbiterSessionJournal::open(&journal_path, binding.clone()).unwrap();
-    assert_eq!(journal.state().unwrap().xmr_settlement, Some([4; 32]));
+    let state = journal.state().unwrap();
+    assert_eq!(state.dom_finality.unwrap().confirmation_depth, 2);
+    assert_eq!(state.xmr_settlement, Some([5; 32]));
     drop(journal);
+    let changed_finality_policy = ArbiterSessionBinding::new(
+        CHAIN_ID,
+        &contract,
+        &shares,
+        &refund_offer,
+        &punish_offer,
+        1,
+        3,
+    )
+    .unwrap();
+    assert!(ArbiterSessionJournal::open(&journal_path, changed_finality_policy).is_err());
 
     let recovery_path = directory.join("recovery.wal");
     let mut recovery = ArbiterSessionJournal::create(&recovery_path, binding.clone()).unwrap();
@@ -355,6 +380,13 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
     recovery.record_dom_release(&session_refund, 11).unwrap();
     recovery.record_dom_settlement(&session_refund, 11).unwrap();
     assert!(recovery.record_xmr_settlement([8; 32]).is_err());
+    assert!(recovery
+        .record_dom_finality(&session_claim, 10, [9; 32], 12, [10; 32])
+        .is_err());
+    recovery
+        .record_dom_finality(&session_refund, 11, [9; 32], 12, [10; 32])
+        .unwrap();
+    assert!(recovery.record_xmr_settlement([8; 32]).is_err());
     drop(recovery);
 
     let bounded_path = directory.join("bounded.wal");
@@ -364,6 +396,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         &shares,
         &refund_offer,
         &punish_offer,
+        2,
         2,
     )
     .unwrap();

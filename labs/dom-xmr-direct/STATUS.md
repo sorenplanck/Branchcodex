@@ -103,6 +103,15 @@ A confirmação precisa repetir o mesmo hash dentro dessa margem. Isso impõe o
 cutoff ao participante honesto, mas não transforma a hipótese de inclusão em
 garantia da rede.
 
+O journal v3 acrescenta uma barreira entre a inclusão DOM e o gasto XMR. A
+política de confirmação entra no binding da sessão; o journal fixa os hashes
+do bloco do settlement e da ponta canônica, calcula a profundidade e recusa
+qualquer settlement XMR antes do mínimo. O ensaio usa duas confirmações, fecha
+e reabre o journal depois da finalização DOM e só então extrai a share e envia
+a transação Monero. Profundidade insuficiente, hash nulo e outra transação são
+recusados. Duas confirmações são uma política de teste contra reorg curto, não
+finalidade absoluta contra reorganizações mais profundas.
+
 Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos à
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
@@ -118,9 +127,11 @@ funcional de laboratório, não prontidão de produção nem garantia universal.
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
 oficial, roda formatação, testes, Clippy e build, e então executa Claim, Refund
-e Punish em paralelo com limite de 180 s por caso. Uma reprodução local dos
-mesmos comandos e do mesmo arquivo oficial passou em **98,73 s** de parede;
-desde `Ready`, os tempos foram **14,06 s**, **19,60 s** e **25,13 s**. A
+e Punish em paralelo com limite de 180 s por caso. Depois da barreira de duas
+confirmações DOM, uma reprodução local dos mesmos comandos e do mesmo arquivo
+oficial passou em **118,45 s** de parede; os casos completos levaram **107,02
+s**, **111,31 s** e **118,40 s**. Desde `Ready`, os tempos foram **20,68 s**,
+**24,92 s** e **31,51 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

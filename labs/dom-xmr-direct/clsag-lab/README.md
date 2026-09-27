@@ -18,7 +18,9 @@ reserva por uma transação Monero nativa.
 `examples/arbiter_regtest.rs` executa cada resultado através de um nó DOM e um
 `monerod` isolados. O journal durável exige recovery antes do funding, XMR
 confirmado e maduro antes de Claim, e grava os settlements canônicos das duas
-chains. O intervalo `Ready → Complete` falha automaticamente acima de 180 s.
+chains. Uma política ligada à sessão exige duas confirmações do settlement DOM
+antes de extrair a share e enviar a transação XMR. O intervalo
+`Ready → Complete` falha automaticamente acima de 180 s.
 Monero bloqueia outputs novos por dez blocos; portanto essa meta exige uma
 reserva preparada e madura. O tempo de preparação é medido separadamente.
 
@@ -31,13 +33,14 @@ python3 scripts/run_arbiter_matrix.py \
   --evidence-dir /diretorio/novo/de/evidencia
 ```
 
-A campanha validada terminou em 95,33 s de parede. Claim, Refund e Punish
-levaram 13,42 s, 19,79 s e 24,46 s desde `Ready`. Os registros completos e os
-limites atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
+A campanha mais recente terminou em 118,45 s de parede, já com a barreira de
+duas confirmações DOM. Claim, Refund e Punish levaram 20,68 s, 24,92 s e 31,51
+s desde `Ready`. Os registros completos e os limites atuais estão em
+`../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
 O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz essa matriz no
 GitHub com Monero 0.18.4.0 verificado por hash, limite de 180 s por caso e 20
-minutos para todo o job. A repetição local exata do workflow passou em 98,73 s
+minutos para todo o job. A repetição local exata do workflow passou em 118,45 s
 de parede e preserva os resultados como artefato quando executada no GitHub.
 
 ## Construção experimental

@@ -60,6 +60,7 @@ const SETTLEMENT_ID: [u8; 32] = [0x72; 32];
 const CONTEXT_HASH: [u8; 32] = [0x73; 32];
 const ARBITER_VALUE: u64 = 100_000_000;
 const FEE: u64 = 1_000_000;
+const MIN_DOM_CONFIRMATIONS: u64 = 2;
 
 struct ManagedDaemon(Child);
 
@@ -478,6 +479,7 @@ async fn funded_arbiter() -> FundedArbiter {
         &refund_offer,
         &punish_offer,
         1,
+        MIN_DOM_CONFIRMATIONS,
     )
     .unwrap();
     let mut journal =
@@ -751,6 +753,32 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
         .unwrap();
     assert_eq!(released_dom_id, settlement_admission.tx_hash);
     assert_eq!(durable_dom_id, settlement_admission.tx_hash);
+    assert!(setup.journal.record_xmr_settlement([1; 32]).is_err());
+    let finality_height = mine(&setup.node).await;
+    assert_eq!(
+        finality_height,
+        settlement_height + MIN_DOM_CONFIRMATIONS - 1
+    );
+    let settlement_block_hash = handle.get_block_hash_at_height(settlement_height).unwrap();
+    let finality_tip_hash = handle.get_block_hash_at_height(finality_height).unwrap();
+    assert_eq!(
+        observed_transaction(&setup, settlement_height, &settlement).await,
+        settlement
+    );
+    let dom_confirmation_depth = setup
+        .journal
+        .record_dom_finality(
+            &observed,
+            settlement_height,
+            settlement_block_hash,
+            finality_height,
+            finality_tip_hash,
+        )
+        .unwrap();
+    assert_eq!(dom_confirmation_depth, MIN_DOM_CONFIRMATIONS);
+    drop(setup.journal);
+    setup.journal =
+        ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
     let opening = offer
         .extract(
             &observed,
@@ -837,6 +865,10 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
         .unwrap();
     let durable_state = setup.journal.state().unwrap();
     assert_eq!(durable_state.dom_settlement.unwrap().path, outcome.path());
+    assert_eq!(
+        durable_state.dom_finality.unwrap().confirmation_depth,
+        MIN_DOM_CONFIRMATIONS
+    );
     assert_eq!(durable_state.xmr_settlement, Some(xmr_transaction_id));
     assert!(handle
         .get_utxo(branch.unsigned.inputs[0].commitment.as_bytes())
@@ -859,6 +891,9 @@ async fn exercise(monerod: PathBuf, outcome: Outcome) {
             "claim_offer_persisted_after_xmr_ready":true,
             "durable_ordering_journal_complete":true,
             "dom_release_recorded_before_submit":true,
+            "dom_finality_recorded_before_xmr_submit":true,
+            "dom_min_confirmations":MIN_DOM_CONFIRMATIONS,
+            "dom_confirmation_depth":dom_confirmation_depth,
             "dom_settlement_height":settlement_height,
             "xmr_reserve_amount":reserve_amount,
             "xmr_payment_amount":payment,

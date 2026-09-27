@@ -25,9 +25,9 @@ use crate::{
     arbiter_pair::VerifiedArbiterSharesV1, claim_resume::digest, native_dom::DomClaimOffer,
 };
 
-const MAGIC: &[u8] = b"DXA1/arbiter-session/v2\0";
+const MAGIC: &[u8] = b"DXA1/arbiter-session/v3\0";
 const HEADER_BODY: usize =
-    MAGIC.len() + 32 + 32 + 32 + SWAP_ARBITER_CONTRACT_SIZE + 32 + 32 + 32 + 33 + 8;
+    MAGIC.len() + 32 + 32 + 32 + SWAP_ARBITER_CONTRACT_SIZE + 32 + 32 + 32 + 33 + 8 + 8;
 const HEADER: usize = HEADER_BODY + 32;
 const MAX_FILE_BYTES: u64 = 4096;
 
@@ -58,6 +58,7 @@ pub struct ArbiterSessionBinding {
     joint_xmr_key: [u8; 32],
     claim_adaptor: [u8; 33],
     max_dom_inclusion_blocks: u64,
+    min_dom_confirmations: u64,
 }
 
 impl ArbiterSessionBinding {
@@ -68,6 +69,7 @@ impl ArbiterSessionBinding {
         refund_offer: &DomClaimOffer,
         punish_offer: &DomClaimOffer,
         max_dom_inclusion_blocks: u64,
+        min_dom_confirmations: u64,
     ) -> Result<Self, ArbiterSessionError> {
         let refund_bytes = refund_offer
             .to_swap_arbiter_resume_bytes()
@@ -90,6 +92,7 @@ impl ArbiterSessionBinding {
                 .map_err(|_| ArbiterSessionError::Binding)?
                 .to_compressed_bytes(),
             max_dom_inclusion_blocks,
+            min_dom_confirmations,
         };
         result.validate_offer(refund_offer, SwapArbiterPath::Refund, result.refund_offer)?;
         result.validate_offer(punish_offer, SwapArbiterPath::Punish, result.punish_offer)?;
@@ -149,6 +152,7 @@ impl ArbiterSessionBinding {
             || self.refund_offer == self.punish_offer
             || self.joint_xmr_key == [0; 32]
             || self.max_dom_inclusion_blocks == 0
+            || self.min_dom_confirmations == 0
         {
             return Err(ArbiterSessionError::Binding);
         }
@@ -163,6 +167,7 @@ impl ArbiterSessionBinding {
         bytes.extend(self.joint_xmr_key);
         bytes.extend(self.claim_adaptor);
         bytes.extend(self.max_dom_inclusion_blocks.to_le_bytes());
+        bytes.extend(self.min_dom_confirmations.to_le_bytes());
         debug_assert_eq!(bytes.len(), HEADER_BODY);
         bytes.extend(Sha256::digest(&bytes));
         Ok(bytes)
@@ -185,6 +190,13 @@ pub struct DomSettlement {
     pub transaction: ChainObservation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DomFinality {
+    pub block_hash: [u8; 32],
+    pub tip: ChainObservation,
+    pub confirmation_depth: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArbiterSessionState {
     pub dom_funding: Option<ChainObservation>,
@@ -192,6 +204,7 @@ pub struct ArbiterSessionState {
     pub claim_offer: Option<[u8; 32]>,
     pub dom_release: Option<DomSettlement>,
     pub dom_settlement: Option<DomSettlement>,
+    pub dom_finality: Option<DomFinality>,
     pub xmr_settlement: Option<[u8; 32]>,
 }
 
@@ -236,8 +249,9 @@ fn sync_parent(path: &Path) -> Result<(), ArbiterSessionError> {
 fn event_payload_len(tag: u8) -> Option<usize> {
     match tag {
         1 | 2 => Some(40),
-        3 | 6 => Some(32),
+        3 | 7 => Some(32),
         4 | 5 => Some(41),
+        6 => Some(72),
         _ => None,
     }
 }
@@ -424,8 +438,32 @@ impl ArbiterSessionJournal {
                 }
                 state.dom_settlement = Some(DomSettlement { path, transaction });
             }
-            6 if state.xmr_ready.is_some()
+            6 if state.dom_settlement.is_some()
+                && state.dom_finality.is_none()
+                && state.xmr_settlement.is_none() =>
+            {
+                let block_hash: [u8; 32] = payload[..32]
+                    .try_into()
+                    .map_err(|_| ArbiterSessionError::Corrupt)?;
+                let tip = nonzero_observation(&payload[32..])?;
+                let settlement = state.dom_settlement.unwrap();
+                let confirmation_depth = tip
+                    .height
+                    .checked_sub(settlement.transaction.height)
+                    .and_then(|depth| depth.checked_add(1))
+                    .ok_or(ArbiterSessionError::Denied)?;
+                if block_hash == [0; 32] || confirmation_depth < binding.min_dom_confirmations {
+                    return Err(ArbiterSessionError::Denied);
+                }
+                state.dom_finality = Some(DomFinality {
+                    block_hash,
+                    tip,
+                    confirmation_depth,
+                });
+            }
+            7 if state.xmr_ready.is_some()
                 && state.dom_settlement.is_some()
+                && state.dom_finality.is_some()
                 && state.xmr_settlement.is_none() =>
             {
                 let value: [u8; 32] = payload
@@ -562,8 +600,48 @@ impl ArbiterSessionJournal {
         &mut self,
         transaction: [u8; 32],
     ) -> Result<(), ArbiterSessionError> {
-        let mut event = vec![6];
+        let mut event = vec![7];
         event.extend(transaction);
         self.append(event)
+    }
+
+    /// Record that the exact DOM settlement remains canonical at the required
+    /// confirmation depth. The caller obtains both hashes from its DOM node;
+    /// XMR settlement remains forbidden until this event is durable.
+    pub fn record_dom_finality(
+        &mut self,
+        transaction: &Transaction,
+        settlement_height: u64,
+        block_hash: [u8; 32],
+        tip_height: u64,
+        tip_hash: [u8; 32],
+    ) -> Result<u64, ArbiterSessionError> {
+        let (path, transaction_id) =
+            self.validated_dom_transaction(transaction, settlement_height)?;
+        let settled = self
+            .state()?
+            .dom_settlement
+            .ok_or(ArbiterSessionError::Denied)?;
+        if settled.path != path
+            || settled.transaction.id != transaction_id
+            || settled.transaction.height != settlement_height
+            || block_hash == [0; 32]
+            || tip_hash == [0; 32]
+        {
+            return Err(ArbiterSessionError::Denied);
+        }
+        let confirmation_depth = tip_height
+            .checked_sub(settlement_height)
+            .and_then(|depth| depth.checked_add(1))
+            .ok_or(ArbiterSessionError::Denied)?;
+        if confirmation_depth < self.binding.min_dom_confirmations {
+            return Err(ArbiterSessionError::Denied);
+        }
+        let mut event = vec![6];
+        event.extend(block_hash);
+        event.extend(tip_hash);
+        event.extend(tip_height.to_le_bytes());
+        self.append(event)?;
+        Ok(confirmation_depth)
     }
 }

@@ -86,6 +86,15 @@ Isso impede fallback local para um caminho concorrente depois de divulgar uma
 share. A margem continua sendo uma hipótese explícita de liveness da chain;
 nenhum journal local pode obrigar mineradores a incluir a transação.
 
+A versão v3 não permite gastar XMR assim que o settlement DOM aparece no
+primeiro bloco. O mínimo de confirmações faz parte do binding imutável da
+sessão. O journal registra o bloco do settlement e uma ponta canônica que
+comprove a profundidade exigida; só depois aceita o settlement XMR. O ensaio
+financiado usa profundidade dois e recusa a tentativa anterior à finalização.
+Isso fecha o reorg de um bloco para a política adotada, mas não transforma duas
+confirmações probabilísticas em finalidade absoluta. Uma reorganização mais
+profunda continua dentro do modelo adversarial que precisa ser quantificado.
+
 Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto.
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo

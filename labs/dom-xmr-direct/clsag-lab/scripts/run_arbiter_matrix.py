@@ -23,6 +23,7 @@ REQUIRED_TRUE = (
     "claim_offer_persisted_after_xmr_ready",
     "durable_ordering_journal_complete",
     "dom_release_recorded_before_submit",
+    "dom_finality_recorded_before_xmr_submit",
     "prepared_mature_reserve_required_for_three_minute_target",
 )
 
@@ -69,6 +70,11 @@ def verify(outcome: str, result: dict) -> None:
         raise ValueError(f"whole isolated test outside 180 seconds: {total!r}")
     if result.get("xmr_default_lock_window_blocks") != 10:
         raise ValueError("unexpected XMR output lock window")
+    if result.get("dom_min_confirmations") != 2:
+        raise ValueError("unexpected DOM confirmation policy")
+    dom_depth = result.get("dom_confirmation_depth")
+    if type(dom_depth) is not int or dom_depth < result["dom_min_confirmations"]:
+        raise ValueError("DOM settlement was not final before XMR submission")
     expected_role = "xmr_owner" if outcome == "refund" else "dom_owner"
     if result.get("xmr_recipient_role") != expected_role:
         raise ValueError("XMR was delivered to the wrong economic role")
