@@ -114,6 +114,45 @@ of the two architectures DXP1 keeps is the operator's decision; this document on
 records that the leg satisfies the stated one today and would need §1's three
 additions for the other.
 
+## 4b. A constraint the daemon imposes on every leg, found while provisioning
+
+`RouteTimePolicyV2::from_registry` refuses a route whose two counterparty positions
+carry the same chain id:
+
+```rust
+if (!native_dom_xmr_v23
+    && upstream.counterparty_leg.chain_id == downstream.counterparty_leg.chain_id)
+```
+
+A daemon route is `counterparty <-> DOM <-> counterparty`, so this says: the two
+counterparty legs of one route are two chains. The single exception is the mainnet
+DOM/XMR profile, and it exists because on Monero the two roles genuinely sit on one
+chain -- which is why that profile carries an extra equality constraint between the two
+checkpoints to make it safe.
+
+Two consequences, and the second one is not about Solana:
+
+* A Solana route in both directions is `Solana(A) -> DOM -> Solana(B)`. Solana emits
+  into the hub at the upstream position and receives from it at the downstream one.
+  Both positions Solana, two clusters. `labs/dom-solana-daemon-route` provisions that
+  shape and refuses one cluster on both positions by name.
+* A **DOM<->Monero** route with both positions on one Monero chain needs
+  `from_registry_dom_xmr_v23`, not `from_registry`. Whoever provisions that leg has to
+  select that profile deliberately; the general one will refuse it, and the refusal
+  will arrive as `InvalidPolicy` from a component that mentions neither Monero nor the
+  route.
+
+Two further facts from the same reading, both of which a leg cannot supply on its own:
+
+* `terms.dom_leg.adapter_profile_hash` must equal
+  `route_time_anchor::resolved_dom_profile_digest_v1(&registry)`. It is a deployment
+  fact. This laboratory has no registry and derives its own stable value, so the field
+  is now an input of `LegPlanInputV1` rather than something the leg computes.
+* `validate_composition_registry_parts` requires the terms and the registry to agree
+  exactly on the DOM leg's chain, native asset and **finality**, and on each
+  counterparty leg's finality against its resolved chain profile. A leg that picks its
+  own finality policy will be refused by a route that declares another.
+
 ## 5. What this document is not
 
 It is not a plan to change code. The DOM-side modules this laboratory copied are

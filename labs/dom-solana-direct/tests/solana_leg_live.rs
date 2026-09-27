@@ -322,6 +322,14 @@ fn leg_input(
         SolanaAssetV1::NativeSol => None,
         SolanaAssetV1::LegacySpl { .. } => Some(account),
     };
+    // Hoisted: the DOM leg's adapter profile hash is derived from this same asset id,
+    // and computing it twice would let the two drift.
+    let dom_asset_id: [u8; 32] = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"DOM-SOLANA-DIRECT-LAB/dom-asset/v1\0");
+        hasher.update(dom_chain_id);
+        hasher.finalize().into()
+    };
     LegPlanInputV1 {
         settlement_id,
         session_id: {
@@ -338,12 +346,7 @@ fn leg_input(
         },
         solver_id: participant(&settlement_id, "solver").0,
         dom_chain_id,
-        dom_asset_id: {
-            let mut hasher = Sha256::new();
-            hasher.update(b"DOM-SOLANA-DIRECT-LAB/dom-asset/v1\0");
-            hasher.update(dom_chain_id);
-            hasher.finalize().into()
-        },
+        dom_asset_id,
         dom_amount_noms: RESERVE_VALUE - CLAIM_FEE,
         dom_beneficiary: participant(&settlement_id, "dom-receiver"),
         dom_refund_to: participant(&settlement_id, "dom-refund"),
@@ -352,6 +355,11 @@ fn leg_input(
             max_reorg_depth: 8,
         },
         dom_fee_max: CLAIM_FEE,
+        // No registry in this laboratory, so the leg's own stable derivation.
+        dom_leg_profile_hash: LegPlanInputV1::derived_dom_leg_profile_hash(
+            dom_chain_id,
+            dom_asset_id,
+        ),
         cluster_genesis: fixture.environment.genesis.0,
         solana_asset_id: {
             // Native SOL has no mint, so it is named by the cluster it is native

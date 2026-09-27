@@ -10,7 +10,10 @@
 #![allow(dead_code)]
 
 use dom_solana_daemon_route::{
-    registry::{provision as provision_registry, ProvisionedSolanaRegistryV1, SolanaChainFactsV1},
+    registry::{
+        provision as provision_registry, ProvisionedSolanaRegistryV1,
+        RegistryProvisioningInputV1, SolanaChainFactsV1,
+    },
     participants::provision as provision_participants,
     roster::provision as provision_roster,
     terms::{
@@ -28,11 +31,33 @@ pub const DOWNSTREAM_TERMS: &str = "artifacts/downstream-terms.v1";
 pub const RELAY_ROSTER: &str = "artifacts/relay-roster.v1";
 pub const PARTICIPANT_BINDINGS: &str = "artifacts/participant-bindings.v1";
 
-pub fn solana_facts() -> SolanaChainFactsV1 {
+/// A trusted second that is neither zero nor near an overflow, so the manifest's
+/// window, the policy's window and the two schedules can all be expressed relative to
+/// it. Fixed rather than read from the clock: a fixture whose artifacts change with
+/// the wall clock cannot be reasoned about when it fails.
+pub const NOW_SECONDS: u64 = 1_800_000_000;
+
+/// The two clusters, one per position.
+///
+/// They are DIFFERENT clusters, and not by preference: `RouteTimePolicyV2::from_registry`
+/// refuses a route whose two counterparty legs carry the same chain id unless the
+/// DOM/XMR mainnet profile is selected. So a Solana route in both directions is
+/// `Solana(A) -> DOM -> Solana(B)`.
+pub fn upstream_facts() -> SolanaChainFactsV1 {
     SolanaChainFactsV1 {
         genesis_hash: [0x7c; 32],
         escrow_program: [0x3c; 32],
         program_data_hash: [0x44; 32],
+        network: chain_profile::SolanaNetworkV1::LocalValidator,
+        max_fee_lamports: 50_000,
+    }
+}
+
+pub fn downstream_facts() -> SolanaChainFactsV1 {
+    SolanaChainFactsV1 {
+        genesis_hash: [0x8d; 32],
+        escrow_program: [0x4e; 32],
+        program_data_hash: [0x55; 32],
         network: chain_profile::SolanaNetworkV1::LocalValidator,
         max_fee_lamports: 50_000,
     }
@@ -65,14 +90,15 @@ pub struct Provisioned {
     pub plan: SolanaRouteBootstrapPlanV1,
     pub upstream: SettlementTermsV1,
     pub downstream: SettlementTermsV1,
-    pub solana_chain_id: [u8; 32],
     pub dom_chain_id: [u8; 32],
     pub dom_asset_id: [u8; 32],
     /// The established positions, kept whole: the participant bindings are built
     /// from these, and only these carry the profile and the DLEQ binding.
     pub upstream_setup: ProvisionedPositionV1,
     pub downstream_setup: ProvisionedPositionV1,
-    pub facts: SolanaChainFactsV1,
+    /// The two clusters, as the registry entries were built from them.
+    pub upstream_facts: SolanaChainFactsV1,
+    pub downstream_facts: SolanaChainFactsV1,
     /// The provisioned registry itself, so a test can rebuild the plan with only the
     /// artifacts its own subject depends on and assert what that one artifact adds.
     pub registry: ProvisionedSolanaRegistryV1,
@@ -84,15 +110,22 @@ pub fn provision_all() -> Provisioned {
     // path role of the daemon's layout.
     let provisioning = tempfile::tempdir().expect("a private provisioning directory");
     let leg_store_dir = provisioning.path().join("leg");
-    let facts = solana_facts();
-    let registry = provision_registry(
-        directory.path(),
-        "artifacts/registry.v1.sqlite3",
-        "artifacts/registry-authorities.v1",
-        NETWORK,
-        7,
-        &facts,
-    )
+    let upstream_facts = upstream_facts();
+    let downstream_facts = downstream_facts();
+    let registry = provision_registry(&RegistryProvisioningInputV1 {
+        state_dir: directory.path(),
+        registry_relative: "artifacts/registry.v1.sqlite3",
+        authorities_relative: "artifacts/registry-authorities.v1",
+        network_id: NETWORK,
+        epoch: 7,
+        now_seconds: NOW_SECONDS,
+        // Wide enough that the route-time policy's own window fits inside it, which the
+        // policy requires of the manifest that authorises it.
+        valid_from_offset_seconds: 86_400,
+        valid_until_offset_seconds: 86_400,
+        upstream: &upstream_facts,
+        downstream: &downstream_facts,
+    })
     .expect("the registry provisions");
 
     let input = RouteTermsInputV1 {
@@ -100,20 +133,23 @@ pub fn provision_all() -> Provisioned {
         upstream_relative: UPSTREAM_TERMS,
         downstream_relative: DOWNSTREAM_TERMS,
         registry: &registry,
-        solana: &facts,
+        upstream_solana: &upstream_facts,
+        downstream_solana: &downstream_facts,
         provisioning_dir: &leg_store_dir,
         upstream: position(0x11),
         downstream: position(0x22),
-        now_seconds: 1_800_000_000,
+        now_seconds: NOW_SECONDS,
         dom_anchor_height: 1,
     };
     let (terms, positions) = provision_terms(&input).expect("both positions establish");
-    let solana_chain_id = registry.solana_chain_id;
     let dom_chain_id = registry.dom_chain_id;
     let dom_asset_id = registry.dom_asset_id;
-    let plan = SolanaRouteBootstrapPlanV1::both_positions_on_cluster(facts.genesis_hash)
-        .with_registry(registry)  // Copy, so the value above stays usable
-        .with_terms(terms);
+    let plan = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        upstream_facts.genesis_hash,
+        downstream_facts.genesis_hash,
+    )
+    .with_registry(registry) // Copy, so the value above stays usable
+    .with_terms(terms);
     let [upstream, downstream] = positions;
 
     // The roster is a function of the frozen terms, so it is provisioned after them
@@ -158,10 +194,10 @@ pub fn provision_all() -> Provisioned {
         registry,
         upstream_setup: upstream.clone(),
         downstream_setup: downstream.clone(),
-        facts,
+        upstream_facts,
+        downstream_facts,
         upstream: upstream.terms,
         downstream: downstream.terms,
-        solana_chain_id,
         dom_chain_id,
         dom_asset_id,
     }

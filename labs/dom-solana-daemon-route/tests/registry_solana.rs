@@ -1,53 +1,75 @@
-//! The registry artifact: a signed manifest carrying one Solana chain, installed
-//! into the store the daemon opens, with the authority bundle beside it.
+//! The registry artifact: a signed manifest carrying the DOM hub and the two Solana
+//! clusters, installed into the store the daemon opens, with the authority bundle
+//! beside it.
 //!
 //! What this establishes is that the first artifact of the bootstrap exists and is
 //! self-consistent: the manifest validates, the digest the store installed is the
-//! digest that was signed, and the plan's pins stop being labels for the four
-//! values the registry determines.
+//! digest that was signed, and the plan's pins stop being labels for the four values
+//! the registry determines.
+//!
+//! Two clusters, because a route has two counterparty positions and
+//! `RouteTimePolicyV2::from_registry` refuses a pair that shares a chain id unless
+//! the DOM/XMR mainnet profile is selected. One of these tests asserts that refusal
+//! directly, at the point where this crate can still explain it, rather than letting
+//! it surface later as `InvalidPolicy` from a component that knows nothing about
+//! Solana.
 
+mod common;
+
+use common::{downstream_facts, upstream_facts, NETWORK, NOW_SECONDS};
 use dom_solana_daemon_route::{
-    registry::{provision, SolanaChainFactsV1},
+    registry::{provision, RegistryProvisioningInputV1, SolanaChainFactsV1},
     SolanaRouteBootstrapPlanV1,
 };
 
-/// The three facts a live cluster supplies. The values are stand-ins here; the leg
-/// laboratory reads the real ones from its harness and its attestation.
-fn solana_facts() -> SolanaChainFactsV1 {
-    SolanaChainFactsV1 {
-        genesis_hash: [0x7c; 32],
-        escrow_program: [0x3c; 32],
-        program_data_hash: [0x44; 32],
-        network: chain_profile::SolanaNetworkV1::LocalValidator,
-        max_fee_lamports: 50_000,
+fn input<'a>(
+    directory: &'a std::path::Path,
+    upstream: &'a SolanaChainFactsV1,
+    downstream: &'a SolanaChainFactsV1,
+) -> RegistryProvisioningInputV1<'a> {
+    RegistryProvisioningInputV1 {
+        state_dir: directory,
+        registry_relative: "artifacts/registry.v1.sqlite3",
+        authorities_relative: "artifacts/registry-authorities.v1",
+        network_id: NETWORK,
+        epoch: 7,
+        now_seconds: NOW_SECONDS,
+        valid_from_offset_seconds: 86_400,
+        valid_until_offset_seconds: 86_400,
+        upstream,
+        downstream,
     }
 }
 
-const NETWORK: [u8; 32] = [0x90; 32];
-
 #[test]
-fn a_signed_registry_with_one_solana_chain_installs_and_reports_its_digest() {
+fn a_signed_registry_with_both_solana_clusters_installs_and_reports_its_digests() {
     let directory = tempfile::tempdir().expect("a private working directory");
-    let facts = solana_facts();
-    let provisioned = provision(
-        directory.path(),
-        "artifacts/registry.v1.sqlite3",
-        "artifacts/registry-authorities.v1",
-        NETWORK,
-        7,
-        &facts,
-    )
-    .expect("the registry provisions");
+    let up = upstream_facts();
+    let down = downstream_facts();
+    let provisioned =
+        provision(&input(directory.path(), &up, &down)).expect("the registry provisions");
 
     assert_eq!(provisioned.network_id, NETWORK);
     assert_eq!(provisioned.epoch, 7);
-    assert_eq!(provisioned.solana_chain_id, facts.genesis_hash);
+    assert_eq!(provisioned.upstream_chain_id, up.genesis_hash);
+    assert_eq!(provisioned.downstream_chain_id, down.genesis_hash);
     assert_ne!(provisioned.manifest_digest, [0; 32]);
     assert_ne!(provisioned.authority_set_digest, [0; 32]);
+    // Measured from the installed registry, not derived here. Both terms must carry
+    // it as their DOM leg's adapter profile hash or the route-time policy refuses
+    // them with RegistryMismatch.
+    assert_ne!(provisioned.dom_profile_digest, [0; 32]);
     assert_ne!(
-        provisioned.dom_chain_id, provisioned.solana_chain_id,
-        "the DOM hub and the Solana position are the same chain"
+        provisioned.dom_chain_id, provisioned.upstream_chain_id,
+        "a counterparty position may not sit on the DOM hub's own chain"
     );
+    assert_ne!(
+        provisioned.dom_chain_id, provisioned.downstream_chain_id,
+        "a counterparty position may not sit on the DOM hub's own chain"
+    );
+    // The window the policy's own window has to fit inside.
+    assert!(provisioned.valid_from_seconds < NOW_SECONDS);
+    assert!(provisioned.expires_at_seconds > NOW_SECONDS);
     assert!(
         directory.path().join("artifacts/registry.v1.sqlite3").exists(),
         "the registry store was not created where the layout says it is"
@@ -61,20 +83,38 @@ fn a_signed_registry_with_one_solana_chain_installs_and_reports_its_digest() {
     );
 }
 
+/// The refusal that shaped this route.
+///
+/// A route whose two counterparty positions sit on ONE cluster cannot be authorised:
+/// `RouteTimePolicyV2::from_registry` rejects it, and the exception carved out for
+/// DOM/XMR mainnet exists because on Monero the two roles genuinely share one chain
+/// and carry an extra equality constraint to make that safe. Refusing here, where the
+/// two clusters are named, says so in terms of the thing the caller passed.
+#[test]
+fn one_cluster_on_both_positions_is_refused_with_the_reason() {
+    let directory = tempfile::tempdir().expect("a private working directory");
+    let up = upstream_facts();
+    let same = upstream_facts();
+    let error = provision(&input(directory.path(), &up, &same))
+        .expect_err("one cluster on both positions is not a route the daemon can admit");
+    assert!(
+        error.contains("different clusters"),
+        "the refusal must name the reason, not just fail: {error}"
+    );
+}
+
 #[test]
 fn binding_the_registry_turns_four_pins_into_measurements() {
     let directory = tempfile::tempdir().expect("a private working directory");
-    let provisioned = provision(
-        directory.path(),
-        "artifacts/registry.v1.sqlite3",
-        "artifacts/registry-authorities.v1",
-        NETWORK,
-        7,
-        &solana_facts(),
-    )
-    .expect("the registry provisions");
+    let up = upstream_facts();
+    let down = downstream_facts();
+    let provisioned =
+        provision(&input(directory.path(), &up, &down)).expect("the registry provisions");
 
-    let bare = SolanaRouteBootstrapPlanV1::both_positions_on_cluster([0x7c; 32]);
+    let bare = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        up.genesis_hash,
+        down.genesis_hash,
+    );
     assert_eq!(bare.measured_pin_count(), 0);
     let bound = bare.with_registry(provisioned);
     assert_eq!(bound.measured_pin_count(), 4);
@@ -90,17 +130,15 @@ fn binding_the_registry_turns_four_pins_into_measurements() {
 #[test]
 fn a_plan_bound_to_a_registry_still_encodes_its_manifest() {
     let directory = tempfile::tempdir().expect("a private working directory");
-    let provisioned = provision(
-        directory.path(),
-        "artifacts/registry.v1.sqlite3",
-        "artifacts/registry-authorities.v1",
-        NETWORK,
-        7,
-        &solana_facts(),
+    let up = upstream_facts();
+    let down = downstream_facts();
+    let provisioned =
+        provision(&input(directory.path(), &up, &down)).expect("the registry provisions");
+    let plan = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        up.genesis_hash,
+        down.genesis_hash,
     )
-    .expect("the registry provisions");
-    let plan = SolanaRouteBootstrapPlanV1::both_positions_on_cluster([0x7c; 32])
-        .with_registry(provisioned);
+    .with_registry(provisioned);
     let written = plan
         .write_manifests(directory.path())
         .expect("both manifests are written with measured registry pins");

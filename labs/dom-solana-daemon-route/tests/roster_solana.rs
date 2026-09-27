@@ -126,8 +126,9 @@ fn one_member_initiates_and_the_other_solves() {
 #[test]
 fn binding_the_roster_turns_one_more_pin_into_a_measurement() {
     let provisioned = provision_all();
-    let before = SolanaRouteBootstrapPlanV1::both_positions_on_cluster(
-        provisioned.facts.genesis_hash,
+    let before = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        provisioned.upstream_facts.genesis_hash,
+        provisioned.downstream_facts.genesis_hash,
     )
     .with_registry(provisioned.registry)
     .with_terms(provisioned.plan.terms.expect("the provisioned terms"));

@@ -97,8 +97,10 @@ fn the_decoded_bundle_is_the_two_positions_that_were_established() {
 #[test]
 fn each_binding_agrees_with_the_registry_and_not_merely_with_itself() {
     let provisioned = provision_all();
-    let facts = provisioned.facts;
-    for setup in [&provisioned.upstream_setup, &provisioned.downstream_setup] {
+    for (setup, facts) in [
+        (&provisioned.upstream_setup, provisioned.upstream_facts),
+        (&provisioned.downstream_setup, provisioned.downstream_facts),
+    ] {
         assert_eq!(setup.profile.program_id.0, facts.escrow_program);
         assert_eq!(setup.binding.program_data_hash, facts.program_data_hash);
         assert_eq!(setup.profile.network as u8, facts.network as u8);

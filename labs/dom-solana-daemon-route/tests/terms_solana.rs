@@ -78,11 +78,14 @@ fn the_scope_pin_is_the_ordered_pair_and_not_either_alone() {
 }
 
 #[test]
-fn both_positions_name_the_solana_chain_the_registry_declares() {
+fn each_position_names_the_cluster_the_registry_declares_for_it() {
     let provisioned = provision_all();
-    for terms in [&provisioned.upstream, &provisioned.downstream] {
+    for (terms, facts) in [
+        (&provisioned.upstream, provisioned.upstream_facts),
+        (&provisioned.downstream, provisioned.downstream_facts),
+    ] {
         assert_eq!(
-            terms.counterparty_leg.chain_id.0, provisioned.solana_chain_id,
+            terms.counterparty_leg.chain_id.0, facts.genesis_hash,
             "the daemon resolves the position's chain by this id; a mismatch resolves nothing"
         );
         assert_eq!(
@@ -90,9 +93,17 @@ fn both_positions_name_the_solana_chain_the_registry_declares() {
             kaystra_core::types::LockMechanism::CrossCurveConditionLock
         );
     }
+    // The route-time policy refuses two counterparty legs that share a chain id, so
+    // this inequality is not incidental to the fixture: it is the shape of the route.
+    assert_ne!(
+        provisioned.upstream.counterparty_leg.chain_id,
+        provisioned.downstream.counterparty_leg.chain_id,
+        "RouteTimePolicyV2::from_registry refuses a route whose counterparty positions \
+         share a chain unless the DOM/XMR mainnet profile is selected"
+    );
     assert_ne!(
         provisioned.upstream.settlement_id, provisioned.downstream.settlement_id,
-        "a route is two distinct settlements even on one cluster"
+        "a route is two distinct settlements"
     );
     assert_ne!(
         provisioned.upstream.session_id,
@@ -190,8 +201,9 @@ fn binding_the_terms_turns_three_more_pins_into_measurements() {
     let provisioned = provision_all();
     let pins = provisioned.plan.terms.expect("the provisioned terms");
 
-    let registry_only = SolanaRouteBootstrapPlanV1::both_positions_on_cluster(
-        provisioned.facts.genesis_hash,
+    let registry_only = SolanaRouteBootstrapPlanV1::both_positions_on_solana(
+        provisioned.upstream_facts.genesis_hash,
+        provisioned.downstream_facts.genesis_hash,
     )
     .with_registry(provisioned.registry);
     assert_eq!(registry_only.measured_pin_count(), 4);

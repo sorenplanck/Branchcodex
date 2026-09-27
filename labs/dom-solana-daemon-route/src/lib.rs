@@ -17,7 +17,7 @@
 //! cannot be handed to the daemon without one, for any chain. This crate is that
 //! provisioner for the Solana positions.
 //!
-//! # Why both positions are Solana
+//! # Why both positions are Solana, and why they are two clusters
 //!
 //! A daemon route is `counterparty <-> DOM <-> counterparty`: the family enum has
 //! no `Dom` variant and the bootstrap carries exactly two legs. A single
@@ -26,6 +26,27 @@
 //! Bitcoin and Monero legs: it exercises the Solana settlement face in both
 //! positions and waits for nobody. When another leg is ready, its owner replaces
 //! one position and nothing here has to change.
+//!
+//! The two positions sit on two DIFFERENT clusters, and that is a constraint the
+//! daemon imposes rather than a choice made here. `RouteTimePolicyV2::from_registry`
+//! refuses a route whose two counterparty legs carry the same chain id:
+//!
+//! ```text
+//! if (!native_dom_xmr_v23
+//!     && upstream.counterparty_leg.chain_id == downstream.counterparty_leg.chain_id)
+//! ```
+//!
+//! The one profile that admits a shared counterparty chain is the mainnet DOM/XMR
+//! one, and it exists because on Monero the two roles genuinely sit on a single chain
+//! -- which is why it carries an extra equality constraint between the two
+//! checkpoints to make that safe. A general route's two counterparty positions are
+//! two chains. So a Solana route in both directions is `Solana(A) -> DOM -> Solana(B)`:
+//! Solana emits into the hub at the upstream position and receives from it at the
+//! downstream one, both through the daemon, with no other chain family involved.
+//!
+//! This also constrains the other legs, and it is worth saying once here: a
+//! DOM<->Monero route with both positions on one Monero chain needs the v23 profile,
+//! not this one.
 //!
 //! # What the bytes are, and what they are not
 //!
@@ -188,24 +209,32 @@ pub struct SolanaRouteBootstrapPlanV1 {
 }
 
 impl SolanaRouteBootstrapPlanV1 {
-    /// A route with a Solana position on both sides of the DOM hub, for one
-    /// cluster.
+    /// A route with a Solana position on both sides of the DOM hub.
     ///
-    /// The two positions differ in every identifier the daemon checks, because a
-    /// route is two distinct settlements even when both sit on the same cluster.
-    pub fn both_positions_on_cluster(cluster_genesis: [u8; 32]) -> Self {
+    /// The two positions differ in every identifier the daemon checks, and they sit on
+    /// two DIFFERENT clusters. That is not a preference:
+    /// `RouteTimePolicyV2::from_registry` refuses a route whose two counterparty legs
+    /// carry the same chain id unless the DOM/XMR mainnet profile is selected, and
+    /// that profile exists because on Monero the two roles genuinely share one chain.
+    /// A general route's two counterparty positions are two chains, so a Solana route
+    /// in both directions is `Solana(A) -> DOM -> Solana(B)`: Solana emits at one end
+    /// and receives at the other, both through the hub.
+    pub fn both_positions_on_solana(
+        upstream_genesis: [u8; 32],
+        downstream_genesis: [u8; 32],
+    ) -> Self {
         Self {
             network_id: placeholder("network-id"),
             route_id: placeholder("route-id"),
             upstream: SolanaRoutePositionPlanV1 {
                 settlement_id: placeholder("upstream-settlement-id"),
                 session_id: placeholder("upstream-session-id"),
-                chain_id: cluster_genesis,
+                chain_id: upstream_genesis,
             },
             downstream: SolanaRoutePositionPlanV1 {
                 settlement_id: placeholder("downstream-settlement-id"),
                 session_id: placeholder("downstream-session-id"),
-                chain_id: cluster_genesis,
+                chain_id: downstream_genesis,
             },
             registry: None,
             terms: None,

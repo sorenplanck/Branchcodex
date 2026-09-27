@@ -132,6 +132,13 @@ pub struct LegPlanInputV1 {
     pub dom_refund_to: ParticipantId,
     pub dom_finality: FinalityPolicyV1,
     pub dom_fee_max: u64,
+    /// Digest of the adapter profile that interprets the DOM leg.
+    ///
+    /// A route provisioned against a daemon must pass the digest its registry
+    /// derives; a standalone laboratory passes
+    /// [`LegPlanInputV1::derived_dom_leg_profile_hash`]. It is an input rather than a
+    /// derivation because only the first of those two is authority.
+    pub dom_leg_profile_hash: [u8; 32],
     // ── Solana leg ──────────────────────────────────────────────────────────
     pub cluster_genesis: [u8; 32],
     pub solana_asset_id: [u8; 32],
@@ -164,11 +171,20 @@ pub struct LegPlanInputV1 {
 }
 
 impl LegPlanInputV1 {
-    fn dom_leg_profile_hash(&self) -> [u8; 32] {
+    /// The value this laboratory uses when no deployment names one.
+    ///
+    /// The DOM leg's adapter profile hash is a DEPLOYMENT fact, not something a leg
+    /// may invent: a daemon route derives it from its authenticated registry with
+    /// `route_time_anchor::resolved_dom_profile_digest_v1`, and refuses terms that
+    /// carry anything else. This laboratory has no registry, so it derives a stable
+    /// value from the DOM chain and asset instead -- which is why the field is an
+    /// input now and this function only supplies the default for a caller that has
+    /// nothing better.
+    pub fn derived_dom_leg_profile_hash(dom_chain_id: [u8; 32], dom_asset_id: [u8; 32]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(DOM_LEG_PROFILE_DOMAIN);
-        hasher.update(self.dom_chain_id);
-        hasher.update(self.dom_asset_id);
+        hasher.update(dom_chain_id);
+        hasher.update(dom_asset_id);
         hasher.finalize().into()
     }
 
@@ -237,7 +253,7 @@ impl LegPlanInputV1 {
                     value: schedule.dom_refund_height.0,
                 },
                 finality: self.dom_finality,
-                adapter_profile_hash: self.dom_leg_profile_hash(),
+                adapter_profile_hash: self.dom_leg_profile_hash,
             },
             counterparty_leg: LegTermsV1 {
                 role: LegRole::Counterparty,

@@ -15,10 +15,13 @@ use dom_solana_daemon_route::SolanaRouteBootstrapPlanV1;
 
 /// Stands in for a cluster genesis hash. Any nonzero value works here; the live
 /// leg reads the real one from its harness.
-const CLUSTER: [u8; 32] = [0x7c; 32];
+/// The two clusters the route's two counterparty positions sit on. Different, because
+/// the route-time policy refuses a pair that shares a chain id.
+const UPSTREAM_CLUSTER: [u8; 32] = [0x7c; 32];
+const DOWNSTREAM_CLUSTER: [u8; 32] = [0x8d; 32];
 
 fn plan() -> SolanaRouteBootstrapPlanV1 {
-    SolanaRouteBootstrapPlanV1::both_positions_on_cluster(CLUSTER)
+    SolanaRouteBootstrapPlanV1::both_positions_on_solana(UPSTREAM_CLUSTER, DOWNSTREAM_CLUSTER)
 }
 
 #[test]

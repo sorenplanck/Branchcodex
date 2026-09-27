@@ -116,13 +116,16 @@ pub struct RouteTermsInputV1<'a> {
     pub upstream_relative: &'a str,
     /// The layout's own relative path for `ProductionPathRoleV1::DownstreamTerms`.
     pub downstream_relative: &'a str,
-    /// The registry these terms must agree with: it names the DOM hub, the cluster
-    /// and both native assets.
+    /// The registry these terms must agree with: it names the DOM hub, both clusters
+    /// and every native asset.
     pub registry: &'a ProvisionedSolanaRegistryV1,
-    /// The cluster facts the registry entry was built from. The escrow program id
-    /// and the program-data hash are re-checked against the registry by the daemon,
-    /// so they are taken from the same place here.
-    pub solana: &'a SolanaChainFactsV1,
+    /// The cluster the upstream position settles on, exactly as the registry entry was
+    /// built from it. The escrow program id and the program-data hash are re-checked
+    /// against the registry by the daemon, so they are taken from the same place here.
+    pub upstream_solana: &'a SolanaChainFactsV1,
+    /// The cluster the downstream position settles on. A different one: the route-time
+    /// policy refuses two counterparty legs that share a chain.
+    pub downstream_solana: &'a SolanaChainFactsV1,
     /// The position that begins on Solana.
     pub upstream: SolanaPositionTermsPlanV1,
     /// The position that ends on Solana.
@@ -196,6 +199,9 @@ fn profile(
 fn plan_input(
     position: &SolanaPositionTermsPlanV1,
     input: &RouteTermsInputV1<'_>,
+    solana: &SolanaChainFactsV1,
+    solana_chain_id: [u8; 32],
+    solana_asset_id: [u8; 32],
     chosen_deadline: ScheduleAnchorV1,
 ) -> LegPlanInputV1 {
     LegPlanInputV1 {
@@ -212,8 +218,11 @@ fn plan_input(
         // whose terms declare a finality the registry does not.
         dom_finality: dom_finality(),
         dom_fee_max: 1_000,
-        cluster_genesis: input.registry.solana_chain_id,
-        solana_asset_id: input.registry.solana_asset_id,
+        // Measured from the installed registry, never derived here: the route-time
+        // policy refuses terms whose DOM leg carries any other value.
+        dom_leg_profile_hash: input.registry.dom_profile_digest,
+        cluster_genesis: solana_chain_id,
+        solana_asset_id,
         asset: SolanaAssetV1::NativeSol,
         lamports: position.accounts.amount,
         funder: position.accounts.funder,
@@ -224,7 +233,7 @@ fn plan_input(
         refund_token_account: None,
         solana_finality: solana_finality(),
         solana_fee_max: 100_000,
-        program_data_hash: input.solana.program_data_hash,
+        program_data_hash: solana.program_data_hash,
         anchor: AssumedDomAnchor::new(
             BlockHeight(input.dom_anchor_height),
             Timestamp(input.now_seconds),
@@ -255,7 +264,10 @@ fn derived(domain: &[u8], seed: &[u8; 32]) -> [u8; 32] {
 pub fn provision(
     input: &RouteTermsInputV1<'_>,
 ) -> Result<(ProvisionedRouteTermsV1, [ProvisionedPositionV1; 2]), String> {
-    let profile = profile(input.solana)?;
+    // One profile per cluster: the profile commits to the escrow program id, and the
+    // two clusters run their own deployment of it.
+    let upstream_profile = profile(input.upstream_solana)?;
+    let downstream_profile = profile(input.downstream_solana)?;
     // The upstream position begins on Solana, so its DOM refund height is the
     // chosen anchor; the downstream ends on Solana, so its escrow deadline is.
     // Each order requires the LATER deadline for whoever claims second, and
@@ -276,7 +288,10 @@ pub fn provision(
     // leaving the first claimant no window at all.
     let upstream = establish(
         input,
-        &profile,
+        &upstream_profile,
+        input.upstream_solana,
+        input.registry.upstream_chain_id,
+        input.registry.upstream_asset_id,
         &input.upstream,
         RelativeDeadlineV1::DomRefundBlocksAhead(600)
             .resolve(&anchor, now)
@@ -285,7 +300,10 @@ pub fn provision(
     )?;
     let downstream = establish(
         input,
-        &profile,
+        &downstream_profile,
+        input.downstream_solana,
+        input.registry.downstream_chain_id,
+        input.registry.downstream_asset_id,
         &input.downstream,
         RelativeDeadlineV1::EscrowRefundSecondsAhead(3_600)
             .resolve(&anchor, now)
@@ -315,9 +333,13 @@ pub fn provision(
 }
 
 /// Establish one position through the leg laboratory, offline.
+#[allow(clippy::too_many_arguments)]
 fn establish(
     input: &RouteTermsInputV1<'_>,
     profile: &SolanaAdapterProfileV1,
+    solana: &SolanaChainFactsV1,
+    solana_chain_id: [u8; 32],
+    solana_asset_id: [u8; 32],
     position: &SolanaPositionTermsPlanV1,
     chosen_deadline: ScheduleAnchorV1,
     label: &str,
@@ -329,7 +351,14 @@ fn establish(
             .join(format!("solana-setup-{label}.sqlite3")),
     )
     .map_err(|error| format!("{label} setup store: {error:?}"))?;
-    let plan = plan_input(position, input, chosen_deadline);
+    let plan = plan_input(
+        position,
+        input,
+        solana,
+        solana_chain_id,
+        solana_asset_id,
+        chosen_deadline,
+    );
     let established = SolanaLegV1::establish(&plan, profile, &store, &mut rand::rngs::OsRng)
         .map_err(|error| format!("{label} leg: {error:?}"))?;
     let leg = established.leg();

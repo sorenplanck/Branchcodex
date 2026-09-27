@@ -6,6 +6,23 @@
 //! the registry authority-set digest, and the network id every other artifact is
 //! bound to.
 //!
+//! # Two Solana entries, not one
+//!
+//! The manifest declares the DOM hub and TWO Solana clusters, because the route has
+//! two counterparty positions and `RouteTimePolicyV2::from_registry` refuses a pair
+//! that shares a chain id unless the mainnet DOM/XMR profile is selected. Passing one
+//! cluster for both positions is refused here, by name, rather than left to surface
+//! later as `InvalidPolicy` from a component that knows nothing about Solana.
+//!
+//! # What this module measures that it does not choose
+//!
+//! `dom_profile_digest` is the twelve-field DOM adapter-profile digest, taken from the
+//! INSTALLED registry with `route_time_anchor::resolved_dom_profile_digest_v1`. Both
+//! terms must carry exactly that value as their DOM leg's `adapter_profile_hash`, and
+//! the route-time policy refuses them with `RegistryMismatch` otherwise. A leg
+//! laboratory with no registry derives its own stable value instead; a route
+//! provisioned against a daemon may not.
+//!
 //! # Why this duplicates a pattern that already exists
 //!
 //! `deploy-genconfig::provision_registry` already builds, signs, installs and
@@ -76,14 +93,36 @@ pub struct ProvisionedSolanaRegistryV1 {
     /// Digest of the registry authority set, as the daemon derives it from the
     /// authority bundle rather than from the set it was handed.
     pub authority_set_digest: [u8; 32],
+    /// First and last trusted second the manifest itself declares. The route-time
+    /// policy's own window must sit inside this one, so a caller writing that
+    /// artifact reads the bounds from here instead of restating them.
+    pub valid_from_seconds: u64,
+    pub expires_at_seconds: u64,
     pub dom_chain_id: [u8; 32],
     /// The DOM hub's native asset, as the manifest names it. The terms of both
     /// positions name this same asset on their DOM leg: a route whose terms named
     /// an asset the registry does not declare would be settling something the
     /// deployment does not know about.
     pub dom_asset_id: [u8; 32],
-    pub solana_chain_id: [u8; 32],
-    pub solana_asset_id: [u8; 32],
+    /// The twelve-field DOM adapter-profile digest, measured from the INSTALLED
+    /// registry with `resolved_dom_profile_digest_v1`.
+    ///
+    /// Not a formula this crate owns. Both terms must carry exactly this value as
+    /// their DOM leg's `adapter_profile_hash`, and the route-time policy refuses them
+    /// with `RegistryMismatch` otherwise -- so it is measured here, once, from the
+    /// registry that was actually installed.
+    pub dom_profile_digest: [u8; 32],
+    /// The cluster the upstream position settles on, and its native asset.
+    pub upstream_chain_id: [u8; 32],
+    pub upstream_asset_id: [u8; 32],
+    /// The cluster the downstream position settles on, and its native asset.
+    ///
+    /// A DIFFERENT cluster from the upstream one, and not by preference:
+    /// `RouteTimePolicyV2::from_registry` refuses a route whose two counterparty
+    /// positions share a chain unless the DOM/XMR mainnet profile is selected. See
+    /// the module documentation.
+    pub downstream_chain_id: [u8; 32],
+    pub downstream_asset_id: [u8; 32],
 }
 
 fn asset_id(domain: &[u8], seed: &[u8; 32]) -> AssetId {
@@ -193,42 +232,78 @@ fn authority_sets(
     Ok((sets, registry_signatures))
 }
 
-/// Build the manifest for a DOM hub and one Solana chain.
+/// Build the manifest for a DOM hub and the two Solana clusters the route uses.
 ///
 /// Only the chains a route actually uses are declared. The daemon resolves a
 /// position's chain by id, so a manifest naming chains no position references would
 /// be describing a deployment this route does not have.
+///
+/// Two Solana entries, not one, because the route has two counterparty positions and
+/// they may not share a chain. The entries are emitted in ascending chain-id order,
+/// which the manifest requires: a duplicate or out-of-order chain is refused as a
+/// non-canonical encoding rather than sorted for the caller.
 pub fn manifest(
     network_id: [u8; 32],
     epoch: u64,
     valid_from: u64,
     expires_at: u64,
-    solana: &SolanaChainFactsV1,
+    upstream: &SolanaChainFactsV1,
+    downstream: &SolanaChainFactsV1,
 ) -> Result<RegistryManifestV1, String> {
+    if upstream.genesis_hash == downstream.genesis_hash {
+        return Err(
+            "the two counterparty positions must settle on different clusters: \
+             RouteTimePolicyV2::from_registry refuses a route whose counterparty legs \
+             share a chain id unless the DOM/XMR mainnet profile is selected"
+                .to_owned(),
+        );
+    }
     let genesis = configured_genesis_hash_for_network_magic(NETWORK_MAGIC_REGTEST)
         .map_err(|error| format!("canonical DOM regtest genesis: {error:?}"))?;
     let dom_chain = ChainId(*derive_chain_id(NETWORK_MAGIC_REGTEST, &genesis).as_bytes());
     let dom_asset = asset_id(b"DOM-SOLANA-DAEMON-ROUTE/DOM-NATIVE/V1\0", &dom_chain.0);
-    let solana_chain = ChainId(solana.genesis_hash);
-    let solana_asset = asset_id(
-        b"DOM-SOLANA-DAEMON-ROUTE/SOL-NATIVE/V1\0",
-        &solana.genesis_hash,
-    );
-    let mut assets = vec![
-        AssetBindingV1 {
-            chain_id: dom_chain,
-            asset_id: dom_asset,
+
+    let mut assets = vec![AssetBindingV1 {
+        chain_id: dom_chain,
+        asset_id: dom_asset,
+        decimals: 9,
+        representation: AssetRepresentationV1::Native,
+    }];
+    let mut chains = Vec::with_capacity(2);
+    for facts in [upstream, downstream] {
+        let chain_id = ChainId(facts.genesis_hash);
+        if chain_id == dom_chain {
+            return Err("a counterparty cluster may not be the DOM hub's own chain".to_owned());
+        }
+        let native_asset = solana_asset_id(facts);
+        assets.push(AssetBindingV1 {
+            chain_id,
+            asset_id: native_asset,
             decimals: 9,
             representation: AssetRepresentationV1::Native,
-        },
-        AssetBindingV1 {
-            chain_id: solana_chain,
-            asset_id: solana_asset,
-            decimals: 9,
-            representation: AssetRepresentationV1::Native,
-        },
-    ];
+        });
+        chains.push(RegistryChainProfileV1 {
+            profile: ChainProfileV1 {
+                chain_id,
+                kind: ChainKindV1::Solana {
+                    network: facts.network,
+                    escrow_program: facts.escrow_program,
+                    program_data_hash: facts.program_data_hash,
+                },
+                timing: solana_timing(),
+                finality: solana_finality(),
+                native_asset,
+                allowed_assets: vec![],
+            },
+            deployment: ChainDeploymentV1::Solana(SolanaDeploymentV1 {
+                genesis_hash: facts.genesis_hash,
+                max_fee_lamports: facts.max_fee_lamports,
+            }),
+        });
+    }
+    chains.sort_by_key(|entry| entry.profile.chain_id.0);
     assets.sort_by_key(|asset| (asset.chain_id.0, asset.asset_id.0));
+
     Ok(RegistryManifestV1 {
         network_id,
         epoch,
@@ -244,26 +319,21 @@ pub fn manifest(
             finality: dom_finality(),
             native_asset: dom_asset,
         },
-        chains: vec![RegistryChainProfileV1 {
-            profile: ChainProfileV1 {
-                chain_id: solana_chain,
-                kind: ChainKindV1::Solana {
-                    network: solana.network,
-                    escrow_program: solana.escrow_program,
-                    program_data_hash: solana.program_data_hash,
-                },
-                timing: solana_timing(),
-                finality: solana_finality(),
-                native_asset: solana_asset,
-                allowed_assets: vec![],
-            },
-            deployment: ChainDeploymentV1::Solana(SolanaDeploymentV1 {
-                genesis_hash: solana.genesis_hash,
-                max_fee_lamports: solana.max_fee_lamports,
-            }),
-        }],
+        chains,
         assets,
     })
+}
+
+/// The native asset id of one cluster.
+///
+/// Named by the cluster it is native to, because native SOL has no mint and a zero
+/// mint would look like a token. Two clusters therefore name two different assets,
+/// which is correct: they are not fungible with each other.
+pub fn solana_asset_id(facts: &SolanaChainFactsV1) -> AssetId {
+    asset_id(
+        b"DOM-SOLANA-DAEMON-ROUTE/SOL-NATIVE/V1\0",
+        &facts.genesis_hash,
+    )
 }
 
 /// A stand-in for the consensus rules digest of this DOM build.
@@ -275,20 +345,58 @@ fn dom_crypto_consensus_digest() -> &'static [u8; 32] {
     &[0x22; 32]
 }
 
+/// Everything the registry provisioner is given.
+///
+/// The clock matters and is therefore explicit. The manifest's validity window must
+/// contain the route-time policy's window, the registry is validated at a stated
+/// second, and the terms are scheduled from the same second -- so all of them come
+/// from one caller-supplied `now` instead of three constants that could disagree.
+#[derive(Clone, Copy, Debug)]
+pub struct RegistryProvisioningInputV1<'a> {
+    pub state_dir: &'a Path,
+    /// The layout's own relative path for `ProductionPathRoleV1::RegistryStore`.
+    pub registry_relative: &'a str,
+    /// The layout's own relative path for `ProductionPathRoleV1::RegistryAuthorities`.
+    pub authorities_relative: &'a str,
+    pub network_id: [u8; 32],
+    /// Registry epoch. The bootstrap's rollback floor is pinned to it, and a zero
+    /// epoch is refused.
+    pub epoch: u64,
+    /// Trusted wall clock, seconds. The registry is validated at this second.
+    pub now_seconds: u64,
+    /// How far before and after `now_seconds` the manifest declares itself valid.
+    pub valid_from_offset_seconds: u64,
+    pub valid_until_offset_seconds: u64,
+    /// The cluster the upstream position settles on -- the operation that BEGINS on
+    /// Solana.
+    pub upstream: &'a SolanaChainFactsV1,
+    /// The cluster the downstream position settles on -- the operation that ENDS on
+    /// Solana. A different cluster, as the route-time policy requires.
+    pub downstream: &'a SolanaChainFactsV1,
+}
+
 /// Build, sign, install and re-verify the registry; write the authority bundle
 /// beside it.
-///
-/// `registry_relative` and `authorities_relative` are the layout's own path roles,
-/// so the files land exactly where the manifest says they will.
 pub fn provision(
-    state_dir: &Path,
-    registry_relative: &str,
-    authorities_relative: &str,
-    network_id: [u8; 32],
-    epoch: u64,
-    solana: &SolanaChainFactsV1,
+    input: &RegistryProvisioningInputV1<'_>,
 ) -> Result<ProvisionedSolanaRegistryV1, String> {
-    let manifest = manifest(network_id, epoch, 1_000, 10_000, solana)?;
+    let valid_from_seconds = input
+        .now_seconds
+        .checked_sub(input.valid_from_offset_seconds)
+        .ok_or_else(|| "the manifest would be valid before the epoch".to_owned())?;
+    let expires_at_seconds = input
+        .now_seconds
+        .checked_add(input.valid_until_offset_seconds)
+        .ok_or_else(|| "the manifest validity window overflows".to_owned())?;
+
+    let manifest = manifest(
+        input.network_id,
+        input.epoch,
+        valid_from_seconds,
+        expires_at_seconds,
+        input.upstream,
+        input.downstream,
+    )?;
     manifest
         .validate()
         .map_err(|error| format!("manifest: {error:?}"))?;
@@ -305,16 +413,16 @@ pub fn provision(
         .map_err(|error| format!("signed registry: {error:?}"))?;
 
     let policy = RegistryValidationPolicyV1 {
-        now_seconds: 2_000,
-        expected_network_id: network_id,
-        minimum_epoch: epoch,
+        now_seconds: input.now_seconds,
+        expected_network_id: input.network_id,
+        minimum_epoch: input.epoch,
     };
     // The registry store refuses a parent directory that is not owner-only, and
     // `create_dir_all` would make one the runner's umask widened to 0o755.
-    if let Some(parent) = state_dir.join(registry_relative).parent() {
+    if let Some(parent) = input.state_dir.join(input.registry_relative).parent() {
         crate::owner_only::directory(parent)?;
     }
-    let mut store = RegistryStoreV1::create(&state_dir.join(registry_relative))
+    let mut store = RegistryStoreV1::create(&input.state_dir.join(input.registry_relative))
         .map_err(|error| format!("registry store: {error:?}"))?;
     let (_outcome, resolved) = store
         .install(&signed, &registry_set, &secp, policy)
@@ -322,6 +430,11 @@ pub fn provision(
     if resolved.manifest_digest() != digest {
         return Err("the installed registry is not the manifest that was signed".to_owned());
     }
+    // Measured from the registry that was installed, not from the manifest that was
+    // handed to the store: the route-time policy derives it from the resolved
+    // registry, and that is the value the terms must carry.
+    let dom_profile_digest = route_time_anchor::resolved_dom_profile_digest_v1(&resolved)
+        .map_err(|error| format!("dom profile digest: {error:?}"))?;
 
     let bundle = ProductionAuthorityBundleV1::new(
         registry_set.clone(),
@@ -336,17 +449,21 @@ pub fn provision(
     let bytes = bundle
         .canonical_bytes()
         .map_err(|error| format!("authority bundle bytes: {error:?}"))?;
-    crate::owner_only::write(&state_dir.join(authorities_relative), &bytes)?;
+    crate::owner_only::write(&input.state_dir.join(input.authorities_relative), &bytes)?;
 
-    let solana_chain = ChainId(solana.genesis_hash);
     Ok(ProvisionedSolanaRegistryV1 {
-        network_id,
-        epoch,
+        network_id: input.network_id,
+        epoch: input.epoch,
         manifest_digest: digest,
         authority_set_digest,
+        valid_from_seconds,
+        expires_at_seconds,
         dom_chain_id: manifest.dom.chain_id.0,
         dom_asset_id: manifest.dom.native_asset.0,
-        solana_chain_id: solana_chain.0,
-        solana_asset_id: manifest.chains[0].profile.native_asset.0,
+        dom_profile_digest,
+        upstream_chain_id: input.upstream.genesis_hash,
+        upstream_asset_id: solana_asset_id(input.upstream).0,
+        downstream_chain_id: input.downstream.genesis_hash,
+        downstream_asset_id: solana_asset_id(input.downstream).0,
     })
 }
