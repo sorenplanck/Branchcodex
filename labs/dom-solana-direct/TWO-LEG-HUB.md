@@ -153,6 +153,40 @@ Two further facts from the same reading, both of which a leg cannot supply on it
   counterparty leg's finality against its resolved chain profile. A leg that picks its
   own finality policy will be refused by a route that declares another.
 
+## 4c. What a route needs that no leg can supply, and no provisioner either
+
+Reaching `load_authenticated_production_inputs_v1` with a real route turned up two
+requirements that belong to neither the leg nor the artifact provisioner, and both apply
+to every leg equally.
+
+**The Contracts bootstrap is a two-party ceremony.** A V11 route's configuration requires
+it -- `ProductionFamilyInputsV5` has one constructor and every field is mandatory -- and
+the artifact is two signed stages, a commit and a reveal with four signatures each,
+carrying Schnorr keys, share points and recovery capsules, bound to the composition, the
+registry and both relay rosters. The daemon already ships the driver: `bootstrap_command_v13`,
+exported and wired into its own `main.rs`, whose documentation is "advance only the
+bootstrap ceremony using public files and a bounded private stdin; repeat with the same
+plan/custody after copying the missing peer files". Both the producer and
+`authenticate_contracts_bootstrap_v1` are `pub(crate)`.
+
+So no single process can provision a complete route, and it would be wrong to want one:
+driving both custodies from one process collapses a two-party protocol into one party
+holding everything. A route provisioner writes the artifacts up to that point and places
+the ceremony's output; the two stage digests are pins, so they cannot be known before it
+runs.
+
+**Three inputs are the deployment's, not the route's.** The layout requires them in create
+and in reopen alike and the bootstrap pins none of them:
+
+* the DOM participant wallet -- opened later by the chain signers with a passphrase, so a
+  provisioner must never hold it;
+* the Contracts budget policy, an input file;
+* the Contracts transport identity authority, a **directory** "provisioned outside the
+  daemon, never created and never repaired here".
+
+Whoever provisions a leg's route should expect to be handed these rather than to produce
+them.
+
 ## 5. What this document is not
 
 It is not a plan to change code. The DOM-side modules this laboratory copied are
