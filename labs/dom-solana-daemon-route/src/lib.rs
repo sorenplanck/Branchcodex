@@ -10,12 +10,31 @@
 //! settlement face, and the Solana actuator store has a pinned name the daemon
 //! creates for a route whose admitted shape carries a Solana leg.
 //!
-//! What does not exist anywhere in the tree is a provisioner. Every writer of a
-//! V11 bootstrap manifest is `cfg(test)` code, there is no
+//! What does not exist anywhere in the tree is a provisioner for the ROUTE. Every
+//! writer of a V11 bootstrap manifest is `cfg(test)` code, there is no
 //! `bootstrap-create-*.conf` committed, and `deploy-genconfig` -- which does
 //! generate the registry and its authority set -- has no Solana path. So a route
 //! cannot be handed to the daemon without one, for any chain. This crate is that
 //! provisioner for the Solana positions.
+//!
+//! One thing the tree DOES ship, and an earlier version of this paragraph was wrong to
+//! imply otherwise: `bootstrap_command_v13`, exported and wired into the daemon's own
+//! `main.rs`, drives the Contracts bootstrap ceremony. It is not a route provisioner --
+//! it advances a two-party ceremony from a plan file and a bounded private stdin, and
+//! must be run by each participant in turn -- but it is the committed tool for the one
+//! artifact this crate deliberately does not produce. See
+//! [`declared_inputs::place_contracts_bootstrap`].
+//!
+//! # Where this stops, and why
+//!
+//! `load_production_bootstrap_v11` accepts the directory this crate writes: the state
+//! directory, both manifests and all forty-six paths.
+//! `load_authenticated_production_inputs_v1` then accepts the registry, both frozen
+//! terms, the ordered route scope, the relay roster, the signed time policy and the
+//! signed evidence, and stops at the Contracts bootstrap -- the two-party artifact.
+//! `tests/bootstrap_layout.rs` asserts exactly that, and asserts it by the state the
+//! loader leaves on disk rather than by an error message that could mean several
+//! things.
 //!
 //! # Why both positions are Solana, and why they are two clusters
 //!
@@ -282,6 +301,9 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// but `authenticate_f6_bundle_file_v8` compares it with the file's own digest, so
     /// it is a measurement of an artifact exactly like the other thirteen.
     pub f6_authority_bundle: Option<[u8; 32]>,
+    /// The Contracts bootstrap's commit and reveal stage digests, once the two-party
+    /// ceremony has produced the artifact they come from.
+    pub contracts_bootstrap: Option<([u8; 32], [u8; 32])>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -319,6 +341,7 @@ impl SolanaRouteBootstrapPlanV1 {
             route_time: None,
             identities: None,
             f6_authority_bundle: None,
+            contracts_bootstrap: None,
         }
     }
 
@@ -426,6 +449,18 @@ impl SolanaRouteBootstrapPlanV1 {
     /// and wrong for a deployment: `process_owner_id` in particular is the identity a
     /// fenced store will refuse another process for, so it belongs to whoever runs the
     /// daemon and not to whoever wrote the manifest.
+    /// Bind the two stage digests of the Contracts bootstrap the ceremony produced.
+    ///
+    /// The commit and reveal stage digests are pins: `authenticate_contracts_bootstrap_v1`
+    /// compares the artifact's own stages with them, so they cannot be chosen and they
+    /// cannot be known until the ceremony has run. This is the seam where its output
+    /// enters the manifest, and until it is used the plan carries derived labels that no
+    /// artifact hashes to.
+    pub fn with_contracts_bootstrap(mut self, commit_stage: [u8; 32], reveal_stage: [u8; 32]) -> Self {
+        self.contracts_bootstrap = Some((commit_stage, reveal_stage));
+        self
+    }
+
     /// Bind the digest of the F6 authority bundle that was written.
     pub fn with_f6_authority_bundle(mut self, digest: [u8; 32]) -> Self {
         self.f6_authority_bundle = Some(digest);
@@ -673,10 +708,15 @@ impl SolanaRouteBootstrapPlanV1 {
                 CONTRACTS_BUDGET_POLICY.to_owned(),
                 ProductionF6PathReferencesV4::from_ordered(f6_v4)?,
                 CONTRACTS_BOOTSTRAP.to_owned(),
-                ProductionContractsBootstrapPinsV5::new(
-                    placeholder("contracts-commit-stage"),
-                    placeholder("contracts-reveal-stage"),
-                )?,
+                {
+                    let (commit, reveal) = self.contracts_bootstrap.unwrap_or_else(|| {
+                        (
+                            placeholder("contracts-commit-stage"),
+                            placeholder("contracts-reveal-stage"),
+                        )
+                    });
+                    ProductionContractsBootstrapPinsV5::new(commit, reveal)?
+                },
             ),
             Self::relay_pins(),
         );
