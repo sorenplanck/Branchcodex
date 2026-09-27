@@ -141,17 +141,38 @@ pub fn run(
     bridge: PathBuf,
     expected: [u8; 32],
 ) -> (PreparedClaim, Transaction, Value) {
-    let mut process = super::ManagedDaemon(
-        Command::new(std::env::current_exe().unwrap())
-            .arg("--xmr-refund-recovery-worker")
-            .arg(&root)
-            .arg(bridge)
-            .arg(hex(&expected))
-            .spawn()
-            .unwrap(),
+    let began = Instant::now();
+    let spawn_signer = |action: &str, solver: &Path, code: i32| {
+        let mut process = super::ManagedDaemon(
+            Command::new(std::env::current_exe().unwrap())
+                .arg("--xmr-refund-recovery-worker")
+                .arg(&root)
+                .arg(solver)
+                .arg(hex(&expected))
+                .arg(action)
+                .spawn()
+                .unwrap(),
+        );
+        let pid = process.0.id();
+        assert_eq!(process.0.wait().unwrap().code(), Some(code));
+        pid
+    };
+    let opened_pid = spawn_signer("crash-after-opening", &bridge, 82);
+    // These workers cannot start a solver: they have only the original local
+    // checkpoint plus a completed opening, and an intentionally invalid path.
+    let no_solver = Path::new("/nonexistent-solver-must-not-reopen");
+    let opening_before = Sha256::digest(&*read_private(&root.join("refund-opening.record")));
+    let partial_pid = spawn_signer("crash-partial-signature", no_solver, 83);
+    assert!(!root.join("refund-signed.tx").exists());
+    assert!(!root.join("refund-send.intent").exists());
+    let signature_pid = spawn_signer("crash-after-signature", no_solver, 84);
+    let signed_stage = read_private(&root.join("refund-signed.pending"));
+    assert!(!root.join("refund-signed.tx").exists());
+    let pid = spawn_signer("sign", no_solver, 0);
+    assert_eq!(
+        Sha256::digest(&*read_private(&root.join("refund-opening.record"))),
+        opening_before
     );
-    let pid = process.0.id();
-    assert!(process.0.wait().unwrap().success());
     let job = Job::load(&root, expected);
     let prepared = job.prepared();
     let bytes = read_private(&root.join("refund-signed.tx"));
@@ -159,10 +180,18 @@ pub fn run(
     let tx = Transaction::read(&mut input).unwrap();
     assert!(input.is_empty());
     assert_eq!(tx.serialize(), *bytes);
+    assert_eq!(*bytes, *signed_stage);
     prepared.verify_final(&tx, &mut OsRng).unwrap();
     let mut report: Value =
         serde_json::from_slice(&read_private(&root.join("refund-worker-report.json"))).unwrap();
     report["refund_recovery_worker_pid"] = json!(pid);
+    report["refund_opening_worker_pid"] = json!(opened_pid);
+    report["refund_partial_signature_worker_pid"] = json!(partial_pid);
+    report["refund_signature_producer_pid"] = json!(signature_pid);
+    report["worker_recovery_and_signing_seconds"] = json!(began.elapsed().as_secs_f64());
+    report["completed_opening_unchanged_across_restarts"] = json!(true);
+    report["staged_signature_promoted_without_resigning"] = json!(true);
+    report["partial_signature_never_published"] = json!(true);
     // The signing process has exited. These processes receive no keys or
     // solver path and can only reconcile/publish the durable signed bytes.
     let before_rpc = super::refund_delivery::run(&root, expected, "send-crash-before-rpc");
@@ -189,6 +218,14 @@ pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
     assert_eq!(raw.len(), 64);
     let expected = std::array::from_fn(|i| u8::from_str_radix(&raw[2 * i..2 * i + 2], 16).unwrap());
     assert_eq!(hex(&expected), raw);
+    let action = args
+        .next()
+        .map(|v| v.into_string().unwrap())
+        .unwrap_or_else(|| "sign".to_owned());
+    assert!(matches!(
+        action.as_str(),
+        "sign" | "crash-after-opening" | "crash-partial-signature" | "crash-after-signature"
+    ));
     assert!(args.next().is_none());
     let job = Job::load(&root, expected);
     assert!(unix_seconds() >= job.received && unix_seconds() <= job.latest);
@@ -205,6 +242,11 @@ pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
     phase
         .claim_recovery(expected)
         .expect("private-abandonment recovery is not authorized");
+    assert!(
+        root.join("refund-signed.tx").try_exists().unwrap()
+            || !root.join("refund-send.intent").try_exists().unwrap(),
+        "missing possibly published refund"
+    );
     assert!(unix_seconds() >= job.received && unix_seconds() <= job.latest);
     let capsule =
         CapsuleCheckpoint::read(&root.join("direct-capsule.record"), job.capsule).unwrap();
@@ -221,14 +263,40 @@ pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
         roster.spend_key() + *job.offset * G,
         prepared.context().ring[prepared.context().real][0]
     );
-    let public = direct_recovery_bridge::DirectPublicCapsule::restore_with_local_receipt(
-        &bridge,
-        &root.join("direct-capsule.record"),
-        job.capsule,
-        &root.join("local-verifier-authority.key"),
-    );
-    let (opening, mut details) = public.open();
     let peer = Participant::new(3 - u16::from(local.params().i())).unwrap();
+    let restored_opening =
+        super::refund_signing_state::restore(&root, expected, roster.share_key(peer).unwrap());
+    let reused_opening = restored_opening.is_some();
+    let (opening, mut details) = if let Some(value) = restored_opening {
+        value
+    } else {
+        assert!(!root.join("refund-signed.tx").try_exists().unwrap());
+        assert!(!root.join("refund-signed.pending").try_exists().unwrap());
+        assert!(!root.join("refund-send.intent").try_exists().unwrap());
+        let public = direct_recovery_bridge::DirectPublicCapsule::restore_with_local_receipt(
+            &bridge,
+            &root.join("direct-capsule.record"),
+            job.capsule,
+            &root.join("local-verifier-authority.key"),
+        );
+        let (opening, details) = public.open();
+        // Validate the original peer/roster relation before persisting any
+        // completed opening. This record contains sensitive key material.
+        drop(
+            link.recover_after_opening(&roster, peer, job.capsule, opening.clone())
+                .unwrap(),
+        );
+        assert!(
+            unix_seconds() <= job.latest,
+            "opening exceeded original deadline"
+        );
+        super::refund_signing_state::persist(&root, expected, &opening, &details);
+        (opening, details)
+    };
+    if action == "crash-after-opening" {
+        std::process::exit(82);
+    }
+    details["completed_opening_restored"] = json!(reused_opening);
     assert!(link
         .recover_after_opening(
             &roster,
@@ -256,31 +324,143 @@ pub fn worker(mut args: impl Iterator<Item = std::ffi::OsString>) {
             .sum::<curve25519_dalek::edwards::EdwardsPoint>(),
         prepared.context().image
     );
-    let witness = Zeroizing::new(Scalar::random(&mut OsRng));
-    let statement = Statement::prove(prepared.context(), &witness, &mut OsRng).unwrap();
-    let pre = presign(&prepared, statement, keys, *fresh_secret());
-    let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+    let final_path = root.join("refund-signed.tx");
+    let pending_path = root.join("refund-signed.pending");
+    let mut recovered_stage = false;
+    let tx = if final_path.try_exists().unwrap() {
+        validated_signed(&prepared, &read_private(&final_path))
+            .expect("invalid final refund signature")
+    } else {
+        // A missing final after possible publication must never be replaced
+        // by newly signed bytes, even if a private partial stage remains.
+        assert!(
+            !root.join("refund-send.intent").try_exists().unwrap(),
+            "missing possibly published refund"
+        );
+        let staged = if pending_path.try_exists().unwrap() {
+            let value = validated_signed(&prepared, &read_private(&pending_path));
+            if value.is_none() {
+                // Only the unpublished staging path may be discarded. The
+                // completed opening survives; fresh signing uses fresh nonces.
+                fs::remove_file(&pending_path).unwrap();
+                File::open(&root).unwrap().sync_all().unwrap();
+            }
+            value
+        } else {
+            None
+        };
+        let tx = if let Some(tx) = staged {
+            recovered_stage = true;
+            tx
+        } else {
+            let witness = Zeroizing::new(Scalar::random(&mut OsRng));
+            let statement = Statement::prove(prepared.context(), &witness, &mut OsRng).unwrap();
+            let pre = presign(&prepared, statement, keys, *fresh_secret());
+            let tx = prepared.complete(&pre, &witness, &mut OsRng).unwrap();
+            let bytes = tx.serialize();
+            if action == "crash-partial-signature" {
+                write_private(&pending_path, &bytes[..bytes.len() / 2]);
+                std::process::exit(83);
+            }
+            write_private(&pending_path, &bytes);
+            tx
+        };
+        if action == "crash-after-signature" {
+            std::process::exit(84);
+        }
+        super::refund_signing_state::promote(&root, "refund-signed.pending", "refund-signed.tx");
+        tx
+    };
+    prepared.verify_final(&tx, &mut OsRng).unwrap();
     assert!(
         unix_seconds() <= job.latest,
         "original recovery deadline exceeded"
     );
-    write_private(&root.join("refund-signed.tx"), &tx.serialize());
+    details["signature_restored_from_complete_stage"] = json!(recovered_stage);
     details["refund_signed_in_fresh_rust_process"] = json!(true);
     details["local_xmr_state_restored_in_fresh_process"] = json!(true);
     details["worker_exports_spend_shares"] = json!(false);
-    details["worker_recovery_and_signing_seconds"] = json!(began.elapsed().as_secs_f64());
+    details["last_signing_worker_seconds"] = json!(began.elapsed().as_secs_f64());
     details["worker_preserves_original_deadline"] = json!(true);
     details["preparation_gate_recovery_only"] = json!(true);
-    write_private(
-        &root.join("refund-worker-report.json"),
-        &serde_json::to_vec(&details).unwrap(),
-    );
+    if !root.join("refund-worker-report.json").try_exists().unwrap() {
+        write_private(
+            &root.join("refund-worker-report.json"),
+            &serde_json::to_vec(&details).unwrap(),
+        );
+    }
     drop(phase);
+}
+
+fn validated_signed(prepared: &PreparedClaim, bytes: &[u8]) -> Option<Transaction> {
+    let mut input = bytes;
+    let tx = Transaction::read(&mut input).ok()?;
+    if !input.is_empty() || tx.serialize() != bytes {
+        return None;
+    }
+    prepared.verify_final(&tx, &mut OsRng).ok()?;
+    Some(tx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_possibly_published_signature_never_restarts_opening_or_signing() {
+        let root = std::env::temp_dir().join(format!("dxp1-missing-final-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let received = unix_seconds();
+        let job = Job {
+            local_identity: [1; 32],
+            capsule: [2; 32],
+            link: [3; 64],
+            received,
+            latest: received + 100,
+            network: [9; 32],
+            offset: Zeroizing::new(Scalar::ZERO),
+            unsigned: Zeroizing::new(vec![7; 16]),
+        };
+        let identity = job.persist(&root);
+        let mut gate = PreparationGate::create(
+            &root.join("preparation.wal"),
+            PreparationBinding {
+                capsule_link: job.link,
+                received,
+            },
+        )
+        .unwrap();
+        gate.claim_recovery(identity).unwrap();
+        drop(gate);
+        write_private(
+            &root.join("refund-send.intent"),
+            b"possible previous publication",
+        );
+        write_private(&root.join("refund-signed.pending"), b"partial");
+        let result = std::panic::catch_unwind(|| {
+            worker(
+                vec![
+                    root.clone().into_os_string(),
+                    "/nonexistent-solver".into(),
+                    hex(&identity).into(),
+                ]
+                .into_iter(),
+            )
+        });
+        let panic = result.expect_err("missing final was repaired");
+        let text = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(text.contains("missing possibly published refund"));
+        assert_eq!(
+            *read_private(&root.join("refund-signed.pending")),
+            b"partial"
+        );
+        assert!(!root.join("refund-signed.tx").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn exposed_operation_is_rejected_before_loading_shares_or_starting_solver() {

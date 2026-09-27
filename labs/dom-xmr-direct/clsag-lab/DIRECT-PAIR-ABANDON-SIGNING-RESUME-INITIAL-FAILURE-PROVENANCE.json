@@ -1,0 +1,38 @@
+{
+  "sha256": {
+    "examples/support/refund_signing_state.rs": "6cfce06e02c0e971066aab5b0b72626491f6d6a2e8c3717c3dce887c879dbf18",
+    "examples/support/refund_delivery.rs": "d57956d995fc2bdd7b9d1908644444aaa47a4cf4f90a3b29757d34d4f151776d",
+    "src/preparation_gate.rs": "be3e77c1789e9f18277dbbc17a698021614cb8f507c4cf4b7a313594a290ca83",
+    "tests/preparation_gate.rs": "fb09b4ee3541493e04ce6d01922885da45a5969ab1b43a860e1178014fce4910",
+    "examples/support/refund_recovery_worker.rs": "0252dc9b3fab83ae0e2d8f4d63c75dcc30e573b95dcf597ba4826dcb446145f5",
+    "src/native/recovery_checkpoint.rs": "e8f63c3710ef7b7ab61fe6b3b612a8bf10d8a3cf171ed503c2ea5ffb69761d87",
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "cabca3080f6d0377fc1fc7833b5a1bc8d54c06a8cd1cbc470a30c8f95209d424",
+    "src/native.rs": "81fcc947f8dc09a22723d48ab996ff37e3308c4f3d3eb1a3783f691fb3297c24",
+    "src/joint.rs": "cbfda4e91cb99b16d5b56c872aa1b89ac1dc6415a29ab5811411e56179bb1872",
+    "src/capsule_checkpoint.rs": "1de9add49121ffecfc30a2625066fd020c841ab449ab85cc781a3022beb6b69f",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "src/xmr_recovery.rs": "96c3a6646f1809444ec03e0d6a4b2d1cea14ecc26fd06df2ebbb8ec96a39669b",
+    "src/xmr_recovery/checkpoint.rs": "fa062eee8da3a2468d29e81a4de386bb1d9f4abbe5bf5e91669b5e8f5c112d8f",
+    "examples/regtest_claim.rs": "490ff074e2ec74b6fa287cf2385b411a7284354127aa3a5e68fd365317ca4b9c",
+    "examples/support/direct_recovery_bridge.rs": "dfed746e0ada114ff764e0a32d5c071219100b866384a0e60232627c74b34339",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "tests/native.rs": "9687d712389c54c8ab3419394bb94a91111601e151ee477d5c3c067e44cb7bbe",
+    "target/release/examples/regtest_claim": "36c6ff12cae930f105e867b61b76fbcc79688dc629307863dac426f4c23d891e",
+    "target/recovery-research/direct-dlog-bridge": "a8ef8155e2e2542af1cb7630d40d5a300e7208ca77db38c2421fbe3610e81858",
+    "../recovery-audit/direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "../recovery-audit/direct_dlog_cli.go": "3c264cb1af6406eb1636834b962cf9104400cf705366fec2bbbb33f47bd6c70c",
+    "../recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b"
+  },
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "resource_pressure_before": {
+    "io": "some avg10=29.96 avg60=44.54 avg300=40.00 total=23562580521\nfull avg10=29.07 avg60=41.29 avg300=37.27 total=22414637157\n",
+    "memory": "some avg10=4.42 avg60=12.57 avg300=7.57 total=1628493905\nfull avg10=4.24 avg60=11.46 avg300=6.94 total=1535842801\n",
+    "cpu": "some avg10=0.02 avg60=0.23 avg300=0.26 total=1146881962\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+  },
+  "scope": "Own offline nodes. Original Rust keys dropped; fresh Rust worker loads pinned private recovery job, local share, capsule and original deadline. Fresh Go verifier authenticates cached setup, rechecks proof and opens. Rust worker signs frozen unsigned refund and returns transaction, never spend shares. Completed opening persisted privately after verification. Fresh processes restart with no solver after exit82, repair private partial signature after exit83, and reuse full staged signature after exit84. New delivery processes independently validate pinned network/anchor/ring/transaction and publish the exact refund. Native crashes before RPC and after ACK followed by pool/inclusion reconciliation. Parent remains node host and miner; not full coordinator restart."
+}

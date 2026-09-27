@@ -1,0 +1,65 @@
+{
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--release",
+        "--locked",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/refund-signing-resume-tests.log",
+      "results": [
+        "    Finished `release` profile [optimized] target(s) in 2m 21s",
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "--release",
+        "--locked",
+        "--all-targets",
+        "-j2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "target/refund-signing-resume-clippy.log",
+      "results": [
+        "    Finished `release` profile [optimized] target(s) in 1m 04s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--offline",
+        "--release",
+        "--locked",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/refund-signing-resume-build.log",
+      "results": [
+        "    Finished `release` profile [optimized] target(s) in 1m 05s"
+      ]
+    }
+  ],
+  "sha256": {
+    "examples/regtest_claim.rs": "490ff074e2ec74b6fa287cf2385b411a7284354127aa3a5e68fd365317ca4b9c",
+    "examples/support/refund_recovery_worker.rs": "0252dc9b3fab83ae0e2d8f4d63c75dcc30e573b95dcf597ba4826dcb446145f5",
+    "examples/support/refund_signing_state.rs": "6cfce06e02c0e971066aab5b0b72626491f6d6a2e8c3717c3dce887c879dbf18",
+    "examples/support/refund_delivery.rs": "d57956d995fc2bdd7b9d1908644444aaa47a4cf4f90a3b29757d34d4f151776d",
+    "target/release/examples/regtest_claim": "36c6ff12cae930f105e867b61b76fbcc79688dc629307863dac426f4c23d891e"
+  }
+}

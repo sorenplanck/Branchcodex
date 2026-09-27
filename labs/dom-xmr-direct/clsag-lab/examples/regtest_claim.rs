@@ -17,6 +17,8 @@ mod recovery_bridge;
 mod refund_delivery;
 #[path = "support/refund_recovery_worker.rs"]
 mod refund_recovery_worker;
+#[path = "support/refund_signing_state.rs"]
+mod refund_signing_state;
 #[path = "support/settlement_resume.rs"]
 mod settlement_resume;
 

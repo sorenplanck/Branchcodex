@@ -13,6 +13,23 @@ testes anteriores de composição estão preservados em `historical/`.
 
 ## Evidência obtida
 
+**Retomada após abertura e gravação parcial da assinatura passou.**
+Checkpoint privado guarda a share original já recuperada, ligada ao job;
+workers novos retomam com caminho de solver inexistente. Staging parcial
+ainda privada pode ser refeita com nonces novos; staging completa é promovida
+sem mudar bytes. Arquivo final inválido ou ausente após possível publicação
+nunca é substituído por nova assinatura. O publisher só aceita o arquivo final.
+
+Passaram 22 testes do exemplo, Clippy/build e cenário com cinco quedas:
+após abertura, durante gravação parcial, após assinatura completa, antes do
+RPC e após ACK. Total **186,557 s**, recuperação integral **45,737 s**,
+XMR observado19 s antes do limite e devolução DOM incluída após lock220.
+O total ainda excedeu180 s em6,557 s. Primeira tentativa falhou no fixture
+de decoys antes da cápsula/funding; preservada. `clsag-lab/SIGNING-RESUME.md`.
+Permanecem abertos cálculo sequencial interrompido antes de obter checkpoint,
+orçamento global, preparação entre participantes independentes, segurança
+criptográfica/temporal e integração ao dom-interopd.
+
 **Devolução XMR agora é publicada e observada por workers independentes.**
 Job v2 fixa o checkpoint original de nó/genesis/bloco; worker verifica anel
 nativo, corpo/assinatura exatos, pool/inclusão ou input livre sob lock de

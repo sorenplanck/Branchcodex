@@ -1,5 +1,9 @@
 # Publicação independente da devolução privada XMR
 
+A etapa posterior `SIGNING-RESUME.md` cobre abertura já concluída e gravação
+interrompida da assinatura antes deste publisher. Os resultados abaixo
+preservam a versão original desta etapa, sem essas novas falhas de assinatura.
+
 `refund_delivery.rs` acrescenta processos de observação/publicação ao worker
 de assinatura existente. Eles recebem apenas diretório, identidade original
 do job e ação; não recebem shares, solver ou interpretações de cadeia do pai.

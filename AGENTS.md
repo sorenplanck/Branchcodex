@@ -842,5 +842,50 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   participantes independentes, prova de atomicidade/tempos e dom-interopd
   continuam obrigatórios. Perfis temporais experimentais não fundamentados.
 
+- Commit8e78296 salvou publicação independente do refund, Soren-only/árvorelimpa.
+- Etapa SIGNING-RESUME: refund_signing_state.rs guarda UMA share original
+  recuperada em refund-opening.record privado0600, job32+scalar32+metrics
+  limitadas/checksum, Zeroizing, chave pública conferida; persiste só após
+  validar link/roster/cápsula sob RecoveryOnly. É segredo LOCAL, não exportado
+  em relatório nem prova pública/cache peer. Storage/clock confiáveis; não
+  protege rollback. Pai apenas compara digest, mesmo domínio privado original.
+- Arquivos pending são fsync/hard-link create-only para final/fsync-dir/unlink.
+  Opening completo pendente pode ser promovido; parcial de abertura falha
+  sem fallback ao solver. Assinatura completa pendente é conferida contra a
+  intenção original/promovida sem assinatura nova. Pending de assinatura
+  parcial PRIVADO pode ser removido/refeito com nonces novos, somente se não
+  existe final nem send.intent. Final inválido nunca reparado; final ausente
+  com intent é recusado antes de shares/solver. Gate fica locked/originaldeadline.
+- Native run injeta saída82 após opening durável, saída83 após metade da tx,
+  saída84 após staging completa; signers seguintes recebem solver inexistente.
+  Conserva também saídas80/81 e pool/inclusão por publisher. Mede custo integral
+  de todos os processos, sem reabrir cápsula ou renovar prazo. Não cobre queda
+  no MEIO do solve ou abertura parcial antes de checkpoint, nem budget global.
+- 22 testes example, Clippy all-targets -D warnings e build passaram
+  session43955; SIGNING-RESUME-CHECKS.json/hashes. Quatro testes novos cobrem
+  identidade/ponto/canonicalidade/truncamento/corrupção/promoção sem overwrite,
+  opening parcial recusado e final possivelmente publicado ausente recusado.
+  Não mudou Go/core nem requereu testes Go novos.
+- Primeira native PID1580165/session17841 exit101 em16,021s: decoy selection
+  round limit no preparo do saldo individual, ANTES de cápsula/sharedfunding.
+  Preservada *SIGNING-RESUME-INITIAL-FAILURE-*, hashes/grupo ausente conferidos.
+  Novo ensaio com outra reserva, MESMAS fontes/binários, sem prazo renovado.
+- Segundo PID1580411/session86359 exit0: total186,557s, recovery45,737s,
+  conjunto signer43,773s, abertura única31,866s, última retomada0,780s.
+  Recebimento1790485218/início1790485253/refund observado1790485299/latest5318
+  (mesmo prefixo179048); DOM lock220/refund221, outputs gastos. Workers1582656
+  (exit82),1582755(exit83),1582757(exit84),1582758(promove bytes), publishers
+  1582759(exit80),1582760(exit81),1582761(pool semPOST),1582762(inclusão semPOST).
+  Go antigo1581243/novo1582658. Hashes/PIDs/grupo conferidos/encerrados.
+  Prefixo DIRECT-PAIR-ABANDON-SIGNING-RESUME-*; SIGNING-RESUME-VERIFICATION.json
+  e SIGNING-RESUME.md. Nenhum ensaio pendente. Total ainda6,557s acima180s;
+  não declarar meta atingida, nem apagar primeira falha/rodada anterior196s.
+- Próximo: recuperação durante cálculo sequencial/checkpoint incompleto e
+  orçamento global de retomadas; fixture de seleção de decoys mostrou falha
+  antes de funding que precisa ser considerada na confiabilidade. Não ficar
+  só nos testes: preparação com participantes independentes, revisão do modelo
+  adversarial/prova de atomicidade e integração ao dom-interopd seguem requisitos
+  obrigatórios. Sem usar abandono privado para recovery pós-exposição.
+
 As instruções globais de `/home/leonardov/AGENTS.md` continuam aplicáveis,
 inclusive controle de escopo, verificações finais e identidade de publicação.
