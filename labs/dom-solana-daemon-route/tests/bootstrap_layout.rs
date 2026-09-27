@@ -299,17 +299,28 @@ fn authentication_reaches_the_two_party_ceremony_and_stops_there() {
         .err()
         .expect("a Contracts bootstrap this crate did not produce cannot authenticate");
 
-    // The route store and the time-anchor store are created while authenticating and
-    // before the Contracts bootstrap is authenticated. Their presence is the evidence
-    // that everything this crate provisions was accepted first.
-    for relative in [
-        Plan::relative(ProductionPathRoleV1::RouteStore),
-        Plan::relative(ProductionPathRoleV1::TimeAnchorStore),
-    ] {
-        assert!(
-            root.join(relative).exists(),
-            "{relative} was not created, so authentication stopped before the route was \
-             admitted and the refusal below is about something earlier: {refusal:?}"
-        );
-    }
+    // The time-anchor store is the marker, and the route store is NOT.
+    //
+    // Reading the loader's order settles which: it creates the time-anchor store, installs
+    // the signed policy, installs the signed evidence and proves the route ladder, and only
+    // THEN authenticates the Contracts bootstrap. The route store is created after both
+    // that and the participant bundle, so it cannot exist while the ceremony artifact is
+    // unauthenticated -- asserting on it would fail for the very reason the test expects.
+    //
+    // So the time-anchor store's presence is the evidence: the layout, both manifests, the
+    // registry, both frozen terms, the ordered route scope, the relay roster, the signed
+    // time policy, the signed evidence and the ladder they imply were all accepted.
+    let marker = Plan::relative(ProductionPathRoleV1::TimeAnchorStore);
+    assert!(
+        root.join(marker).exists(),
+        "{marker} was not created, so authentication stopped before the time authority was \
+         established and the refusal is about something earlier: {refusal:?}"
+    );
+    assert!(
+        !root
+            .join(Plan::relative(ProductionPathRoleV1::RouteStore))
+            .exists(),
+        "the route store is created only after the Contracts bootstrap authenticates, so \
+         its presence would mean the ceremony artifact was accepted: {refusal:?}"
+    );
 }
