@@ -237,7 +237,16 @@ const DOWNSTREAM_ACTUATOR_STORE: &str = "state/downstream/solana-actuator.v1.sql
 const UPSTREAM_LEG_AUTHORITY_BUNDLE: &str = "artifacts/upstream-solana-authority-bundle.v1";
 const DOWNSTREAM_LEG_AUTHORITY_BUNDLE: &str = "artifacts/downstream-solana-authority-bundle.v1";
 
-const CONTRACTS_IDENTITY_STORE: &str = "state/contracts/transport-identity.v1";
+/// The Contracts transport identity authority: a DIRECTORY the layout requires to exist
+/// in create and in reopen alike, "provisioned outside the daemon, never created and never
+/// repaired here".
+///
+/// No dot in the final component, which breaks the `.v1` convention every other path here
+/// follows, and not by choice.
+/// `ContractsTransportIdentityStoreV1::create_production` validates the root name it is
+/// asked to publish and admits only ASCII alphanumerics, `-` and `_`; a dotted name is
+/// refused with `InvalidInput` before anything is created.
+const CONTRACTS_IDENTITY_STORE: &str = "state/contracts/transport-identity-v1";
 const CONTRACTS_BUDGET_POLICY: &str = "artifacts/contracts-budget-policy.v1";
 const CONTRACTS_BOOTSTRAP: &str = "artifacts/contracts-bootstrap.v1";
 
