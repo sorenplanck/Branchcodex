@@ -1,19 +1,29 @@
 use dom_consensus::{
-    swap_arbiter_intent, validate_range_proofs, validate_swap_arbiter_input_proofs,
-    validate_transaction, SwapArbiterContract, Transaction, TransactionInput, TransactionKernel,
-    TransactionOutput, ValidationContext,
+    derive_chain_id, is_swap_arbiter_active, swap_arbiter_activation_height, swap_arbiter_intent,
+    validate_range_proofs, validate_swap_arbiter_input_proofs, validate_transaction,
+    SwapArbiterContract, Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+    ValidationContext,
 };
 use dom_core::{
-    Amount, BlockHeight, DomError, Timestamp, KERNEL_FEAT_PLAIN, KERNEL_FEAT_SWAP_CLAIM,
-    KERNEL_FEAT_SWAP_PUNISH, KERNEL_FEAT_SWAP_REFUND, TAG_KERNEL_MSG,
+    Amount, BlockHeight, DomError, Hash256, Timestamp, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST,
+    GENESIS_HASH_TESTNET, KERNEL_FEAT_PLAIN, KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH,
+    KERNEL_FEAT_SWAP_REFUND, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
+    TAG_KERNEL_MSG,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_crypto::{range_proof_prove_bytes_with_extra_commit, schnorr_sign, SecretKey};
 
-const CHAIN_ID: [u8; 32] = [0x51; 32];
 const INPUT_VALUE: u64 = 50_000;
 const OUTPUT_VALUE: u64 = 49_000;
+
+fn chain_id() -> [u8; 32] {
+    *derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(GENESIS_HASH_REGTEST),
+    )
+    .as_bytes()
+}
 
 fn scalar(last: u8) -> BlindingFactor {
     let mut bytes = [0u8; 32];
@@ -46,7 +56,7 @@ fn branch(
     let signature = schnorr_sign(
         &secret,
         &kernel_message(feature, INPUT_VALUE - OUTPUT_VALUE, boundary),
-        &CHAIN_ID,
+        &chain_id(),
     )
     .unwrap();
     Transaction {
@@ -114,7 +124,7 @@ fn fixture() -> (
 fn context(height: u64) -> ValidationContext {
     ValidationContext {
         current_height: BlockHeight(height),
-        chain_id: CHAIN_ID,
+        chain_id: chain_id(),
         now: Timestamp(u64::MAX),
     }
 }
@@ -136,6 +146,7 @@ fn proof_bound_contract_and_three_exact_branches_validate() {
         validate_swap_arbiter_input_proofs(
             tx,
             BlockHeight(height),
+            &chain_id(),
             std::slice::from_ref(&funding.proof),
         )
         .unwrap();
@@ -143,23 +154,72 @@ fn proof_bound_contract_and_three_exact_branches_validate() {
 }
 
 #[test]
+fn dxa1_activation_is_regtest_only_and_height_exact() {
+    let (funding, _, _, _, _) = fixture();
+    let funding_tx = Transaction {
+        inputs: vec![],
+        outputs: vec![funding],
+        kernels: vec![],
+        offset: [0; 32],
+    };
+    let regtest = chain_id();
+    assert_eq!(
+        swap_arbiter_activation_height(&regtest),
+        Some(BlockHeight(1))
+    );
+    assert!(!is_swap_arbiter_active(&regtest, BlockHeight(0)));
+    assert!(is_swap_arbiter_active(&regtest, BlockHeight(1)));
+    assert!(matches!(
+        validate_swap_arbiter_input_proofs(&funding_tx, BlockHeight(0), &regtest, &[]),
+        Err(DomError::Invalid(message)) if message.contains("not active")
+    ));
+    validate_swap_arbiter_input_proofs(&funding_tx, BlockHeight(1), &regtest, &[]).unwrap();
+
+    for (network_magic, genesis_hash) in [
+        (NETWORK_MAGIC_MAINNET, GENESIS_HASH_MAINNET),
+        (NETWORK_MAGIC_TESTNET, GENESIS_HASH_TESTNET),
+    ] {
+        let disabled =
+            *derive_chain_id(network_magic, &Hash256::from_bytes(genesis_hash)).as_bytes();
+        assert_eq!(swap_arbiter_activation_height(&disabled), None);
+        assert!(!is_swap_arbiter_active(&disabled, BlockHeight(u64::MAX)));
+        assert!(matches!(
+            validate_swap_arbiter_input_proofs(
+                &funding_tx,
+                BlockHeight(u64::MAX),
+                &disabled,
+                &[],
+            ),
+            Err(DomError::Invalid(message)) if message.contains("not active")
+        ));
+    }
+
+    let unknown = [0x55; 32];
+    assert_eq!(swap_arbiter_activation_height(&unknown), None);
+    assert!(
+        validate_swap_arbiter_input_proofs(&funding_tx, BlockHeight(u64::MAX), &unknown, &[],)
+            .is_err()
+    );
+}
+
+#[test]
 fn consensus_phases_are_adjacent_and_never_overlap() {
     let (funding, _, claim, refund, punish) = fixture();
     let proof = std::slice::from_ref(&funding.proof);
     assert!(matches!(
-        validate_swap_arbiter_input_proofs(&claim, BlockHeight(11), proof),
+        validate_swap_arbiter_input_proofs(&claim, BlockHeight(11), &chain_id(), proof),
         Err(DomError::Invalid(_))
     ));
     assert!(matches!(
-        validate_swap_arbiter_input_proofs(&refund, BlockHeight(10), proof),
+        validate_swap_arbiter_input_proofs(&refund, BlockHeight(10), &chain_id(), proof),
         Err(DomError::TemporarilyInvalid(_))
     ));
     assert!(matches!(
-        validate_swap_arbiter_input_proofs(&refund, BlockHeight(21), proof),
+        validate_swap_arbiter_input_proofs(&refund, BlockHeight(21), &chain_id(), proof),
         Err(DomError::Invalid(_))
     ));
     assert!(matches!(
-        validate_swap_arbiter_input_proofs(&punish, BlockHeight(20), proof),
+        validate_swap_arbiter_input_proofs(&punish, BlockHeight(20), &chain_id(), proof),
         Err(DomError::TemporarilyInvalid(_))
     ));
 }
@@ -173,6 +233,7 @@ fn exact_intents_and_contract_output_are_enforced() {
         validate_swap_arbiter_input_proofs(
             &changed,
             BlockHeight(10),
+            &chain_id(),
             std::slice::from_ref(&funding.proof),
         ),
         Err(DomError::Invalid(_))
@@ -185,6 +246,7 @@ fn exact_intents_and_contract_output_are_enforced() {
         validate_swap_arbiter_input_proofs(
             &ordinary,
             BlockHeight(10),
+            &chain_id(),
             std::slice::from_ref(&funding.proof),
         ),
         Err(DomError::Invalid(_))
@@ -192,7 +254,12 @@ fn exact_intents_and_contract_output_are_enforced() {
 
     let plain = vec![0u8; dom_crypto::RANGE_PROOF_SIZE];
     assert!(matches!(
-        validate_swap_arbiter_input_proofs(&claim, BlockHeight(10), std::slice::from_ref(&plain),),
+        validate_swap_arbiter_input_proofs(
+            &claim,
+            BlockHeight(10),
+            &chain_id(),
+            std::slice::from_ref(&plain),
+        ),
         Err(DomError::Invalid(_))
     ));
 }

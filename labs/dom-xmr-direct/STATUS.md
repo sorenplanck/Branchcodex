@@ -127,7 +127,7 @@ sem o Claim; esses blocos atravessam `ChainState::connect_block`, promovem o for
 mais pesado e removem o settlement da altura canônica. A rechecagem detecta o
 novo hash, recusa a liberação e o ensaio confirma que nenhuma assinatura ou
 transação XMR foi solicitada. Na campanha mais recente, a recusa ocorreu em
-**42,66 s** desde `Ready` e **128,10 s** no caso completo.
+**37,64 s** desde `Ready` e **117,90 s** no caso completo.
 
 As duas shares privadas que formam a chave XMR agora são geradas e mantidas
 por processos distintos (`arbiter_party`). O coordenador recebe somente as
@@ -161,8 +161,8 @@ ela ainda roda num único host e não substitui um ensaio físico entre máquina
 O modo persistente agora permite deixar cada participante em outro host e
 reabrir seu helper privado depois que o coordenador desconecta. Um Claim
 financiado percorreu esse modo, reiniciou e restaurou os dois participantes e
-terminou em **93,93 s** no total e **29,34 s** desde `Ready`, já com as shares
-cifradas em repouso. O teste usou dois
+terminou em **107,80 s** no total e **32,68 s** desde `Ready`, já com as shares
+cifradas em repouso e a barreira de ativação. O teste usou dois
 servidores loopback separados; `clsag-lab/REMOTE-REGTEST.md` registra o mesmo
 procedimento para máquinas distintas.
 
@@ -181,13 +181,20 @@ Há uma limitação de rede incontornável: outputs Monero novos ficam sujeitos 
 janela padrão de dez blocos. Portanto, a meta de até três minutos começa em
 `Ready` e requer uma reserva conjunta já confirmada e madura, preparada antes
 da liquidação ativa. Na campanha paralela mais recente, medido desde `Ready`,
-Claim levou **29,15 s**, Refund **34,87 s** e Punish **45,74 s**. O runner
+Claim levou **33,32 s**, Refund **40,29 s** e Punish **39,05 s**. O runner
 impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
 mainnet. Ainda faltam executar o transporte em máquinas físicas distintas,
 quantificar a política para reorgs mais profundos e ativar com segurança as
 novas regras de consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.
+
+A ativação agora é uma regra de consenso ligada ao `chain_id`. Somente o
+Regtest canônico aceita DXA1, a partir da altura 1. Mainnet, Testnet e IDs
+desconhecidos permanecem desabilitados mesmo em `u64::MAX`; o mempool usa a
+altura do próximo bloco e as conexões diretas, reconstrução de UTXO e reorgs
+repetem a mesma barreira. Ativação pública ainda requer altura e versão de bloco
+coordenadas, deliberadamente ausentes deste candidato.
 
 O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
 um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
@@ -198,10 +205,10 @@ que contenção do runner seja confundida com latência do protocolo. Depois da
 barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
 reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **243,66 s** de parede com dois workers. Claim,
-Refund e Punish completos levaram **110,69 s**, **115,54 s** e **126,09 s**; o
-reorg foi recusado em **128,10 s** totais. Desde `Ready`, os settlements levaram
-**29,15 s**, **34,87 s** e **45,74 s**. A
+mesmo arquivo oficial passou em **235,61 s** de parede com dois workers. Claim,
+Refund e Punish completos levaram **110,50 s**, **117,69 s** e **120,36 s**; o
+reorg foi recusado em **117,90 s** totais. Desde `Ready`, os settlements levaram
+**33,32 s**, **40,29 s** e **39,05 s**. A
 evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 

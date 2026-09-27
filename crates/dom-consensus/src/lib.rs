@@ -56,7 +56,8 @@ pub use block::BlockHeader;
 pub use block_full::{validate_block, validate_block_for_network, Block};
 pub use cutthrough::apply_cut_through;
 pub use swap_arbiter::{
-    swap_arbiter_intent, validate_swap_arbiter_input_proofs, SwapArbiterContract, SwapArbiterPath,
+    is_swap_arbiter_active, swap_arbiter_activation_height, swap_arbiter_intent,
+    validate_swap_arbiter_input_proofs, SwapArbiterContract, SwapArbiterPath,
 };
 pub use transaction::{
     validate_balance_equation, validate_lock_heights, validate_range_proofs,

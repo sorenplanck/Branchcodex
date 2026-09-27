@@ -358,6 +358,17 @@ pub const TESTNET_V3_ACTIVATION_HEIGHT: u64 = 1;
 /// Consensus. Regtest activates v3 at its first post-genesis block.
 pub const REGTEST_V3_ACTIVATION_HEIGHT: u64 = 1;
 
+/// Consensus. DXA1 remains disabled on Mainnet until an audited activation
+/// release assigns a height and coordinates the corresponding block version.
+pub const MAINNET_DXA1_ACTIVATION_HEIGHT: Option<u64> = None;
+
+/// Consensus. DXA1 remains disabled on the persistent public Testnet until its
+/// reset or activation height is explicitly coordinated.
+pub const TESTNET_DXA1_ACTIVATION_HEIGHT: Option<u64> = None;
+
+/// Consensus. Regtest enables DXA1 in its first post-genesis block.
+pub const REGTEST_DXA1_ACTIVATION_HEIGHT: Option<u64> = Some(1);
+
 /// Return the block version required by Mainnet consensus at `height`.
 pub const fn required_block_version(height: u64) -> u32 {
     if height >= MAINNET_V3_ACTIVATION_HEIGHT {

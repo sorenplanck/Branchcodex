@@ -15,6 +15,12 @@ reserva XMR. Claim/Punish revelam a share do dono de XMR; Refund revela a share
 do dono de DOM. O lado econômico correto reconstrói a chave conjunta e gasta a
 reserva por uma transação Monero nativa.
 
+A regra de ativação falha fechada pelo `chain_id` canônico. DXA1 fica ativo
+somente no Regtest a partir da altura 1. Mainnet, Testnet e cadeias desconhecidas
+o recusam em qualquer altura. Uma futura ativação pública exige definir altura,
+versão de bloco e rollout coordenado em uma nova release; o laboratório não
+ativa silenciosamente uma regra de consenso na rede existente.
+
 `examples/arbiter_regtest.rs` executa cada resultado através de um nó DOM e um
 `monerod` isolados. O journal durável exige recovery antes do funding, XMR
 confirmado e maduro antes de Claim, e grava os settlements canônicos das duas
@@ -70,17 +76,18 @@ python3 scripts/run_arbiter_matrix.py \
   --workers 2
 ```
 
-A campanha mais recente usou dois workers e terminou em 243,66 s de parede,
+A campanha mais recente usou dois workers e terminou em 235,61 s de parede,
 com duas confirmações DOM, shares XMR e DOM em processos separados, prova de
 faixa colaborativa, reinício dos dois participantes, rechecagem canônica antes
 da assinatura XMR e todas as operações pelo canal Noise. Claim, Refund e
-Punish levaram 29,15 s, 34,87 s e 45,74 s desde `Ready`. Um quarto caso
+Punish levaram 33,32 s, 40,29 s e 39,05 s desde `Ready`. Um quarto caso
 promoveu uma cadeia DOM concorrente, removeu o Claim e recusou qualquer
-assinatura XMR em 42,66 s desde `Ready`. Os registros completos e os limites
+assinatura XMR em 37,64 s desde `Ready`. Os registros completos e os limites
 atuais estão em `../STATUS.md` e `../ARBITRATION-REPLACEMENT.md`.
 
-O Claim financiado pelo caminho de servidores persistentes e estado cifrado
-passou em 93,93 s no total e 29,34 s de `Ready` até a conclusão. Esse ensaio prova o protocolo de
+O Claim financiado pelo caminho de servidores persistentes, estado cifrado e
+barreira de ativação passou em 107,80 s no total e 32,68 s de `Ready` até a
+conclusão. Esse ensaio prova o protocolo de
 execução remota e a retomada sobre TCP/Noise, porém usou interfaces loopback no
 mesmo host. A execução em máquinas físicas distintas continua pendente.
 

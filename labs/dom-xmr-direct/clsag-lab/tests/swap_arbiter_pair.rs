@@ -1,11 +1,12 @@
 use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, scalar::Scalar};
 use dom_consensus::{
-    swap_arbiter_intent, validate_swap_arbiter_input_proofs, SwapArbiterContract, SwapArbiterPath,
-    Transaction, TransactionInput, TransactionKernel, TransactionOutput, ValidationContext,
+    derive_chain_id, swap_arbiter_intent, validate_swap_arbiter_input_proofs, SwapArbiterContract,
+    SwapArbiterPath, Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+    ValidationContext,
 };
 use dom_core::{
-    Amount, BlockHeight, Timestamp, KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH,
-    KERNEL_FEAT_SWAP_REFUND,
+    Amount, BlockHeight, Hash256, Timestamp, GENESIS_HASH_REGTEST, KERNEL_FEAT_SWAP_CLAIM,
+    KERNEL_FEAT_SWAP_PUNISH, KERNEL_FEAT_SWAP_REFUND, NETWORK_MAGIC_REGTEST,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_crypto::SecretKey;
@@ -32,11 +33,18 @@ use xmr_dleq_sigma::{
 };
 use zeroize::Zeroizing;
 
-const CHAIN_ID: [u8; 32] = [0x61; 32];
 const SETTLEMENT_ID: [u8; 32] = [0x62; 32];
 const CONTEXT_HASH: [u8; 32] = [0x63; 32];
 const INPUT_VALUE: u64 = 5_000_000;
 const FEE: u64 = 100_000;
+
+fn chain_id() -> [u8; 32] {
+    *derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(GENESIS_HASH_REGTEST),
+    )
+    .as_bytes()
+}
 
 fn scalar(last: u8) -> BlindingFactor {
     let mut bytes = [0u8; 32];
@@ -89,7 +97,7 @@ fn branch(
         }],
         offset: [0; 32],
     };
-    let prepared = PreparedDomClaim::new_swap_arbiter_path(unsigned.clone(), CHAIN_ID).unwrap();
+    let prepared = PreparedDomClaim::new_swap_arbiter_path(unsigned.clone(), chain_id()).unwrap();
     Branch {
         unsigned,
         prepared,
@@ -138,7 +146,7 @@ fn offer(branch: &Branch, adaptor: dom_crypto::PublicKey, session: u8) -> DomCla
 fn context(height: u64) -> ValidationContext {
     ValidationContext {
         current_height: BlockHeight(height),
-        chain_id: CHAIN_ID,
+        chain_id: chain_id(),
         now: Timestamp(u64::MAX),
     }
 }
@@ -298,7 +306,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
     let wrong_claim_offer = offer(&claim, wrong_adaptor, 74);
 
     let binding = ArbiterSessionBinding::new(
-        CHAIN_ID,
+        chain_id(),
         &contract,
         &shares,
         &refund_offer,
@@ -368,7 +376,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
     assert_eq!(state.xmr_settlement, Some([5; 32]));
     drop(journal);
     let changed_finality_policy = ArbiterSessionBinding::new(
-        CHAIN_ID,
+        chain_id(),
         &contract,
         &shares,
         &refund_offer,
@@ -403,7 +411,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
 
     let bounded_path = directory.join("bounded.wal");
     let bounded = ArbiterSessionBinding::new(
-        CHAIN_ID,
+        chain_id(),
         &contract,
         &shares,
         &refund_offer,
@@ -463,6 +471,7 @@ fn every_terminal_dom_path_reveals_the_xmr_share_for_the_opposite_asset_owner() 
         validate_swap_arbiter_input_proofs(
             &final_tx,
             BlockHeight(height),
+            &chain_id(),
             std::slice::from_ref(&funding.proof),
         )
         .unwrap();

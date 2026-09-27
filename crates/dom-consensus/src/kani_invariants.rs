@@ -12,6 +12,7 @@ use crate::{
 };
 use dom_core::{
     block_reward, BlockHeight, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN,
+    KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH, KERNEL_FEAT_SWAP_REFUND,
 };
 
 #[kani::proof]
@@ -21,8 +22,11 @@ fn kernel_feature_acceptance_is_exact_for_every_byte() {
         is_known_kernel_features(features)
             == (features == KERNEL_FEAT_PLAIN
                 || features == KERNEL_FEAT_COINBASE
-                || features == KERNEL_FEAT_HEIGHT_LOCKED),
-        "only the three frozen kernel feature bytes are valid",
+                || features == KERNEL_FEAT_HEIGHT_LOCKED
+                || features == KERNEL_FEAT_SWAP_CLAIM
+                || features == KERNEL_FEAT_SWAP_REFUND
+                || features == KERNEL_FEAT_SWAP_PUNISH),
+        "only the six frozen kernel feature bytes are valid",
     );
 }
 
@@ -30,9 +34,16 @@ fn kernel_feature_acceptance_is_exact_for_every_byte() {
 fn kernel_lock_field_classification_is_exact() {
     let features: u8 = kani::any();
     let lock_height: u64 = kani::any();
-    let expected = if features == KERNEL_FEAT_HEIGHT_LOCKED && lock_height == 0 {
+    let height_bearing = matches!(
+        features,
+        KERNEL_FEAT_HEIGHT_LOCKED
+            | KERNEL_FEAT_SWAP_CLAIM
+            | KERNEL_FEAT_SWAP_REFUND
+            | KERNEL_FEAT_SWAP_PUNISH
+    );
+    let expected = if height_bearing && lock_height == 0 {
         KernelLockClassification::HeightLockedAtZero
-    } else if features != KERNEL_FEAT_HEIGHT_LOCKED && lock_height != 0 {
+    } else if !height_bearing && lock_height != 0 {
         KernelLockClassification::NonHeightLockedAtNonzero
     } else {
         KernelLockClassification::Canonical

@@ -55,6 +55,13 @@ ou punish entrega DOM ao dono de XMR e revela a share que permite ao dono de
 DOM gastar a saída XMR conjunta; refund devolve DOM ao dono de DOM e revela a
 share que permite ao dono de XMR recuperar XMR.
 
+O primitivo não fica implicitamente ativo por existir no binário. A barreira
+de consenso deriva a rede pelo `chain_id` canônico e hoje habilita DXA1 apenas
+no Regtest, desde a altura 1. Mainnet, Testnet e IDs desconhecidos retornam
+desativado em qualquer altura. Uma ativação pública precisa escolher altura,
+elevar e coordenar a versão de bloco e publicar uma release de upgrade; nenhuma
+dessas decisões é inferida pelo laboratório.
+
 Testes nativos validam as assinaturas DOM multipartes, a extração de cada
 share e a reconstrução da chave XMR conjunta. O nó DOM aplica o contrato no
 mempool, bloco direto, reorganização e reconstrução após reinício. Um ensaio
@@ -118,8 +125,9 @@ fragmentação; a matriz inteira usa esse canal e o recria no restart. Falta
 repetir entre hosts físicos distintos. O servidor persistente e a configuração
 externa do coordenador já permitem essa topologia. Um Claim financiado pelo
 mesmo caminho remoto, com os dois servidores isolados em loopback, restaurou os
-participantes após a desconexão e passou, com estado cifrado, em 93,93 s no
-total e 29,34 s desde `Ready`; o roteiro reproduzível está em
+participantes após a desconexão e passou, com estado cifrado e ativação
+restrita ao Regtest, em 107,80 s no total e 32,68 s desde `Ready`; o roteiro
+reproduzível está em
 `clsag-lab/REMOTE-REGTEST.md`.
 
 As chaves de pré-assinatura DOM agora também ficam distribuídas. Cada processo
@@ -144,7 +152,7 @@ Monero impõe a todos os outputs uma janela padrão de dez blocos antes do gasto
 Assim, um depósito XMR criado sob demanda não pode cumprir 2–3 minutos em rede
 normal. A meta rápida é tecnicamente possível somente no intervalo
 `Ready → Complete`, usando uma reserva conjunta já confirmada e madura. Esse
-intervalo mediu 29,15 s para Claim, 34,87 s para Refund e 45,74 s para Punish
+intervalo mediu 33,32 s para Claim, 40,29 s para Refund e 39,05 s para Punish
 sob execução paralela. O runner falha se qualquer caso exceder 180 s; a
 preparação permanece declarada separadamente.
 

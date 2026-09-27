@@ -5,15 +5,53 @@
 //! does not contain the proof envelope of the output it spends.
 
 use dom_core::{
-    Amount, BlockHeight, DomError, KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH,
-    KERNEL_FEAT_SWAP_REFUND, SWAP_ARBITER_CONTRACT_SIZE, TAG_SWAP_ARBITER_INTENT,
+    Amount, BlockHeight, DomError, Hash256, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST,
+    GENESIS_HASH_TESTNET, KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH, KERNEL_FEAT_SWAP_REFUND,
+    MAINNET_DXA1_ACTIVATION_HEIGHT, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+    NETWORK_MAGIC_TESTNET, REGTEST_DXA1_ACTIVATION_HEIGHT, SWAP_ARBITER_CONTRACT_SIZE,
+    TAG_SWAP_ARBITER_INTENT, TESTNET_DXA1_ACTIVATION_HEIGHT,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_serialization::DomSerialize;
 
-use crate::Transaction;
+use crate::{derive_chain_id, Transaction};
 
 const MAGIC: &[u8; 4] = b"DXA1";
+
+/// Return the configured DXA1 activation height for a canonical chain ID.
+///
+/// Unknown chains and networks whose activation is intentionally unset remain
+/// disabled. This fails closed if a caller supplies an arbitrary chain ID.
+pub fn swap_arbiter_activation_height(chain_id: &[u8; 32]) -> Option<BlockHeight> {
+    for (network_magic, genesis_hash, activation) in [
+        (
+            NETWORK_MAGIC_MAINNET,
+            GENESIS_HASH_MAINNET,
+            MAINNET_DXA1_ACTIVATION_HEIGHT,
+        ),
+        (
+            NETWORK_MAGIC_TESTNET,
+            GENESIS_HASH_TESTNET,
+            TESTNET_DXA1_ACTIVATION_HEIGHT,
+        ),
+        (
+            NETWORK_MAGIC_REGTEST,
+            GENESIS_HASH_REGTEST,
+            REGTEST_DXA1_ACTIVATION_HEIGHT,
+        ),
+    ] {
+        let expected = derive_chain_id(network_magic, &Hash256::from_bytes(genesis_hash));
+        if expected.as_bytes() == chain_id {
+            return activation.map(BlockHeight);
+        }
+    }
+    None
+}
+
+/// Return whether DXA1 is active on `chain_id` at `height`.
+pub fn is_swap_arbiter_active(chain_id: &[u8; 32], height: BlockHeight) -> bool {
+    swap_arbiter_activation_height(chain_id).is_some_and(|active| height >= active)
+}
 
 /// Immutable paths committed into a DOM output's range-proof transcript.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,8 +260,31 @@ pub fn swap_arbiter_intent(tx: &Transaction) -> Result<[u8; 32], DomError> {
 pub fn validate_swap_arbiter_input_proofs(
     tx: &Transaction,
     height: BlockHeight,
+    chain_id: &[u8; 32],
     input_proofs: &[Vec<u8>],
 ) -> Result<(), DomError> {
+    let has_arbiter_envelope = tx
+        .outputs
+        .iter()
+        .map(|output| &output.proof)
+        .chain(input_proofs.iter())
+        .any(|proof| proof.len() == dom_crypto::RANGE_PROOF_SIZE + SWAP_ARBITER_CONTRACT_SIZE);
+    let special_kernels = tx
+        .kernels
+        .iter()
+        .filter(|kernel| {
+            matches!(
+                kernel.features,
+                KERNEL_FEAT_SWAP_CLAIM | KERNEL_FEAT_SWAP_REFUND | KERNEL_FEAT_SWAP_PUNISH
+            )
+        })
+        .count();
+    if (has_arbiter_envelope || special_kernels != 0) && !is_swap_arbiter_active(chain_id, height) {
+        return Err(DomError::Invalid(format!(
+            "DXA1 swap arbiter is not active for this chain at height {}",
+            height.0
+        )));
+    }
     if input_proofs.len() != tx.inputs.len() {
         return Err(DomError::Internal(
             "swap arbiter validation received an incomplete UTXO snapshot".into(),
@@ -240,16 +301,6 @@ pub fn validate_swap_arbiter_input_proofs(
             }
         }
     }
-    let special_kernels = tx
-        .kernels
-        .iter()
-        .filter(|kernel| {
-            matches!(
-                kernel.features,
-                KERNEL_FEAT_SWAP_CLAIM | KERNEL_FEAT_SWAP_REFUND | KERNEL_FEAT_SWAP_PUNISH
-            )
-        })
-        .count();
     match (contract, special_kernels) {
         (None, 0) => Ok(()),
         (None, _) => Err(DomError::Invalid(
