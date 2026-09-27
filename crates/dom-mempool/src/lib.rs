@@ -580,6 +580,7 @@ pub fn validate_tx_against_chain_view<F>(
 where
     F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
 {
+    let mut input_proofs = Vec::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
         let commitment = input.commitment.as_bytes();
         let Some(entry) = lookup_utxo(commitment)? else {
@@ -594,7 +595,15 @@ where
                 current_height, entry.block_height, coinbase_maturity
             )));
         }
+        input_proofs.push(entry.proof);
     }
+    // Admission targets the next possible block. Consensus repeats this check
+    // against the actual block height, so a stale mempool snapshot cannot
+    // extend a claim/refund phase.
+    let next_height = current_height
+        .checked_add(1)
+        .ok_or_else(|| DomError::Invalid("next block height overflow".into()))?;
+    dom_consensus::validate_swap_arbiter_input_proofs(tx, BlockHeight(next_height), &input_proofs)?;
     Ok(())
 }
 

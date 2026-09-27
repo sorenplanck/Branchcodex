@@ -11,6 +11,31 @@ DOM↔Monero; a perna DOM↔Bitcoin quase concluída não será modificada. O mo
 executado por padrão agora é bilateral, inclusive seu controle negativo. Os
 testes anteriores de composição estão preservados em `historical/`.
 
+## Novo árbitro DOM — marco de implementação
+
+Foi implementado o primeiro primitivo nativo do mecanismo substituto, sem a
+cápsula temporizada e sem BTC. Um output DOM `DXA1` compromete, dentro do
+transcript da própria Bulletproof, três transações exatas: claim, refund e
+punish. Os três caminhos usam tipos de kernel próprios e janelas de altura
+adjacentes sem sobreposição. A assinatura final não entra no hash de intenção
+para permitir conclusão posterior por adaptor; input, outputs, provas, taxa,
+excesso, offset, caminho e limites de altura permanecem comprometidos.
+
+O contrato é lido somente da prova guardada no UTXO canônico. A regra é
+repetida na admissão do mempool para o próximo bloco, na conexão direta pelo
+bloco real, na promoção de reorganizações e na reconstrução após reinício. Um
+peer não pode fornecer outro contrato no gasto. A generalização do envelope
+preserva a validação estrutural das cápsulas antigas.
+
+Passaram os testes específicos de consenso e mempool, as suítes completas de
+`dom-consensus`, `dom-mempool` e `dom-chain`, além de Clippy com warnings como
+erros nos quatro crates tocados. Isso prova o isolamento das fases e a
+persistência da regra no nó; ainda não prova o swap DOM↔XMR. Próximo passo:
+ligar claim/refund à revelação das shares usadas pela saída XMR conjunta e
+executar o ensaio financiado ponta a ponta. A ativação de rede e a garantia de
+inclusão dentro da janela continuam decisões abertas; este código é candidato
+experimental de consenso.
+
 ## Evidência obtida
 
 **Prioridade atual: corrigir uma premissa de segurança refutada.**

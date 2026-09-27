@@ -260,9 +260,23 @@ pub const MAX_PROOF_SIZE: usize = 768;
 /// Consensus. Exact Wallet V3 recovery capsule size.
 pub const RECOVERY_CAPSULE_SIZE: usize = 96;
 
-/// Consensus. Maximum length-prefixed output proof envelope. Recoverable
-/// outputs carry the 739-byte range proof followed by a 96-byte capsule.
-pub const MAX_OUTPUT_PROOF_ENVELOPE_SIZE: usize = 739 + RECOVERY_CAPSULE_SIZE;
+/// Consensus. Bytes in a DOM/XMR arbiter output extension.
+///
+/// `DXA1` magic + claim/refund terminal heights + three exact spend-intent
+/// hashes. The experimental arbiter and the wallet recovery capsule are
+/// mutually exclusive output extensions.
+pub const SWAP_ARBITER_CONTRACT_SIZE: usize = 4 + 8 + 8 + 3 * 32;
+
+/// Consensus. Maximum length-prefixed output proof envelope.
+///
+/// Outputs carry a 739-byte proof and may append exactly one canonical
+/// recovery capsule or DOM/XMR arbiter contract.
+pub const MAX_OUTPUT_PROOF_ENVELOPE_SIZE: usize = 739
+    + if RECOVERY_CAPSULE_SIZE > SWAP_ARBITER_CONTRACT_SIZE {
+        RECOVERY_CAPSULE_SIZE
+    } else {
+        SWAP_ARBITER_CONTRACT_SIZE
+    };
 
 /// Consensus. Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
@@ -504,6 +518,15 @@ pub const KERNEL_FEAT_COINBASE: u8 = 0x01;
 /// Consensus. Height-locked kernel — absolute timelock.
 pub const KERNEL_FEAT_HEIGHT_LOCKED: u8 = 0x02;
 
+/// Consensus candidate. Claim an arbiter output no later than `lock_height`.
+pub const KERNEL_FEAT_SWAP_CLAIM: u8 = 0x03;
+
+/// Consensus candidate. Refund during the arbiter's bounded refund phase.
+pub const KERNEL_FEAT_SWAP_REFUND: u8 = 0x04;
+
+/// Consensus candidate. Punish after the bounded refund phase ends.
+pub const KERNEL_FEAT_SWAP_PUNISH: u8 = 0x05;
+
 // ── Weight Units ──────────────────────────────────────────────────────────────
 
 /// Consensus. Weight of a single transaction input.
@@ -523,6 +546,7 @@ pub const WEIGHT_COINBASE_KERNEL: u32 = 2;
 pub const TAG_KERNEL_SIG: &str = "DOM:kernel-sig:v1";
 pub const TAG_KERNEL_MSG: &str = "DOM:kernel-msg:v1";
 pub const TAG_KERNEL_MSG_COINBASE: &str = "DOM:kernel-msg:coinbase:v1";
+pub const TAG_SWAP_ARBITER_INTENT: &str = "DOM:swap-arbiter-intent:v1";
 pub const TAG_H2C: &str = "DOM:h2c:secp256k1:v6.1";
 pub const TAG_BULLETPROOF: &str = "DOM:bulletproof:v1";
 pub const TAG_BP_G: &str = "DOM:bp-G:v1";

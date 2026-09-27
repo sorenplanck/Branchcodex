@@ -1489,6 +1489,7 @@ impl ChainState {
     fn validate_direct_extension_inputs(&self, block: &Block) -> Result<(), DomError> {
         let header = &block.header;
         for tx in &block.transactions {
+            let mut input_proofs = Vec::with_capacity(tx.inputs.len());
             for input in &tx.inputs {
                 let commitment_bytes = input.commitment.as_bytes();
                 let entry = self.store.get_utxo(commitment_bytes)?.ok_or_else(|| {
@@ -1505,7 +1506,9 @@ impl ChainState {
                         header.height.0, entry.block_height, self.coinbase_maturity
                     )));
                 }
+                input_proofs.push(entry.proof);
             }
+            dom_consensus::validate_swap_arbiter_input_proofs(tx, header.height, &input_proofs)?;
         }
         Ok(())
     }
@@ -1629,6 +1632,35 @@ fn reconstruct_canonical_utxo_set(
         }
 
         for tx in &block.transactions {
+            let mut input_proofs = Vec::with_capacity(tx.inputs.len());
+            for input in &tx.inputs {
+                let commitment = *input.commitment.as_bytes();
+                let entry_bytes = utxos.get(&commitment).ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: canonical spend references missing UTXO {} at height {} during UTXO rebuild",
+                        hex::encode(commitment),
+                        h
+                    ))
+                })?;
+                let entry = UtxoEntry::from_bytes(entry_bytes).map_err(|error| {
+                    DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: canonical UTXO {} failed to decode at height {} during UTXO rebuild: {error}",
+                        hex::encode(commitment),
+                        h
+                    ))
+                })?;
+                input_proofs.push(entry.proof);
+            }
+            dom_consensus::validate_swap_arbiter_input_proofs(
+                tx,
+                block.header.height,
+                &input_proofs,
+            )
+            .map_err(|error| {
+                DomError::Internal(format!(
+                    "{CHAIN_CORRUPT_SENTINEL}: canonical swap-arbiter spend is invalid at height {h} during UTXO rebuild: {error}"
+                ))
+            })?;
             for input in &tx.inputs {
                 let commitment = *input.commitment.as_bytes();
                 if utxos.remove(&commitment).is_none() {
@@ -1919,6 +1951,7 @@ fn apply_connect(
     coinbase_maturity: u64,
 ) -> Result<(), DomError> {
     for tx in &block.transactions {
+        let mut input_proofs = Vec::with_capacity(tx.inputs.len());
         for input in &tx.inputs {
             let commitment = *input.commitment.as_bytes();
             let entry = lookup_utxo(store, utxo_overlay, &commitment)?.ok_or_else(|| {
@@ -1933,8 +1966,10 @@ fn apply_connect(
                     block.header.height.0, entry.block_height, coinbase_maturity
                 )));
             }
+            input_proofs.push(entry.proof.clone());
             utxo_overlay.insert(commitment, None);
         }
+        dom_consensus::validate_swap_arbiter_input_proofs(tx, block.header.height, &input_proofs)?;
     }
 
     let coinbase_commitment = *block.coinbase.output.commitment.as_bytes();
