@@ -34,8 +34,10 @@ seis controles negativos. O teste Rust mostra que o guard de30 s admite
 publicação após a recuperação observada já ser possível.
 `recovery-audit/FAST-OPEN-AUDIT.md` contém evidência/limites dessa medição.
 Não substituir30 por8 como se a medição fosse um novo mínimo. Próximo trabalho
-é substituir ou fundamentar a recuperação temporizada,
-antes de integrar retomada durante o solve ou declarar proximidade de produção.
+é substituir ou fundamentar a recuperação temporizada. As condições para uma
+alternativa de arbitragem DOM estão em `ARBITRATION-REPLACEMENT.md`. Essa etapa
+precede a integração da retomada durante o solve e qualquer declaração de
+proximidade de produção.
 
 **Retomada após abertura e gravação parcial da assinatura passou.**
 Checkpoint privado guarda a share original já recuperada, ligada ao job;
