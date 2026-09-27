@@ -33,6 +33,9 @@ btc-crypto = { path = "../../crates/adapters/btc-crypto" }
 # not re-export.
 adapter-btc = { path = "../../crates/adapters/btc" }
 kaystra-core = { path = "../../crates/kaystra-core" }
+# `SenderRoleV1`, which the roster member carries and `dom-interopd` does not
+# re-export. Default features only: the fault-injection surface is not among them.
+relay = { path = "../../crates/relay" }
 dom-consensus = { path = "../../crates/dom-consensus" }
 dom-core = { path = "../../crates/dom-core" }
 # The ordered terms scope the V2 time authority signs over. `dom-interopd` uses it

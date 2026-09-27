@@ -48,6 +48,7 @@
 #![forbid(unsafe_code)]
 
 pub mod registry;
+pub mod roster;
 pub mod terms;
 
 use std::path::{Path, PathBuf};
@@ -63,6 +64,7 @@ use dom_interopd::{
     PRODUCTION_REOPEN_CONFIG_FILE_V11,
 };
 use registry::ProvisionedSolanaRegistryV1;
+use roster::ProvisionedRelayRosterV1;
 use terms::ProvisionedRouteTermsV1;
 use sha2::{Digest, Sha256};
 
@@ -174,6 +176,9 @@ pub struct SolanaRouteBootstrapPlanV1 {
     /// means the route names its counterparty chain in the place the daemon reads it
     /// from, which is what makes the positions resolvable as Solana at all.
     pub terms: Option<ProvisionedRouteTermsV1>,
+    /// The Relay roster, once both positions have one. Present means the daemon can
+    /// tell which key speaks for which participant of which position.
+    pub roster: Option<ProvisionedRelayRosterV1>,
 }
 
 impl SolanaRouteBootstrapPlanV1 {
@@ -198,6 +203,7 @@ impl SolanaRouteBootstrapPlanV1 {
             },
             registry: None,
             terms: None,
+            roster: None,
         }
     }
 
@@ -223,6 +229,13 @@ impl SolanaRouteBootstrapPlanV1 {
         self
     }
 
+    /// Bind the provisioned Relay roster, so `relay_binding_digest` stops being a
+    /// label.
+    pub fn with_roster(mut self, provisioned: ProvisionedRelayRosterV1) -> Self {
+        self.roster = Some(provisioned);
+        self
+    }
+
     /// How many of the nineteen route pins are measurements of a real artifact.
     ///
     /// Reported as a number rather than a boolean because the bootstrap is built
@@ -239,7 +252,12 @@ impl SolanaRouteBootstrapPlanV1 {
             Some(_) => 3,
             None => 0,
         };
-        registry + terms
+        let roster = match self.roster {
+            // relay_binding_digest.
+            Some(_) => 1,
+            None => 0,
+        };
+        registry + terms + roster
     }
 
     /// True while any pin is still a derived label rather than the digest of a
@@ -288,7 +306,10 @@ impl SolanaRouteBootstrapPlanV1 {
             downstream_terms_digest: downstream_terms,
             route_scope_digest: route_scope,
             participant_bindings_digest: placeholder("participant-bindings"),
-            relay_binding_digest: placeholder("relay-binding"),
+            relay_binding_digest: match &self.roster {
+                Some(provisioned) => provisioned.relay_binding_digest,
+                None => placeholder("relay-binding"),
+            },
             time_policy_digest: placeholder("time-policy"),
             time_evidence_digest: placeholder("time-evidence"),
             process_owner_id: placeholder("process-owner"),
