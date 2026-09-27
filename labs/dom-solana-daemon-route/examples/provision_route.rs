@@ -87,6 +87,17 @@ fn main() -> Result<(), String> {
     println!("bootstrap_plan={}", plan_path.display());
     // Everything that later hands this route to the daemon must use the same second.
     println!("now_seconds={now_seconds}");
+    // The shape of the route, so a later refusal can be compared against what was written
+    // rather than against what was intended.
+    println!("upstream_settlement={}", hex(&route.upstream.terms.settlement_id.0));
+    println!("downstream_settlement={}", hex(&route.downstream.terms.settlement_id.0));
+    println!("intent_shared={}", route.upstream.terms.intent_hash == route.downstream.terms.intent_hash);
+    println!(
+        "adaptor_point_shared={}",
+        route.upstream.terms.adaptor_point_sec1 == route.downstream.terms.adaptor_point_sec1
+    );
+    println!("party_0={}", hex(&route.parties[0].0));
+    println!("party_1={}", hex(&route.parties[1].0));
     for (index, path) in plans.paths.iter().enumerate() {
         println!("plan_{index}={}", path.display());
     }

@@ -69,6 +69,16 @@ run_party() {
     >"$report" 2>"$report.err"; then
     log "party $slot refused the ceremony:"
     sed 's/^/  /' "$report.err" >&2
+    # The plan is public data, and the refusal is one word for many conditions. Printing
+    # what the party actually read is the difference between a diagnosis and a guess.
+    log "the plan party $slot read:"
+    sed 's/^/  /' "$CEREMONY_DIR/ceremony-plan-party-$slot.json" >&2
+    log "the secrets it read, with the secret values redacted:"
+    jq '{identity_passphrase_len: (.identity_passphrase|length),
+         upstream_relay_secret_len: (.upstream_relay_secret|length),
+         downstream_relay_secret_len: (.downstream_relay_secret|length),
+         secrets_differ: (.upstream_relay_secret != .downstream_relay_secret)}' \
+      "$CEREMONY_DIR/secrets-party-$slot.json" >&2
     exit 1
   fi
   local stage awaiting
