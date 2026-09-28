@@ -27,14 +27,26 @@ essa margem de inclusão representa nominalmente 114 minutos, mas não adiciona
 espera ao handoff ativo; ela reserva tempo para republicação antes de Refund.
 
 Os ensaios mais recentes, com journal ligado aos hashes canônicos do nó DOM,
-completaram o handoff ativo normal em **16,27 s** e o handoff seguido de reorg em
-**16,22 s**. No segundo,
+completaram o handoff ativo normal em **16,27 s** e, depois da migração para a
+autoridade de produto e do prazo absoluto durável, o handoff seguido de reorg em **17,46 s**. No segundo,
 uma cadeia concorrente retirou o Claim depois do compromisso XMR; o journal
 manteve Refund proibido, exigiu republicação, e o mesmo Claim voltou à cadeia e
 alcançou seis confirmações. O registro persistiu hashes distintos para o bloco
 órfão, a reinclusão e a ponta de confirmação. Claim DOM e pagamento XMR foram
 minerados e verificados fora do cronômetro ativo. Preparação, handoff e
-comprovação levaram **117,56 s** no caso normal e **148,24 s** no caso com reorg.
+comprovação levaram **117,56 s** no caso normal e **163,07 s** no caso com reorg.
+
+A máquina de estados e o journal DXF1 agora pertencem ao crate de produto
+`crates/dom-xmr-fast-handoff`, compilado pela feature `production` do
+`dom-interopd`; o laboratório apenas reexporta e exercita esse mesmo código. A
+autoridade persiste a exposição DOM antes do RPC, exige reabertura depois do
+compromisso XMR e, antes do RPC Monero, persiste o txid e o SHA-256 dos bytes
+assinados exatos. Uma retomada deve restaurar os mesmos bytes. O ensaio com
+reorg também republica o Claim por essa autoridade. O journal v4 vincula o
+início absoluto dos 180 s e rejeita reinício do contador ou recuo do relógio.
+Ainda falta ligar os ports
+concretos dessa autoridade ao loop principal do processo `dom-interopd` e
+executá-los em três hosts físicos.
 Os testes são:
 
 ```text
@@ -163,9 +175,10 @@ protocolo, 26,46 s desde `Ready` e 121,78 s incluindo a preparação dos
 contêineres. A imagem Ubuntu é fixada por digest. Esse teste remove o
 compartilhamento de pilha de rede do loopback, mas continua no mesmo host físico.
 
-O runner de contêineres agora também executa o DXF1 com reorg. Nesse caso, o
-handoff ativo terminou em **15,85 s**, o protocolo completo em **143,58 s** e a
-campanha, incluindo preparação e inspeção dos contêineres, em **180,43 s**. Os
+O runner de contêineres agora também executa o DXF1 com reorg. Com a autoridade
+de produto e o journal v4, o handoff ativo terminou em **17,11 s**, o protocolo
+completo em **158,96 s** e a campanha, incluindo preparação e inspeção dos
+contêineres, em **206,89 s**. Os
 três processos mantiveram namespaces, endereços e volumes distintos; a rede não
 tinha rota externa, as chaves de wrapping vieram de provedores externos e o
 coordenador não montou o estado de nenhum signer.

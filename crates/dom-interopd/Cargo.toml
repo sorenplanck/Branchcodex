@@ -35,6 +35,7 @@ production = [
     "dep:dom-actuator",
     "dom-actuator/production",
     "dep:dom-leg",
+    "dep:dom-xmr-fast-handoff",
     "dom-leg/real-dom-adaptor",
     "dep:dom-core",
     "dep:dom-consensus",
@@ -168,6 +169,7 @@ btc-actuator = { path = "../btc-actuator", default-features = false, optional = 
 btc-vault = { path = "../adapters/btc-vault", optional = true }
 dom-actuator = { path = "../dom-actuator", default-features = false, optional = true }
 dom-leg = { path = "../dom-leg", default-features = false, optional = true }
+dom-xmr-fast-handoff = { path = "../dom-xmr-fast-handoff", optional = true }
 dom-adaptor = { workspace = true, optional = true }
 dom-core = { workspace = true, optional = true }
 dom-consensus = { workspace = true, optional = true }

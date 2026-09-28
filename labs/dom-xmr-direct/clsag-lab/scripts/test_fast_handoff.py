@@ -16,10 +16,13 @@ from pathlib import Path
 REQUIRED_TRUE = (
     "dom_node",
     "monerod",
+    "product_dxf1_authority",
     "prepared_dom_reserve",
     "prepared_mature_xmr_reserve",
     "dom_claim_mempool_admitted_before_xmr_release",
     "xmr_release_committed_before_rpc",
+    "xmr_exact_transaction_persisted_before_rpc",
+    "durable_absolute_active_deadline",
     "durable_restart_before_xmr_signing",
     "refund_permanently_forbidden_after_xmr_commitment",
     "dom_claim_eventually_included",

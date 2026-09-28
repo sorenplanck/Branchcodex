@@ -13,6 +13,7 @@ on:
       - 'crates/dom-chain/**'
       - 'crates/dom-node/**'
       - 'crates/dom-rpc/**'
+      - 'crates/dom-xmr-fast-handoff/**'
       - 'crates/dom-scriptless-primitives/**'
       - 'crates/dom-serialization/**'
       - 'crates/dom-wallet/**'
@@ -78,12 +79,16 @@ jobs:
             -p dom-consensus --test swap_arbiter_consensus
           cargo test --locked --manifest-path ../../../Cargo.toml \
             -p dom-mempool --test swap_arbiter_admission
+          cargo test --locked --manifest-path ../../../Cargo.toml \
+            -p dom-xmr-fast-handoff
           cargo test --locked --lib -j2
           cargo test --locked --test dom_joint --test dom_reserve \
             --test swap_arbiter_pair --test swap_arbiter_node -j2
           cargo clippy --locked --manifest-path ../../../Cargo.toml \
             -p dom-core -p dom-consensus -p dom-mempool -p dom-chain \
             --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path ../../../Cargo.toml \
+            -p dom-xmr-fast-handoff --all-targets -- -D warnings
           cargo clippy --locked --lib --test swap_arbiter_pair --example arbiter_regtest --example arbiter_party --example arbiter_party_proxy -- -D warnings
           cargo build --locked --example arbiter_regtest --example arbiter_party --example arbiter_party_proxy
           python3 -B scripts/test_arbiter_party_state.py \

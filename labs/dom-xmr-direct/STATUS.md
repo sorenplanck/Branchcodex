@@ -210,10 +210,23 @@ Um mecanismo novo `DXF1` agora remove a produção de blocos do intervalo ativo.
 As reservas DOM e XMR ficam prontas antes de `Ready`. O Claim DOM exato é
 persistido e aceito pelo daemon; depois a decisão de liberar o pagamento XMR é
 sincronizada, reaberta após restart e submetida ao `monerod`. Os ensaios mais
-recentes completaram o handoff normal em **16,27 s** e o caso com reorg em
-**16,22 s**, sem esperar bloco de nenhuma chain no intervalo ativo. Claim DOM e
+recentes completaram o handoff normal em **16,27 s** e o caso com reorg, já pela
+autoridade de produto e prazo absoluto durável, em **17,46 s**, sem esperar bloco de nenhuma chain no
+intervalo ativo. Claim DOM e
 pagamento XMR foram depois minerados e verificados; os ensaios inteiros levaram
-**117,56 s** e **148,24 s**, respectivamente.
+**117,56 s** e **163,07 s**, respectivamente.
+
+O núcleo DXF1 deixou de ser uma cópia privada do laboratório. O novo crate
+`dom-xmr-fast-handoff` contém estado, journal v4 e ports estreitos para DOM e
+XMR; `dom-interopd` o inclui no perfil `production`, e o ensaio financiado usa
+o mesmo componente. O journal agora liga também o txid Monero ao SHA-256 dos
+bytes assinados antes do primeiro RPC, exige reabertura depois do compromisso
+XMR e recusa uma restauração que produza bytes diferentes. O início absoluto
+dos 180 s também integra o binding: a autoridade consulta o relógio e o replay
+rejeita prazo reiniciado, observação decrescente ou janela já vencida. O build de produção
+completo do daemon passou. Os adapters concretos ainda precisam ser ligados ao
+loop principal do `dom-interopd`; por isso esta etapa prova o componente de
+produto e seus daemons reais de Regtest, não uma implantação pública concluída.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
 DOM de no máximo 57 blocos, exige que essa margem termine antes da primeira
@@ -242,9 +255,10 @@ provas, ofertas e hashes públicos. Essa execução usou interfaces distintas no
 mesmo host. A execução física em três hosts continua sendo a próxima prova
 operacional.
 
-O cenário DXF1 com reorg também passou em três contêineres isolados. O handoff
-ativo levou **16,95 s**, a execução do protocolo **162,77 s** e o runner completo
-**191,01 s**. Coordenador, dono DOM e dono XMR usaram namespaces, endereços e
+O cenário DXF1 com reorg também passou em três contêineres isolados. Com a
+autoridade de produto e o journal v4, o handoff ativo levou **17,11 s**, a
+execução do protocolo **158,96 s** e o runner completo **206,89 s**. Coordenador,
+dono DOM e dono XMR usaram namespaces, endereços e
 volumes distintos numa rede sem rota externa; o coordenador não montou os
 estados privados, e as chaves de wrapping permaneceram nos provedores externos.
 Essa é a evidência local mais próxima da implantação em três máquinas.

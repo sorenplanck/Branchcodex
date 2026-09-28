@@ -1181,6 +1181,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-xmr-fast-handoff"
+version = "0.2.0"
+dependencies = [
+ "fs2",
+ "sha2",
+]
+
+[[package]]
 name = "dxp1-clsag-lab"
 version = "0.1.0"
 dependencies = [
@@ -1199,6 +1207,7 @@ dependencies = [
  "dom-serialization",
  "dom-wallet",
  "dom-wire",
+ "dom-xmr-fast-handoff",
  "flexible-transcript",
  "group",
  "modular-frost",

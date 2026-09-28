@@ -1668,6 +1668,7 @@ dependencies = [
  "dom-store",
  "dom-vault",
  "dom-wallet2",
+ "dom-xmr-fast-handoff",
  "ed25519-dalek",
  "evm-actuator",
  "f6-engine",
@@ -2494,6 +2495,14 @@ dependencies = [
  "tokio",
  "tracing",
  "x25519-dalek",
+]
+
+[[package]]
+name = "dom-xmr-fast-handoff"
+version = "0.2.0"
+dependencies = [
+ "fs2",
+ "sha2",
 ]
 
 [[package]]

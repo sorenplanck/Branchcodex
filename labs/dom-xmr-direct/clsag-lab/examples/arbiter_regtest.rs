@@ -6,6 +6,7 @@
 //! is not a production-network latency guarantee.
 
 use std::{
+    convert::Infallible,
     env, fs,
     io::{BufRead, BufReader, Write},
     net::TcpListener,
@@ -31,13 +32,16 @@ use dom_rpc::{NodeHandle, SpendRequest, TxAdmissionState};
 use dom_scriptless_primitives::scriptless_add_public_points;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_wallet::{Bip39Seed, Network, WalletDir};
+use dom_xmr_fast_handoff::{
+    DomClaimAdmission, DomClaimFn, FastHandoffAuthority, XmrPaymentFn, XmrPreparedIdentity,
+    XmrPreparedPayment,
+};
 use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
     arbiter_session::{ArbiterSessionBinding, ArbiterSessionJournal},
     claim_resume::digest,
     dom_reserve::ReserveIntent,
     fast_handoff::{FastHandoffBinding, FastHandoffPolicy},
-    fast_handoff_journal::FastHandoffJournal,
     finality_budget::PowFinalityBudget,
     native_dom::{DomClaimOffer, PreparedDomClaim},
 };
@@ -1470,6 +1474,10 @@ async fn exercise(
     drop(setup.journal);
     setup.journal =
         ArbiterSessionJournal::open(&session_path, setup.session_binding.clone()).unwrap();
+    let active_window_started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let active_settlement = Instant::now();
     // This fakechain fixture has one RingCT output per generated block. Keep
     // its decoy sampling reproducible so a stochastic sample cannot make the
@@ -1676,7 +1684,7 @@ async fn exercise(
     };
     let settlement_bytes = settlement.to_bytes().unwrap();
     let prospective_dom_id = *dom_crypto::blake2b_256(&settlement_bytes).as_bytes();
-    let mut fast_journal = if outcome.is_fast() {
+    let mut fast_authority = if outcome.is_fast() {
         let funding = setup.journal.state().unwrap().dom_funding.unwrap();
         let funding_confirmations = handle
             .chain_height()
@@ -1712,22 +1720,15 @@ async fn exercise(
             xmr_output_id,
             prospective_dom_id,
             xmr_payment_intent,
+            active_window_started_at,
             policy,
         )
         .unwrap();
         let path = setup._root.0.join("dxf1-fast-handoff.wal");
-        let mut journal = FastHandoffJournal::create(&path, binding).unwrap();
-        journal
-            .record_ready(funding.id, funding_confirmations, xmr_output_id, true)
-            .unwrap();
-        journal
-            .record_dom_claim_exposure(
-                prospective_dom_id,
-                settlement_height,
-                active_settlement.elapsed().as_secs(),
-            )
-            .unwrap();
-        Some((journal, path, binding))
+        let authority =
+            FastHandoffAuthority::create_ready(&path, binding, funding_confirmations, true)
+                .unwrap();
+        Some((authority, path, binding))
     } else {
         None
     };
@@ -1736,28 +1737,34 @@ async fn exercise(
         .record_dom_release(&settlement, settlement_height)
         .unwrap();
     assert_eq!(released_dom_id, prospective_dom_id);
-    let settlement_admission = handle.submit_tx(settlement_bytes).unwrap();
+    let settlement_admission = if let Some((authority, _, _)) = fast_authority.as_mut() {
+        let mut observed_admission = None;
+        let mut port = DomClaimFn(|expected_transaction_id, transaction: &[u8]| {
+            assert_eq!(
+                *dom_crypto::blake2b_256(transaction).as_bytes(),
+                expected_transaction_id
+            );
+            let admission = handle.submit_tx(transaction.to_vec()).unwrap();
+            observed_admission = Some(admission);
+            Ok::<_, Infallible>(DomClaimAdmission {
+                transaction_id: admission.tx_hash,
+                daemon_next_height: handle.chain_height() + 1,
+            })
+        });
+        authority
+            .admit_dom_claim(&settlement_bytes, settlement_height, &mut port)
+            .unwrap();
+        observed_admission.unwrap()
+    } else {
+        handle.submit_tx(settlement_bytes).unwrap()
+    };
     assert_eq!(settlement_admission.state, TxAdmissionState::New);
-    if let Some((journal, _, _)) = fast_journal.as_mut() {
-        journal
-            .record_dom_daemon_admission(
-                settlement_admission.tx_hash,
-                handle.chain_height() + 1,
-                active_settlement.elapsed().as_secs(),
-            )
-            .unwrap();
-    }
     if outcome.is_fast() {
-        let (mut journal, path, binding) = fast_journal.take().unwrap();
-        journal
-            .record_xmr_release_commitment(
-                xmr_payment_intent,
-                active_settlement.elapsed().as_secs(),
-            )
-            .unwrap();
-        drop(journal);
-        let mut journal = FastHandoffJournal::open(&path, binding).unwrap();
-        assert!(journal.authorize_refund(u64::MAX).is_err());
+        let (mut authority, path, binding) = fast_authority.take().unwrap();
+        authority.commit_xmr_release().unwrap();
+        drop(authority);
+        let mut authority = FastHandoffAuthority::open(&path, binding).unwrap();
+        assert!(authority.journal().authorize_refund(u64::MAX).is_err());
 
         let opening = selected_offer
             .extract(
@@ -1770,10 +1777,32 @@ async fn exercise(
             *opening,
             SwapArbiterPath::Claim,
         ));
-        let (tx_as_hex, xmr_transaction_id) =
-            setup
-                .dom_owner
-                .sign_xmr(&signable_xmr_transaction, *opening, SwapArbiterPath::Claim);
+        let mut payment_port =
+            XmrPaymentFn(|expected_intent, expected: Option<XmrPreparedIdentity>| {
+                assert_eq!(expected_intent, xmr_payment_intent);
+                assert!(expected.is_none());
+                let (tx_as_hex, transaction_id) = setup.dom_owner.sign_xmr(
+                    &signable_xmr_transaction,
+                    *opening,
+                    SwapArbiterPath::Claim,
+                );
+                Ok::<_, Infallible>(XmrPreparedPayment {
+                    transaction_id,
+                    transaction: decode_hex(&tx_as_hex),
+                })
+            });
+        let submission = authority.prepare_committed_xmr(&mut payment_port).unwrap();
+        drop(authority);
+        let mut authority = FastHandoffAuthority::open(&path, binding).unwrap();
+        assert_eq!(
+            authority
+                .journal()
+                .state()
+                .unwrap()
+                .xmr_transaction_digest(),
+            Some(submission.identity().transaction_digest)
+        );
+        let tx_as_hex = hex(submission.transaction());
         let response = rpc
             .rpc_call(
                 "send_raw_transaction",
@@ -1787,16 +1816,12 @@ async fn exercise(
             .unwrap();
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["status"], "OK", "{response}");
-        journal
-            .record_xmr_daemon_admission(
-                xmr_payment_intent,
-                xmr_transaction_id,
-                active_settlement.elapsed().as_secs(),
-            )
+        authority
+            .record_xmr_daemon_admission(&submission, submission.identity().transaction_id)
             .unwrap();
         let active_handoff_seconds = active_settlement.elapsed().as_secs_f64();
-        assert!(journal.completed().unwrap());
-        assert!(journal.authorize_refund(u64::MAX).is_err());
+        assert!(authority.journal().completed().unwrap());
+        assert!(authority.journal().authorize_refund(u64::MAX).is_err());
         assert!(
             active_settlement.elapsed() <= Duration::from_secs(ACTIVE_SETTLEMENT_BUDGET_SECONDS)
         );
@@ -1807,12 +1832,8 @@ async fn exercise(
         let observed = observed_transaction(&setup, settlement_height, &settlement).await;
         assert_eq!(observed, settlement);
         let initial_claim_block = handle.get_block_hash_at_height(settlement_height).unwrap();
-        journal
-            .record_dom_claim_inclusion(
-                settlement_admission.tx_hash,
-                settlement_height,
-                initial_claim_block,
-            )
+        authority
+            .record_dom_claim_inclusion(settlement_height, initial_claim_block)
             .unwrap();
         let mut recovery_inclusion_height = settlement_height;
         let mut recovery_inclusion_block = initial_claim_block;
@@ -1847,13 +1868,29 @@ async fn exercise(
                 .transactions
                 .iter()
                 .any(|transaction| transaction == &settlement));
-            journal
-                .record_dom_claim_reorg(settlement_admission.tx_hash, original_claim_block)
+            authority
+                .record_dom_claim_reorg(original_claim_block)
                 .unwrap();
             orphaned_claim_block = Some(original_claim_block);
-            assert!(journal.state().unwrap().rebroadcast_required());
-            assert!(journal.authorize_refund(u64::MAX).is_err());
-            let readmission = handle.submit_tx(settlement.to_bytes().unwrap()).unwrap();
+            assert!(authority.journal().state().unwrap().rebroadcast_required());
+            assert!(authority.journal().authorize_refund(u64::MAX).is_err());
+            let mut observed_readmission = None;
+            let mut rebroadcast_port = DomClaimFn(|expected_transaction_id, transaction: &[u8]| {
+                assert_eq!(
+                    *dom_crypto::blake2b_256(transaction).as_bytes(),
+                    expected_transaction_id
+                );
+                let admission = handle.submit_tx(transaction.to_vec()).unwrap();
+                observed_readmission = Some(admission);
+                Ok::<_, Infallible>(DomClaimAdmission {
+                    transaction_id: admission.tx_hash,
+                    daemon_next_height: handle.chain_height() + 1,
+                })
+            });
+            authority
+                .rebroadcast_dom_claim(&settlement.to_bytes().unwrap(), &mut rebroadcast_port)
+                .unwrap();
+            let readmission = observed_readmission.unwrap();
             assert_eq!(readmission.tx_hash, settlement_admission.tx_hash);
             assert!(matches!(
                 readmission.state,
@@ -1869,12 +1906,8 @@ async fn exercise(
                 observed_transaction(&setup, recovery_inclusion_height, &settlement).await,
                 settlement
             );
-            journal
-                .record_dom_claim_inclusion(
-                    settlement_admission.tx_hash,
-                    recovery_inclusion_height,
-                    recovery_inclusion_block,
-                )
+            authority
+                .record_dom_claim_inclusion(recovery_inclusion_height, recovery_inclusion_block)
                 .unwrap();
         }
         let mut dom_finality_height = recovery_inclusion_height;
@@ -1884,9 +1917,8 @@ async fn exercise(
         let dom_finality_block = handle
             .get_block_hash_at_height(dom_finality_height)
             .unwrap();
-        journal
+        authority
             .record_dom_claim_finality(
-                settlement_admission.tx_hash,
                 recovery_inclusion_height,
                 recovery_inclusion_block,
                 dom_finality_height,
@@ -1899,7 +1931,7 @@ async fn exercise(
             .block
             .transactions
             .iter()
-            .any(|transaction| transaction.as_ref() == xmr_transaction_id));
+            .any(|transaction| transaction.as_ref() == submission.identity().transaction_id));
         let received = Scanner::new(recipient_view)
             .scan(payment_block)
             .unwrap()
@@ -1907,8 +1939,11 @@ async fn exercise(
         assert!(received
             .iter()
             .any(|output| output.commitment().amount == payment));
-        let state = journal.state().unwrap();
-        assert_eq!(state.xmr_transaction(), Some(xmr_transaction_id));
+        let state = authority.journal().state().unwrap();
+        assert_eq!(
+            state.xmr_transaction(),
+            Some(submission.identity().transaction_id)
+        );
         assert!(state.dom_claim_finalized());
         assert!(!state.rebroadcast_required());
         println!(
@@ -1919,6 +1954,7 @@ async fn exercise(
                 "dom_node":true,
                 "monerod":true,
                 "bitcoin_involved":false,
+                "product_dxf1_authority":true,
                 "remote_participant_servers":setup.remote_participants,
                 "authenticated_noise_transport":true,
                 "bounded_noise_handshake_and_message_deadlines":true,
@@ -1934,6 +1970,8 @@ async fn exercise(
                 "prepared_mature_xmr_reserve":true,
                 "dom_claim_mempool_admitted_before_xmr_release":true,
                 "xmr_release_committed_before_rpc":true,
+                "xmr_exact_transaction_persisted_before_rpc":true,
+                "durable_absolute_active_deadline":true,
                 "durable_restart_before_xmr_signing":true,
                 "refund_permanently_forbidden_after_xmr_commitment":true,
                 "dom_block_wait_in_active_interval":false,

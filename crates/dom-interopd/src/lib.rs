@@ -47,6 +47,17 @@ mod production_child_xmr;
 #[cfg(feature = "production")]
 mod production_dom_claim_driver_v12;
 #[cfg(feature = "production")]
+pub use dom_xmr_fast_handoff::{
+    DomClaimAdmission as ProductionDxf1DomClaimAdmission, DomClaimFn as ProductionDxf1DomClaimFn,
+    DomClaimPort as ProductionDxf1DomClaimPort, FastHandoffAuthority as ProductionDxf1Authority,
+    FastHandoffAuthorityError as ProductionDxf1AuthorityError,
+    FastHandoffBinding as ProductionDxf1Binding, FastHandoffPolicy as ProductionDxf1Policy,
+    PreparedXmrSubmission as ProductionDxf1PreparedXmrSubmission,
+    XmrPaymentFn as ProductionDxf1XmrPaymentFn, XmrPaymentPort as ProductionDxf1XmrPaymentPort,
+    XmrPreparedIdentity as ProductionDxf1XmrPreparedIdentity,
+    XmrPreparedPayment as ProductionDxf1XmrPreparedPayment,
+};
+#[cfg(feature = "production")]
 mod production_dom_shared_bootstrap_v12;
 #[cfg(feature = "production")]
 mod production_dom_vaults_v12;

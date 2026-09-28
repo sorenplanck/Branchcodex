@@ -179,11 +179,23 @@ O novo fluxo DXF1 não reduz silenciosamente as confirmações do DXA1. DOM e XM
 são preparados antes de `Ready`; no intervalo ativo, o Claim DOM exato é
 persistido e aceito pelo daemon. A decisão XMR irreversível é então sincronizada
 antes da assinatura e do RPC Monero. O ensaio normal mais recente fez esse
-handoff em 16,27 s sem minerar novos blocos durante a medição. Um segundo ensaio
-fez o handoff em 16,22 s, removeu o Claim por uma cadeia concorrente depois do
+handoff em 16,27 s sem minerar novos blocos durante a medição. Um segundo ensaio,
+depois de mover o núcleo para a autoridade de produto e fixar o prazo absoluto, fez o handoff em 17,46 s,
+removeu o Claim por uma cadeia concorrente depois do
 compromisso XMR, manteve Refund proibido, republicou exatamente o mesmo Claim e
 acumulou as seis confirmações exigidas. As transações DOM e XMR foram mineradas
 e verificadas depois do intervalo ativo.
+
+Estado, journal v4 e ordem dos RPCs agora vivem em
+`crates/dom-xmr-fast-handoff`, incluído pelo perfil de produção do
+`dom-interopd`. A autoridade grava a exposição DOM antes do envio, exige
+reabertura após o compromisso XMR e grava txid mais SHA-256 dos bytes Monero
+assinados antes de entregá-los ao daemon. Reinício após essa preparação só pode
+restaurar os mesmos bytes. O início absoluto do prazo também fica no binding e
+as observações do relógio são gravadas em ordem não decrescente; reiniciar o
+processo não reinicia os 180 s. O ensaio financiado e o daemon compilam contra esse
+mesmo núcleo; o encaixe dos adapters no loop principal do processo ainda é a
+próxima etapa de integração.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
 em até 57 blocos e acumular seis confirmações ainda dentro de sua fase
@@ -208,8 +220,8 @@ física distribuída. Com a margem completa de 57 blocos, essa execução levou
 O mesmo caso passou depois em três contêineres com namespaces, endereços e
 volumes separados. A rede interna não tinha saída, o coordenador não montou os
 estados dos signers e as chaves de wrapping vieram de agentes externos. O
-handoff ativo terminou em 16,95 s, a execução do protocolo em 162,77 s e o
-runner completo em 191,01 s.
+handoff ativo terminou em 17,11 s, a execução do protocolo em 158,96 s e o
+runner completo em 206,89 s, já com a autoridade de produto e o journal v4.
 
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

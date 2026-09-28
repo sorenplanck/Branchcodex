@@ -55,6 +55,7 @@ members = [
     "crates/deployment-registry",
     "crates/dom-actuator",
     "crates/dom-interopd",
+    "crates/dom-xmr-fast-handoff",
     "crates/evm-actuator",
     "crates/solana-actuator",
     "crates/xmr-actuator",

@@ -30,6 +30,7 @@ dom-crypto = { path = "../../../crates/dom-crypto" }
 dom-scriptless-primitives = { path = "../../../crates/dom-scriptless-primitives" }
 dom-scriptless-bulletproof = { path = "../../../crates/dom-scriptless-bulletproof" }
 dom-wire = { path = "../../../crates/dom-wire" }
+dom-xmr-fast-handoff = { path = "../../../crates/dom-xmr-fast-handoff" }
 xmr-dleq-sigma = { path = "../../../crates/adapters/xmr-dleq-sigma" }
 snow = "=0.9.6"
 tokio = { version = "=1.52.3", features = ["macros", "net", "rt", "time"] }

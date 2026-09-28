@@ -971,3 +971,21 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   divulgado por claim DOM perdedor pode permitir DOM+XMR ao mesmo ator.
   Evitar a corrida depende de limite de inclusão DOM demonstrado; um bloco
   além da hipótese a reproduz. Não alegar segurança nem meta de 2–3 minutos.
+- DXF1 é o mecanismo novo preparado após essa pesquisa. O núcleo não fica mais
+  privado no laboratório: `crates/dom-xmr-fast-handoff` contém estado, journal
+  v4 e a autoridade/ports, e a feature `production` do `dom-interopd` o inclui.
+  O laboratório reexporta o mesmo código. A autoridade grava exposição DOM
+  antes do RPC, exige reabertura após o compromisso XMR, grava txid e SHA-256
+  dos bytes XMR assinados antes do RPC e exige restauração byte a byte; reorg
+  mantém Refund proibido e força republicação do mesmo Claim pela autoridade.
+  O início absoluto dos 180 s fica no binding durável; a autoridade lê o
+  relógio, conserva observações não decrescentes no journal e falha fechado em
+  restart vencido ou recuo do relógio, sem aceitar um contador reiniciado.
+  Teste local financiado com reorg e prazo absoluto passou em 17,463 s ativos /
+  163,068 s total. Três contêineres isolados passaram em 17,110 s ativos /
+  158,958 s protocolo / 206,892 s runner, com namespaces, estados e wrapping
+  keys separados. Limite
+  condicional atual: Claim em até 57 blocos e seis confirmações antes da altura
+  de Refund. Falta ligar adapters concretos ao loop principal do processo
+  `dom-interopd`, testar três hosts físicos e coordenar ativação pública; não
+  declarar produção ou finalidade PoW em segundos.
