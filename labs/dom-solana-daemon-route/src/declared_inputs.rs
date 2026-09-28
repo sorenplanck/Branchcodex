@@ -30,6 +30,7 @@
 //! agree by construction, and says plainly that agreement is not authentication of the
 //! bundle's contents.
 
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
@@ -392,4 +393,44 @@ fn owner_only_directory_is_valid(path: &Path, owner: u32) -> Result<(), String> 
         ));
     }
     Ok(())
+}
+
+/// Write the Relay network sidecar a run binds before it reaches any settlement work.
+///
+/// This is not part of the pinned layout, which is why nothing above writes it: the manifest
+/// pins artifacts by digest, and this document is local operational configuration that names
+/// where the two counterparties meet. `run` still authenticates it -- the two remote database
+/// ids must equal the ones the manifest declares and the local one must equal the authority
+/// pin -- so it grants no authority and cannot redirect an unrelated route.
+///
+/// The mode is the sole authority for the Noise role: `Connect` initiates, `Listen` responds.
+/// One party of a pair listens where the other connects, and the addresses are theirs to
+/// agree on; nothing here may take a role from configuration independently of the operation
+/// it performs, which is why the caller states the operation and never the role.
+pub fn write_relay_network_config(
+    state_dir: &Path,
+    upstream: (dom_interopd::ProductionRelayEndpointModeV1, SocketAddr),
+    downstream: (dom_interopd::ProductionRelayEndpointModeV1, SocketAddr),
+) -> Result<(), String> {
+    let (_, [upstream_remote, downstream_remote]) = crate::relay_database_ids();
+    let link = |(mode, address): (dom_interopd::ProductionRelayEndpointModeV1, SocketAddr),
+                remote: [u8; 32]|
+     -> Result<dom_interopd::ProductionRelayNetworkLinkV1, String> {
+        let remote = relay::production::RelayDatabaseIdV1::new(remote)
+            .map_err(|error| format!("the remote relay database id: {error:?}"))?;
+        dom_interopd::ProductionRelayNetworkLinkV1::new(mode, address, remote)
+            .map_err(|error| format!("the relay link: {error:?}"))
+    };
+    let config = dom_interopd::ProductionRelayNetworkConfigV1::new(
+        link(upstream, upstream_remote)?,
+        link(downstream, downstream_remote)?,
+    )
+    .map_err(|error| format!("the relay network configuration: {error:?}"))?;
+    let bytes = config
+        .canonical_bytes()
+        .map_err(|error| format!("encode the relay network configuration: {error:?}"))?;
+    owner_only::write(
+        &state_dir.join(dom_interopd::PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1),
+        &bytes,
+    )
 }

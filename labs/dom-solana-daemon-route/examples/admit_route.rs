@@ -133,6 +133,21 @@ fn main() -> Result<(), String> {
             route_services.as_bytes(),
         )?;
         println!("route_services={}", out_dir.join("route-services.json").display());
+
+        // The sidecar a run binds before any settlement work. This party LISTENS on both
+        // links; its counterparty connects to the same two addresses. The mode is the sole
+        // authority for the Noise role, so stating the operation is how the role is chosen.
+        use dom_interopd::ProductionRelayEndpointModeV1 as Mode;
+        declared_inputs::write_relay_network_config(
+            &state_dir,
+            (Mode::Listen, "127.0.0.1:9101".parse().map_err(|error| {
+                format!("the upstream relay address: {error}")
+            })?),
+            (Mode::Listen, "127.0.0.1:9102".parse().map_err(|error| {
+                format!("the downstream relay address: {error}")
+            })?),
+        )?;
+        println!("relay_network=listen:9101,9102");
     }
     Ok(())
 }
