@@ -234,8 +234,9 @@ física distribuída. Com a margem completa de 57 blocos, essa execução levou
 O mesmo caso passou depois em três contêineres com namespaces, endereços e
 volumes separados. A rede interna não tinha saída, o coordenador não montou os
 estados dos signers e as chaves de wrapping vieram de agentes externos. O
-handoff ativo terminou em 21,40 s, a execução do protocolo em 174,06 s e o
-runner completo em 210,46 s, já com a autoridade DXF1 e o journal v4.
+handoff ativo terminou em 16,452 s, a execução do protocolo em 143,719 s e o
+runner completo em 180,658 s, já com a autoridade DXF1, o journal v4, a
+recuperação XMR ambígua e a observação DOM pelo daemon.
 
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

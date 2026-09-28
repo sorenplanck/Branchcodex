@@ -994,9 +994,9 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   entram por um port de observação do daemon; não há escritores públicos para o
   coordenador. Com essas recuperações, passou em 16,872 s ativos / 147,135 s
   total.
-  Três contêineres isolados passaram em 21,400 s ativos / 174,060 s protocolo /
-  210,464 s runner, com namespaces, estados e wrapping
-  keys separados. Limite
+  Três contêineres isolados, já com recuperação XMR ambígua e observação DOM
+  pelo daemon, passaram em 16,452 s ativos / 143,719 s protocolo / 180,658 s
+  runner, com namespaces, estados e wrapping keys separados. Limite
   condicional atual: Claim em até 57 blocos e seis confirmações antes da altura
   de Refund. Falta testar três hosts físicos e coordenar ativação pública; não
   declarar produção ou finalidade PoW em segundos.

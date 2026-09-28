@@ -272,8 +272,9 @@ mesmo host. A execução física em três hosts continua sendo a próxima prova
 operacional.
 
 O cenário DXF1 com reorg também passou em três contêineres isolados. Com a
-autoridade DXF1 e o journal v4, o handoff ativo levou **21,40 s**, a
-execução do protocolo **174,06 s** e o runner completo **210,46 s**. Coordenador,
+autoridade DXF1, o journal v4, a recuperação XMR ambígua e a observação DOM pelo
+daemon, o handoff ativo levou **16,452 s**, a execução do protocolo **143,719 s**
+e o runner completo **180,658 s**. Coordenador,
 dono DOM e dono XMR usaram namespaces, endereços e
 volumes distintos numa rede sem rota externa; o coordenador não montou os
 estados privados, e as chaves de wrapping permaneceram nos provedores externos.

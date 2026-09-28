@@ -189,9 +189,9 @@ contêineres. A imagem Ubuntu é fixada por digest. Esse teste remove o
 compartilhamento de pilha de rede do loopback, mas continua no mesmo host físico.
 
 O runner de contêineres agora também executa o DXF1 com reorg. Com a autoridade
-DXF1 e o journal v4, o handoff ativo terminou em **21,40 s**, o protocolo
-completo em **174,06 s** e a campanha, incluindo preparação e inspeção dos
-contêineres, em **210,46 s**. Os
+DXF1, o journal v4, a recuperação XMR ambígua e a observação DOM pelo daemon, o
+handoff ativo terminou em **16,452 s**, o protocolo completo em **143,719 s** e
+a campanha, incluindo preparação e inspeção dos contêineres, em **180,658 s**. Os
 três processos mantiveram namespaces, endereços e volumes distintos; a rede não
 tinha rota externa, as chaves de wrapping vieram de provedores externos e o
 coordenador não montou o estado de nenhum signer.
