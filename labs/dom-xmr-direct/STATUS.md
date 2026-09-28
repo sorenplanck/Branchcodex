@@ -206,14 +206,33 @@ impõe limite de 180 s por caso nesse
 intervalo; a mineração acelerada de Regtest não é usada como promessa para
 mainnet.
 
+Um mecanismo novo `DXF1` agora remove a produção de blocos do intervalo ativo.
+As reservas DOM e XMR ficam prontas antes de `Ready`. O Claim DOM exato é
+persistido e aceito pelo daemon; depois a decisão de liberar o pagamento XMR é
+sincronizada, reaberta após restart e submetida ao `monerod`. O primeiro ensaio
+financiado completou esse handoff em **18,96 s**, sem esperar bloco de nenhuma
+chain. Claim DOM e pagamento XMR foram depois minerados e verificados; o ensaio
+inteiro levou **133,82 s**.
+
+DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
+DOM de no máximo três blocos, exige que essa margem termine antes da primeira
+altura de Refund com espaço para seis confirmações e proíbe Refund
+permanentemente depois do compromisso XMR. Um reorg restaura apenas a obrigação
+de republicar o mesmo Claim. Se mineradores censurarem o Claim além do limite ou
+um reorg superar a profundidade adotada, a hipótese de segurança foi violada. O
+teste real de rede precisa medir essa hipótese e manter
+monitoramento/republicação durante toda a janela.
+
 Há também uma incompatibilidade no lado DOM que o Regtest ocultava: o alvo
 público é 120 s por bloco. A política conservadora de duas confirmações consome
 nominalmente **240 s**, antes do restante do protocolo, e portanto não cabe em
 180 s. Sob o modelo Poisson idealizado, a probabilidade de dois blocos em três
 minutos é **44,2%**; PoW não oferece prazo máximo determinístico. O ensaio agora
-grava esses fatos e os runners os exigem. O candidato ainda não satisfaz ao
-mesmo tempo o teto público estrito de três minutos e a política atual de duas
-confirmações. Ainda faltam executar o transporte em máquinas físicas distintas,
+grava esses fatos e os runners os exigem. O caminho DXA1 com finalidade ainda
+não satisfaz ao mesmo tempo o teto público estrito de três minutos e a política
+atual de duas confirmações. DXF1 satisfaz o teto do handoff sem esperar blocos,
+sob a hipótese de inclusão declarada. Ainda faltam executar o transporte em
+máquinas físicas distintas,
 quantificar a política para reorgs mais profundos e ativar com segurança as
 novas regras de consenso. O resultado comprova um ponta a ponta
 funcional de laboratório, não prontidão de produção nem garantia universal.

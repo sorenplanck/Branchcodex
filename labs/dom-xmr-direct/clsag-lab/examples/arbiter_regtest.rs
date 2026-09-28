@@ -36,6 +36,8 @@ use dxp1_clsag_lab::{
     arbiter_session::{ArbiterSessionBinding, ArbiterSessionJournal},
     claim_resume::digest,
     dom_reserve::ReserveIntent,
+    fast_handoff::{FastHandoffBinding, FastHandoffPolicy},
+    fast_handoff_journal::FastHandoffJournal,
     finality_budget::PowFinalityBudget,
     native_dom::{DomClaimOffer, PreparedDomClaim},
 };
@@ -507,6 +509,7 @@ impl PartyProcess {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
+    FastClaim,
     Claim,
     Refund,
     Punish,
@@ -516,17 +519,18 @@ enum Outcome {
 impl Outcome {
     fn parse(value: &str) -> Self {
         match value {
+            "fast-claim" => Self::FastClaim,
             "claim" => Self::Claim,
             "refund" => Self::Refund,
             "punish" => Self::Punish,
             "reorg-guard" => Self::ReorgGuard,
-            _ => panic!("outcome must be claim, refund, punish, or reorg-guard"),
+            _ => panic!("outcome must be fast-claim, claim, refund, punish, or reorg-guard"),
         }
     }
 
     fn path(self) -> SwapArbiterPath {
         match self {
-            Self::Claim | Self::ReorgGuard => SwapArbiterPath::Claim,
+            Self::FastClaim | Self::Claim | Self::ReorgGuard => SwapArbiterPath::Claim,
             Self::Refund => SwapArbiterPath::Refund,
             Self::Punish => SwapArbiterPath::Punish,
         }
@@ -534,6 +538,7 @@ impl Outcome {
 
     fn label(self) -> &'static str {
         match self {
+            Self::FastClaim => "fast-claim",
             Self::Claim => "claim",
             Self::Refund => "refund",
             Self::Punish => "punish",
@@ -558,6 +563,27 @@ fn fresh_secret() -> Zeroizing<[u8; 32]> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn fast_xmr_payment_intent(
+    reserve_output: [u8; 32],
+    recipient: &str,
+    payment: u64,
+    reserve_amount: u64,
+    fee_rate: &[u8],
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"DXF1/XMR-payment-intent/v1");
+    hash.update(SETTLEMENT_ID);
+    hash.update(CONTEXT_HASH);
+    hash.update(reserve_output);
+    hash.update((recipient.len() as u64).to_le_bytes());
+    hash.update(recipient.as_bytes());
+    hash.update(payment.to_le_bytes());
+    hash.update(reserve_amount.to_le_bytes());
+    hash.update((fee_rate.len() as u64).to_le_bytes());
+    hash.update(fee_rate);
+    hash.finalize().into()
 }
 
 fn decode_hex(value: &str) -> Vec<u8> {
@@ -1040,6 +1066,7 @@ async fn observed_transaction(
 async fn funded_arbiter(
     party_binary: &Path,
     create_shadow: bool,
+    fast_window: bool,
     remote_parties: Option<&RemoteParties>,
 ) -> FundedArbiter {
     let (root, node, chain_id) = node().await;
@@ -1083,7 +1110,7 @@ async fn funded_arbiter(
 
     let arbiter_blinding = BlindingFactor::random();
     let arbiter = Commitment::commit(ARBITER_VALUE, &arbiter_blinding);
-    let claim_until = staging_height + 2;
+    let claim_until = staging_height + if fast_window { 64 } else { 2 };
     let refund_until = claim_until + 1;
     let claim = branch(
         arbiter.clone(),
@@ -1259,10 +1286,15 @@ async fn exercise(
     let mut setup = funded_arbiter(
         &party_binary,
         outcome == Outcome::ReorgGuard,
+        outcome == Outcome::FastClaim,
         remote_parties.as_ref(),
     )
     .await;
     let handle = NodeHandleImpl(setup.node.clone());
+    if outcome == Outcome::FastClaim {
+        let funding = setup.journal.state().unwrap().dom_funding.unwrap();
+        assert_eq!(mine(&setup.node).await, funding.height + 1);
+    }
 
     let verified_joint = CompressedEdwardsY(setup.shares.joint_xmr_spend_key().unwrap())
         .decompress()
@@ -1428,6 +1460,31 @@ async fn exercise(
         .fee_rate(FeePriority::Normal, 1_000_000_000)
         .await
         .unwrap();
+    let recipient_spend = Zeroizing::new(MoneroScalar::random(&mut OsRng));
+    let recipient_view = ViewPair::new(
+        Point::from((*recipient_spend).into() * ED25519_BASEPOINT_POINT),
+        Zeroizing::new(MoneroScalar::random(&mut OsRng)),
+    )
+    .unwrap();
+    let recipient_address = recipient_view.legacy_address(XmrNetwork::Mainnet);
+    let payment = reserve_amount / 2;
+    let xmr_payment_intent = fast_xmr_payment_intent(
+        xmr_output_id,
+        &recipient_address.to_string(),
+        payment,
+        reserve_amount,
+        &fee.serialize(),
+    );
+    let signable_xmr_transaction = SignableTransaction::new(
+        RctType::ClsagBulletproofPlus,
+        fresh_secret(),
+        vec![input],
+        vec![(recipient_address, payment)],
+        Change::new(reserve_view, None),
+        vec![],
+        fee,
+    )
+    .unwrap();
 
     // This is the Ready transition. The claim offer does not exist while the
     // XMR reserve is absent or immature. Recovery offers were already durable
@@ -1525,6 +1582,12 @@ async fn exercise(
     setup.xmr_owner.authorize_dom(&setup.contract, &claim_offer);
 
     let (branch, selected_offer, replacement_offer, settlement_height) = match outcome {
+        Outcome::FastClaim => (
+            &setup.claim,
+            &claim_offer,
+            &claim_replacement_offer,
+            handle.chain_height() + 1,
+        ),
         Outcome::Claim | Outcome::ReorgGuard => (
             &setup.claim,
             &claim_offer,
@@ -1563,7 +1626,7 @@ async fn exercise(
                 .dom_owner
                 .complete_dom(selected_offer, settlement_height)
         }
-        Outcome::Claim | Outcome::Punish | Outcome::ReorgGuard => {
+        Outcome::FastClaim | Outcome::Claim | Outcome::Punish | Outcome::ReorgGuard => {
             assert!(setup
                 .dom_owner
                 .rejects_dom(selected_offer, settlement_height));
@@ -1575,12 +1638,186 @@ async fn exercise(
                 .complete_dom(selected_offer, settlement_height)
         }
     };
+    let settlement_bytes = settlement.to_bytes().unwrap();
+    let prospective_dom_id = *dom_crypto::blake2b_256(&settlement_bytes).as_bytes();
+    let mut fast_journal = if outcome == Outcome::FastClaim {
+        let funding = setup.journal.state().unwrap().dom_funding.unwrap();
+        let funding_confirmations = handle
+            .chain_height()
+            .checked_sub(funding.height)
+            .and_then(|depth| depth.checked_add(1))
+            .unwrap();
+        let policy = FastHandoffPolicy::new(
+            ACTIVE_SETTLEMENT_BUDGET_SECONDS,
+            MIN_DOM_CONFIRMATIONS,
+            3,
+            6,
+            setup.claim_until,
+        )
+        .unwrap();
+        let binding = FastHandoffBinding::new(
+            SETTLEMENT_ID,
+            setup.chain_id,
+            funding.id,
+            xmr_output_id,
+            prospective_dom_id,
+            xmr_payment_intent,
+            policy,
+        )
+        .unwrap();
+        let path = setup._root.0.join("dxf1-fast-handoff.wal");
+        let mut journal = FastHandoffJournal::create(&path, binding).unwrap();
+        journal
+            .record_ready(funding.id, funding_confirmations, xmr_output_id, true)
+            .unwrap();
+        journal
+            .record_dom_claim_exposure(
+                prospective_dom_id,
+                settlement_height,
+                active_settlement.elapsed().as_secs(),
+            )
+            .unwrap();
+        Some((journal, path, binding))
+    } else {
+        None
+    };
     let released_dom_id = setup
         .journal
         .record_dom_release(&settlement, settlement_height)
         .unwrap();
-    let settlement_admission = handle.submit_tx(settlement.to_bytes().unwrap()).unwrap();
+    assert_eq!(released_dom_id, prospective_dom_id);
+    let settlement_admission = handle.submit_tx(settlement_bytes).unwrap();
     assert_eq!(settlement_admission.state, TxAdmissionState::New);
+    if let Some((journal, _, _)) = fast_journal.as_mut() {
+        journal
+            .record_dom_daemon_admission(
+                settlement_admission.tx_hash,
+                handle.chain_height() + 1,
+                active_settlement.elapsed().as_secs(),
+            )
+            .unwrap();
+    }
+    if outcome == Outcome::FastClaim {
+        let (mut journal, path, binding) = fast_journal.take().unwrap();
+        journal
+            .record_xmr_release_commitment(
+                xmr_payment_intent,
+                active_settlement.elapsed().as_secs(),
+            )
+            .unwrap();
+        drop(journal);
+        let mut journal = FastHandoffJournal::open(&path, binding).unwrap();
+        assert!(journal.authorize_refund(u64::MAX).is_err());
+
+        let opening = selected_offer
+            .extract(
+                &settlement,
+                &validation_context(setup.chain_id, settlement_height),
+            )
+            .unwrap();
+        assert!(setup.xmr_owner.rejects_xmr(
+            &signable_xmr_transaction,
+            *opening,
+            SwapArbiterPath::Claim,
+        ));
+        let (tx_as_hex, xmr_transaction_id) =
+            setup
+                .dom_owner
+                .sign_xmr(&signable_xmr_transaction, *opening, SwapArbiterPath::Claim);
+        let response = rpc
+            .rpc_call(
+                "send_raw_transaction",
+                Some(
+                    json!({"tx_as_hex":tx_as_hex, "do_not_relay":true, "do_sanity_checks":false})
+                        .to_string(),
+                ),
+                16384,
+            )
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["status"], "OK", "{response}");
+        journal
+            .record_xmr_daemon_admission(
+                xmr_payment_intent,
+                xmr_transaction_id,
+                active_settlement.elapsed().as_secs(),
+            )
+            .unwrap();
+        let active_handoff_seconds = active_settlement.elapsed().as_secs_f64();
+        assert!(journal.completed().unwrap());
+        assert!(journal.authorize_refund(u64::MAX).is_err());
+        assert!(
+            active_settlement.elapsed() <= Duration::from_secs(ACTIVE_SETTLEMENT_BUDGET_SECONDS)
+        );
+
+        // These blocks prove eventual native settlement, but are deliberately
+        // outside the active handoff measurement.
+        assert_eq!(mine(&setup.node).await, settlement_height);
+        let observed = observed_transaction(&setup, settlement_height, &settlement).await;
+        assert_eq!(observed, settlement);
+        journal
+            .record_dom_claim_inclusion(settlement_admission.tx_hash, settlement_height)
+            .unwrap();
+        let mut dom_finality_height = settlement_height;
+        for _ in 1..binding.policy().minimum_dom_claim_confirmations() {
+            dom_finality_height = mine(&setup.node).await;
+        }
+        journal
+            .record_dom_claim_finality(
+                settlement_admission.tx_hash,
+                settlement_height,
+                dom_finality_height,
+            )
+            .unwrap();
+        let (blocks, _) = rpc.generate_blocks(&recipient_address, 1).await.unwrap();
+        let payment_block = rpc.scannable_block(blocks[0]).await.unwrap();
+        assert!(payment_block
+            .block
+            .transactions
+            .iter()
+            .any(|transaction| transaction.as_ref() == xmr_transaction_id));
+        let received = Scanner::new(recipient_view)
+            .scan(payment_block)
+            .unwrap()
+            .not_additionally_locked();
+        assert!(received
+            .iter()
+            .any(|output| output.commitment().amount == payment));
+        let state = journal.state().unwrap();
+        assert_eq!(state.xmr_transaction(), Some(xmr_transaction_id));
+        assert!(state.dom_claim_finalized());
+        assert!(!state.rebroadcast_required());
+        println!(
+            "{}",
+            json!({
+                "experiment":"DXF1 prepared DOM-XMR fast handoff",
+                "outcome":outcome.label(),
+                "dom_node":true,
+                "monerod":true,
+                "bitcoin_involved":false,
+                "prepared_dom_reserve":true,
+                "prepared_mature_xmr_reserve":true,
+                "dom_claim_mempool_admitted_before_xmr_release":true,
+                "xmr_release_committed_before_rpc":true,
+                "durable_restart_before_xmr_signing":true,
+                "refund_permanently_forbidden_after_xmr_commitment":true,
+                "dom_block_wait_in_active_interval":false,
+                "xmr_block_wait_in_active_interval":false,
+                "bounded_dom_inclusion_assumption_blocks":binding.policy().maximum_dom_claim_inclusion_blocks(),
+                "minimum_dom_claim_confirmations_before_refund":binding.policy().minimum_dom_claim_confirmations(),
+                "latest_assumed_dom_claim_height":state.latest_assumed_claim_height(),
+                "required_dom_finality_height":state.required_dom_finality_height(),
+                "dom_claim_eventually_included":true,
+                "dom_claim_eventually_finalized":true,
+                "xmr_payment_eventually_included":true,
+                "active_handoff_seconds":active_handoff_seconds,
+                "active_deadline_seconds":binding.policy().active_deadline_seconds(),
+                "total_seconds":started.elapsed().as_secs_f64(),
+            })
+        );
+        return;
+    }
     assert_eq!(mine(&setup.node).await, settlement_height);
     let observed = observed_transaction(&setup, settlement_height, &settlement).await;
     let durable_dom_id = setup
@@ -1705,29 +1942,11 @@ async fn exercise(
         )
         .unwrap();
 
-    let recipient_spend = Zeroizing::new(MoneroScalar::random(&mut OsRng));
-    let recipient_view = ViewPair::new(
-        Point::from((*recipient_spend).into() * ED25519_BASEPOINT_POINT),
-        Zeroizing::new(MoneroScalar::random(&mut OsRng)),
-    )
-    .unwrap();
-    let recipient_address = recipient_view.legacy_address(XmrNetwork::Mainnet);
     let recipient_role = match outcome {
         Outcome::Refund => "xmr_owner",
-        Outcome::Claim | Outcome::Punish => "dom_owner",
+        Outcome::FastClaim | Outcome::Claim | Outcome::Punish => "dom_owner",
         Outcome::ReorgGuard => unreachable!(),
     };
-    let payment = reserve_amount / 2;
-    let signable_xmr_transaction = SignableTransaction::new(
-        RctType::ClsagBulletproofPlus,
-        fresh_secret(),
-        vec![input],
-        vec![(recipient_address, payment)],
-        Change::new(reserve_view, None),
-        vec![],
-        fee,
-    )
-    .unwrap();
     let recheck_tip_height = handle.chain_height();
     let recheck_block_hash = handle.get_block_hash_at_height(settlement_height).unwrap();
     let recheck_tip_hash = handle.get_block_hash_at_height(recheck_tip_height).unwrap();
@@ -1753,7 +1972,7 @@ async fn exercise(
                 .xmr_owner
                 .sign_xmr(&signable_xmr_transaction, *opening, outcome.path())
         }
-        Outcome::Claim | Outcome::Punish => {
+        Outcome::FastClaim | Outcome::Claim | Outcome::Punish => {
             assert!(setup.xmr_owner.rejects_xmr(
                 &signable_xmr_transaction,
                 *opening,

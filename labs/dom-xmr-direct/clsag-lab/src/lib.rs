@@ -34,6 +34,8 @@ pub mod counterpart_delivery;
 pub mod dom_joint;
 pub mod dom_recovery;
 pub mod dom_reserve;
+pub mod fast_handoff;
+pub mod fast_handoff_journal;
 pub mod finality_budget;
 pub mod joint;
 pub mod native;

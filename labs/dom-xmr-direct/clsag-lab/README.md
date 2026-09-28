@@ -6,7 +6,37 @@ origem de revelação: completar o claim **XMR** permite extrair o segredo e
 completar diretamente a assinatura DOM. O sentido DOM→XMR também é testado.
 BTC não participa desse fluxo.
 
-## Candidato rápido atual: DXA1
+## Candidato rápido atual: DXF1
+
+`DXF1` é uma máquina de liquidação nova, separada da espera por finalidade do
+DXA1. Ela usa liquidez DOM previamente confirmada e uma reserva XMR previamente
+confirmada e madura. No intervalo ativo, o Claim DOM exato é primeiro gravado e
+aceito pelo daemon; depois a decisão XMR é sincronizada em disco, o journal é
+reaberto e somente então o gasto exato é assinado e aceito pelo `monerod`.
+Nenhum bloco é esperado nesse intervalo.
+
+Depois do compromisso XMR, Refund fica permanentemente proibido e um Claim que
+sair da cadeia volta ao estado obrigatório de republicação. Essa regra é
+durável, mas não transforma mempool em finalidade: a segurança depende da
+hipótese imutável de que o Claim será incluído dentro de três blocos, antes da
+primeira altura de Refund, e acumulará seis confirmações ainda dentro dessa
+janela. O contrato do ensaio mantém uma janela maior para a recuperação. Censura
+além de três blocos ou reorg posterior à profundidade adotada permanece fora da
+garantia; PoW não oferece limite determinístico.
+
+O primeiro ensaio financiado com nó DOM e `monerod` reais completou o handoff
+ativo em **18,96 s**. Claim DOM e pagamento XMR foram posteriormente minerados e
+verificados, fora do cronômetro ativo; preparação, handoff e comprovação final
+levaram **133,82 s**. O teste reproduzível é:
+
+```text
+python3 -B scripts/test_fast_handoff.py \
+  --binary target/debug/examples/arbiter_regtest \
+  --monerod /caminho/absoluto/monerod \
+  --evidence-file /caminho/dxf1-fast-handoff.json
+```
+
+## Primitivo de arbitragem reutilizado: DXA1
 
 O mecanismo novo não usa a cápsula temporizada descrita nas seções históricas
 abaixo. Um output DOM `DXA1` compromete três gastos exatos e exclusivos por
@@ -116,10 +146,10 @@ modelo Poisson idealizado, a chance de dois blocos chegarem em três minutos é
 `finality_budget` e os verificadores de evidência impedem que o resultado rápido
 do Regtest seja apresentado como cumprimento do prazo em rede pública.
 
-O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o ensaio em três
-contêineres e a matriz no GitHub com Monero 0.18.4.0 verificado por hash, limite
-de 180 s por caso e 20 minutos para todo o job. Ele preserva os resultados como
-artefato.
+O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o DXF1, o ensaio em
+três contêineres e a matriz DXA1 no GitHub com Monero 0.18.4.0 verificado por
+hash, limite ativo de 180 s e 20 minutos para todo o job. Ele preserva os
+resultados como artefato.
 
 ## Construção experimental
 

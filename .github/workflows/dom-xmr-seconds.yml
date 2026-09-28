@@ -100,6 +100,15 @@ jobs:
             --monerod "$DXA1_MONEROD" \
             --evidence-file "$RUNNER_TEMP/dxa1-container-participants.json"
 
+      - name: Run prepared DXF1 fast handoff
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          python3 -B scripts/test_fast_handoff.py \
+            --binary target/debug/examples/arbiter_regtest \
+            --monerod "$DXA1_MONEROD" \
+            --evidence-file "$RUNNER_TEMP/dxf1-fast-handoff.json"
+
       - name: Run settlements and competing reorg concurrently
         working-directory: labs/dom-xmr-direct/clsag-lab
         run: |
@@ -119,5 +128,6 @@ jobs:
           path: |
             ${{ runner.temp }}/dxa1-arbiter-evidence/
             ${{ runner.temp }}/dxa1-container-participants.json
+            ${{ runner.temp }}/dxf1-fast-handoff.json
           if-no-files-found: warn
           retention-days: 14

@@ -173,6 +173,23 @@ Regtest abaixo de três minutos não prova o requisito na rede pública. Manter
 duas confirmações preserva a política de reorg e viola o prazo nominal; reduzir
 para uma cabe nominalmente, mas enfraquece a segurança e não cria garantia.
 
+## Fast handoff preparado DXF1
+
+O novo fluxo DXF1 não reduz silenciosamente as confirmações do DXA1. DOM e XMR
+são preparados antes de `Ready`; no intervalo ativo, o Claim DOM exato é
+persistido e aceito pelo daemon. A decisão XMR irreversível é então sincronizada
+antes da assinatura e do RPC Monero. O primeiro ensaio financiado fez esse
+handoff em 18,96 s sem minerar novos blocos durante a medição. As duas
+transações foram mineradas e verificadas depois.
+
+A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
+em até três blocos e acumular seis confirmações ainda dentro de sua fase
+exclusiva. Depois do compromisso XMR, o journal nunca autoriza Refund; reorg
+apenas reabre a republicação do mesmo Claim. Isso fornece um caminho rápido sob
+liveness limitada, não finalidade PoW em 18,96 segundos. Censura além do limite
+ou reorg posterior à profundidade adotada viola a hipótese e precisa ser medido
+em teste público antes de produção.
+
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único
 compromisso DOM de arbitragem possui três caminhos: antes de `Ready`, o dono DOM
