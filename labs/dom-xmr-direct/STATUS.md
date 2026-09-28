@@ -211,10 +211,10 @@ As reservas DOM e XMR ficam prontas antes de `Ready`. O Claim DOM exato é
 persistido e aceito pelo daemon; depois a decisão de liberar o pagamento XMR é
 sincronizada, reaberta após restart e submetida ao `monerod`. Os ensaios mais
 recentes completaram o handoff normal em **16,27 s** e o caso com reorg, já pela
-autoridade DXF1 e prazo absoluto durável, em **17,07 s**, sem esperar bloco de nenhuma chain no
+autoridade DXF1 e prazo absoluto durável, em **16,74 s**, sem esperar bloco de nenhuma chain no
 intervalo ativo. Claim DOM e
 pagamento XMR foram depois minerados e verificados; os ensaios inteiros levaram
-**117,56 s** e **169,19 s**, respectivamente.
+**117,56 s** e **160,29 s**, respectivamente.
 
 O núcleo DXF1 deixou de ser uma cópia privada do laboratório. O novo crate
 `dom-xmr-fast-handoff` contém estado, journal v4 e ports estreitos para DOM e
@@ -230,6 +230,9 @@ escrita do journal não são públicos fora do crate; a superfície externa é d
 auditoria. Esta
 etapa prova o protocolo novo com os daemons das duas chains em Regtest, não uma
 implantação pública concluída.
+O port do `monerod` recebe ainda um deadline absoluto derivado da janela
+persistida. Se não resta ao menos um segundo, o RPC irreversível nem começa; o
+broadcaster verifica o prazo antes e depois das chamadas de rede.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
 DOM de no máximo 57 blocos, exige que essa margem termine antes da primeira
@@ -259,8 +262,8 @@ mesmo host. A execução física em três hosts continua sendo a próxima prova
 operacional.
 
 O cenário DXF1 com reorg também passou em três contêineres isolados. Com a
-autoridade DXF1 e o journal v4, o handoff ativo levou **16,70 s**, a
-execução do protocolo **148,25 s** e o runner completo **187,47 s**. Coordenador,
+autoridade DXF1 e o journal v4, o handoff ativo levou **21,40 s**, a
+execução do protocolo **174,06 s** e o runner completo **210,46 s**. Coordenador,
 dono DOM e dono XMR usaram namespaces, endereços e
 volumes distintos numa rede sem rota externa; o coordenador não montou os
 estados privados, e as chaves de wrapping permaneceram nos provedores externos.

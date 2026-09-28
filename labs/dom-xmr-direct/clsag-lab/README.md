@@ -28,13 +28,13 @@ espera ao handoff ativo; ela reserva tempo para republicação antes de Refund.
 
 Os ensaios mais recentes, com journal ligado aos hashes canônicos do nó DOM,
 completaram o handoff ativo normal em **16,27 s** e, depois da migração para a
-autoridade DXF1 e do prazo absoluto durável, o handoff seguido de reorg em **17,07 s**. No segundo,
+autoridade DXF1 e do prazo absoluto durável, o handoff seguido de reorg em **16,74 s**. No segundo,
 uma cadeia concorrente retirou o Claim depois do compromisso XMR; o journal
 manteve Refund proibido, exigiu republicação, e o mesmo Claim voltou à cadeia e
 alcançou seis confirmações. O registro persistiu hashes distintos para o bloco
 órfão, a reinclusão e a ponta de confirmação. Claim DOM e pagamento XMR foram
 minerados e verificados fora do cronômetro ativo. Preparação, handoff e
-comprovação levaram **117,56 s** no caso normal e **169,19 s** no caso com reorg.
+comprovação levaram **117,56 s** no caso normal e **160,29 s** no caso com reorg.
 
 A máquina de estados e o journal DXF1 agora pertencem ao crate próprio
 `crates/dom-xmr-fast-handoff`, isolado das demais pernas e do `dom-interopd`;
@@ -48,6 +48,9 @@ autoridade também executa o port do `monerod` e só completa após a resposta d
 txid exato; o coordenador não possui uma função para registrar essa admissão
 diretamente. Criação e transições do journal são privadas ao crate; a referência
 exposta pela autoridade é somente para leitura e auditoria.
+O port XMR recebe um deadline absoluto derivado dos 180 s persistidos. Sem ao
+menos um segundo útil, a autoridade não inicia o RPC; o broadcaster conserva o
+mesmo corte durante verificação, submissão e reconciliação.
 Ainda falta executá-lo em três hosts físicos.
 Os testes são:
 
@@ -178,9 +181,9 @@ contêineres. A imagem Ubuntu é fixada por digest. Esse teste remove o
 compartilhamento de pilha de rede do loopback, mas continua no mesmo host físico.
 
 O runner de contêineres agora também executa o DXF1 com reorg. Com a autoridade
-DXF1 e o journal v4, o handoff ativo terminou em **16,70 s**, o protocolo
-completo em **148,25 s** e a campanha, incluindo preparação e inspeção dos
-contêineres, em **187,47 s**. Os
+DXF1 e o journal v4, o handoff ativo terminou em **21,40 s**, o protocolo
+completo em **174,06 s** e a campanha, incluindo preparação e inspeção dos
+contêineres, em **210,46 s**. Os
 três processos mantiveram namespaces, endereços e volumes distintos; a rede não
 tinha rota externa, as chaves de wrapping vieram de provedores externos e o
 coordenador não montou o estado de nenhum signer.

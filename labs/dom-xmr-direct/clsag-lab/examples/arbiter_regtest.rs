@@ -1805,29 +1805,34 @@ async fn exercise(
             Some(submission.identity().transaction_digest)
         );
         let monerod_endpoint = url.clone();
-        let mut xmr_submission = XmrSubmissionFn(|expected_transaction_id, transaction: &[u8]| {
-            assert_eq!(
-                expected_transaction_id,
-                submission.identity().transaction_id
-            );
-            let acceptance = std::thread::scope(|scope| {
-                scope
-                    .spawn(|| {
-                        let mut broadcaster =
-                            BlockingMoneroBroadcaster::new(monerod_endpoint.clone()).unwrap();
-                        broadcaster.submit_exact(expected_transaction_id, transaction)
-                    })
-                    .join()
-                    .unwrap()
+        let mut xmr_submission =
+            XmrSubmissionFn(|expected_transaction_id, transaction: &[u8], deadline| {
+                assert_eq!(
+                    expected_transaction_id,
+                    submission.identity().transaction_id
+                );
+                let acceptance = std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let mut broadcaster =
+                                BlockingMoneroBroadcaster::new(monerod_endpoint.clone()).unwrap();
+                            broadcaster.submit_exact_before_v24(
+                                expected_transaction_id,
+                                transaction,
+                                deadline,
+                            )
+                        })
+                        .join()
+                        .unwrap()
+                });
+                assert!(matches!(
+                    acceptance,
+                    Ok(BroadcastAcceptance::Accepted | BroadcastAcceptance::AlreadyKnown)
+                ));
+                Ok::<_, Infallible>(XmrDaemonAdmission {
+                    transaction_id: expected_transaction_id,
+                })
             });
-            assert!(matches!(
-                acceptance,
-                Ok(BroadcastAcceptance::Accepted | BroadcastAcceptance::AlreadyKnown)
-            ));
-            Ok::<_, Infallible>(XmrDaemonAdmission {
-                transaction_id: expected_transaction_id,
-            })
-        });
         authority
             .submit_prepared_xmr(&submission, &mut xmr_submission)
             .unwrap();
@@ -1984,6 +1989,7 @@ async fn exercise(
                 "xmr_release_committed_before_rpc":true,
                 "xmr_exact_transaction_persisted_before_rpc":true,
                 "xmr_daemon_submission_enforced_by_authority":true,
+                "xmr_daemon_absolute_submission_deadline":true,
                 "durable_absolute_active_deadline":true,
                 "durable_restart_before_xmr_signing":true,
                 "refund_permanently_forbidden_after_xmr_commitment":true,

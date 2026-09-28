@@ -10,7 +10,7 @@
 use std::{
     convert::Infallible,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
@@ -25,6 +25,30 @@ fn observed_at() -> Result<u64, FastHandoffJournalError> {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .map_err(|_| FastHandoffJournalError::Denied(FastHandoffError::ActiveDeadlineExceeded))
+}
+
+fn xmr_submission_deadline(
+    binding: FastHandoffBinding,
+    observation: u64,
+    now: Instant,
+) -> Result<Instant, FastHandoffJournalError> {
+    let elapsed = observation
+        .checked_sub(binding.active_window_started_at())
+        .ok_or(FastHandoffJournalError::Denied(
+            FastHandoffError::ActiveDeadlineExceeded,
+        ))?;
+    let remaining = binding
+        .policy()
+        .active_deadline_seconds()
+        .checked_sub(elapsed)
+        .filter(|remaining| *remaining != 0)
+        .ok_or(FastHandoffJournalError::Denied(
+            FastHandoffError::ActiveDeadlineExceeded,
+        ))?;
+    now.checked_add(Duration::from_secs(remaining))
+        .ok_or(FastHandoffJournalError::Denied(
+            FastHandoffError::ActiveDeadlineExceeded,
+        ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +136,7 @@ pub trait XmrSubmissionPort {
         &mut self,
         expected_transaction_id: [u8; 32],
         transaction: &[u8],
+        deadline: Instant,
     ) -> Result<XmrDaemonAdmission, Self::Error>;
 }
 
@@ -119,7 +144,7 @@ pub struct XmrSubmissionFn<Function>(pub Function);
 
 impl<Function, Error> XmrSubmissionPort for XmrSubmissionFn<Function>
 where
-    Function: FnMut([u8; 32], &[u8]) -> Result<XmrDaemonAdmission, Error>,
+    Function: FnMut([u8; 32], &[u8], Instant) -> Result<XmrDaemonAdmission, Error>,
 {
     type Error = Error;
 
@@ -127,8 +152,9 @@ where
         &mut self,
         expected_transaction_id: [u8; 32],
         transaction: &[u8],
+        deadline: Instant,
     ) -> Result<XmrDaemonAdmission, Self::Error> {
-        (self.0)(expected_transaction_id, transaction)
+        (self.0)(expected_transaction_id, transaction, deadline)
     }
 }
 
@@ -330,8 +356,14 @@ impl FastHandoffAuthority {
         {
             return Err(FastHandoffAuthorityError::WrongPhase);
         }
+        let deadline =
+            xmr_submission_deadline(self.journal.binding(), observed_at()?, Instant::now())?;
         let admission = port
-            .submit_exact_payment(submission.identity.transaction_id, submission.transaction())
+            .submit_exact_payment(
+                submission.identity.transaction_id,
+                submission.transaction(),
+                deadline,
+            )
             .map_err(FastHandoffAuthorityError::Port)?;
         if admission.transaction_id != submission.identity.transaction_id {
             return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
@@ -495,8 +527,10 @@ mod tests {
             &mut self,
             expected_transaction_id: [u8; 32],
             transaction: &[u8],
+            deadline: Instant,
         ) -> Result<XmrDaemonAdmission, Self::Error> {
             self.calls += 1;
+            assert!(deadline > Instant::now());
             assert_eq!(expected_transaction_id, id(7));
             assert_eq!(transaction, b"exact signed XMR transaction");
             Ok(XmrDaemonAdmission {
@@ -671,5 +705,20 @@ mod tests {
             ))
         ));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn xmr_rpc_deadline_expires_before_irreversible_submission() {
+        let binding = binding();
+        let now = Instant::now();
+        assert!(
+            xmr_submission_deadline(binding, binding.active_window_started_at() + 179, now).is_ok()
+        );
+        assert!(matches!(
+            xmr_submission_deadline(binding, binding.active_window_started_at() + 180, now),
+            Err(FastHandoffJournalError::Denied(
+                FastHandoffError::ActiveDeadlineExceeded
+            ))
+        ));
     }
 }

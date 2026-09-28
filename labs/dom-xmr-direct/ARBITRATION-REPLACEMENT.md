@@ -180,7 +180,7 @@ são preparados antes de `Ready`; no intervalo ativo, o Claim DOM exato é
 persistido e aceito pelo daemon. A decisão XMR irreversível é então sincronizada
 antes da assinatura e do RPC Monero. O ensaio normal mais recente fez esse
 handoff em 16,27 s sem minerar novos blocos durante a medição. Um segundo ensaio,
-depois de mover o núcleo para a autoridade DXF1 e fixar o prazo absoluto, fez o handoff em 17,07 s,
+depois de mover o núcleo para a autoridade DXF1 e fixar o prazo absoluto, fez o handoff em 16,74 s,
 removeu o Claim por uma cadeia concorrente depois do
 compromisso XMR, manteve Refund proibido, republicou exatamente o mesmo Claim e
 acumulou as seis confirmações exigidas. As transações DOM e XMR foram mineradas
@@ -198,6 +198,9 @@ não existe mais uma API que conclua a troca aceitando somente um txid fornecido
 pelo coordenador. A escrita do journal também é privada ao crate; consumidores
 externos recebem apenas a visão de auditoria. O ensaio financiado usa esse mesmo núcleo com
 DomNode e monerod reais de Regtest.
+O envio XMR também recebe um deadline absoluto calculado da janela persistida.
+Sem ao menos um segundo restante, a autoridade recusa antes do RPC; o cliente
+Monero conserva esse limite durante verificação, envio e reconciliação.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
 em até 57 blocos e acumular seis confirmações ainda dentro de sua fase
@@ -222,8 +225,8 @@ física distribuída. Com a margem completa de 57 blocos, essa execução levou
 O mesmo caso passou depois em três contêineres com namespaces, endereços e
 volumes separados. A rede interna não tinha saída, o coordenador não montou os
 estados dos signers e as chaves de wrapping vieram de agentes externos. O
-handoff ativo terminou em 16,70 s, a execução do protocolo em 148,25 s e o
-runner completo em 187,47 s, já com a autoridade DXF1 e o journal v4.
+handoff ativo terminou em 21,40 s, a execução do protocolo em 174,06 s e o
+runner completo em 210,46 s, já com a autoridade DXF1 e o journal v4.
 
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

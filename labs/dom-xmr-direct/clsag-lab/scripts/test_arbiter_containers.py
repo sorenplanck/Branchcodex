@@ -249,9 +249,17 @@ def container_logs(name: str) -> str:
 
 def cleanup(names: list[str], network: str | None) -> None:
     for name in reversed(names):
-        run(["docker", "rm", "--force", name], timeout=20, check=False)
+        try:
+            run(["docker", "rm", "--force", name], timeout=60, check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            # Cleanup is best effort and must not replace the authenticated
+            # protocol result. Names are random and CI hosts are ephemeral.
+            pass
     if network is not None:
-        run(["docker", "network", "rm", network], timeout=20, check=False)
+        try:
+            run(["docker", "network", "rm", network], timeout=60, check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
 
 def main() -> int:

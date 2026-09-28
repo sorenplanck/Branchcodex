@@ -984,10 +984,11 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   chama o `monerod` com os bytes persistidos; o coordenador não pode registrar
   uma admissão fornecendo apenas um txid. Os construtores e escritores do
   journal são privados ao crate; fora dele, o journal é somente leitura.
-  Resposta divergente falha fechado.
-  Teste local financiado com reorg passou em 17,073 s ativos / 169,193 s total.
-  Três contêineres isolados passaram em 16,696 s ativos / 148,253 s protocolo /
-  187,471 s runner, com namespaces, estados e wrapping
+  Resposta divergente falha fechado. O port XMR recebe um deadline absoluto
+  menor que a janela restante; com zero segundos úteis, nenhum RPC é iniciado.
+  Teste local financiado com reorg passou em 16,740 s ativos / 160,292 s total.
+  Três contêineres isolados passaram em 21,400 s ativos / 174,060 s protocolo /
+  210,464 s runner, com namespaces, estados e wrapping
   keys separados. Limite
   condicional atual: Claim em até 57 blocos e seis confirmações antes da altura
   de Refund. Falta testar três hosts físicos e coordenar ativação pública; não

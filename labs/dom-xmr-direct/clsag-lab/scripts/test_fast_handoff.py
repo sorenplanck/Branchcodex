@@ -23,6 +23,7 @@ REQUIRED_TRUE = (
     "xmr_release_committed_before_rpc",
     "xmr_exact_transaction_persisted_before_rpc",
     "xmr_daemon_submission_enforced_by_authority",
+    "xmr_daemon_absolute_submission_deadline",
     "durable_absolute_active_deadline",
     "durable_restart_before_xmr_signing",
     "refund_permanently_forbidden_after_xmr_commitment",
