@@ -949,7 +949,7 @@ fn run_legacy_production_v3(
     // crash anywhere in this pair exactly resumable.
     let (upstream_dom_payout, downstream_dom_payout, dom_lease) = authenticate_dom_f6_payouts(
         &inputs,
-        contracts_stage10_owner.private_bootstrap_v13.as_mut(),
+        contracts_stage10_owner.private_bootstrap_v13.as_deref_mut(),
         &mut chain_signers,
         &mut dom_actuator_store,
         pins.process_owner_id,
@@ -1248,6 +1248,7 @@ fn run_legacy_production_v3(
                 .trusted_chain_id(),
             runtime: dom_runtime,
             route_terms_digest: inputs.admission().frozen_bindings().terms_digest,
+            dom_consensus_rules_digest: dom_deployment.deployment().consensus_rules_digest,
             materialization_scope: dom_materialization_scope,
         },
     )
@@ -1480,10 +1481,22 @@ fn run_legacy_production_v3(
     // ------------------------------------------------------------------
     let external_call_bound = Duration::from_millis(runtime_bounds.external_call_timeout_ms);
     let relay_backoff = Duration::from_millis(runtime_bounds.relay_poll_backoff_ms);
+    // Same authenticated ceiling as the universal entrypoint: one connection
+    // carries a socket wait plus every scope's exchange, and the route
+    // supervisor refuses an external block longer than its renewal window.
+    let route_block_ceiling = Duration::from_millis(
+        runtime_bounds
+            .lease_duration_ms
+            .checked_sub(runtime_bounds.renew_before_ms)
+            .ok_or(ProductionRunErrorV1::RouteRuntime)?,
+    );
+    let composite_call_bound = external_call_bound.min(
+        crate::production_composite_loop::call_bound_for_blocking_ceiling_v25(route_block_ceiling),
+    );
     let composite_config = ProductionCompositeLoopConfigV1::new(
-        external_call_bound,
-        external_call_bound,
-        external_call_bound,
+        composite_call_bound,
+        composite_call_bound,
+        composite_call_bound,
         relay_backoff,
         PRODUCTION_ACTIVATION_ROUND_BUDGET_V1,
     )
@@ -1688,6 +1701,16 @@ fn authenticate_dom_f6_payouts(
     let lease = store
         .acquire_lease(participant.0, owner_id, now_unix_ms, lease_duration_ms)
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+    // A reopened process with the same owner id gets its previous, still-live
+    // lease back unchanged: AlreadyOwned keeps the old expiry. Startup then
+    // binds both sessions and builds the F6 authorities before its next
+    // renewal, which can outlast whatever was left of that inherited lease.
+    // Renew the exact fenced ownership to a full duration now. For a lease
+    // acquired just above this changes nothing; an expired or stale one is
+    // still refused.
+    let mut lease = store
+        .renew_lease(lease, now_unix_ms, lease_duration_ms)
+        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
     let upstream_binding = chain_signers.dom_binding(LegIdV1::Upstream);
     let downstream_binding = chain_signers.dom_binding(LegIdV1::Downstream);
     store
@@ -1874,6 +1897,10 @@ fn authenticate_dom_f6_payouts(
         }
     }
 
+    lease = store
+        .renew_lease(lease, trusted_now_millis_v1()?, lease_duration_ms)
+        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+
     let upstream_value = u64::try_from(inputs.composition().upstream().dom_leg.amount)
         .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
     let downstream_value = u64::try_from(inputs.composition().downstream().dom_leg.amount)
@@ -1926,6 +1953,10 @@ fn authenticate_dom_f6_payouts(
             .map_err(|_| ProductionRunErrorV1::F6Authorities)?,
         )
     };
+    lease = store
+        .renew_lease(lease, trusted_now_millis_v1()?, lease_duration_ms)
+        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
+
     // Persist before any outbound publication. A restart reconstructs the
     // private signing shares from the encrypted wallet and exact reservation,
     // while reusing the public output proofs from this immutable record.
@@ -2009,6 +2040,9 @@ fn authenticate_dom_f6_payouts(
             material.refund_share_v18 = Some(refund);
         }
     }
+    lease = store
+        .renew_lease(lease, trusted_now_millis_v1()?, lease_duration_ms)
+        .map_err(|_| ProductionRunErrorV1::F6Authorities)?;
     Ok((upstream, downstream, lease))
 }
 
@@ -2633,31 +2667,75 @@ fn open_dom_actuator_store(
     match (mode, stage) {
         (ProductionRunModeV1::Create, ProductionProvisioningStageStateV1::Started) => {
             if stage_before_begin == ProductionProvisioningStageStateV1::Absent {
-                return DomActuatorStoreV1::create(path)
-                    .map_err(|_| ProductionRunErrorV1::DomActuatorStore);
+                return DomActuatorStoreV1::create(path).map_err(|error| {
+                    eprintln!(
+                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=create_fresh error={:?}",
+                        error
+                    );
+                    ProductionRunErrorV1::DomActuatorStore
+                });
             }
+
             if stage_before_begin != ProductionProvisioningStageStateV1::Started {
                 return Err(ProductionRunErrorV1::Provisioning);
             }
-            if path_entry_present(&dom_actuator_process_lock_path(path))
-                .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?
-            {
-                DomActuatorStoreV1::resume_create_production(path)
-            } else if path_entry_present(path)
-                .map_err(|_| ProductionRunErrorV1::DomActuatorStore)?
-            {
-                return Err(ProductionRunErrorV1::DomActuatorStore);
+
+            let lock_present =
+                path_entry_present(&dom_actuator_process_lock_path(path)).map_err(|error| {
+                    eprintln!(
+                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=inspect_process_lock error={:?}",
+                        error
+                    );
+                    ProductionRunErrorV1::DomActuatorStore
+                })?;
+
+            if lock_present {
+                DomActuatorStoreV1::resume_create_production(path).map_err(|error| {
+                    eprintln!(
+                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=resume_create error={:?}",
+                        error
+                    );
+                    ProductionRunErrorV1::DomActuatorStore
+                })
             } else {
-                DomActuatorStoreV1::create(path)
+                let database_present = path_entry_present(path).map_err(|error| {
+                    eprintln!(
+                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=inspect_database error={:?}",
+                        error
+                    );
+                    ProductionRunErrorV1::DomActuatorStore
+                })?;
+
+                if database_present {
+                    eprintln!(
+                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=create_resume database_without_process_lock"
+                    );
+                    return Err(ProductionRunErrorV1::DomActuatorStore);
+                }
+
+                DomActuatorStoreV1::create(path).map_err(|error| {
+                    eprintln!(
+                        "DOM_ACTUATOR_OPEN_DIAG_V25 operation=create_after_started error={:?}",
+                        error
+                    );
+                    ProductionRunErrorV1::DomActuatorStore
+                })
             }
         }
+
         (
             ProductionRunModeV1::Create | ProductionRunModeV1::ReopenExisting,
             ProductionProvisioningStageStateV1::Complete,
-        ) => DomActuatorStoreV1::open_existing(path),
-        _ => return Err(ProductionRunErrorV1::Provisioning),
+        ) => DomActuatorStoreV1::open_existing(path).map_err(|error| {
+            eprintln!(
+                "DOM_ACTUATOR_OPEN_DIAG_V25 operation=open_existing mode={:?} error={:?}",
+                mode, error
+            );
+            ProductionRunErrorV1::DomActuatorStore
+        }),
+
+        _ => Err(ProductionRunErrorV1::Provisioning),
     }
-    .map_err(|_| ProductionRunErrorV1::DomActuatorStore)
 }
 
 fn require_dom_actuator_create_prefix_absent(path: &Path) -> Result<(), ProductionRunErrorV1> {

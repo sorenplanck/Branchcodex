@@ -1174,6 +1174,10 @@ fn map_plan_persistence_coordinator_error(error: CoordinatorErrorV1) -> Authorit
         | CoordinatorErrorV1::PlanAuthorityRefused
         | CoordinatorErrorV1::ChildAuthorityRefused
         | CoordinatorErrorV1::ChildObserverRefused => AuthorityRefusalV1::Unavailable,
+        // A child that refused the exact call, or whose state conflicts with
+        // it, will refuse it again; only unavailability is retried.
+        CoordinatorErrorV1::ChildAuthorityRejected => AuthorityRefusalV1::Refused,
+        CoordinatorErrorV1::ChildAuthorityConflict => AuthorityRefusalV1::Inconsistent,
         CoordinatorErrorV1::InvalidPlan
         | CoordinatorErrorV1::InvalidCanonicalMaterial
         | CoordinatorErrorV1::InvalidPlanAuthorization

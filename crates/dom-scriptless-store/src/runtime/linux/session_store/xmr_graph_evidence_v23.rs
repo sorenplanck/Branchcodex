@@ -496,9 +496,9 @@ mod tests {
             altered[end..].copy_from_slice(&checksum);
             assert!(Evidence::decode(&altered).is_err());
         }
-        for index in 0..6 {
+        for (index, limit) in LIMITS.iter().enumerate() {
             let mut altered = Evidence::decode(&bytes)?;
-            altered.fields[index] = vec![1; LIMITS[index] + 1];
+            altered.fields[index] = vec![1; limit + 1];
             assert!(altered.encode().is_err());
         }
         let mut trailing = bytes;

@@ -1,0 +1,9 @@
+{
+  "experiment": "height-dom-first regression after funding fixture extraction",
+  "pid": 847207,
+  "timeout_seconds": 120,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 34.8828186049941,
+  "compilation_included": false
+}

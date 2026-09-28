@@ -1,0 +1,12 @@
+{
+  "artifact_directory": "target/regtest-856707-1790461880878390505",
+  "sha256": {
+    "target/release/examples/regtest_claim": "c56959844f3a5d0664939c67e935f273662ac51f120aa01d06c50f7b5e926269",
+    "target/recovery-research/direct-dlog-bridge": "94be42247ce8e12b4c098335b450dca1993c0692db28f3f406ab95ee3eea7b27",
+    "examples/regtest_claim.rs": "ec1284cdc62afc6e111daa771cacfac11d599bd5c624ac1a9330499a67ea6634",
+    "examples/support/dom_regtest.rs": "dd95624b9afdd3a559d6587bd833430decc20f3c4982088c22401fd7527c7568",
+    "examples/support/direct_recovery_bridge.rs": "710b2e2a928b0dae44c653c4754a95eb14b47bf43db5a16298e9ca02f2175336"
+  },
+  "monerod_sha256": "09ca0100c216c30083b17f2008103388921db8ac654e95b47a2df2ebff13b0ff",
+  "scope": "Owned offline regtest; abandonment before adaptor delivery, conditional timing assumptions, no production or bilateral security proof."
+}

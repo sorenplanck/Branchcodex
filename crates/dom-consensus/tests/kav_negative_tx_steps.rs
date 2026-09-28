@@ -27,7 +27,8 @@ use dom_consensus::transaction::{
 use dom_consensus::{validate_transaction, CoinbaseKernel, CoinbaseTransaction, ValidationContext};
 use dom_core::{
     Amount, BlockHeight, DomError, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED,
-    KERNEL_FEAT_PLAIN, MAX_KERNELS_PER_TX, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    KERNEL_FEAT_PLAIN, KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH, KERNEL_FEAT_SWAP_REFUND,
+    MAX_KERNELS_PER_TX, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -147,6 +148,9 @@ fn kav_neg_unknown_kernel_feature_byte_sweep() {
         KERNEL_FEAT_PLAIN,
         KERNEL_FEAT_COINBASE,
         KERNEL_FEAT_HEIGHT_LOCKED,
+        KERNEL_FEAT_SWAP_CLAIM,
+        KERNEL_FEAT_SWAP_REFUND,
+        KERNEL_FEAT_SWAP_PUNISH,
     ];
     for b in 0u16..=255u16 {
         let feat = b as u8;

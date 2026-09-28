@@ -6,9 +6,7 @@ use super::*;
 mod enrollment_wire_v23;
 #[path = "production_native_xmr_bundle_entrypoints_v23_tests.rs"]
 mod entrypoints_v23;
-pub(crate) use entrypoints_v23::{
-    encode_native_xmr_bundle_from_plan_v23, encode_native_xmr_bundle_v23,
-};
+pub(crate) use entrypoints_v23::encode_native_xmr_bundle_from_plan_v23;
 
 pub(crate) struct NativeXmrBundleResourcesV23 {
     pub local_participant_id: [u8; 32],
@@ -65,7 +63,10 @@ fn encode_native_xmr_wire_v23(
     ] {
         relative_path(path)?;
     }
-    require_milliseconds(resources.sidecar_timeout_ms, 180_000)?;
+    require_milliseconds(
+        resources.sidecar_timeout_ms,
+        crate::production_universal_leg_authority::MAX_SIDECAR_CALL_MS_V26,
+    )?;
     if let Some((path, fee)) = &resources.private_funding {
         relative_path(path)?;
         if resources.local_participant_id != terms.counterparty_leg.refund_to.0

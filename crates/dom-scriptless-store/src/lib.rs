@@ -215,16 +215,17 @@ pub use runtime::{
 pub use runtime::{
     AdmittedF7FinalClaimV14, AuthenticatedF7ClaimPreSignatureV12, CollaborativeBpCustodyV16,
     ConsumedF7ClaimAuthorizationV12, ContractsNonceVaultV1, F7AnchorRequestBindingV12,
-    F7ClaimObserverFactsV15, F7FinalClaimActionV14, F7FinalClaimFactsV14, F7FinalClaimProgressV14,
-    F7FundingAuthorizationV12, F7FundingGatePreparationV12, F7RecoveryPreparationV12,
-    InventoryError, ObservedF7FinalClaimV15, PreparedF7ClaimPreSignatureTransportV12,
-    PreparedF7FinalClaimIngressV15, PreparedF7FinalClaimSubmissionV14, PreparedF7FundingGateV12,
-    PreparedF7FundingSubmissionV12, PreparedOperationalXmrFundingGateV12,
-    PreparedOperationalXmrReadyToFundVoteV12, PreparedXmrRecoveryAttemptV12,
-    RealDomFundingFactsV23, RetainedRestoreTargetV1, VerifiedXmrOrdinaryRecoveryRoundsV11,
-    VerifiedXmrRecoveryExecutionAuthorityV12, XmrOrdinaryRecoveryRoundSessionsV11,
-    XmrRecoveryCustodyErrorV11, XmrRecoveryCustodyRoleV11, XmrRecoveryCustodyScopeV11,
-    XmrRecoveryCustodyV11, XmrRecoveryObservedExitV12, XmrRecoveryOperationV12,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, F7FinalClaimActionV14, F7FinalClaimFactsV14,
+    F7FinalClaimProgressV14, F7FundingAuthorizationV12, F7FundingGatePreparationV12,
+    F7RecoveryPreparationV12, InventoryError, ObservedF7FinalClaimV15,
+    PreparedF7ClaimPreSignatureTransportV12, PreparedF7FinalClaimIngressV15,
+    PreparedF7FinalClaimSubmissionV14, PreparedF7FundingGateV12, PreparedF7FundingSubmissionV12,
+    PreparedOperationalXmrFundingGateV12, PreparedOperationalXmrReadyToFundVoteV12,
+    PreparedXmrRecoveryAttemptV12, RealDomFundingFactsV23, RetainedRestoreTargetV1,
+    VerifiedXmrOrdinaryRecoveryRoundsV11, VerifiedXmrRecoveryExecutionAuthorityV12,
+    XmrOrdinaryRecoveryRoundSessionsV11, XmrRecoveryCustodyErrorV11, XmrRecoveryCustodyRoleV11,
+    XmrRecoveryCustodyScopeV11, XmrRecoveryCustodyV11, XmrRecoveryObservedExitV12,
+    XmrRecoveryOperationV12,
 };
 
 pub use canonical::{

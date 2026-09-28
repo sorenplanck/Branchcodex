@@ -31,7 +31,6 @@ struct RunningDependenciesV23 {
     _f6: NativeF6ProvisionV23,
     _baseline: NativeDomSnapshotV23,
     _funding: RouteFundingOwnerV23,
-    _inventory: NativeMainnetXmrInventorySourceV23,
     _credentials: NativeXmrDaemonCredentialsV23,
 }
 
@@ -306,6 +305,24 @@ impl NativeMainnetStartupV23 {
             .ok_or("startup actor")?
             .1)
     }
+    pub(crate) fn collateral_confirmations_v25(&self) -> ColdStartResult<[u32; 2]> {
+        let cold = self.cold.as_ref().ok_or("startup cold owner absent")?;
+        let mut confirmations = [0; 2];
+        for (position, depth) in confirmations.iter_mut().enumerate() {
+            let policy = xmr_refund_policy::compensation::XmrCompensationPolicyV11::from_bytes(
+                &cold.compensation_policy(position)?,
+            )?;
+            *depth = policy
+                .validate_for(&cold.terms[position])?
+                .policy()
+                .collateral_confirmations;
+            if *depth == 0 || *depth > 64 {
+                return Err("scenario collateral confirmation bound".into());
+            }
+        }
+        Ok(confirmations)
+    }
+
     pub(crate) fn f6(&self) -> ColdStartResult<&NativeF6ProvisionV23> {
         self.f6
             .as_ref()
@@ -348,11 +365,14 @@ impl NativeMainnetStartupV23 {
             eprintln!("native startup actor={actor}: authenticated export ready");
         }
         let exports = exports.try_into().map_err(|_| "startup two exports")?;
+        // The exported daemon resources now own every authenticated public
+        // input they need. Drop the parent's encrypted SQLite inventory
+        // handle before either child opens the same secret store.
+        drop(self.inventory.take().ok_or("startup inventory absent")?);
         let dependencies = RunningDependenciesV23 {
             _f6: self.f6.take().ok_or("startup F6 absent")?,
             _baseline: self.baseline.take().ok_or("startup baseline absent")?,
             _funding: self.funding.take().ok_or("startup funding absent")?,
-            _inventory: self.inventory.take().ok_or("startup inventory absent")?,
             _credentials: self
                 .credentials
                 .take()
@@ -454,6 +474,16 @@ impl NativeXmrRunningColdStartV23 {
 
     /// Append genuine validated coinbase/UTXO transitions to the controlled
     /// RPC ledger. The headers are still a simulation, not proof of mainnet PoW.
+    pub(crate) fn confirm_dom_funding_v25(
+        &self,
+        hash: &[u8; 32],
+        confirmations: u32,
+    ) -> ColdStartResult<()> {
+        self.mainnet_dependencies_v23()?
+            ._baseline
+            .confirm_retained_funding_v25(hash, confirmations)
+    }
+
     pub(crate) fn advance_dom_height_v23(&self, target: u64) -> ColdStartResult<()> {
         self.mainnet_dependencies_v23()?
             ._baseline

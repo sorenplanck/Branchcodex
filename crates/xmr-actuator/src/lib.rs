@@ -56,6 +56,18 @@ pub trait XmrObservationPortV1 {
 
     /// Whether the exact key image is spent anywhere the quorum can see.
     fn key_image_spent(&mut self, key_image: Digest32) -> Result<bool>;
+
+    /// Bounds every nested request of the observations that follow.
+    ///
+    /// One observation is not one request: a quorum answer fans out over
+    /// several daemon calls, each with its own transport timeout. Without an
+    /// aggregate bound a single observation can last the sum of those
+    /// timeouts, which is long enough to outlive the caller's lease while the
+    /// caller is alive and working. A port that cannot block ignores this.
+    fn set_observation_deadline_v26(&mut self, deadline: std::time::Instant) -> Result<()> {
+        let _ = deadline;
+        Ok(())
+    }
 }
 
 /// Outcome of one broadcast fan-out.

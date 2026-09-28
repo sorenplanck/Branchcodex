@@ -94,6 +94,7 @@ impl DomParticipantWalletSessionV1<'_> {
     ///
     /// The caller must durably retain the public offer before publishing it.
     /// Supplying an arbitrary retained offer cannot mint a signing capability.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_bootstrap_offer_v17(
         &mut self,
         store: &mut DomActuatorStoreV1,

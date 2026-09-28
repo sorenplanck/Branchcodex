@@ -38,6 +38,8 @@ closed_tags!(Stage {
 
 closed_tags!(Cause {
     InvalidConfiguration => "invalid_configuration", Clock => "clock_unavailable",
+    ActuatorLeaseRenewal => "actuator_lease_renewal",
+    ActivationStalled => "activation_stalled",
     Binding => "binding", Crypto => "crypto", Vault => "vault", Expired => "expired",
     Mailbox => "mailbox", XmrGraph => "xmr_recovery_graph_required",
     JournalBinding => "journal_binding", JournalCrypto => "journal_crypto",
@@ -57,7 +59,11 @@ closed_tags!(Cause {
     InvalidDsc1 => "invalid_dsc1", WrongDsc1Scope => "wrong_dsc1_scope",
     Unprepared => "unprepared_message", ClaimObservation => "awaiting_claim_observation",
     Templates => "awaiting_template_construction", RefundHandoff => "awaiting_refund_handoff",
-    NativeRefund => "awaiting_native_refund_transport", WrongAuthority => "wrong_authority",
+    NativeRefund => "awaiting_native_refund_transport",
+    ReadinessGate => "awaiting_native_readiness_gate",
+    ClaimSigningHandoff => "awaiting_claim_signing_handoff",
+    ClaimPreSignatureHandoff => "awaiting_claim_pre_signature_handoff",
+    FundingHandoff => "awaiting_native_funding_handoff", WrongAuthority => "wrong_authority",
     GraphCandidateNoiseOffer => "graph_candidate_noise_offer_absent",
     GraphCandidateSetup => "graph_candidate_setup_absent",
     GraphCandidatePrivateBootstrap => "graph_candidate_private_bootstrap_absent",
@@ -154,7 +160,14 @@ fn outbound(error: &RelayWorkerOutboundErrorV1) -> Cause {
         E::OwnerBusy => Cause::OwnerBusy,
         E::EntropyUnavailable => Cause::Entropy,
         E::Sender(_) => Cause::Sender,
-        E::StoreRejected => Cause::StoreRejected,
+        E::StoreRejected(
+            dom_scriptless_store::SessionStoreError::StoreBusy
+            | dom_scriptless_store::SessionStoreError::Filesystem,
+        ) => Cause::StoreBusy,
+        E::StoreRejected(
+            dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable,
+        ) => Cause::StoreClaimSigning,
+        E::StoreRejected(_) => Cause::StoreRejected,
         E::InvalidDsc1 => Cause::InvalidDsc1,
         E::WrongDsc1Scope => Cause::WrongDsc1Scope,
     }
@@ -179,6 +192,10 @@ fn ingress(error: &ContractsRelayIngressErrorV1) -> Cause {
         E::AwaitingTemplateConstructionV17 => Cause::Templates,
         E::AwaitingBootstrapRefundHandoffV18 => Cause::RefundHandoff,
         E::AwaitingNativeXmrRefundTransportV23 => Cause::NativeRefund,
+        E::AwaitingNativeXmrFundingHandoffV25 => Cause::FundingHandoff,
+        E::AwaitingNativeXmrReadinessGateV25 => Cause::ReadinessGate,
+        E::AwaitingClaimSigningHandoffV29 => Cause::ClaimSigningHandoff,
+        E::AwaitingClaimPreSignatureHandoffV29 => Cause::ClaimPreSignatureHandoff,
         E::WrongAuthority => Cause::WrongAuthority,
         E::AuthorityAlreadyInstalled => Cause::AlreadyInstalled,
         E::InvalidReceipt => Cause::Receipt,
@@ -254,6 +271,7 @@ impl ProductionCompositeLoopErrorV1 {
         use ProductionCompositeLoopErrorV1 as E;
         let (stage, cause) = match self {
             E::InvalidConfiguration => (Stage::Composite, Cause::InvalidConfiguration),
+            E::ActuatorLeaseRenewal => (Stage::Composite, Cause::ActuatorLeaseRenewal),
             E::ClockUnavailable => (Stage::Composite, Cause::Clock),
             E::Bootstrap(error) | E::BootstrapAtV25 { error, .. } => (
                 match self {
@@ -271,6 +289,9 @@ impl ProductionCompositeLoopErrorV1 {
                     _ => Stage::Bootstrap,
                 },
                 match error {
+                    ProductionBootstrapRuntimeErrorV16::ActuatorLeaseRenewalV25 => {
+                        Cause::ActuatorLeaseRenewal
+                    }
                     ProductionBootstrapRuntimeErrorV16::Binding => Cause::Binding,
                     ProductionBootstrapRuntimeErrorV16::Crypto => Cause::Crypto,
                     ProductionBootstrapRuntimeErrorV16::Vault => Cause::Vault,
@@ -334,6 +355,11 @@ impl ProductionCompositeLoopErrorV1 {
                     ProductionRelayNetworkRuntimeErrorV1::AuthenticatedExchangeFailed => {
                         Cause::AuthenticatedExchange
                     }
+                    ProductionRelayNetworkRuntimeErrorV1::IdentityAuthenticationRefused => {
+                        Cause::Identity
+                    }
+                    ProductionRelayNetworkRuntimeErrorV1::ProtocolRefused => Cause::Protocol,
+                    ProductionRelayNetworkRuntimeErrorV1::PeerRefused => Cause::Peer,
                     ProductionRelayNetworkRuntimeErrorV1::ChannelUnavailable => Cause::Channel,
                     ProductionRelayNetworkRuntimeErrorV1::DurableRelayUnavailable => {
                         Cause::DurableRelay
@@ -381,6 +407,8 @@ impl ProductionCompositeLoopErrorV1 {
                 Stage::RecoverySigningInbound,
                 poll(error, |_| Cause::F6ActivationUnavailable),
             ),
+            E::RecoverySigningEnvelopeRefused => (Stage::RecoverySigningInbound, Cause::Inbox),
+            E::ActivationStalled => (Stage::Composite, Cause::ActivationStalled),
             E::Activation(error) => (
                 Stage::Activation,
                 match error {
@@ -440,9 +468,12 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
             C::OwnerBusy
                 | C::Unprepared
                 | C::ClaimObservation
+                | C::ClaimSigningHandoff
+                | C::ClaimPreSignatureHandoff
                 | C::Templates
                 | C::RefundHandoff
                 | C::NativeRefund
+                | C::FundingHandoff
                 | C::WrongAuthority
                 | C::AlreadyInstalled
                 | C::Receipt
@@ -461,7 +492,10 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
             | C::PendingEvmAccount
     );
     match stage {
-        Stage::Composite => matches!(cause, C::InvalidConfiguration | C::Clock),
+        Stage::Composite => matches!(
+            cause,
+            C::InvalidConfiguration | C::Clock | C::ActuatorLeaseRenewal | C::ActivationStalled
+        ),
         Stage::Bootstrap
         | Stage::LocalBootstrap
         | Stage::GraphCandidate
@@ -487,6 +521,7 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                         | C::GraphCandidatePrivateBootstrap
                         | C::GraphCandidateCancelled
                         | C::GraphCandidateF6Principal
+                        | C::ActuatorLeaseRenewal
                 )
         }
         Stage::F7 => ingress || outbound || matches!(cause, C::Identity | C::Clock),
@@ -498,6 +533,9 @@ fn permitted(stage: Stage, cause: Cause) -> bool {
                 | C::Listen
                 | C::AcceptDeadline
                 | C::AuthenticatedExchange
+                | C::Identity
+                | C::Protocol
+                | C::Peer
                 | C::Channel
                 | C::DurableRelay
         ),
@@ -702,6 +740,48 @@ mod tests {
             "network/connect_unavailable"
         );
         assert!(is_peer_temporarily_unavailable_v23(&error));
+    }
+
+    #[test]
+    fn composite_failure_v25_names_lease_refusal_and_quarantine_causes() {
+        // Each of these is fatal and must reach the exit diagnostic as a
+        // classified code rather than `unknown`; none may be retried as a
+        // temporarily absent peer.
+        assert_projection(
+            ProductionCompositeLoopErrorV1::ActuatorLeaseRenewal,
+            "composite/actuator_lease_renewal",
+        );
+        assert_projection(
+            ProductionCompositeLoopErrorV1::BootstrapAtV25 {
+                context: ProductionCompositeBootstrapContextV25::LocalBootstrap,
+                error: ProductionBootstrapRuntimeErrorV16::ActuatorLeaseRenewalV25,
+            },
+            "local_bootstrap/actuator_lease_renewal",
+        );
+        assert_projection(
+            ProductionCompositeLoopErrorV1::RecoverySigningEnvelopeRefused,
+            "recovery_signing_inbound/inbox_refused",
+        );
+        assert_projection(
+            ProductionCompositeLoopErrorV1::ActivationStalled,
+            "composite/activation_stalled",
+        );
+        for (error, expected) in [
+            (
+                ProductionRelayNetworkRuntimeErrorV1::IdentityAuthenticationRefused,
+                "network/identity_refused",
+            ),
+            (
+                ProductionRelayNetworkRuntimeErrorV1::ProtocolRefused,
+                "network/protocol_refused",
+            ),
+            (
+                ProductionRelayNetworkRuntimeErrorV1::PeerRefused,
+                "network/peer_refused",
+            ),
+        ] {
+            assert_projection(ProductionCompositeLoopErrorV1::Network(error), expected);
+        }
     }
 
     #[test]

@@ -146,6 +146,7 @@ impl XmrGraphOutputJournalV22 {
         Ok(journal)
     }
 
+    #[cfg(test)]
     pub(super) fn verify(
         &self,
         chain: TrustedChainIdV1,
@@ -199,7 +200,10 @@ impl XmrGraphOutputJournalV22 {
                 return Err(SessionStoreError::Conflict);
             }
         }
-        let ids = early.participants.each_ref().map(|p| p.participant_id);
+        let ids = [
+            early.participants[0].participant_id,
+            early.participants[1].participant_id,
+        ];
         let mut transcript = early.initial_transcript_hash;
         let mut sequences = [0u64; 2];
         let mut commitments = [None, None];

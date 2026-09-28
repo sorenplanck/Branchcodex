@@ -47,6 +47,7 @@ impl NativeBarrierV23 {
 
 pub(super) struct XmrLedgerPumpV23 {
     confirmations: u64,
+    collateral_confirmations: [u32; 2],
     last_poll: Option<Instant>,
 }
 
@@ -72,6 +73,7 @@ impl XmrLedgerPumpV23 {
         }
         Ok(Self {
             confirmations,
+            collateral_confirmations: startup.collateral_confirmations_v25()?,
             last_poll: None,
         })
     }
@@ -79,7 +81,7 @@ impl XmrLedgerPumpV23 {
     pub(super) fn pump(
         &mut self,
         running: &mut NativeXmrRunningColdStartV23,
-        snapshots: &[&RouteSnapshotV1],
+        snapshots: &[(usize, &RouteSnapshotV1)],
     ) -> Result<()> {
         if self
             .last_poll
@@ -89,8 +91,15 @@ impl XmrLedgerPumpV23 {
         }
         self.last_poll = Some(Instant::now());
         let mut expected = Vec::new();
-        for snapshot in snapshots {
-            for actor in 0..2 {
+        // Ask each snapshot's own coordinator about it. Crossing every
+        // snapshot with both actors compared one actor's aggregate identity
+        // against the other's binding, which the validator rejects even when
+        // both actors are correct: the two derive their own first-exposure
+        // evidence, so the same effect legitimately carries different
+        // aggregates.
+        for (actor, snapshot) in snapshots {
+            {
+                let actor = *actor;
                 let coordinator = CoordinatorObserverV23::new(running.state_dir(actor)?)?;
                 for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
                     for kind in [
@@ -99,6 +108,22 @@ impl XmrLedgerPumpV23 {
                         ActionKindV1::Refund,
                     ] {
                         if let Some(action) = coordinator.poll(snapshot, leg, kind)? {
+                            // Every native DOM action needs the same thing from
+                            // the local chain: blocks on top of its inclusion.
+                            // Confirming only Funding left Claim and Refund
+                            // waiting for confirmations nothing would mine, which
+                            // is exactly the compensation and refund scenarios.
+                            // The helper is generic by transaction hash; only
+                            // native inclusion can unlock maturation, and this
+                            // cannot release a held submission or mint finality.
+                            let position = match leg {
+                                LegIdV1::Upstream => 0,
+                                LegIdV1::Downstream => 1,
+                            };
+                            running.confirm_dom_funding_v25(
+                                &action.dom_id,
+                                self.collateral_confirmations[position],
+                            )?;
                             if action.xmr_dispatched {
                                 expected.push((kind, action));
                             }
@@ -422,9 +447,10 @@ impl FundingBarrierControlV23 for NativeBarrierV23 {
     fn pump_expected_xmr(
         &mut self,
         running: &mut NativeXmrRunningColdStartV23,
+        actor: usize,
         snapshot: &RouteSnapshotV1,
     ) -> Result<()> {
-        self.xmr.pump(running, &[snapshot])
+        self.xmr.pump(running, &[(actor, snapshot)])
     }
 
     fn advance_refund_window(
@@ -485,7 +511,7 @@ impl FundingBarrierControlV23 for NativeBarrierV23 {
             return Err("stopped native funding identities differ from durable coordinator".into());
         }
         self.xmr.last_poll = None;
-        self.xmr.pump(running, &[snapshot])?;
+        self.xmr.pump(running, &[(boundary.survivor, snapshot)])?;
         if !self.native_final_funding(running)?[0] {
             return Err("stopped upstream funding lacks actual native history finality".into());
         }

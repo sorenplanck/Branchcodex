@@ -1,0 +1,12 @@
+{
+  "pid": 1348011,
+  "command": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "height-dom-first"
+  ],
+  "exit_code": 0,
+  "timed_out": false,
+  "wall_seconds": 32.329256942961365,
+  "log": "target/height-dom-first-refund-worker-1790481869308812706.log"
+}

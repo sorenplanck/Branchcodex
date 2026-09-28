@@ -430,11 +430,13 @@ pub(super) fn run_claim(
     eprintln!("native claim: private-fork refund recovery complete");
     let claim_bindings = [signed.wallets[0].0, signed.wallets[1].0];
     let funding_owner = std::cell::RefCell::new(funding);
+    let mut dom_scan_progress = f7_anchor_authority::DomFundingScanProgressV24::new();
     let mut built_sweep = None;
     native_funding_v23::native_claim_v23::claim_after_observed_funding(
         signed,
         work,
         &native,
+        &snapshot.runtime()?,
         claim_capture::capture,
         |store, actor, participant, exact| {
             let facts = store
@@ -467,6 +469,31 @@ pub(super) fn run_claim(
                 observed.tx_hash(),
                 dom_scriptless_chain_adapter::canonical_transaction_hash_v1(exact)?
             );
+            // Exercise the production receiver facade with the signed claim
+            // and real scanner proof, including the reopened receive below.
+            // The historical observation alone must not authorize another tx.
+            let receiver = dom_actuator::DomContractsActuatorV1::bind(
+                store,
+                claim_bindings[actor],
+            )?;
+            let retained = receiver
+                .f7_receiver_observation_v25(&chain)?
+                .ok_or("observed receiver was classified as a sender")?;
+            assert_eq!(retained.tx_hash(), observed.tx_hash());
+            let verified = receiver.verified_f7_receiver_claim_v25(
+                &runtime,
+                &chain,
+                observed.tx_hash(),
+            )?;
+            assert_eq!(verified.tx_hash(), observed.tx_hash());
+            let mut substituted = observed.tx_hash();
+            substituted[0] ^= 1;
+            assert!(matches!(
+                receiver.verified_f7_receiver_claim_v25(&runtime, &chain, substituted),
+                Err(dom_actuator::DomActuatorError::CapabilityMismatch)
+            ));
+            assert!(receiver.f7_final_claim_progress_v21(&chain).is_err());
+            eprintln!("native Claim receiver: production facade verified exact tx and rejected sender authority");
             let revealed = runtime.consume_observed_f7_claim_v15(&facts, &observed)?;
             native.verify_extracted_claim_destination_v23(actor, revealed)?;
             if built_sweep.is_none() {
@@ -503,6 +530,7 @@ pub(super) fn run_claim(
             native.observe_claim_anchors_v23(
                 actor,
                 snapshot.adapter(),
+                &mut dom_scan_progress,
                 request,
                 produced,
                 &deployment,

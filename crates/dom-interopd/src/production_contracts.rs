@@ -15,6 +15,7 @@ pub(crate) use xmr_auxiliary_relay_v23::XmrAuxiliaryRelayOpenModeV23;
 mod bootstrap_runtime_v16;
 #[path = "production_xmr_graph_custody_v23.rs"]
 mod graph_custody_v23;
+pub(crate) use graph_custody_v23::ProductionXmrGraphCustodyErrorV23;
 #[path = "production_contracts_xmr_remote_v23.rs"]
 mod xmr_remote_v23;
 pub(crate) use xmr_remote_v23::ProductionXmrRemoteContractsAuthorityV23;
@@ -39,7 +40,9 @@ pub(crate) use dom_claim_runtime_v12::{
 
 #[path = "production_funding_runtime_v20.rs"]
 mod funding_runtime_v20;
-pub(crate) use funding_runtime_v20::ProductionFundingErrorV20;
+pub(crate) use funding_runtime_v20::{
+    ProductionFundingErrorV20, ProductionFundingStepV20, F7_FUNDING_CONTEXT_POLL_BOUND_V24,
+};
 
 #[path = "production_f7_readiness_v19.rs"]
 mod f7_readiness_v19;
@@ -49,8 +52,7 @@ pub(crate) use f7_readiness_v19::ProductionF7ReadinessErrorV19;
 mod f7_runtime_v12;
 pub(crate) use f7_runtime_v12::{
     ProductionF7ObserverPlanV20, ProductionF7RuntimeErrorV12, ProductionF7RuntimeV12,
-    ProductionF7StepV12, ProductionSelectedF7ObserverV12, ProductionXmrF7GraphV23,
-    ProductionXmrF7InputsV12,
+    ProductionSelectedF7ObserverV12, ProductionXmrF7GraphV23, ProductionXmrF7InputsV12,
 };
 
 #[path = "production_post_m8_claim_v22.rs"]
@@ -71,9 +73,6 @@ pub(crate) use final_claim_v14::{
 
 #[path = "production_claim_receiver_v15.rs"]
 mod claim_receiver_v15;
-pub(crate) use claim_receiver_v15::{
-    ProductionClaimReceiverErrorV15, ProductionClaimReceiverStepV15,
-};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -88,7 +87,7 @@ use dom_adaptor::TrustedChainIdV1;
 use dom_core::Hash256;
 use dom_scriptless_identity_store::{ContractsTransportIdentityStoreV1, IdentityStoreError};
 use dom_scriptless_store::{
-    AcceptedXmrRemoteSweepRequestV23, ClaimSigningAuthorizationV2,
+    AcceptedXmrRemoteSweepRequestV23, ClaimSigningAuthorizationV2, CommittedOutboundDsc1V1,
     ConsumedClaimSigningAuthorizationV2, ContractsNonceVaultV1, ContractsSessionStoreV1,
     OutboundDsc1RecoveryV1, PreparedDsc1SigningRequestV1, PreparedEvmSignedActionImportV1,
     PreparedOperationalFinalRefundTransportAuthorityV1, PreparedOperationalM8FundingGateV2,
@@ -173,9 +172,9 @@ use crate::production_refund_arming::{
 };
 use crate::relay_worker::{
     ContractsRelayIngressErrorV1, ContractsSessionStatusV1, DurableRelayWorkerV1,
-    PreparedContractsIngressV1, RelayInboundPollReportV1, RelayOutboundStepV1, RelayWorkerConfigV1,
-    RelayWorkerInboundErrorV1, RelayWorkerOpenErrorV1, RelayWorkerOutboundErrorV1,
-    RelayWorkerPathsV1,
+    PreparedContractsIngressV1, RelayF6MessageKindV1, RelayInboundPollReportV1,
+    RelayOutboundStepV1, RelayWorkerConfigV1, RelayWorkerInboundErrorV1, RelayWorkerOpenErrorV1,
+    RelayWorkerOutboundErrorV1, RelayWorkerPathsV1,
 };
 use crate::supervisor::AuthorityRefusalV1;
 
@@ -231,6 +230,27 @@ pub(crate) enum ProductionContractsF6RecoveryErrorV2 {
     OwnerBusy,
     #[error("production F6 applied history failed authentication")]
     Replay(#[source] F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>),
+}
+
+/// Outcome of one initiator-side F6 RFQ drive step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductionF6InitiatorRfqStepV25 {
+    /// The local F6 port durably accepted (or had already accepted) the RFQ.
+    Accepted,
+    /// The port still awaits another authenticated input, typically the
+    /// paired leg's RFQ. The caller drives the other leg and retries.
+    Awaiting,
+}
+
+/// Redacted refusal from the initiator-side F6 RFQ drive boundary.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProductionContractsF6InitiatorErrorV25 {
+    #[error("Contracts Relay owner is already executing another operation")]
+    OwnerBusy,
+    #[error("Relay sender refused the initiator RFQ envelope")]
+    Outbound(#[source] RelayWorkerOutboundErrorV1),
+    #[error("production F6 port refused the initiator RFQ")]
+    Lifecycle(#[source] ProductionF6LifecycleErrorV2),
 }
 
 /// Redacted refusal from the productive F7/M.8 Contracts boundary.
@@ -546,8 +566,31 @@ fn map_remote_transport_error(
     match error {
         ProductionContractsOutboundErrorV1::Relay(_)
         | ProductionContractsOutboundErrorV1::OwnerBusy => ChildAuthorityRefusalV1::Unavailable,
+        // "Observe again", not "this route is broken". The downstream claim
+        // gate answers ClaimSigningAuthorityUnavailable while its retained
+        // observation lease is absent or older than sixty seconds, and the
+        // Store answers Filesystem/StoreBusy while another opening holds it.
+        // Nothing is authorized, signed or staged from any of the three, so
+        // the next turn simply asks again. production_f7_runtime_v12's
+        // retryable_v20 already classifies exactly these three this way --
+        // run 84 died because that one path treated the gate answer as fatal.
+        // This converter kept turning all of them into Conflict, which
+        // map_child_refusal then reports as an inconsistent authority, and
+        // that is what killed runs 91, 94 and 95 in the upstream claim.
+        // A native XMR sweep the Store reports as still pending is a wait by
+        // its own definition, and production_xmr_recovery_driver_v12 already
+        // classes that variant as Unavailable.
+        ProductionContractsOutboundErrorV1::Store(
+            dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable
+            | dom_scriptless_store::SessionStoreError::Filesystem
+            | dom_scriptless_store::SessionStoreError::StoreBusy
+            | dom_scriptless_store::SessionStoreError::NativeXmrRefundTransportPendingV23,
+        ) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Identity(_)
-        | ProductionContractsOutboundErrorV1::Store(_) => ChildAuthorityRefusalV1::Conflict,
+        | ProductionContractsOutboundErrorV1::Store(_) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=remote_transport variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 
@@ -898,9 +941,17 @@ where
                 // Let the ordinary sole Relay owner drain an earlier message.
                 // Such a message is never mislabeled as the completed claim.
                 let request = match pending {
-                    OutboundDsc1RecoveryV1::None => self
-                        .store
-                        .prepare_f7_final_claim_dsc1_request_v14(&admitted)?,
+                    OutboundDsc1RecoveryV1::None => {
+                        let prepared = self
+                            .store
+                            .prepare_f7_final_claim_dsc1_request_v14(&admitted)?;
+                        if route_step_deadline::armed().is_some() {
+                            // The exact request is durable. Resume it under the
+                            // next step's leases before doing identity signing.
+                            return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
+                        }
+                        prepared
+                    }
                     OutboundDsc1RecoveryV1::SigningRequest(prepared) => {
                         if prepared.message_type() != 0x12 {
                             return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
@@ -917,6 +968,21 @@ where
                         return Err(ProductionContractsOutboundErrorV1::OwnerBusy)
                     }
                 };
+                if route_step_deadline::armed().is_some() {
+                    if request.session_id() != &self.session_id
+                        || request.sender_id() != &self.local_participant
+                    {
+                        return Err(SessionStoreError::InvalidTransition.into());
+                    }
+                    // The identity/store boundary authenticates and durably
+                    // commits the exact 0x12. The TransportCommitted branch
+                    // will reauthenticate and stage it on the next route step;
+                    // do not combine signing and relay staging in this lease.
+                    let _committed = self
+                        .identity
+                        .sign_and_commit_store_prepared_dsc1(self.store.as_ref(), request)?;
+                    return Err(ProductionContractsOutboundErrorV1::OwnerBusy);
+                }
                 sign_commit_and_stage_with_shared_relay(
                     self.session_id,
                     self.local_participant,
@@ -2075,6 +2141,18 @@ where
             reason = "retained surface not yet wired by the stage-7 composition root"
         )
     )]
+
+    pub(crate) fn outbound_dsc1_route_pending_v24(
+        &mut self,
+        outbound: &CommittedOutboundDsc1V1,
+    ) -> Result<bool, ProductionContractsOutboundErrorV1> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsOutboundErrorV1::OwnerBusy)?
+            .store_outbound_dsc1_pending_v24(outbound)
+            .map_err(ProductionContractsOutboundErrorV1::from)
+    }
+
     pub(crate) fn resume_and_stage(
         &mut self,
         expiry: TimelockSpec,
@@ -2324,6 +2402,39 @@ impl ProductionContractsV1<ProductionF6LifecyclePortV2> {
             .map_err(|_| ProductionContractsF6RecoveryErrorV2::OwnerBusy)?
             .recover_production_f6_applied_history()
             .map_err(ProductionContractsF6RecoveryErrorV2::from)
+    }
+
+    /// Drives the initiator's own deterministic RFQ for this leg: the same
+    /// object is persisted once for Relay submission to the solver and then
+    /// delivered to the local F6 port, which re-authenticates it against its
+    /// pinned bindings. Both effects are idempotent — the durable sender
+    /// refuses a second RFQ preparation and the pair activation registers an
+    /// identical RFQ without consuming anything — so the caller loops this
+    /// step until the port stops answering `Awaiting`.
+    pub(crate) fn drive_f6_initiator_rfq_v25(
+        &self,
+        payload: &[u8],
+        expiry: TimelockSpec,
+    ) -> Result<ProductionF6InitiatorRfqStepV25, ProductionContractsF6InitiatorErrorV25> {
+        let mut relay = self
+            .relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsF6InitiatorErrorV25::OwnerBusy)?;
+        if !relay
+            .f6_rfq_already_prepared_v25()
+            .map_err(ProductionContractsF6InitiatorErrorV25::Outbound)?
+        {
+            relay
+                .prepare_f6(RelayF6MessageKindV1::Rfq, payload, expiry)
+                .map_err(ProductionContractsF6InitiatorErrorV25::Outbound)?;
+        }
+        match relay.accept_local_initiator_rfq_v25(payload) {
+            Ok(_) => Ok(ProductionF6InitiatorRfqStepV25::Accepted),
+            Err(ProductionF6LifecycleErrorV2::Awaiting(_)) => {
+                Ok(ProductionF6InitiatorRfqStepV25::Awaiting)
+            }
+            Err(error) => Err(ProductionContractsF6InitiatorErrorV25::Lifecycle(error)),
+        }
     }
 }
 
@@ -2694,6 +2805,7 @@ mod tests {
             owner.step_f7_readiness_v19(chain, 1_000)?,
             super::f7_readiness_v19::ProductionF7ReadinessStepV19::GateAbsent
         );
+        assert!(!owner.f7_readiness_complete_v25(chain)?);
         let OutboundDsc1RecoveryV1::SigningRequest(retained) =
             owner.store.resume_outbound_dsc1(SESSION)?
         else {

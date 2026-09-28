@@ -214,7 +214,9 @@ impl ContractsSessionStoreV1 {
         self.require_f7_consumed_handle_v12(authorization)?;
         self.resume_xmr_bounded_claim_session_locked_v23(chain, authorization.session_id)
     }
-    fn resume_xmr_bounded_claim_session_locked_v23(
+    /// Caller holds the operation lock and has authenticated the consumed
+    /// process-owned handle in this operation, including its current recency.
+    pub(in super::super) fn resume_xmr_bounded_claim_session_locked_v23(
         &self,
         chain: TrustedChainIdV1,
         session: [u8; 32],

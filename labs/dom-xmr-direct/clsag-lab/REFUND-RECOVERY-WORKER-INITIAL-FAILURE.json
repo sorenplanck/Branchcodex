@@ -1,0 +1,16 @@
+{
+  "native_pid": 1331232,
+  "rust_worker_pid": 1331589,
+  "exit_code": 101,
+  "wall_seconds": 136.14534985501086,
+  "both_shared_reserves_funded": true,
+  "unsigned_refund_persisted": true,
+  "recovery_started_at_original_latest_start": true,
+  "failure": "Job::prepared used plain SHA-256 but PreparedClaim::from_recovery_bytes expects claim_resume::digest with domain and length",
+  "new_go_verifier_started": false,
+  "capsule_opened": false,
+  "refund_signed": false,
+  "original_deadline_renewed": false,
+  "all_source_binary_hashes_match_before_correction": true,
+  "remaining_process_group": []
+}

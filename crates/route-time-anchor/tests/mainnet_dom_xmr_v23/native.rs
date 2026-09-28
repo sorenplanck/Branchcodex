@@ -56,6 +56,13 @@ fn fixture() -> Result<
         decimals: 12,
         representation: AssetRepresentationV1::Native,
     });
+    // The manifest's canonical encoding requires the asset bindings to be
+    // strictly increasing by (chain_id, asset_id). The DOM chain id is derived
+    // from the network magic and genesis, so where this appended XMR binding
+    // falls relative to it is not something the fixture can assume.
+    manifest
+        .assets
+        .sort_by_key(|asset| (asset.chain_id.0, asset.asset_id.0));
     let secp = btc_crypto::SecpContext::new(&[0x67; 32]);
     let keys = [[3; 32], [4; 32], [5; 32]];
     let authorities = common::authority_set(&secp, &keys);

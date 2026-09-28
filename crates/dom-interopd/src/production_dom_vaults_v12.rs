@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use blake2::{
-    digest::{consts::U32, KeyInit, Mac, Update},
+    digest::{consts::U32, KeyInit, Mac},
     Blake2bMac,
 };
 use cap_std::fs::Dir;

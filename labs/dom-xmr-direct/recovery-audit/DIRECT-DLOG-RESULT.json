@@ -1,0 +1,18 @@
+{
+  "experiment": "single real puzzle with experimental Ed25519 relation proof",
+  "proof_rounds": 256,
+  "mask_bits": 256,
+  "squarings": 200000,
+  "setup_and_verification_seconds": 0.834565173,
+  "proof_generation_seconds": 17.433115892,
+  "proof_verification_seconds": 17.236037198,
+  "opening_seconds": 0.739524025,
+  "positive_total_seconds": 36.247949153,
+  "json_bytes": 901937,
+  "adversarial_mutations_rejected": 19,
+  "secret_recovered": true,
+  "funding_included": false,
+  "process_ipc_included": false,
+  "protocol_security_proven": false,
+  "minimum_adversarial_delay_proven": false
+}

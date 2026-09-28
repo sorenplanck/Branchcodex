@@ -1,5 +1,105 @@
 use super::*;
 
+#[test]
+fn xmr_deadline_observer_survives_server_idle_connection_close_v25() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    };
+
+    // Match the fixture's keep-alive response followed by an idle close, but
+    // synchronize that close instead of waiting through a real swap ceremony.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let (closed, closes) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        while !worker_stop.load(Ordering::Acquire) {
+            let (stream, _) = match listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => panic!("accept: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            loop {
+                let mut first = String::new();
+                match reader.read_line(&mut first) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let response = if first.contains("/get_info ") {
+                    serde_json::json!({"status":"OK", "untrusted":false,
+                        "synchronized":true,"height":2,"target_height":2,
+                        "mainnet":true,"stagenet":false,"testnet":false,
+                        "top_block_hash":"22".repeat(32)})
+                } else {
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let height = request["params"]["height"].as_u64().unwrap();
+                    serde_json::json!({"jsonrpc":"2.0","id":"0","result":{
+                    "status":"OK","untrusted":false,"block_header":{
+                        "height":height,"orphan_status":false,
+                        "hash":if height == 0 {"11".repeat(32)} else {"22".repeat(32)}
+                    }}})
+                }
+                .to_string();
+                write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}", response.len(), response).unwrap();
+                reader.get_mut().flush().unwrap();
+            }
+            drop(reader);
+            let _ = closed.send(());
+        }
+    });
+    let source = ProductionXmrDeadlineSourceV23 {
+        leg: LegIdV1::Upstream,
+        chain_id: [8; 32],
+        genesis: [0x11; 32],
+        adapter_profile: [9; 32],
+        daemon_urls: vec![url],
+        network: XmrNetwork::Mainnet,
+        quorum: 1,
+        executor: tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    };
+    let first = source.observe();
+    let idle_close = closes.recv_timeout(Duration::from_secs(3));
+    let second = source.observe();
+    drop(source);
+    stop.store(true, Ordering::Release);
+    server.join().unwrap();
+    assert!(first.is_ok(), "first observation: {first:?}");
+    assert!(idle_close.is_ok(), "server did not close idle connection");
+    assert_eq!(second, first, "unchanged canonical chain after idle close");
+}
+
 fn frozen() -> FrozenBindingsV1 {
     FrozenBindingsV1 {
         terms_digest: [1; 32],

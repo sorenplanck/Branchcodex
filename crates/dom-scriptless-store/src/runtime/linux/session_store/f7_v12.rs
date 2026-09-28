@@ -5,6 +5,9 @@
 //! A private XMR U-final signature is never part of a readiness payload.
 
 use super::*;
+#[cfg(test)]
+#[path = "f7_claim_resume_replay_v25_tests.rs"]
+mod claim_resume_replay_v25_tests;
 #[path = "f7_downstream_claim_gate_v23.rs"]
 mod downstream_claim_gate_v23;
 pub(super) use downstream_claim_gate_v23::DownstreamClaimLeaseV23;
@@ -39,7 +42,8 @@ mod claim_receiver_v15;
 mod final_claim_v14;
 use claim_receiver_v15::{validate_f7_observation_bytes_v15, OBSERVATION_PREFIX_V15};
 pub use claim_receiver_v15::{
-    F7ClaimObserverFactsV15, ObservedF7FinalClaimV15, PreparedF7FinalClaimIngressV15,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, ObservedF7FinalClaimV15,
+    PreparedF7FinalClaimIngressV15,
 };
 pub(super) const OBSERVATION_MAX_V15: usize = claim_receiver_v15::OBSERVATION_MAX_V15;
 use super::super::xmr_recovery::XmrRecoveryCustodyV11;
@@ -582,6 +586,22 @@ impl ContractsSessionStoreV1 {
         &self,
         handle: &PreparedF7FundingGateV12,
     ) -> Result<F7GateRecordV12, SessionStoreError> {
+        self.authenticate_f7_gate_with_graph_v25(handle)
+            .map(|(gate, _)| gate)
+    }
+
+    /// Preserve the graph freshly reconstructed by ancestry authentication.
+    /// The caller holds operation_lock; this is never cached across operations.
+    fn authenticate_f7_gate_with_graph_v25(
+        &self,
+        handle: &PreparedF7FundingGateV12,
+    ) -> Result<
+        (
+            F7GateRecordV12,
+            Option<xmr_refund_policy::graph_builder::ProducedXmrRecoveryGraphV12>,
+        ),
+        SessionStoreError,
+    > {
         if self.policy.profile() != BudgetPolicyProfileV1::ProductionRatified {
             return Err(SessionStoreError::PolicyProfile);
         }
@@ -592,11 +612,41 @@ impl ContractsSessionStoreV1 {
         if gate.digest != handle.digest || gate.ready_digest != handle.ready_digest {
             return Err(SessionStoreError::InvalidTransition);
         }
-        self.authenticate_f7_gate_ancestry_v12(&gate)?;
-        Ok(gate)
+        let graph = match gate.profile {
+            F7RecoveryProfileV23::XmrBounded => {
+                Some(self.authenticate_xmr_bounded_f7_ancestry_v23(&gate)?)
+            }
+            F7RecoveryProfileV23::Legacy => {
+                self.authenticate_f7_gate_ancestry_v12(&gate)?;
+                None
+            }
+        };
+        Ok((gate, graph))
     }
 
+    /// The verdict below is a pure function of the gate bytes and of records
+    /// only this process writes (the Store lock is exclusive), so a verdict
+    /// already derived for this exact gate digest at this mutation generation
+    /// is the verdict. The gate itself was just reread and decoded by the
+    /// caller; only the derivation is not repeated.
     fn authenticate_f7_gate_ancestry_v12(
+        &self,
+        gate: &F7GateRecordV12,
+    ) -> Result<(), SessionStoreError> {
+        let generation = self.store_mutation_generation_v26();
+        if let Ok(verdicts) = self.f7_gate_ancestry_v26.lock() {
+            if verdicts.get(&gate.session_id) == Some(&(generation, gate.digest)) {
+                return Ok(());
+            }
+        }
+        self.authenticate_f7_gate_ancestry_uncached_v26(gate)?;
+        if let Ok(mut verdicts) = self.f7_gate_ancestry_v26.lock() {
+            verdicts.insert(gate.session_id, (generation, gate.digest));
+        }
+        Ok(())
+    }
+
+    fn authenticate_f7_gate_ancestry_uncached_v26(
         &self,
         gate: &F7GateRecordV12,
     ) -> Result<(), SessionStoreError> {
@@ -689,6 +739,57 @@ impl ContractsSessionStoreV1 {
         let _guard = self.operation_lock()?;
         self.prepare_next_f7_ready_vote_locked_v12(gate)
     }
+    /// DIAG(temporary): who the local signer is versus whose vote is expected.
+    fn diag_ready_signer_v25(signer: &[u8; 32], expected: &[u8; 32]) {
+        use std::cell::RefCell;
+        thread_local! {
+            static LAST_SIGNER_V25: RefCell<String> = const { RefCell::new(String::new()) };
+        }
+        let line = format!(
+            "signer={} expected={} match={}",
+            Self::hex_prefix_v25(signer),
+            Self::hex_prefix_v25(expected),
+            signer == expected,
+        );
+        LAST_SIGNER_V25.with(|last| {
+            let mut last = last.borrow_mut();
+            if *last != line {
+                eprintln!("DOM_READY_SIGNER_V25 {line}");
+                *last = line;
+            }
+        });
+    }
+
+    /// DIAG(temporary): one line per change of the ready-to-fund quorum shape.
+    fn diag_ready_quorum_v25(
+        local: &str,
+        accepted: usize,
+        bound_revision: u64,
+        current_revision: u64,
+        next_voter: Option<[u8; 32]>,
+    ) {
+        use std::cell::RefCell;
+        thread_local! {
+            static LAST_QUORUM_V25: RefCell<String> = const { RefCell::new(String::new()) };
+        }
+        let line = format!(
+            "local={local} accepted={accepted} bound_rev={bound_revision} cur_rev={current_revision} next={}",
+            next_voter
+                .map(|id| Self::hex_prefix_v25(&id))
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        LAST_QUORUM_V25.with(|last| {
+            let mut last = last.borrow_mut();
+            if *last != line {
+                eprintln!("DOM_READY_QUORUM_V25 {line}");
+                *last = line;
+            }
+        });
+    }
+
+    fn hex_prefix_v25(id: &[u8; 32]) -> String {
+        id[..3].iter().map(|b| format!("{b:02x}")).collect()
+    }
     fn prepare_next_f7_ready_vote_locked_v12(
         &self,
         handle: &PreparedF7FundingGateV12,
@@ -707,6 +808,24 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::FundingAuthorityUnavailable);
         }
         let roster = self.load_transport_roster(gate.session_id)?;
+        // DIAG(temporary): name the LOCAL peer on every quorum line. Without it
+        // two daemons' lines are indistinguishable in one log, which is exactly
+        // how absence of a token was repeatedly misread as absence of state.
+        let local_v25 = self
+            .authenticate_local_transport_signer_binding(gate.session_id)
+            .map(|signer| Self::hex_prefix_v25(&signer.participant_id))
+            .unwrap_or_else(|_| "unknown".to_string());
+        // DIAG(temporary): `AwaitingPeer` is the only thing the caller sees when
+        // this returns `Some`, and it cannot say whose vote is still missing.
+        // Print the quorum shape once per change: how many votes are accepted,
+        // where the gate was bound, and which roster index owes the next one.
+        Self::diag_ready_quorum_v25(
+            &local_v25,
+            accepted,
+            gate.bound_revision,
+            current.revision(),
+            roster.participants.get(accepted).map(|p| p.participant_id),
+        );
         let participant = roster
             .participants
             .get(accepted)
@@ -818,11 +937,28 @@ impl ContractsSessionStoreV1 {
         vote: &PreparedOperationalXmrReadyToFundVoteV12,
     ) -> Result<Option<PreparedDsc1SigningRequestV1>, SessionStoreError> {
         let _guard = self.operation_lock()?;
+        // DIAG(temporary): prove entry before any `?` can abort silently. The
+        // signer line below sits behind three fallible steps, so its absence
+        // never distinguished "not called" from "aborted on the way".
+        eprintln!(
+            "DOM_READY_ENTRY_V25 vote_for={}",
+            Self::hex_prefix_v25(&vote.participant_id)
+        );
         let expected = self
             .prepare_next_f7_ready_vote_locked_v12(handle)?
             .ok_or(SessionStoreError::FundingAuthorityUnavailable)?;
-        require_same_vote_v12(vote, &expected)?;
+        if let Err(error) = require_same_vote_v12(vote, &expected) {
+            eprintln!(
+                "DOM_READY_ENTRY_V25 same_vote=refused have={} expected={}",
+                Self::hex_prefix_v25(&vote.participant_id),
+                Self::hex_prefix_v25(&expected.participant_id),
+            );
+            return Err(error);
+        }
         let signer = self.authenticate_local_transport_signer_binding(vote.session_id)?;
+        // DIAG(temporary): the only silent exit on the readiness path. If both
+        // peers take it, the quorum can never reach two and nothing reports why.
+        Self::diag_ready_signer_v25(&signer.participant_id, &vote.participant_id);
         if signer.participant_id != vote.participant_id {
             return Ok(None);
         }
@@ -1661,7 +1797,7 @@ impl ContractsSessionStoreV1 {
         custody: &XmrRecoveryCustodyV11,
     ) -> Result<VerifiedXmrRecoveryExecutionAuthorityV12, SessionStoreError> {
         let _guard = self.operation_lock()?;
-        let gate = self.authenticate_f7_gate_v12(handle)?;
+        let (gate, graph) = self.authenticate_f7_gate_with_graph_v25(handle)?;
         if gate.family != F7ExternalFamilyV11::Monero {
             return Err(SessionStoreError::InvalidTransition);
         }
@@ -1673,7 +1809,9 @@ impl ContractsSessionStoreV1 {
         let bounded_refund_pre_signature = match gate.profile {
             F7RecoveryProfileV23::Legacy => None,
             F7RecoveryProfileV23::XmrBounded => Some(
-                self.reconstruct_completed_xmr_graph_v23(gate.session_id)?
+                graph
+                    .as_ref()
+                    .ok_or(SessionStoreError::Quarantined)?
                     .graph()
                     .refund_pre_signature()
                     .to_bytes()
@@ -1893,6 +2031,7 @@ fn require_f7_funding_windows_v23(
     Ok(())
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "f7_xmr_funding_window_v23_tests.rs"]
 mod xmr_funding_window_v23_tests;
@@ -1974,6 +2113,20 @@ impl ConsumedF7ClaimAuthorizationV12 {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
         }
         Ok(())
+    }
+
+    /// True while the last concrete external-chain observation can still back
+    /// Store operations guarded by the native F7 recency window.
+    pub fn has_recent_observation_v12(&self) -> bool {
+        self.require_recent_observation().is_ok()
+    }
+
+    /// True when callers can skip an RPC refresh and still have enough recency
+    /// headroom for the next local Store operation to complete its checks.
+    pub fn can_reuse_observation_v12(&self) -> bool {
+        const MIN_HEADROOM: std::time::Duration = std::time::Duration::from_secs(15);
+        self.observed_at.get().elapsed() + MIN_HEADROOM
+            <= f7_anchor_authority::families_v11::MAX_V11_EXTERNAL_ANCHOR_AGE
     }
 
     /// Called only after the fresh opaque F7 token has passed scope and ancestry
@@ -2439,7 +2592,13 @@ impl ContractsSessionStoreV1 {
             let _guard = self.operation_lock()?;
             let (gate, _, _) = self.require_f7_consumed_handle_v12(authorization)?;
             if gate.profile == F7RecoveryProfileV23::XmrBounded {
-                return self.resume_xmr_bounded_claim_signing_locked_v23(chain, authorization);
+                // The handle was fully authenticated under this same lock.
+                // Keep the second time-sensitive check, without reconstructing
+                // its immutable ancestry a second time. The session helper
+                // still authenticates the binding and audits the current round.
+                authorization.require_recent_observation()?;
+                return self
+                    .resume_xmr_bounded_claim_session_locked_v23(chain, authorization.session_id);
             }
             self.load_signing_binding(authorization.session_id, PurposeV1::ClaimAdaptor)?
                 .decode(&chain)?
@@ -3126,6 +3285,66 @@ impl ContractsSessionStoreV1 {
             .max()
             .ok_or(SessionStoreError::ClaimSigningAuthorityUnavailable)
     }
+    /// The peer's adaptor pre-signature (`0x0f`) reached this side before its
+    /// own claim step reconstructed the pre-signature record and installed the
+    /// `UniversalClaimPreSignatureV12` ingress authority.
+    ///
+    /// Both happen inside the local claim step, on the pass after the sixth
+    /// signing message is accepted, and that pass waits for a Verified funding
+    /// observation unless the consumed authority is still recent. The peer
+    /// finishes as soon as it has accepted this side's last signing message,
+    /// so its `0x0f` can be dispatched here while the ingress authority is
+    /// still the signing one, whose acceptor admits only `0x0c`-`0x0e` and
+    /// answers InvalidTransition — fatal at the route.
+    ///
+    /// Answer true only for a message the acceptor will take once that step
+    /// runs: the round is complete in the durable journal (six accepted, the
+    /// same terminal `derive_xmr_bounded_claim_pre_v23` requires), and the
+    /// envelope is exactly what `accept_prepared_f7_claim_pre_signature_transport_v12`
+    /// checks against the derived record — canonical sender, sequence, terminal
+    /// transcript, chain, session and a verifying signature. Every entitlement
+    /// check answers false rather than raising, so anything outside this exact
+    /// shape keeps the behaviour it had.
+    pub fn f7_claim_pre_signature_awaits_handoff_v29(
+        &self,
+        session: [u8; 32],
+        signed_bytes: &[u8],
+    ) -> Result<bool, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+        if envelope.message_type != 0x0f
+            || envelope.session_id != session
+            || !self.xmr_bounded_funding_profile_locked_v23(session)?
+        {
+            return Ok(false);
+        }
+        let current = self.load_session_locked(session)?;
+        let Ok(terminal) = self.f7_signing_terminal_revision_v12(session, current.revision())
+        else {
+            return Ok(false);
+        };
+        let Ok(record) = self.derive_xmr_bounded_claim_pre_v23(session, terminal, None) else {
+            return Ok(false);
+        };
+        if envelope.chain_id != record.chain_id
+            || envelope.sender_id != record.canonical_sender_id
+            || envelope.sequence != record.canonical_sender_sequence
+            || envelope.previous_transcript_hash != record.terminal_transcript_hash
+        {
+            return Ok(false);
+        }
+        let roster = self.load_transport_roster(session)?;
+        let identities = self.load_transport_identity_binding(session)?;
+        require_transport_identity_binding(&roster, &identities)?;
+        let Some(participant) = roster
+            .participants
+            .iter()
+            .find(|p| p.participant_id == record.canonical_sender_id)
+        else {
+            return Ok(false);
+        };
+        Ok(envelope.verify(&participant.identity_key).is_ok())
+    }
     fn load_f7_pre_v12(&self, session: [u8; 32]) -> Result<F7PreRecordV12, SessionStoreError> {
         let bytes = self.read_f7_v12(session, "claim-pre", 4096)?;
         if bytes.len() < 24 || &bytes[..8] != b"DOMFCP12" {
@@ -3631,6 +3850,7 @@ impl ContractsSessionStoreV1 {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3809,22 +4029,14 @@ pub(super) enum F7ArtifactKindV12 {
     ObservationV15,
     RefundTransportV23,
 }
+/// Per-session artifact kinds plus the total artifact count and byte size.
+type F7ArtifactCensusV12 = (
+    BTreeMap<[u8; 32], BTreeSet<F7ArtifactKindV12>>,
+    usize,
+    usize,
+);
+
 impl F7ArtifactKindV12 {
-    fn suffix(self) -> &'static str {
-        match self {
-            Self::Gate => "gate",
-            Self::Funding => "funding",
-            Self::FundingSigningV20 => "funding-signing-v20",
-            Self::Issued => "claim-issued",
-            Self::Consumed => "claim-consumed",
-            Self::Binding => "claim-binding",
-            Self::Pre => "claim-pre",
-            Self::ExposureV14 => "claim-exposure-v14",
-            Self::AdmissionV14 => "claim-admission-v14",
-            Self::ObservationV15 => "claim-observation-v15",
-            Self::RefundTransportV23 => "refund-transport-v23",
-        }
-    }
     fn maximum_length(self) -> usize {
         match self {
             Self::Gate => GATE_MAX,
@@ -4001,19 +4213,19 @@ impl ContractsSessionStoreV1 {
         }
     }
 
-    fn census_f7_artifacts_v12(
+    fn census_f7_artifacts_v12(&self) -> Result<F7ArtifactCensusV12, SessionStoreError> {
+        Ok(self.census_f7_artifacts_with_digest_v26()?.0)
+    }
+
+    /// The census plus a digest over every artifact's name and exact bytes in
+    /// scan order, so a later call can prove it read the same inventory.
+    fn census_f7_artifacts_with_digest_v26(
         &self,
-    ) -> Result<
-        (
-            BTreeMap<[u8; 32], BTreeSet<F7ArtifactKindV12>>,
-            usize,
-            usize,
-        ),
-        SessionStoreError,
-    > {
+    ) -> Result<(F7ArtifactCensusV12, [u8; 32]), SessionStoreError> {
         let mut sessions = BTreeMap::<[u8; 32], BTreeSet<F7ArtifactKindV12>>::new();
         let mut count = 0usize;
         let mut total = 0usize;
+        let mut transcript = Vec::new();
         for (directory_kind, directory) in self.durable_profile_directories() {
             let mut names = Vec::new();
             directory.scan_lexicographic(|name, node| {
@@ -4048,9 +4260,14 @@ impl ContractsSessionStoreV1 {
                 if !sessions.entry(session).or_default().insert(kind) {
                     return Err(SessionStoreError::Quarantined);
                 }
+                transcript.extend_from_slice(&(name.len() as u64).to_le_bytes());
+                transcript.extend_from_slice(name.as_bytes());
+                transcript.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                transcript.extend_from_slice(&bytes);
             }
         }
-        Ok((sessions, count, total))
+        let digest = tagged_hash("DOM:f7-artifact-inventory-census:v26", &transcript);
+        Ok(((sessions, count, total), digest))
     }
 
     fn require_f7_artifact_publication_budget_v12(
@@ -4082,7 +4299,20 @@ impl ContractsSessionStoreV1 {
     /// prefixes. Missing authority ancestors are corruption; a final's absent
     /// next publication is a legitimate prefix and never synthesized here.
     pub(super) fn audit_f7_artifact_inventory_v12(&self) -> Result<(), SessionStoreError> {
-        let (sessions, _, _) = self.census_f7_artifacts_v12()?;
+        let ((sessions, _, _), artifact_digest) = self.census_f7_artifacts_with_digest_v26()?;
+        // Every artifact above was just reread and revalidated byte for byte.
+        // The ancestry derivations below are pure functions of those bytes and
+        // of records only this process writes (the Store lock is exclusive),
+        // so when nothing was written since the last complete audit and no
+        // artifact byte differs, that audit's verdict still holds.
+        let generation = self.store_mutation_generation_v26();
+        if let Ok(audited) = self.f7_inventory_audit_v26.lock() {
+            if audited.is_some_and(|last| {
+                last.generation == generation && last.artifact_digest == artifact_digest
+            }) {
+                return Ok(());
+            }
+        }
         for (session, kinds) in sessions {
             use F7ArtifactKindV12 as K;
             if !kinds.contains(&K::Gate) {
@@ -4185,6 +4415,12 @@ impl ContractsSessionStoreV1 {
             }
             self.audit_f7_final_claim_inventory_v14(session, &kinds)?;
             self.audit_f7_observation_inventory_v15(session, &kinds)?;
+        }
+        if let Ok(mut audited) = self.f7_inventory_audit_v26.lock() {
+            *audited = Some(AuditedF7InventoryV26 {
+                generation,
+                artifact_digest,
+            });
         }
         Ok(())
     }

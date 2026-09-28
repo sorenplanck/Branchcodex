@@ -1,0 +1,8 @@
+{
+  "pid": 1580165,
+  "exit_code": 101,
+  "stage": "individual owner balance preparation, before capsule and shared funding",
+  "error": "hit decoy selection round limit",
+  "hashes_match": true,
+  "remaining_group": []
+}

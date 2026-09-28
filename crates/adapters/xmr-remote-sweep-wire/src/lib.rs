@@ -487,6 +487,8 @@ impl RemoteSweepResponseV23 {
     }
 
     /// Decode one response. This establishes framing only, never validity.
+    // `as_chunks` is stable only since Rust 1.88; the workspace MSRV is 1.75.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn decode_exact(bytes: &[u8]) -> Result<Self, RemoteSweepWireErrorV23> {
         if bytes.len() < RESPONSE_FIXED_PREFIX_LEN_V23
             || bytes.len() > MAX_REMOTE_SWEEP_RESPONSE_BYTES_V23

@@ -1,0 +1,20 @@
+{
+  "experiment": "fixed-partition public search workload",
+  "participants": 198,
+  "delayed_candidates": 99,
+  "rejected_noncanonical": 98,
+  "last_candidate_recovered": true,
+  "squarings": 200000,
+  "setup_verification_seconds": 0.598033688,
+  "offer_and_opening_verification_seconds": 15.773580152,
+  "preparation_seconds": 35.862182167,
+  "sequential_solve_seconds": 64.71270636299995,
+  "recovery_session_seconds": 64.716038548,
+  "total_seconds": 100.578457081,
+  "derived_challenge": false,
+  "feldman_checks_included": false,
+  "process_ipc_included": false,
+  "funding_included": false,
+  "worst_case_time_bound_proven": false,
+  "minimum_adversarial_delay_proven": false
+}

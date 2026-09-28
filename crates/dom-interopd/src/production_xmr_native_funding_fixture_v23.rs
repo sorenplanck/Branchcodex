@@ -387,9 +387,18 @@ pub(super) fn custody_and_funding_for_claim(
         .graph()
         .require_claim_window(closed_height)
         .is_err());
+    assert_eq!(signed.stores.len(), 2);
+    assert_eq!(signed.wallets.len(), 2);
+    let protocol_indices = [
+        signed.wallets[0].0.participant().protocol_index(),
+        signed.wallets[1].0.participant().protocol_index(),
+    ];
+    let first_sender = native_sender_for_position_v24(protocol_indices, 0)?;
+    let actor_order = [first_sender, first_sender ^ 1];
     let mut signers = Vec::new();
     let mut funding_paths = Vec::new();
-    for actor in 0..2 {
+    let mut messages = Vec::new();
+    for actor in actor_order {
         let actor_started = Instant::now();
         assert!(
             signed.stores[actor]
@@ -502,31 +511,83 @@ pub(super) fn custody_and_funding_for_claim(
             1,
             "Funding must own one separate native root"
         );
-        funding_paths.push(created.into_iter().next().ok_or("missing Funding root")?);
-        signers.push(custody_stage(
+        funding_paths.push((
             actor,
-            "bind retained native funding signer",
-            dom_actuator::participant_retained_vault_signer_v12(
-                vault,
-                Rc::clone(&signed.stores[actor]),
+            created.into_iter().next().ok_or("missing Funding root")?,
+        ));
+        signers.push((
+            actor,
+            custody_stage(
+                actor,
+                "bind retained native funding signer",
+                dom_actuator::participant_retained_vault_signer_v12(
+                    vault,
+                    Rc::clone(&signed.stores[actor]),
+                    signed.wallets[actor].0,
+                    chain,
+                    share,
+                ),
+            )?,
+        ));
+        if actor == first_sender {
+            // Reproduce the daemon ordering that originally exposed the relay
+            // race: one side installs its native Funding authority and emits
+            // position zero while its peer still has only the two durable
+            // readiness votes.  The peer must retain this exact authenticated
+            // envelope without ACKing it or accepting arbitrary unprepared
+            // traffic.
+            let transport = signed.stores[actor].prepare_operational_signing_transport_authority(
+                chain,
+                session,
+                PurposeV1::Funding,
+            )?;
+            let accepted =
+                signed.stores[actor].resume_xmr_bounded_funding_signing_v23(chain, session)?;
+            assert_eq!(accepted.accepted_signing_messages().count(), 0);
+            let signer = &mut signers
+                .last_mut()
+                .ok_or("missing first native funding signer")?
+                .1;
+            let request = match crate::production_dom_claim_driver_v12::prepare_next_dom_funding_edge_v20(
+                &signed.stores[actor],
                 signed.wallets[actor].0,
                 chain,
-                share,
-            ),
-        )?);
+                signer,
+                accepted,
+                &transport,
+            )? {
+                crate::production_dom_claim_driver_v12::ProductionDomClaimProgressV12::Prepared(
+                    request,
+                ) => request,
+                _ => return Err("first funding edge did not produce request".into()),
+            };
+            let committed = identities[actor]
+                .sign_and_commit_store_prepared_dsc1(&signed.stores[actor], request)?;
+            let peer = actor ^ 1;
+            assert!(signed.stores[peer]
+                .xmr_funding_commitment_awaits_handoff_v25(session, committed.signed_bytes(),)?);
+            messages.push(committed.signed_bytes().to_vec());
+        } else {
+            let first = messages
+                .first()
+                .ok_or("missing retained first native funding edge")?;
+            assert!(
+                !signed.stores[actor].xmr_funding_commitment_awaits_handoff_v25(session, first)?
+            );
+            let transport = signed.stores[actor].prepare_operational_signing_transport_authority(
+                chain,
+                session,
+                PurposeV1::Funding,
+            )?;
+            signed.stores[actor]
+                .accept_prepared_operational_signing_transport_message(&transport, first)?;
+        }
         eprintln!(
             "native funding actor={actor}: retained vault Ready and signer bound after {:?}",
             actor_started.elapsed(),
         );
     }
-    assert_eq!(signed.stores.len(), 2);
-    assert_eq!(signed.wallets.len(), 2);
-    let protocol_indices = [
-        signed.wallets[0].0.participant().protocol_index(),
-        signed.wallets[1].0.participant().protocol_index(),
-    ];
-    let mut messages = Vec::new();
-    for position in 0..6 {
+    for position in messages.len()..6 {
         let turn_started = Instant::now();
         // Selecting an actor does not consume an accepted signing handle. The
         // fresh resume below still performs the full Store audit for this turn;
@@ -550,12 +611,17 @@ pub(super) fn custody_and_funding_for_claim(
             accepted.roster().entries()[(position + 1) % 2].participant_id(),
             &signed.wallets[peer].0.participant().participant_id(),
         );
+        let signer = &mut signers
+            .iter_mut()
+            .find(|(owner, _)| *owner == sender)
+            .ok_or("missing native funding signer")?
+            .1;
         let request =
             match crate::production_dom_claim_driver_v12::prepare_next_dom_funding_edge_v20(
                 &signed.stores[sender],
                 signed.wallets[sender].0,
                 chain,
-                &mut signers[sender],
+                signer,
                 accepted,
                 &transport,
             )? {
@@ -726,12 +792,17 @@ pub(super) fn custody_and_funding_for_claim(
         // Recoverable rename simulates missing Ready custody, never deletes it.
         let saved = work[actor].join("funding-vault-retained-for-missing-root-test");
         assert!(!saved.exists());
-        std::fs::rename(&funding_paths[actor], &saved)?;
+        let funding_path = &funding_paths
+            .iter()
+            .find(|(owner, _)| *owner == actor)
+            .ok_or("missing retained Funding root")?
+            .1;
+        std::fs::rename(funding_path, &saved)?;
         let refused = provisioner.provision_funding_v23(&store, signed.wallets[actor].0, chain);
-        if funding_paths[actor].exists() {
+        if funding_path.exists() {
             return Err("Ready Funding vault was recreated; original retained beside it".into());
         }
-        std::fs::rename(&saved, &funding_paths[actor])?;
+        std::fs::rename(&saved, funding_path)?;
         assert!(refused.is_err(), "missing Ready Funding vault must refuse");
         drop(provisioner.provision_funding_v23(&store, signed.wallets[actor].0, chain)?);
         let gate = store.resume_f7_funding_gate_v12(chain, session)?;

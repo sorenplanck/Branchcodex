@@ -66,6 +66,15 @@ impl ProductionF7RuntimeErrorV12 {
             Self::Claim(error) => error.is_retryable(),
             Self::Evidence(F7FamilyAuthorityErrorV11::Unavailable)
             | Self::Store(SessionStoreError::StoreBusy | SessionStoreError::Filesystem) => true,
+            // The downstream claim gate answers with this while its retained
+            // observation lease is absent or older than sixty seconds. Both
+            // are "observe again", not "this route is broken": the Store has
+            // refused, so nothing is authorized, signed or staged from the
+            // stale evidence, and the next turn re-observes. Run 84 died here
+            // — `native_xmr_claim` treated it as fatal moments after the claim
+            // exposed the secret, which is exactly when the observer stops
+            // refreshing that lease.
+            Self::Store(SessionStoreError::ClaimSigningAuthorityUnavailable) => true,
             _ => false,
         }
     }
@@ -395,7 +404,10 @@ impl ProductionSelectedF7ObserverV12 {
                                 }
                                 let funding = executor.block_on(async {
                                     tokio::time::timeout(
-                                        Duration::from_secs(60),
+                                        adapter_dom_real::route_step_deadline_v27::remaining_v27(
+                                            Duration::from_secs(60),
+                                        )
+                                        .unwrap_or(Duration::from_millis(1)),
                                         f7_anchor_authority::families_v11::verify_xmr_funding_v11(
                                             xmr_request(),
                                             &mut sidecar,
@@ -658,42 +670,72 @@ where
         if self.completed {
             return Ok(ProductionF7StepV12::Complete);
         }
-        let request = self
-            .store
-            .f7_anchor_request_binding_v12(&self.gate, self.chain)?;
-        let anchors = match self.observer.observe(self.scanner.as_ref(), &request)? {
-            ProductionF7ObservationV12::FundingAbsent => {
-                return Ok(ProductionF7StepV12::FundingAbsent)
-            }
-            ProductionF7ObservationV12::AwaitingFinality => {
-                return Ok(ProductionF7StepV12::AwaitingFinality)
-            }
-            ProductionF7ObservationV12::TemporarilyUnavailable => {
-                return Ok(ProductionF7StepV12::TemporarilyUnavailable)
-            }
-            ProductionF7ObservationV12::Verified(value) => value,
+        let claim_authority_recent = self
+            .claim
+            .as_ref()
+            .is_some_and(|claim| claim.universal_authority_recent_v12());
+        let anchors = if claim_authority_recent {
+            None
+        } else {
+            let request = self
+                .store
+                .f7_anchor_request_binding_v12(&self.gate, self.chain)?;
+            Some(
+                match self.observer.observe(self.scanner.as_ref(), &request)? {
+                    ProductionF7ObservationV12::FundingAbsent => {
+                        return Ok(ProductionF7StepV12::FundingAbsent)
+                    }
+                    ProductionF7ObservationV12::AwaitingFinality => {
+                        return Ok(ProductionF7StepV12::AwaitingFinality)
+                    }
+                    ProductionF7ObservationV12::TemporarilyUnavailable => {
+                        return Ok(ProductionF7StepV12::TemporarilyUnavailable)
+                    }
+                    ProductionF7ObservationV12::Verified(value) => value,
+                },
+            )
         };
         if self.claim.is_none() {
+            let anchors = anchors.ok_or(ProductionF7RuntimeErrorV12::Scope)?;
             // Arm the terminal state before moving either capability. Only a
             // successful retained native owner may clear it. Earlier observer
-            // failures leave both the state and original custody untouched.
+            // failures leave both the state and original custody untouched —
+            // which taking the signer here broke: a refusal raised before
+            // anything was consumed still destroyed the only signing
+            // material. The start now borrows it and takes it at its own
+            // point of no return, so this comment holds again.
+            if self.initial_signer.is_none() {
+                return Err(ProductionF7RuntimeErrorV12::RequiresRestart(None));
+            }
             self.restart_required = true;
-            let (vault, share) = self
-                .initial_signer
-                .take()
-                .ok_or(ProductionF7RuntimeErrorV12::RequiresRestart(None))?;
-            self.claim = Some(
-                owner
-                    .start_dom_claim_runtime_v12(
-                        self.binding,
-                        self.chain,
-                        vault,
-                        share,
-                        &self.gate,
-                        anchors,
-                    )
-                    .map_err(|error| ProductionF7RuntimeErrorV12::RequiresRestart(Some(error)))?,
-            );
+            match owner.start_dom_claim_runtime_v12(
+                self.binding,
+                self.chain,
+                &mut self.initial_signer,
+                &self.gate,
+                anchors,
+            ) {
+                Ok(claim) => self.claim = Some(claim),
+                // The signer survived, so nothing was consumed: the downstream
+                // claim gate answered with a retained observation older than
+                // its sixty seconds. Observe again next turn. Run 89 ended
+                // here instead, as an unrecoverable RequiresRestart.
+                Err(error) if self.initial_signer.is_some() => {
+                    self.restart_required = false;
+                    if matches!(
+                        error,
+                        ProductionDomClaimRuntimeErrorV12::Store(
+                            SessionStoreError::ClaimSigningAuthorityUnavailable
+                        )
+                    ) {
+                        return Ok(ProductionF7StepV12::TemporarilyUnavailable);
+                    }
+                    return Err(ProductionF7RuntimeErrorV12::Claim(error));
+                }
+                Err(error) => {
+                    return Err(ProductionF7RuntimeErrorV12::RequiresRestart(Some(error)))
+                }
+            }
             self.restart_required = false;
             return Ok(ProductionF7StepV12::Started);
         }
@@ -701,11 +743,10 @@ where
             .claim
             .as_mut()
             .ok_or(ProductionF7RuntimeErrorV12::Consumed)?;
-        match claim.step(
-            owner,
-            ProductionDomClaimAnchorsV12::Universal(anchors),
-            expiry,
-        )? {
+        let claim_anchors = anchors
+            .map(ProductionDomClaimAnchorsV12::Universal)
+            .unwrap_or(ProductionDomClaimAnchorsV12::UniversalRecent);
+        match claim.step(owner, claim_anchors, expiry)? {
             ProductionDomClaimStepV12::AwaitingPeer => Ok(ProductionF7StepV12::AwaitingPeer),
             ProductionDomClaimStepV12::Staged(value) => Ok(ProductionF7StepV12::Staged(value)),
             ProductionDomClaimStepV12::Complete => {
@@ -879,6 +920,22 @@ where
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn observation_refresh_retries_without_relaxing_scope_or_consumed_custody() {
+        assert!(ProductionF7RuntimeErrorV12::Claim(
+            ProductionDomClaimRuntimeErrorV12::RefreshRequired,
+        )
+        .retryable_v20());
+        assert!(
+            !ProductionF7RuntimeErrorV12::Claim(ProductionDomClaimRuntimeErrorV12::Scope,)
+                .retryable_v20()
+        );
+        assert!(!ProductionF7RuntimeErrorV12::RequiresRestart(Some(
+            ProductionDomClaimRuntimeErrorV12::RefreshRequired,
+        ))
+        .retryable_v20());
+    }
 
     #[test]
     fn fresh_exposure_clock_refuses_rpc_delay_past_the_original_lease() {

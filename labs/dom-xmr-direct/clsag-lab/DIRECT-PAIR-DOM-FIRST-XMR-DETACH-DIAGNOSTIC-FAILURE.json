@@ -1,0 +1,16 @@
+{
+  "exit_code": 101,
+  "wall_seconds": 114.08164853503695,
+  "http_status": 429,
+  "route": "/chain/identity",
+  "worker_action": "Reconcile",
+  "transaction_send_attempted": false,
+  "signature_created": false,
+  "last_phase": "xmr_detached_claim_removed_from_pool",
+  "complete_native_detachment_scenario_passed": false,
+  "rpc_default_code_configuration": {
+    "read_burst": 100,
+    "read_replenishment_per_second": 1
+  },
+  "log": "target/direct-pair-dom-first-xmr-detach-native-1790472314377128076.log"
+}

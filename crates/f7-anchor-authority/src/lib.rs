@@ -207,6 +207,7 @@ impl VerifiedBitcoinFundingEvidenceV1 {
     }
 }
 
+#[derive(Clone)]
 struct VerifiedDomFundingEvidenceV1 {
     chain_id: [u8; 32],
     funding_txid: [u8; 32],
@@ -216,6 +217,45 @@ struct VerifiedDomFundingEvidenceV1 {
     observed_tip_hash: [u8; 32],
     observed_tip_height: u64,
     confirmation_depth: u32,
+}
+
+/// Process-local authenticated prefix for repeated native DOM/XMR funding
+/// observations. The prefix is only a scan accelerator: it is neither an
+/// authorization nor evidence of a current tip. Every successful use scans
+/// from the retained hash-anchored cursor to a freshly observed tip.
+pub struct DomFundingScanProgressV24 {
+    scope: Option<[u8; 32]>,
+    cursor: ScriptlessScanCursorV1,
+    found: Option<([u8; 32], u64, u64)>,
+}
+
+impl DomFundingScanProgressV24 {
+    /// Creates an empty prefix at genesis.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            scope: None,
+            cursor: ScriptlessScanCursorV1::genesis(),
+            found: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn bind_scope(&mut self, scope: [u8; 32]) {
+        if self.scope != Some(scope) {
+            self.reset();
+            self.scope = Some(scope);
+        }
+    }
+}
+
+impl Default for DomFundingScanProgressV24 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Linear proof that complete real DOM and Bitcoin anchor validation passed
@@ -1049,7 +1089,7 @@ fn verify_dom_funding_evidence_inner(
 
 // Native XMR promotion carries the original external proof deadline into the
 // scan. Legacy callers retain their existing retry window through None.
-fn verify_dom_funding_evidence_until_v23(
+pub(crate) fn verify_dom_funding_evidence_until_v23(
     dom: &DomHttpChainAdapterV1,
     expected_funding_txid: [u8; 32],
     expected_shared_output_commitment: [u8; 33],
@@ -1058,6 +1098,34 @@ fn verify_dom_funding_evidence_until_v23(
     require_unspent: bool,
     external_deadline: Option<Instant>,
 ) -> Result<VerifiedDomFundingEvidenceV1, F7AnchorAuthorityError> {
+    // Every caller that omits a deadline still runs inside a route step that
+    // holds the actuator lease; the armed ceiling is that step's clock. The
+    // scan below walks up to MAX_F7_DOM_SCAN_PAGES with no clock of its own.
+    let external_deadline = route_step_deadline::clamp_or_armed(external_deadline);
+    let mut progress = DomFundingScanProgressV24::new();
+    verify_dom_funding_evidence_with_progress_v24(
+        dom,
+        expected_funding_txid,
+        expected_shared_output_commitment,
+        expected_funding_template_hash,
+        minimum_confirmations,
+        require_unspent,
+        external_deadline,
+        &mut progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_dom_funding_evidence_with_progress_v24(
+    dom: &DomHttpChainAdapterV1,
+    expected_funding_txid: [u8; 32],
+    expected_shared_output_commitment: [u8; 33],
+    expected_funding_template_hash: [u8; 32],
+    minimum_confirmations: u32,
+    require_unspent: bool,
+    external_deadline: Option<Instant>,
+    progress: &mut DomFundingScanProgressV24,
+) -> Result<VerifiedDomFundingEvidenceV1, F7AnchorAuthorityError> {
     if expected_funding_txid == [0; 32]
         || expected_shared_output_commitment == [0; 33]
         || expected_funding_template_hash == [0; 32]
@@ -1065,18 +1133,51 @@ fn verify_dom_funding_evidence_until_v23(
     {
         return Err(F7AnchorAuthorityError::RouteBindingMismatch);
     }
+    // Narrow here, not only in the `_until_v23` wrapper. A caller's own
+    // deadline may be anchored somewhere other than this step — the native XMR
+    // claim gate derives it from the funding observation's `observed_at`, so a
+    // fresh observation admits a full extra minute of scanning inside a route
+    // step that is already spending its lease. That is how a claim step
+    // measured 144.4 s against a 120 s lease while the step ceiling was armed
+    // and no single child operation exceeded 30 s.
+    let external_deadline = route_step_deadline::clamp_or_armed(external_deadline);
     let scan_deadline = Instant::now()
         .checked_add(DOM_FUNDING_SCAN_TIMEOUT)
         .ok_or(F7AnchorAuthorityError::BoundsExceeded)?;
-    let mut cursor = ScriptlessScanCursorV1::genesis();
-    let mut found = None;
+    // The retry loop below sleeps between attempts and stops at this figure;
+    // it must never outlive the step either.
+    let scan_deadline = match external_deadline {
+        Some(external) => scan_deadline.min(external),
+        None => scan_deadline,
+    };
+    let mut scope = sha2::Sha256::new();
+    use sha2::Digest as _;
+    scope.update(b"DOM-INTEROP/F7-DOM-FUNDING-SCAN/V24\0");
+    scope.update(expected_funding_txid);
+    scope.update(expected_shared_output_commitment);
+    scope.update(expected_funding_template_hash);
+    scope.update([u8::from(require_unspent)]);
+    let scope: [u8; 32] = scope.finalize().into();
+    progress.bind_scope(scope);
+    let mut cursor = progress.cursor;
+    let mut found = progress.found;
     for _ in 0..MAX_F7_DOM_SCAN_PAGES {
         let page = loop {
             // A single blocking request still has its configured client timeout;
             // do not start another page or retry after the XMR snapshot expires.
             require_external_scan_deadline_v23(external_deadline, Instant::now())?;
-            match dom.scan_page(cursor, MAX_SCRIPTLESS_SCAN_BLOCKS_V1) {
+            let result = match external_deadline {
+                Some(deadline) => {
+                    dom.scan_page_until_v23(cursor, MAX_SCRIPTLESS_SCAN_BLOCKS_V1, deadline)
+                }
+                None => dom.scan_page(cursor, MAX_SCRIPTLESS_SCAN_BLOCKS_V1),
+            };
+            match result {
                 Ok(page) => break page,
+                Err(ChainAdapterError::ReorgDetected) => {
+                    progress.reset();
+                    return Err(ChainAdapterError::TemporarilyUnavailable.into());
+                }
                 Err(ChainAdapterError::TemporarilyUnavailable)
                     if Instant::now() < scan_deadline =>
                 {
@@ -1126,6 +1227,8 @@ fn verify_dom_funding_evidence_until_v23(
         }
         require_external_scan_deadline_v23(external_deadline, Instant::now())?;
         cursor = page.next_cursor;
+        progress.cursor = cursor;
+        progress.found = found;
         if page.reached_snapshot_tip {
             let (block_hash, height, block_time_seconds) = found.ok_or(if require_unspent {
                 F7AnchorAuthorityError::DomFundingAbsent

@@ -190,7 +190,7 @@ fn chain_view_rejects_missing_input() {
     let input = h_commitment();
     let (tx, _) = make_spending_tx(input, MIN_RELAY_FEE_RATE * 25, 0x01);
 
-    let err = validate_tx_against_chain_view(&tx, 100, 1_000, |_| Ok(None))
+    let err = validate_tx_against_chain_view(&tx, 100, 1_000, [0; 32], |_| Ok(None))
         .expect_err("missing input must reject");
     assert!(
         matches!(err, DomError::PolicyRejected(ref msg) if msg.contains("not found in canonical UTXO set")),
@@ -208,7 +208,7 @@ fn chain_view_rejects_immature_coinbase() {
         proof: vec![],
     };
 
-    let err = validate_tx_against_chain_view(&tx, 100, 10, |_| Ok(Some(entry.clone())))
+    let err = validate_tx_against_chain_view(&tx, 100, 10, [0; 32], |_| Ok(Some(entry.clone())))
         .expect_err("immature coinbase must reject");
     assert!(
         matches!(err, DomError::TemporarilyInvalid(ref msg) if msg.contains("immature coinbase spend")),
@@ -242,7 +242,8 @@ fn chain_view_and_mempool_enforce_coinbase_maturity_boundaries() {
         entry.block_height = 1;
         entry.is_coinbase = true;
 
-        let direct = validate_tx_against_chain_view(&tx, height, 2, |_| Ok(Some(entry.clone())));
+        let direct =
+            validate_tx_against_chain_view(&tx, height, 2, [0; 32], |_| Ok(Some(entry.clone())));
         let mut pool = Mempool::new();
         let mempool = pool.accept_tx_with_chain_view(tx, hash, 0, height, TEST_CHAIN_ID, 2, |_| {
             Ok(Some(entry.clone()))

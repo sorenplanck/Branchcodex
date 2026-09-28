@@ -313,6 +313,7 @@ impl ContractsSessionStoreV1 {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     use super::*;

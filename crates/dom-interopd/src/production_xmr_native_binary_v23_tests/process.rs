@@ -12,6 +12,81 @@ use zeroize::Zeroizing;
 
 const MAX_CAPTURE: usize = 256 * 1024;
 type Capture = Receiver<std::io::Result<Zeroizing<Vec<u8>>>>;
+/// Bytes read so far, readable before the pipe closes. The daemon's own
+/// children inherit its stderr, so a live helper keeps the pipe open long
+/// after the daemon exits and an EOF-only capture returns nothing for that
+/// actor: exactly half of a bilateral failure disappears. The reader thread
+/// keeps this in step with what it has consumed.
+type LiveCapture = std::sync::Arc<std::sync::Mutex<RetainedCaptureV25>>;
+
+const CAPTURE_HEAD_BYTES_V25: usize = MAX_CAPTURE / 2;
+const CAPTURE_TAIL_BYTES_V25: usize = MAX_CAPTURE - CAPTURE_HEAD_BYTES_V25;
+const CAPTURE_GAP_V25: &[u8] = b"\nDOM_NATIVE_DIAGNOSTICS_TRUNCATED_V25\n";
+
+/// Preserve the initial diagnostics and a rolling recent tail. Both buffers
+/// allocate their full capacity once, and are zeroized when their owner drops.
+struct RetainedCaptureV25 {
+    head: Zeroizing<Vec<u8>>,
+    tail: Zeroizing<Vec<u8>>,
+    truncated: bool,
+}
+
+impl RetainedCaptureV25 {
+    fn new() -> Self {
+        Self {
+            head: Zeroizing::new(Vec::with_capacity(CAPTURE_HEAD_BYTES_V25)),
+            tail: Zeroizing::new(Vec::with_capacity(CAPTURE_TAIL_BYTES_V25)),
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let head_count = bytes.len().min(CAPTURE_HEAD_BYTES_V25 - self.head.len());
+        self.head.extend_from_slice(&bytes[..head_count]);
+        let bytes = &bytes[head_count..];
+        if bytes.len() >= CAPTURE_TAIL_BYTES_V25 {
+            self.truncated |= !self.tail.is_empty() || bytes.len() > CAPTURE_TAIL_BYTES_V25;
+            self.tail.clear();
+            self.tail
+                .extend_from_slice(&bytes[bytes.len() - CAPTURE_TAIL_BYTES_V25..]);
+            return;
+        }
+        let overflow = (self.tail.len() + bytes.len()).saturating_sub(CAPTURE_TAIL_BYTES_V25);
+        if overflow != 0 {
+            self.truncated = true;
+            self.tail.copy_within(overflow.., 0);
+            let retained = self.tail.len() - overflow;
+            self.tail.truncate(retained);
+        }
+        self.tail.extend_from_slice(bytes);
+    }
+
+    fn snapshot(&self) -> Zeroizing<Vec<u8>> {
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_CAPTURE));
+        if !self.truncated {
+            bytes.extend_from_slice(&self.head);
+            bytes.extend_from_slice(&self.tail);
+            return bytes;
+        }
+        // Never concatenate unrelated fragments into an apparently complete
+        // public error line. Keep complete head lines, mark the gap, then keep
+        // complete tail lines within the original classifier's total bound.
+        let head_end = self
+            .head
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        bytes.extend_from_slice(&self.head[..head_end]);
+        bytes.extend_from_slice(CAPTURE_GAP_V25);
+        let available = MAX_CAPTURE - bytes.len();
+        let tail_start = self.tail.len().saturating_sub(available);
+        let tail = &self.tail[tail_start..];
+        if let Some(newline) = tail.iter().position(|byte| *byte == b'\n') {
+            bytes.extend_from_slice(&tail[newline + 1..]);
+        }
+        bytes
+    }
+}
 
 mod exit_diagnostic_v24;
 
@@ -27,64 +102,38 @@ fn retain_stderr_once_v24(
     }
 }
 
-/// The daemon line shapes this harness echoes while a run is still in flight.
-/// Every one of them carries fixed progress tags only, never a payload, path
-/// or credential, so echoing them cannot leak what the capture bound protects.
-const ECHOED_PROGRESS_PREFIXES_V25: &[&[u8]] = &[
-    b"DOM_NATIVE_BOOTSTRAP_PROGRESS_V25",
-    b"DOM_NATIVE_TOLERATED_REFUSAL_V25",
-    b"DOM_NATIVE_ACTIVATION_READY_V25",
-];
-
-/// Echoes complete progress lines from the freshly read bytes.
-///
-/// The retained capture is unchanged: this only mirrors the exact lines whose
-/// fixed prefix marks them as progress tags, so a daemon that never exits
-/// still reports where its bootstrap stopped advancing instead of going
-/// silent until a lifetime expires.
-fn echo_progress_lines_v25(bytes: &[u8], scanned: &mut usize) {
-    while let Some(offset) = bytes[*scanned..].iter().position(|byte| *byte == b'\n') {
-        let line = &bytes[*scanned..*scanned + offset];
-        *scanned += offset + 1;
-        if ECHOED_PROGRESS_PREFIXES_V25
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-        {
-            if let Ok(text) = std::str::from_utf8(line) {
-                eprintln!("{text}");
-            }
-        }
-    }
+fn drain(stream: impl Read + Send + 'static) -> Capture {
+    drain_live(stream).0
 }
 
-fn drain(mut stream: impl Read + Send + 'static) -> Capture {
+fn drain_live(mut stream: impl Read + Send + 'static) -> (Capture, LiveCapture) {
     let (send, receive) = mpsc::sync_channel(1);
+    let live: LiveCapture = std::sync::Arc::new(std::sync::Mutex::new(RetainedCaptureV25::new()));
+    let writer = std::sync::Arc::clone(&live);
     thread::spawn(move || {
         let result = (|| {
-            // Allocate before reading so a reallocation cannot leave a copy.
-            let mut bytes = Zeroizing::new(vec![0; MAX_CAPTURE + 1]);
-            let mut length = 0;
-            let mut echoed = 0;
+            let mut retained = RetainedCaptureV25::new();
+            let mut scratch = Zeroizing::new(vec![0; 8 * 1024]);
             loop {
-                match stream.read(&mut bytes[length..]) {
+                // Keep draining after the retention bound, so a noisy daemon
+                // cannot block on a full stdout/stderr pipe.
+                match stream.read(&mut scratch) {
                     Ok(0) => break,
                     Ok(count) => {
-                        length += count;
-                        if length > MAX_CAPTURE {
-                            return Err(std::io::Error::other("daemon output exceeded bound"));
+                        retained.push(&scratch[..count]);
+                        if let Ok(mut live) = writer.lock() {
+                            live.push(&scratch[..count]);
                         }
-                        echo_progress_lines_v25(&bytes[..length], &mut echoed);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
                 }
             }
-            bytes.truncate(length);
-            Ok(bytes)
+            Ok(retained.snapshot())
         })();
         let _ = send.send(result);
     });
-    receive
+    (receive, live)
 }
 
 pub(super) struct CapturedExit {
@@ -99,6 +148,7 @@ pub(crate) struct NativeDaemonProcessV23 {
     status: Option<ExitStatus>,
     stdout: Capture,
     stderr: Capture,
+    stderr_live: LiveCapture,
     captured_stderr: Option<std::io::Result<Zeroizing<Vec<u8>>>>,
     failure_reported: bool,
 }
@@ -116,12 +166,14 @@ impl NativeDaemonProcessV23 {
         let mut child = command.spawn().map_err(|_| "real daemon could not start")?;
         // Stdio::piped guarantees all three handles after a successful spawn.
         let stdout = drain(child.stdout.take().ok_or("missing daemon stdout pipe")?);
-        let stderr = drain(child.stderr.take().ok_or("missing daemon stderr pipe")?);
+        let (stderr, stderr_live) =
+            drain_live(child.stderr.take().ok_or("missing daemon stderr pipe")?);
         let mut owned = Self {
             child,
             status: None,
             stdout,
             stderr,
+            stderr_live,
             captured_stderr: None,
             failure_reported: false,
         };
@@ -160,7 +212,18 @@ impl NativeDaemonProcessV23 {
                 .try_wait()
                 .map_err(|_| "daemon status unavailable")?;
         }
-        if self.status.is_some_and(|status| !status.success()) && !self.failure_reported {
+        if self.status.is_some_and(|status| !status.success()) {
+            self.report_diagnostics_v25();
+        }
+        Ok(self.status)
+    }
+
+    /// Echo this daemon's allowlisted diagnostics exactly once, whatever its
+    /// exit status was. A clean exit that did not finish the swap is still a
+    /// failed run, and it is the one the caller most needs explained; gating
+    /// the echo on an unsuccessful status left that case mute.
+    pub(crate) fn report_diagnostics_v25(&mut self) {
+        if !self.failure_reported {
             // A failed process can be noticed by either poll_actor or
             // require_running. Preserve the one received Zeroizing buffer for
             // finish: diagnostics never consume stdout/self-check evidence.
@@ -169,6 +232,14 @@ impl NativeDaemonProcessV23 {
                 &mut self.captured_stderr,
                 Duration::from_secs(2),
             );
+            // The pipe may still be held open by an inherited helper. Fall back
+            // to whatever the reader has already consumed rather than report
+            // nothing for this actor.
+            if self.captured_stderr.is_none() {
+                if let Ok(live) = self.stderr_live.lock() {
+                    self.captured_stderr = Some(Ok(live.snapshot()));
+                }
+            }
             let code = match self.captured_stderr.as_ref() {
                 Some(Ok(bytes)) => exit_diagnostic_v24::classify(bytes),
                 _ => "unknown",
@@ -188,9 +259,102 @@ impl NativeDaemonProcessV23 {
             } else {
                 eprintln!("DOM_NATIVE_EXIT_DIAGNOSTIC_V24 code={code}");
             }
+
+            if let Some(status) = self.status {
+                use std::os::unix::process::ExitStatusExt;
+                eprintln!(
+                    "DOM_NATIVE_EXIT_STATUS_V25 code={:?} signal={:?}",
+                    status.code(),
+                    status.signal()
+                );
+            }
+            if let Some(Ok(bytes)) = self.captured_stderr.as_ref() {
+                let text = String::from_utf8_lossy(bytes);
+                // A panic header names only the source location; the message
+                // body after it is never echoed.
+                for line in text.lines().filter(|line| line.starts_with("thread '")) {
+                    let location = line.split(" panicked at ").nth(1).unwrap_or("?");
+                    eprintln!("DOM_DAEMON_PANIC_V25 at {}", location.trim_end_matches(':'));
+                }
+                for line in text.lines() {
+                    if line.contains("DOM_ACTIVATION_STALL_V25")
+                        || line.contains("DOM_F6_INITIATOR_DIAG_V25")
+                        || line.contains("DOM_F6_BIND_DIAG_V25")
+                        || line.contains("DOM_PHASE_SLOW_V25")
+                        || line.contains("DOM_RECOVERY_PHASE_V25")
+                        || line.contains("DOM_LEASE_GAP_V25")
+                        || line.contains("DOM_ROUTE_LEASE_GAP_V26")
+                        || line.contains("DOM_RENEW_SITE_V26")
+                        || line.contains("DOM_RENEW_INTERVAL_V26")
+                        || line.contains("DOM_ROUTE_STEP_SLOW_V26")
+                        || line.contains("DOM_PLAN_SOURCE_DIAG_V25")
+                        || line.contains("DOM_ROUTE_RUNTIME_DIAG_V25")
+                        || line.contains("DOM_SIGBUS_DIAG_V25")
+                        || line.contains("DOM_ACTION_AUTH_DIAG_V25")
+                        || line.contains("DOM_MATERIALIZER_DIAG_V25")
+                        || line.contains("DOM_REFUSAL_ORIGIN_V26")
+                        || line.contains("DOM_CHILD_CONFLICT_V25")
+                        || line.contains("DOM_CHILD_MATERIALIZE_PIN_V25")
+                        || line.contains("DOM_CHILD_STATIC_PIN_V25")
+                        || line.contains("DOM_CHILD_RETAINED_PIN_V25")
+                        || line.contains("DOM_CHILD_FACE_DIAG_V25")
+                        || line.contains("DOM_F7_FUNDING_GATE_V25")
+                        || line.contains("DOM_EXCHANGE_SHAPE_V25")
+                        || line.contains("DOM_READY_QUORUM_V25")
+                        || line.contains("DOM_READY_SIGNER_V25")
+                        || line.contains("DOM_GRAPH_SETUP_V25")
+                        || line.contains("DOM_READY_ENTRY_V25")
+                        || line.contains("DOM_READY_APPLY_V25")
+                        || line.contains("DOM_READY_SIGNER_V25")
+                        || line.contains("DOM_GRAPH_SETUP_V25")
+                        || line.contains("DOM_READY_ENTRY_V25")
+                        || line.contains("DOM_READY_APPLY_V25")
+                        || line.contains("DOM_FUNDING_WINDOW_REFUSAL_V25")
+                        || line.contains("DOM_F7_ACTIVATE_RECOVERY_V25")
+                        || line.contains("DOM_F7_FUNDING_RETRYABLE_V25")
+                        || line.contains("DOM_FUNDING_WINDOW_V25")
+                        || line.contains("DOM_NATIVE_F7_FUNDING_V24")
+                        || line.contains("DOM_XMR_FUNDING_REFUSAL_V25")
+                        || line.contains("DOM_LEASE_DIAG_V25")
+                        || line.contains("DOM_STEP_SEGMENT_SLOW_V28")
+                        || line.contains("DOM_CHILD_OP_SLOW_V27")
+                        || line.contains("DOM_CHILD_SEAM_RENEW_V27")
+                        || line.contains("DOM_SETTLEMENT_CHILD_DIAG_V26")
+                        || line.contains("DOM_ACTUATOR_OPEN_DIAG_V25")
+                        || line.contains("production DOM actuator store unavailable")
+                        || line.contains("production settlement child authority unavailable")
+                        || line.contains("production route runtime failed")
+                        || line.contains("production composite relay loop failed")
+                    {
+                        eprintln!("DOM_DAEMON_STDERR_V25 {line}");
+                    }
+                }
+            }
             self.failure_reported = true;
         }
-        Ok(self.status)
+    }
+
+    /// Terminate this harness-owned daemon so its stderr can be drained and
+    /// reported. A stalled run is the one failure that produced no diagnostic
+    /// at all: the daemons stay alive past the phase deadline, so their stderr
+    /// pipe never reaches EOF and `poll` never has anything to classify. The
+    /// signalled exit is not evidence of an economic outcome; the caller has
+    /// already decided the run failed.
+    pub(crate) fn report_stall_v25(&mut self) -> Result<()> {
+        if self.status.is_none() {
+            self.signal(rustix::process::Signal::TERM)?;
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                if self.poll()?.is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        // The daemon handles SIGTERM and exits cleanly, so the status alone
+        // proves nothing here — report unconditionally.
+        self.report_diagnostics_v25();
+        Ok(())
     }
 
     pub(crate) fn require_running(&mut self) -> Result<()> {

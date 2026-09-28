@@ -1,0 +1,21 @@
+{
+  "amount_atomic": 1000000000000,
+  "atomic_swap": false,
+  "bitcoin_involved": false,
+  "claim_construction_seconds": 1.033600233,
+  "claim_through_local_inclusion_seconds": 1.594487465,
+  "dom_completion_seconds": 0.057648132,
+  "dom_consensus_validated": true,
+  "dom_input_funded": false,
+  "dom_secret_source": "extracted from exact XMR transaction fetched from owned monerod",
+  "experiment": "DXP1 observed XMR claim directly completes native DOM fixture",
+  "fee_atomic": 7082900000,
+  "flow": "XMR -> DOM",
+  "mainnet_latency_measurement": false,
+  "network": "owned offline regtest",
+  "preparation_blocks": 140,
+  "preparation_seconds": 26.918777977,
+  "recipient_maturity_blocks_mined": 10,
+  "recipient_onward_spend_included": true,
+  "total_seconds": 33.821494414
+}

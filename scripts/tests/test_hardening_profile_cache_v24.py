@@ -33,6 +33,37 @@ COMPONENT_PACKAGES = {
 
 
 class HardeningProfileCache(unittest.TestCase):
+    def test_source_digest_excludes_generated_ci_checkouts_and_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="interop-digest-") as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src/lib.rs").write_text("source\n")
+            (root / ".ci-eigenwallet").mkdir()
+            (root / ".ci-eigenwallet/tool").write_text("generated checkout\n")
+            (root / ".ci-eigenwallet.partial-20260915005919").mkdir()
+            (root / ".ci-eigenwallet.partial-20260915005919/tool").write_text("partial checkout\n")
+            (root / "artifacts/interop-hardening").mkdir(parents=True)
+            (root / "artifacts/interop-hardening/report.json").write_text("{}\n")
+            listed = (
+                b"src/lib.rs\0"
+                b".ci-eigenwallet/tool\0"
+                b".ci-eigenwallet.partial-20260915005919/tool\0"
+                b"artifacts/interop-hardening/report.json\0"
+            )
+            seen = []
+
+            def fake_sha256(path):
+                seen.append(path.relative_to(root).as_posix())
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            with mock.patch.object(runner, "ROOT", root), \
+                    mock.patch.object(runner.subprocess, "check_output", return_value=listed), \
+                    mock.patch.object(runner, "sha256", side_effect=fake_sha256):
+                digest = runner.source_digest()
+
+            self.assertEqual(seen, ["src/lib.rs"])
+            self.assertEqual(len(digest), 64)
+
     def test_native_exact_splits_name_real_distinct_tests_and_never_skip_another_symbol(self):
         expected = {
             "production-native-funding": "v23_native_two_leg_templates_custody_ready_and_bounded_funding",

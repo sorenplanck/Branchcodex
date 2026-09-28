@@ -1,0 +1,82 @@
+[
+  {
+    "prefix": "DIRECT-PAIR-DOM-FIRST-XMR-DETACH-RPC-READ-RECOVERY",
+    "total_seconds": 189.201201164,
+    "claims_seconds": 103.183560176,
+    "recovery_seconds": 0.946012359,
+    "conditional_headroom_seconds": 6,
+    "refund_height": 213,
+    "rpc_totals": {
+      "public_read_attempts": 82,
+      "authenticated_read_attempts": 31,
+      "submit_attempts": 0,
+      "throttle_retries": 0,
+      "wait_requested_ms": 0,
+      "wait_elapsed_ms": 0
+    },
+    "owned_recorded_pids_exited": [
+      942133,
+      942523,
+      942524,
+      942525,
+      942527,
+      942528,
+      942529,
+      942530,
+      942545,
+      942546,
+      942547,
+      942548,
+      942549,
+      942550,
+      942551,
+      942552,
+      942553,
+      942554,
+      942555
+    ],
+    "sources_and_binary_match": true,
+    "exit_code": 0
+  },
+  {
+    "prefix": "DIRECT-PAIR-XMR-FIRST-REINCLUDE-RPC-READ-RECOVERY",
+    "total_seconds": 179.73590113,
+    "claims_seconds": 95.228160673,
+    "recovery_seconds": 1.3401267909999999,
+    "conditional_headroom_seconds": 7,
+    "refund_height": 212,
+    "rpc_totals": {
+      "public_read_attempts": 62,
+      "authenticated_read_attempts": 16,
+      "submit_attempts": 1,
+      "throttle_retries": 0,
+      "wait_requested_ms": 0,
+      "wait_elapsed_ms": 0
+    },
+    "owned_recorded_pids_exited": [
+      943166,
+      944305,
+      944306,
+      944307,
+      944308,
+      944309,
+      944310,
+      944311,
+      944312,
+      944313,
+      944314,
+      944315,
+      944316,
+      944317,
+      944318,
+      944319,
+      944320,
+      944321,
+      944322,
+      944323,
+      944324
+    ],
+    "sources_and_binary_match": true,
+    "exit_code": 0
+  }
+]

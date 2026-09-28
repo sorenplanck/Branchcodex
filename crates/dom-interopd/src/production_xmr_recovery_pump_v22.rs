@@ -291,6 +291,24 @@ impl ProductionXmrRecoveryPumpV22 {
             return Ok(None);
         }
         self.execute_next = false;
+        // The proof was observed on the previous tick, and the rest of the
+        // root loop (the other leg's pump, the F7 steps, a relay round against
+        // a peer that may be gone) ran in between. If that pushed it past the
+        // freshness bound, observe it again now, immediately before use. The
+        // funding-less tick it would otherwise fall back to can never
+        // compensate, so a stale proof here meant retrying forever. The bound
+        // itself is unchanged.
+        if self
+            .funding
+            .as_ref()
+            .is_some_and(|funding| funding.facts().age() > MAX_V11_EXTERNAL_ANCHOR_AGE)
+        {
+            self.funding = match self.sweep.observe_verified_funding_v22() {
+                Ok(proof) => Some(proof),
+                Err(Refusal::Unavailable) => None,
+                Err(error) => return Err(error),
+            };
+        }
         let progress = drive_recovery_step_v23(
             &mut self.funding,
             |funding| funding.facts().age(),

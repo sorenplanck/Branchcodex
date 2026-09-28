@@ -1,0 +1,24 @@
+{
+  "sha256": {
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "5be6325967b225b65740dda2341fd377652c344830f8ba94aee2bebc5ac52c87",
+    "src/native.rs": "31f9c3fab3bbbdc15512da4f30f44feb679557afbd49efcb95daebfd247458ec",
+    "src/native_dom.rs": "55abd49873194b6f4f91880c753614c67cf620851528c890fccaf99294824800",
+    "src/claim_resume.rs": "60c58aa0c02a21d5ff8ab9d0da1f3fd57b383615078d847cd115668f03513234",
+    "src/operation_checkpoint.rs": "4c261c7e0ef253de7169f7e919557169be851a3c7e9efefd0811f3844eba04a3",
+    "src/release_journal.rs": "593ebeddf2509a36bb36c6fd9a381a1c9a1b6c2cfdf85865c7f8abaa18f7eed0",
+    "src/counterpart_delivery.rs": "990097068819635c6ed066064a022d78bc3e002a6eac0e701c45a512d61b79fb",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "examples/regtest_claim.rs": "96329e65469fd52ed23af5276e5e193f18cc14b9d6ebddd70e74b6fc2d6850d4",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "examples/support/claim_resume_bridge.rs": "806cd0c2f5f668192b8ac438e4bbdd60a3b53fd322751230500927e72a9dda5f",
+    "examples/support/counterpart_delivery_bridge.rs": "2951b97e8b1a66c0fe4e0967978367c8378b59cf4fdf1fde709bd74035a6a892",
+    "examples/support/settlement_resume.rs": "a259ca9d3158e44923bd9aeab65e420b532f2bb58eb08e6d2207bf87779c3782",
+    "examples/support/direct_recovery_bridge.rs": "710b2e2a928b0dae44c653c4754a95eb14b47bf43db5a16298e9ca02f2175336",
+    "tests/operation_checkpoint.rs": "8e1663c99d374aaf520024df870e36d8904ed8d32cb461353ee2eee6a90c4492",
+    "target/release/examples/regtest_claim": "07d99dabfe3a28a73518d6accb51ea20d444e9e1034c66cdc8c8afcd714a7bb5",
+    "target/recovery-research/direct-dlog-bridge": "94be42247ce8e12b4c098335b450dca1993c0692db28f3f406ab95ee3eea7b27"
+  },
+  "scope": "Fresh worker reconstructs obligation after exit 75 before post-inclusion files/journal exist. Initial native bytes and exposure policy were persisted before first send. Reopens existing obligation without recompleting adaptor; lost acknowledgment and independent pool/block/unavailable-RPC checks follow. Host/miners remain live; not full executor restart or production timing proof."
+}

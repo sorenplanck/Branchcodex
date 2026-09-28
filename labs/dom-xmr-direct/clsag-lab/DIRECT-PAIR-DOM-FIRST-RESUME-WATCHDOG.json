@@ -1,0 +1,10 @@
+{
+  "experiment": "direct-pair-dom-first-resume",
+  "pid": 869602,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 171.05587225605268,
+  "compilation_included": false,
+  "log": "target/direct-pair-dom-first-resume-1790465929416697599.log"
+}

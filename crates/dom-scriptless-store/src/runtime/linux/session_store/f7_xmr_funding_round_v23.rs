@@ -68,6 +68,49 @@ pub(super) struct NativeXmrFundingRoundV23 {
 }
 
 impl ContractsSessionStoreV1 {
+    pub(super) fn reconstruct_xmr_bounded_funding_roster_v23(
+        &self,
+        gate: &F7GateRecordV12,
+    ) -> Result<(TrustedChainIdV1, ParticipantRosterV1, Transaction), SessionStoreError> {
+        use xmr_refund_policy::graph_signing_keys_v22::XmrGraphSigningStageV22;
+
+        let chain = self.require_process_trusted_chain_v23(&gate.chain_id)?;
+        let reconstructed = self.reconstruct_xmr_graph_evidence_core_v23(
+            chain,
+            gate.role.route_id(),
+            gate.session_id,
+            false,
+        )?;
+        let (templates, keys) = (&reconstructed.0, &reconstructed.1);
+        keys.require_graph(templates)
+            .map_err(|_| SessionStoreError::Quarantined)?;
+        let hash = keys.template_hash(XmrGraphSigningStageV22::Funding);
+        if hash != gate.role.funding_template_hash() {
+            return Err(SessionStoreError::Quarantined);
+        }
+        let transport = self.load_transport_roster(gate.session_id)?;
+        let identities = self.load_transport_identity_binding(gate.session_id)?;
+        require_transport_identity_binding(&transport, &identities)?;
+        let mut participants = Vec::with_capacity(2);
+        for entry in transport.participants {
+            let key = keys
+                .key(XmrGraphSigningStageV22::Funding, entry.participant_id, hash)
+                .map_err(|_| SessionStoreError::Quarantined)?
+                .clone();
+            let participant =
+                ParticipantIdentityV1::new(&chain, entry.identity_key, key, entry.direction)
+                    .map_err(|_| SessionStoreError::Quarantined)?;
+            if participant.participant_id() != &entry.participant_id {
+                return Err(SessionStoreError::Quarantined);
+            }
+            participants.push(participant);
+        }
+        participants.sort_by_key(|participant| *participant.participant_id());
+        let roster =
+            ParticipantRosterV1::new(participants).map_err(|_| SessionStoreError::Quarantined)?;
+        Ok((chain, roster, templates.funding().clone()))
+    }
+
     pub(in super::super) fn prepare_xmr_bounded_funding_transport_locked_v23(
         &self,
         chain: TrustedChainIdV1,
@@ -185,7 +228,6 @@ impl ContractsSessionStoreV1 {
         &self,
         session: [u8; 32],
     ) -> Result<NativeXmrFundingBindingV23, SessionStoreError> {
-        use xmr_refund_policy::graph_signing_keys_v22::XmrGraphSigningStageV22;
         let gate = self.load_f7_gate_v12(session)?;
         self.authenticate_xmr_bounded_f7_ancestry_v23(&gate)?;
         let journal = self
@@ -203,40 +245,7 @@ impl ContractsSessionStoreV1 {
             Ok(_) => return Err(SessionStoreError::Conflict),
             Err(error) => return Err(error),
         }
-        let chain = self.require_process_trusted_chain_v23(&gate.chain_id)?;
-        let reconstructed = self.reconstruct_xmr_graph_evidence_core_v23(
-            chain,
-            gate.role.route_id(),
-            session,
-            false,
-        )?;
-        let (templates, keys) = (&reconstructed.0, &reconstructed.1);
-        keys.require_graph(templates)
-            .map_err(|_| SessionStoreError::Quarantined)?;
-        let hash = keys.template_hash(XmrGraphSigningStageV22::Funding);
-        if hash != gate.role.funding_template_hash() {
-            return Err(SessionStoreError::Quarantined);
-        }
-        let transport = self.load_transport_roster(session)?;
-        let identities = self.load_transport_identity_binding(session)?;
-        require_transport_identity_binding(&transport, &identities)?;
-        let mut participants = Vec::with_capacity(2);
-        for entry in transport.participants {
-            let key = keys
-                .key(XmrGraphSigningStageV22::Funding, entry.participant_id, hash)
-                .map_err(|_| SessionStoreError::Quarantined)?
-                .clone();
-            let participant =
-                ParticipantIdentityV1::new(&chain, entry.identity_key, key, entry.direction)
-                    .map_err(|_| SessionStoreError::Quarantined)?;
-            if participant.participant_id() != &entry.participant_id {
-                return Err(SessionStoreError::Quarantined);
-            }
-            participants.push(participant);
-        }
-        participants.sort_by_key(|p| *p.participant_id());
-        let roster =
-            ParticipantRosterV1::new(participants).map_err(|_| SessionStoreError::Quarantined)?;
+        let (chain, roster, template) = self.reconstruct_xmr_bounded_funding_roster_v23(&gate)?;
         let mut bases = [0; 2];
         for (index, participant) in roster.entries().iter().enumerate() {
             bases[index] = self.transport_sequence_at_revision(
@@ -264,7 +273,7 @@ impl ContractsSessionStoreV1 {
                 session,
                 purpose: PurposeV1::Funding,
                 roster,
-                template: templates.funding().clone(),
+                template,
                 adaptor: None,
             },
             start,
@@ -385,24 +394,12 @@ impl ContractsSessionStoreV1 {
             .revision()
             .checked_add(6)
             .ok_or(SessionStoreError::CapacityExceeded)?;
-        let prefix = format!("{}-", hex_lower(&origin.session));
-        let mut records = Vec::new();
-        self.messages.scan_lexicographic(|name, node| {
-            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
-                return Err(LinuxCapabilityError::InvalidObject);
-            }
-            if !name.starts_with(&prefix) || !name.ends_with(".message") {
-                return Ok(());
-            }
-            let bytes = self.messages.read_bounded_file(
-                &ValidatedComponent::registered(name)?,
-                TRANSPORT_MESSAGE_MAX_LEN,
-            )?;
-            let record = TransportMessageRecordV1::from_bytes(&bytes)
-                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
-            records.push((name.to_owned(), record));
-            Ok(())
-        })?;
+        // Collect fresh physical records in bounded passes, then retain the
+        // same lexical authentication order and complete successor/round audit.
+        let records = xmr_graph_proposal_v22::message_collect_v25::collect_untrusted_messages_v25(
+            &self.messages,
+            origin.session,
+        )?;
         let mut round = Vec::new();
         for (name, record) in records {
             let (envelope, direction) = self.authenticate_transport_record(&name, &record)?;

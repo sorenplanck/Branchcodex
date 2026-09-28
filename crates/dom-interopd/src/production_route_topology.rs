@@ -196,6 +196,7 @@ impl ProductionRouteTopologyV4 {
             || settlement_id != expected.settlement_id
             || (face != SettlementFaceV1::Dom && face != expected.face)
         {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=topology.require_request");
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         Ok(())
@@ -214,6 +215,7 @@ impl ProductionRouteTopologyV4 {
                 || profile_digest != self.dom_profile_digest
                 || deployment_digest != self.dom_deployment_digest
             {
+                eprintln!("DOM_REFUSAL_ORIGIN_V26 site=topology.chain_binding_dom");
                 return Err(ChildAuthorityRefusalV1::Conflict);
             }
         } else {
@@ -223,6 +225,7 @@ impl ProductionRouteTopologyV4 {
                 || profile_digest != expected.profile_digest
                 || deployment_digest != expected.deployment_digest
             {
+                eprintln!("DOM_REFUSAL_ORIGIN_V26 site=topology.chain_binding_counterparty");
                 return Err(ChildAuthorityRefusalV1::Conflict);
             }
         }
@@ -235,6 +238,7 @@ impl ProductionRouteTopologyV4 {
         registry: Digest,
     ) -> Result<(), ChildAuthorityRefusalV1> {
         if terms != self.terms_digest || registry != self.registry_digest {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=topology.admission_scope");
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         Ok(())

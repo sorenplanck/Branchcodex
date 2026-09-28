@@ -7,8 +7,9 @@
 
 use dom_core::{
     fee_policy, Amount, BlockHeight, DomError, PeerMisbehavior, KERNEL_FEAT_COINBASE,
-    KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX,
-    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_KERNEL,
+    KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, KERNEL_FEAT_SWAP_CLAIM, KERNEL_FEAT_SWAP_PUNISH,
+    KERNEL_FEAT_SWAP_REFUND, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX, MAX_OUTPUTS_PER_TX,
+    MAX_TX_WEIGHT, SWAP_ARBITER_CONTRACT_SIZE, WEIGHT_COINBASE_KERNEL, WEIGHT_KERNEL,
 };
 use dom_crypto::pedersen::Commitment;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -30,6 +31,9 @@ pub(crate) const fn is_known_kernel_features(features: u8) -> bool {
     features == KERNEL_FEAT_PLAIN
         || features == KERNEL_FEAT_COINBASE
         || features == KERNEL_FEAT_HEIGHT_LOCKED
+        || features == KERNEL_FEAT_SWAP_CLAIM
+        || features == KERNEL_FEAT_SWAP_REFUND
+        || features == KERNEL_FEAT_SWAP_PUNISH
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +48,16 @@ pub(crate) const fn classify_kernel_lock_fields(
     features: u8,
     lock_height: u64,
 ) -> KernelLockClassification {
-    if features == KERNEL_FEAT_HEIGHT_LOCKED && lock_height == 0 {
+    if matches!(
+        features,
+        KERNEL_FEAT_HEIGHT_LOCKED
+            | KERNEL_FEAT_SWAP_CLAIM
+            | KERNEL_FEAT_SWAP_REFUND
+            | KERNEL_FEAT_SWAP_PUNISH
+    ) && lock_height == 0
+    {
         KernelLockClassification::HeightLockedAtZero
-    } else if features != KERNEL_FEAT_HEIGHT_LOCKED && lock_height != 0 {
+    } else if matches!(features, KERNEL_FEAT_PLAIN | KERNEL_FEAT_COINBASE) && lock_height != 0 {
         KernelLockClassification::NonHeightLockedAtNonzero
     } else {
         KernelLockClassification::Canonical
@@ -141,11 +152,38 @@ impl TransactionOutput {
         })
     }
 
+    /// Attach one immutable DOM/XMR arbiter contract to a proof generated with
+    /// the contract bytes as its Bulletproof `extra_commit` transcript input.
+    pub fn with_swap_arbiter(
+        commitment: Commitment,
+        proof: Vec<u8>,
+        contract: &crate::SwapArbiterContract,
+    ) -> Result<Self, DomError> {
+        if proof.len() != dom_crypto::RANGE_PROOF_SIZE {
+            return Err(DomError::Invalid(format!(
+                "range proof length {} != {}",
+                proof.len(),
+                dom_crypto::RANGE_PROOF_SIZE
+            )));
+        }
+        let contract = contract.to_bytes();
+        let mut envelope = Vec::with_capacity(dom_crypto::RANGE_PROOF_SIZE + contract.len());
+        envelope.extend_from_slice(&proof);
+        envelope.extend_from_slice(&contract);
+        Ok(Self {
+            commitment,
+            proof: envelope,
+        })
+    }
+
     /// Return the unchanged 739-byte mathematical range proof.
     pub fn range_proof_bytes(&self) -> Result<&[u8], DomError> {
         match self.proof.len() {
             dom_crypto::RANGE_PROOF_SIZE => Ok(&self.proof),
-            dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE => {
+            length
+                if length == dom_crypto::RANGE_PROOF_SIZE + dom_core::RECOVERY_CAPSULE_SIZE
+                    || length == dom_crypto::RANGE_PROOF_SIZE + SWAP_ARBITER_CONTRACT_SIZE =>
+            {
                 Ok(&self.proof[..dom_crypto::RANGE_PROOF_SIZE])
             }
             length => Err(DomError::Invalid(format!(
@@ -160,16 +198,55 @@ impl TransactionOutput {
     ) -> Result<Option<dom_crypto::recovery::RecoveryCapsule>, DomError> {
         match self.proof.len() {
             dom_crypto::RANGE_PROOF_SIZE => Ok(None),
-            dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE => {
+            length if length == dom_crypto::RANGE_PROOF_SIZE + dom_core::RECOVERY_CAPSULE_SIZE => {
                 dom_crypto::recovery::RecoveryCapsule::from_bytes(
                     &self.proof[dom_crypto::RANGE_PROOF_SIZE..],
                 )
                 .map(Some)
             }
+            length if length == dom_crypto::RANGE_PROOF_SIZE + SWAP_ARBITER_CONTRACT_SIZE => {
+                Ok(None)
+            }
             length => Err(DomError::Invalid(format!(
                 "noncanonical output proof envelope length {length}"
             ))),
         }
+    }
+
+    /// Parse the optional consensus-bound DOM/XMR arbiter contract.
+    pub fn swap_arbiter(&self) -> Result<Option<crate::SwapArbiterContract>, DomError> {
+        match self.proof.len() {
+            dom_crypto::RANGE_PROOF_SIZE => Ok(None),
+            length if length == dom_crypto::RANGE_PROOF_SIZE + SWAP_ARBITER_CONTRACT_SIZE => {
+                crate::SwapArbiterContract::from_bytes(&self.proof[dom_crypto::RANGE_PROOF_SIZE..])
+                    .map(Some)
+            }
+            length if length == dom_crypto::RANGE_PROOF_SIZE + dom_core::RECOVERY_CAPSULE_SIZE => {
+                Ok(None)
+            }
+            length => Err(DomError::Invalid(format!(
+                "noncanonical output proof envelope length {length}"
+            ))),
+        }
+    }
+
+    /// Application bytes bound into the output's range-proof transcript.
+    pub fn extra_commit_bytes(&self) -> Result<&[u8], DomError> {
+        match self.proof.len() {
+            dom_crypto::RANGE_PROOF_SIZE => {}
+            length if length == dom_crypto::RANGE_PROOF_SIZE + dom_core::RECOVERY_CAPSULE_SIZE => {
+                self.recovery_capsule()?;
+            }
+            length if length == dom_crypto::RANGE_PROOF_SIZE + SWAP_ARBITER_CONTRACT_SIZE => {
+                self.swap_arbiter()?;
+            }
+            length => {
+                return Err(DomError::Invalid(format!(
+                    "noncanonical output proof envelope length {length}"
+                )))
+            }
+        }
+        Ok(&self.proof[dom_crypto::RANGE_PROOF_SIZE..])
     }
 }
 
@@ -461,7 +538,7 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
                 )));
             }
             KernelLockClassification::NonHeightLockedAtNonzero => {
-                // AUDIT: non-HEIGHT_LOCKED kernels with lock_height != 0 are
+                // AUDIT: plain/coinbase kernels with lock_height != 0 are
                 // malleable (hash changes without semantic change) — reject them.
                 return Err(DomError::Invalid(format!(
                     "kernel {i}: lock_height must be 0 for non-HEIGHT_LOCKED kernels (got {})",
@@ -557,13 +634,15 @@ impl CoinbaseTransaction {
             ));
         }
         let proof = self.output.range_proof_bytes()?;
-        let valid = match self.output.recovery_capsule()? {
-            Some(capsule) => dom_crypto::range_proof_verify_with_extra_commit(
+        let extra_commit = self.output.extra_commit_bytes()?;
+        let valid = if extra_commit.is_empty() {
+            dom_crypto::range_proof_verify(self.output.commitment.as_bytes(), proof)
+        } else {
+            dom_crypto::range_proof_verify_with_extra_commit(
                 self.output.commitment.as_bytes(),
                 proof,
-                capsule.as_bytes(),
-            ),
-            None => dom_crypto::range_proof_verify(self.output.commitment.as_bytes(), proof),
+                extra_commit,
+            )
         };
         match valid {
             Ok(true) => {}
@@ -898,13 +977,15 @@ pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
     for (i, output) in tx.outputs.iter().enumerate() {
         let commitment = &output.commitment;
         let proof_bytes = output.range_proof_bytes()?;
-        let valid = match output.recovery_capsule()? {
-            Some(capsule) => dom_crypto::range_proof_verify_with_extra_commit(
+        let extra_commit = output.extra_commit_bytes()?;
+        let valid = if extra_commit.is_empty() {
+            dom_crypto::range_proof_verify(commitment.as_bytes(), proof_bytes)
+        } else {
+            dom_crypto::range_proof_verify_with_extra_commit(
                 commitment.as_bytes(),
                 proof_bytes,
-                capsule.as_bytes(),
-            ),
-            None => dom_crypto::range_proof_verify(commitment.as_bytes(), proof_bytes),
+                extra_commit,
+            )
         };
 
         match valid {

@@ -1,0 +1,10 @@
+{
+  "experiment": "direct-pair-xmr-first-ack-loss",
+  "pid": 872753,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 171.74086038395762,
+  "compilation_included": false,
+  "log": "target/direct-pair-xmr-first-ack-loss-1790467043675671194.log"
+}

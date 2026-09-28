@@ -54,10 +54,10 @@ impl ContractsSessionStoreV1 {
         if records.len() != 6 {
             return Err(SessionStoreError::Quarantined);
         }
-        let ids = authority
-            .participants
-            .each_ref()
-            .map(|participant| participant.participant_id);
+        let ids = [
+            authority.participants[0].participant_id,
+            authority.participants[1].participant_id,
+        ];
         let mut commitments = [None, None];
         let mut contributions = Vec::with_capacity(2);
         for (position, record) in records.iter().enumerate() {

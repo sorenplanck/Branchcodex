@@ -447,6 +447,17 @@ where
     ) -> Result<(), RouteRuntimeErrorV1> {
         let bound_ms = u64::try_from(bound.as_millis())
             .map_err(|_| RouteRuntimeErrorV1::InvalidConfiguration)?;
+        // This ceiling is `lease - renew_before` (60 s on the native route),
+        // twice the `external_call_timeout_ms` the config validates for one
+        // external call. It is not tightened here because the relay bounds
+        // are derived to exactly this value and refusing them would stop the
+        // route. It is safe only because no caller may treat the admitted
+        // bound as a limit: every 60 s block behind this call is bounded by
+        // its own clock — relay exchanges by socket deadlines derived from
+        // the bound, the XMR pumps by an armed `route_step_deadline` ceiling,
+        // the terminal drain by heartbeats between its legs. A new caller
+        // that blocks without one of those reintroduces the lease lapse this
+        // route died of eight times.
         let safe_ceiling = self
             .supervisor
             .config()

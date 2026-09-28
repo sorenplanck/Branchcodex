@@ -521,7 +521,8 @@ fn staged_child_is_secret_free_restartable_and_authority_pinned() {
         store
             .materialize_deferred_child_one(lease, &mut wrong_authority, 1_004, || Ok(1_005))
             .unwrap_err(),
-        CoordinatorErrorV1::ChildAuthorityRefused
+        // A different authority can never become the bound one by retrying.
+        CoordinatorErrorV1::ChildAuthorityRejected
     );
     assert!(wrong_authority.calls.is_empty());
     assert_eq!(

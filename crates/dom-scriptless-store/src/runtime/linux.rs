@@ -24,7 +24,10 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     mem::MaybeUninit,
     os::fd::AsFd,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 /// Durability barrier through a real descriptor.
@@ -82,16 +85,16 @@ pub use session_store::{
     ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
     DurableContractsReservationLookupV1, DurableTransportOutcomeV1, DurableTransportReceiptV1,
     ExactDomFundingBroadcasterV1, ExactDomRefundBroadcasterV1, F7AnchorRequestBindingV12,
-    F7ClaimObserverFactsV15, F7FinalClaimActionV14, F7FinalClaimFactsV14, F7FinalClaimProgressV14,
-    F7FundingAuthorizationV12, F7FundingGatePreparationV12, F7RecoveryPreparationV12,
-    FinalClaimTransactionSinkRefV2, FundingAuthorizationRefV1, FundingAuthorizationV1,
-    FundingBroadcastV1, FundingRetransmissionV1, FundingTransactionSinkRefV1,
-    M8FundingAuthorizationRefV1, M8FundingTransactionSinkRefV1, M8FundingTransactionSinkRefV2,
-    ObservedF7FinalClaimV15, ObservedFinalClaimExposureV2, OperationalBpContinuationStageV1,
-    OperationalFundingGateVerificationRequestV1, OperationalM8BackupParticipantAuditV2,
-    OperationalM8BackupProvenanceAuditV2, OperationalM8FundingGatePreparationV2,
-    OperationalM8FundingGateVerificationRequestV1, OutboundDsc1RecoveryV1,
-    PreparedContractsSessionStoreOpenV1, PreparedDsc1SigningRequestV1,
+    F7ClaimObserverFactsV15, F7ClaimReceiverStateV25, F7FinalClaimActionV14, F7FinalClaimFactsV14,
+    F7FinalClaimProgressV14, F7FundingAuthorizationV12, F7FundingGatePreparationV12,
+    F7RecoveryPreparationV12, FinalClaimTransactionSinkRefV2, FundingAuthorizationRefV1,
+    FundingAuthorizationV1, FundingBroadcastV1, FundingRetransmissionV1,
+    FundingTransactionSinkRefV1, M8FundingAuthorizationRefV1, M8FundingTransactionSinkRefV1,
+    M8FundingTransactionSinkRefV2, ObservedF7FinalClaimV15, ObservedFinalClaimExposureV2,
+    OperationalBpContinuationStageV1, OperationalFundingGateVerificationRequestV1,
+    OperationalM8BackupParticipantAuditV2, OperationalM8BackupProvenanceAuditV2,
+    OperationalM8FundingGatePreparationV2, OperationalM8FundingGateVerificationRequestV1,
+    OutboundDsc1RecoveryV1, PreparedContractsSessionStoreOpenV1, PreparedDsc1SigningRequestV1,
     PreparedEarlyTransportAuthorityV1, PreparedEvmSignedActionImportV1,
     PreparedF7ClaimPreSignatureTransportV12, PreparedF7FinalClaimIngressV15,
     PreparedF7FinalClaimSubmissionV14, PreparedF7FundingGateV12, PreparedF7FundingSubmissionV12,
@@ -129,6 +132,7 @@ const DIRECTORY_SCAN_BUFFER_LEN: usize = 8_192;
 // inventory takes the unchanged lexical scanner before any caller is visited.
 const READONLY_SCAN_ENTRIES_V25: usize = 16_384;
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "linux/unordered_readonly_scan_v25_tests.rs"]
 mod unordered_readonly_scan_v25_tests;
@@ -334,6 +338,13 @@ struct RetainedDirectory {
     identity: NodeIdentity,
     reopen: ReopenAuthority,
     scan_exclusions: Arc<Mutex<BTreeMap<String, NodeIdentity>>>,
+    /// Count of mutations this process has applied through this directory
+    /// capability, shared by every retained alias of it. Every mutator bumps
+    /// it before its first effect, so a caller that remembers the count can
+    /// tell whether anything it audited through this capability may have
+    /// changed since. It says nothing about writers outside this process; the
+    /// Store's exclusive lock is what excludes those.
+    mutations: Arc<AtomicU64>,
 }
 
 impl RetainedDirectory {
@@ -349,7 +360,17 @@ impl RetainedDirectory {
                 component: self.reopen.component.clone(),
             },
             scan_exclusions: Arc::clone(&self.scan_exclusions),
+            mutations: Arc::clone(&self.mutations),
         })
+    }
+
+    /// Mutations applied through this capability (and its aliases) so far.
+    fn mutation_count(&self) -> u64 {
+        self.mutations.load(Ordering::SeqCst)
+    }
+
+    fn note_mutation(&self) {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
     }
 
     fn create_under(
@@ -385,6 +406,7 @@ impl RetainedDirectory {
             identity,
             reopen: ReopenAuthority { parent, component },
             scan_exclusions: Arc::new(Mutex::new(BTreeMap::new())),
+            mutations: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -405,6 +427,7 @@ impl RetainedDirectory {
             identity,
             reopen: ReopenAuthority { parent, component },
             scan_exclusions: Arc::new(Mutex::new(BTreeMap::new())),
+            mutations: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -412,6 +435,7 @@ impl RetainedDirectory {
         &self,
         component: ValidatedComponent,
     ) -> Result<Self, LinuxCapabilityError> {
+        self.note_mutation();
         self.revalidate()?;
         Self::create_under(Arc::clone(&self.descriptor), component)
     }
@@ -433,6 +457,7 @@ impl RetainedDirectory {
         component: &ValidatedComponent,
         exact_bytes: &[u8],
     ) -> Result<RetainedFile, LinuxCapabilityError> {
+        self.note_mutation();
         if component.expected_type != ExpectedNodeType::RegularFile {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
@@ -511,6 +536,7 @@ impl RetainedDirectory {
         destination: &ValidatedComponent,
         retained_source: &RetainedFile,
     ) -> Result<(), LinuxCapabilityError> {
+        self.note_mutation();
         if source.expected_type != ExpectedNodeType::RegularFile
             || destination.expected_type != ExpectedNodeType::RegularFile
         {
@@ -545,6 +571,7 @@ impl RetainedDirectory {
         destination: &ValidatedComponent,
         retained_staging: &RetainedDirectory,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         if staging.expected_type != ExpectedNodeType::Directory
             || destination.expected_type != ExpectedNodeType::Directory
             || !generation_component(destination.as_str(), false)
@@ -594,6 +621,7 @@ impl RetainedDirectory {
         staging: &ValidatedComponent,
         retained_staging: &RetainedDirectory,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         let pending = ValidatedComponent::registered("restore-pending")?;
         if staging.expected_type != ExpectedNodeType::Directory
             || !exact_wrapped_hex(staging.as_str(), ".restore-", 32, ".staging")
@@ -639,6 +667,7 @@ impl RetainedDirectory {
         successor: &RetainedDirectory,
         destination: &ValidatedComponent,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         if pending.reopen.component.as_str() != "restore-pending"
             || !Arc::ptr_eq(&pending.reopen.parent, &self.descriptor)
             || successor.reopen.component.as_str() != "successor-generation"
@@ -730,6 +759,7 @@ impl RetainedDirectory {
         pending: &RetainedDirectory,
         completed: &ValidatedComponent,
     ) -> Result<RetainedDirectory, LinuxCapabilityError> {
+        self.note_mutation();
         if pending.reopen.component.as_str() != "restore-pending"
             || !Arc::ptr_eq(&pending.reopen.parent, &self.descriptor)
             || completed.expected_type != ExpectedNodeType::Directory
@@ -770,6 +800,7 @@ impl RetainedDirectory {
         destination: &ValidatedComponent,
         retained_staging: &RetainedFile,
     ) -> Result<(), LinuxCapabilityError> {
+        self.note_mutation();
         if staging.as_str() != ".active-vault-generation.staging"
             || destination.as_str() != "active-vault-generation"
             || staging.expected_type != ExpectedNodeType::RegularFile
@@ -806,6 +837,7 @@ impl RetainedDirectory {
         component: &ValidatedComponent,
         retained: &RetainedFile,
     ) -> Result<(), LinuxCapabilityError> {
+        self.note_mutation();
         if component.expected_type != ExpectedNodeType::RegularFile {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
@@ -1359,23 +1391,147 @@ fn classify_registered_component(value: &str) -> Option<ExpectedNodeType> {
     static_type.or_else(|| classify_dynamic_component(value))
 }
 
+// Same names, same order and same result as the `format!` closures they
+// replace. Those closures built up to twenty-two Strings per classified
+// component (three signing edges, five resource scopes times two states and
+// three custody/vault kinds times two states), and a component is classified
+// for every entry of every directory scan the Store performs. A perf record of
+// run 90 attributed 17% of the daemon's CPU to this formatting alone.
+const XMR_GRAPH_EDGE_NAMES_V23: [(&str, &str); 6] = [
+    (
+        "-02.xmr-graph-signing-session-v23",
+        "-02.xmr-graph-signing-session-v23.staging",
+    ),
+    (
+        "-03.xmr-graph-signing-session-v23",
+        "-03.xmr-graph-signing-session-v23.staging",
+    ),
+    (
+        "-04.xmr-graph-signing-session-v23",
+        "-04.xmr-graph-signing-session-v23.staging",
+    ),
+    (
+        "-02.xmr-graph-signing-origin-v23",
+        "-02.xmr-graph-signing-origin-v23.staging",
+    ),
+    (
+        "-03.xmr-graph-signing-origin-v23",
+        "-03.xmr-graph-signing-origin-v23.staging",
+    ),
+    (
+        "-04.xmr-graph-signing-origin-v23",
+        "-04.xmr-graph-signing-origin-v23.staging",
+    ),
+];
+
+const XMR_GRAPH_RESOURCE_NAMES_V23: [(&str, &str); 10] = [
+    (
+        "-02-01.xmr-graph-resource-started-v23",
+        "-02-01.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-02-01.xmr-graph-resource-ready-v23",
+        "-02-01.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-02-02.xmr-graph-resource-started-v23",
+        "-02-02.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-02-02.xmr-graph-resource-ready-v23",
+        "-02-02.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-03-01.xmr-graph-resource-started-v23",
+        "-03-01.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-03-01.xmr-graph-resource-ready-v23",
+        "-03-01.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-04-01.xmr-graph-resource-started-v23",
+        "-04-01.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-04-01.xmr-graph-resource-ready-v23",
+        "-04-01.xmr-graph-resource-ready-v23.staging",
+    ),
+    (
+        "-04-02.xmr-graph-resource-started-v23",
+        "-04-02.xmr-graph-resource-started-v23.staging",
+    ),
+    (
+        "-04-02.xmr-graph-resource-ready-v23",
+        "-04-02.xmr-graph-resource-ready-v23.staging",
+    ),
+];
+
+const XMR_GRAPH_STATE_NAMES_V23: [(&str, &str); 6] = [
+    (
+        ".xmr-graph-custody-started-v23",
+        ".xmr-graph-custody-started-v23.staging",
+    ),
+    (
+        ".xmr-graph-custody-ready-v23",
+        ".xmr-graph-custody-ready-v23.staging",
+    ),
+    (
+        ".xmr-funding-vault-started-v23",
+        ".xmr-funding-vault-started-v23.staging",
+    ),
+    (
+        ".xmr-funding-vault-ready-v23",
+        ".xmr-funding-vault-ready-v23.staging",
+    ),
+    (
+        ".xmr-claim-vault-started-v23",
+        ".xmr-claim-vault-started-v23.staging",
+    ),
+    (
+        ".xmr-claim-vault-ready-v23",
+        ".xmr-claim-vault-ready-v23.staging",
+    ),
+];
+
 fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
-    for suffix in [
-        ".f7-v12-gate",
-        ".f7-v12-funding",
-        ".f7-v12-funding-signing-v20",
-        ".f7-v12-claim-issued",
-        ".f7-v12-claim-consumed",
-        ".f7-v12-claim-binding",
-        ".f7-v12-claim-pre",
-        ".f7-v12-claim-exposure-v14",
-        ".f7-v12-claim-admission-v14",
-        ".f7-v12-claim-observation-v15",
-        ".f7-v12-refund-transport-v23",
-    ] {
-        if exact_wrapped_hex(value, "", 64, suffix)
-            || exact_wrapped_hex(value, ".", 64, &format!("{suffix}.staging"))
-        {
+    // Both names are constants, so they are written as constants. Building the
+    // staging one with `format!` inside this loop allocated up to eleven
+    // Strings per classified component, and `ValidatedComponent::registered`
+    // classifies every path component of every Store operation: a perf record
+    // of run 89 attributed 16.9% of the daemon's CPU to this function, 12.4
+    // points of it inside format/realloc under exactly this call. Same names,
+    // same order, same result.
+    const WRAPPED_V12_NAMES: [(&str, &str); 11] = [
+        (".f7-v12-gate", ".f7-v12-gate.staging"),
+        (".f7-v12-funding", ".f7-v12-funding.staging"),
+        (
+            ".f7-v12-funding-signing-v20",
+            ".f7-v12-funding-signing-v20.staging",
+        ),
+        (".f7-v12-claim-issued", ".f7-v12-claim-issued.staging"),
+        (".f7-v12-claim-consumed", ".f7-v12-claim-consumed.staging"),
+        (".f7-v12-claim-binding", ".f7-v12-claim-binding.staging"),
+        (".f7-v12-claim-pre", ".f7-v12-claim-pre.staging"),
+        (
+            ".f7-v12-claim-exposure-v14",
+            ".f7-v12-claim-exposure-v14.staging",
+        ),
+        (
+            ".f7-v12-claim-admission-v14",
+            ".f7-v12-claim-admission-v14.staging",
+        ),
+        (
+            ".f7-v12-claim-observation-v15",
+            ".f7-v12-claim-observation-v15.staging",
+        ),
+        (
+            ".f7-v12-refund-transport-v23",
+            ".f7-v12-refund-transport-v23.staging",
+        ),
+    ];
+    for (suffix, staging) in WRAPPED_V12_NAMES {
+        if exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging) {
             return Some(ExpectedNodeType::RegularFile);
         }
     }
@@ -1521,73 +1677,17 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         || exact_wrapped_hex(value, ".", 64, ".template-transport-authority.staging")
         || exact_wrapped_hex(value, "", 64, ".bootstrap-wallet-keys-v18")
         || exact_wrapped_hex(value, ".", 64, ".bootstrap-wallet-keys-v18.staging")
-        || ["02", "03", "04"].iter().any(|edge| {
-            exact_wrapped_hex(
-                value,
-                "",
-                64,
-                &format!("-{edge}.xmr-graph-signing-session-v23"),
-            ) || exact_wrapped_hex(
-                value,
-                ".",
-                64,
-                &format!("-{edge}.xmr-graph-signing-session-v23.staging"),
-            )
+        || XMR_GRAPH_EDGE_NAMES_V23.iter().any(|(suffix, staging)| {
+            exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
-        || ["02", "03", "04"].iter().any(|edge| {
-            exact_wrapped_hex(
-                value,
-                "",
-                64,
-                &format!("-{edge}.xmr-graph-signing-origin-v23"),
-            ) || exact_wrapped_hex(
-                value,
-                ".",
-                64,
-                &format!("-{edge}.xmr-graph-signing-origin-v23.staging"),
-            )
-        })
-        || ["02-01", "02-02", "03-01", "04-01", "04-02"]
+        || XMR_GRAPH_RESOURCE_NAMES_V23
             .iter()
-            .any(|scope| {
-                ["started", "ready"].iter().any(|state| {
-                    exact_wrapped_hex(
-                        value,
-                        "",
-                        64,
-                        &format!("-{scope}.xmr-graph-resource-{state}-v23"),
-                    ) || exact_wrapped_hex(
-                        value,
-                        ".",
-                        64,
-                        &format!("-{scope}.xmr-graph-resource-{state}-v23.staging"),
-                    )
-                })
+            .any(|(suffix, staging)| {
+                exact_wrapped_hex(value, "", 64, suffix)
+                    || exact_wrapped_hex(value, ".", 64, staging)
             })
-        || ["started", "ready"].iter().any(|state| {
-            exact_wrapped_hex(value, "", 64, &format!(".xmr-graph-custody-{state}-v23"))
-                || exact_wrapped_hex(
-                    value,
-                    ".",
-                    64,
-                    &format!(".xmr-graph-custody-{state}-v23.staging"),
-                )
-        })
-        || ["started", "ready"].iter().any(|state| {
-            exact_wrapped_hex(value, "", 64, &format!(".xmr-funding-vault-{state}-v23"))
-                || exact_wrapped_hex(
-                    value,
-                    ".",
-                    64,
-                    &format!(".xmr-funding-vault-{state}-v23.staging"),
-                )
-                || exact_wrapped_hex(value, "", 64, &format!(".xmr-claim-vault-{state}-v23"))
-                || exact_wrapped_hex(
-                    value,
-                    ".",
-                    64,
-                    &format!(".xmr-claim-vault-{state}-v23.staging"),
-                )
+        || XMR_GRAPH_STATE_NAMES_V23.iter().any(|(suffix, staging)| {
+            exact_wrapped_hex(value, "", 64, suffix) || exact_wrapped_hex(value, ".", 64, staging)
         })
         || exact_wrapped_hex(value, "", 64, ".xmr-graph-commit-context-v23")
         || exact_wrapped_hex(value, ".", 64, ".xmr-graph-commit-context-v23.staging")
@@ -1934,11 +2034,44 @@ mod tests {
             ".f7-v12-claim-admission-v14",
             ".f7-v12-claim-observation-v15",
             ".f7-v12-refund-transport-v23",
+            "-02.xmr-graph-signing-session-v23",
+            "-03.xmr-graph-signing-session-v23",
+            "-04.xmr-graph-signing-session-v23",
+            "-02.xmr-graph-signing-origin-v23",
+            "-03.xmr-graph-signing-origin-v23",
+            "-04.xmr-graph-signing-origin-v23",
+            "-02-01.xmr-graph-resource-started-v23",
+            "-02-01.xmr-graph-resource-ready-v23",
+            "-02-02.xmr-graph-resource-started-v23",
+            "-02-02.xmr-graph-resource-ready-v23",
+            "-03-01.xmr-graph-resource-started-v23",
+            "-03-01.xmr-graph-resource-ready-v23",
+            "-04-01.xmr-graph-resource-started-v23",
+            "-04-01.xmr-graph-resource-ready-v23",
+            "-04-02.xmr-graph-resource-started-v23",
+            "-04-02.xmr-graph-resource-ready-v23",
+            ".xmr-graph-custody-started-v23",
+            ".xmr-graph-custody-ready-v23",
+            ".xmr-funding-vault-started-v23",
+            ".xmr-funding-vault-ready-v23",
+            ".xmr-claim-vault-started-v23",
+            ".xmr-claim-vault-ready-v23",
         ] {
             let final_name = format!("{session}{suffix}");
             let staging_name = format!(".{session}{suffix}.staging");
             assert!(ValidatedComponent::registered(&final_name).is_ok());
             assert!(ValidatedComponent::registered(&staging_name).is_ok());
+        }
+
+        for suffix in [
+            "-05.xmr-graph-signing-session-v23",
+            "-03-02.xmr-graph-resource-started-v23",
+            ".xmr-graph-custody-done-v23",
+        ] {
+            assert!(ValidatedComponent::registered(&format!("{session}{suffix}")).is_err());
+            assert!(
+                ValidatedComponent::registered(&format!(".{session}{suffix}.staging")).is_err()
+            );
         }
 
         for invalid in [
@@ -1979,25 +2112,43 @@ mod tests {
         Ok(())
     }
 
+    // procfs has no fsync operation (EINVAL, which `map_errno` classifies as
+    // an unsupported filesystem), so it is a parent that can be opened and
+    // read but never synchronized. A path-only handle to an ordinary
+    // directory is not such a parent: `fsync_capability_dir` reopens "."
+    // read-only before fsync, which is how the daemon's ambient state
+    // directory (opened O_PATH by cap-std) passes this same preflight.
     #[test]
     fn unsynchronizable_parent_fails_before_mutation() -> Result<(), Box<dyn Error>> {
+        let unsynchronizable = Arc::new(Dir::open_ambient_dir(
+            "/proc",
+            cap_std::ambient_authority(),
+        )?);
+        let error = RetainedDirectory::create_under(
+            unsynchronizable,
+            ValidatedComponent::operator_selected_root("must-not-exist")?,
+        )
+        .err();
+        assert!(
+            matches!(error, Some(LinuxCapabilityError::UnsupportedFilesystem)),
+            "{error:?}"
+        );
+        assert!(!Path::new("/proc/must-not-exist").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn path_only_parent_is_synchronized_through_reopen() -> Result<(), Box<dyn Error>> {
         let temporary = TestDirectory::create()?;
         let path_only = Arc::new(Dir::open_ambient_dir(
             temporary.path(),
             cap_std::ambient_authority(),
         )?);
-        let result = RetainedDirectory::create_under(
+        RetainedDirectory::create_under(
             path_only,
-            ValidatedComponent::operator_selected_root("must-not-exist")?,
-        );
-        assert!(matches!(
-            result,
-            Err(LinuxCapabilityError::OperationFailed {
-                operation: "fsync-directory-preflight",
-                ..
-            })
-        ));
-        assert!(!temporary.path().join("must-not-exist").exists());
+            ValidatedComponent::operator_selected_root("created-under-path-only")?,
+        )?;
+        assert!(temporary.path().join("created-under-path-only").is_dir());
         Ok(())
     }
 

@@ -1077,11 +1077,15 @@ fn verify_remote_response_cryptography_v23(
     response: &RemoteSweepResponseV23,
     quorum: &QuorumXmrObservationPortV1,
 ) -> Result<([u8; 32], [u8; 32], Vec<u8>), ChildAuthorityRefusalV1> {
+    // One aggregate ceiling for both quorum reads: sixteen ring members and
+    // the funding bytes are several daemon round-trips each, and their sum is
+    // what has to stay inside the lease the route step is holding.
+    let deadline = super::production_child_xmr::observation_deadline_v26();
     let funding_raw = quorum
-        .authenticated_funding_raw_v23(request.funding_tx_hash)
+        .authenticated_funding_raw_with_deadline_v24(request.funding_tx_hash, deadline)
         .map_err(super::production_child_xmr::map_actuator_error)?;
     let ring_members = quorum
-        .authenticate_remote_ring_v23(response.ring_members())
+        .authenticate_remote_ring_with_deadline_v24(response.ring_members(), deadline)
         .map_err(super::production_child_xmr::map_actuator_error)?;
     let input_proof = InputSpendProofV23::decode(response.input_spend_proof())
         .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;

@@ -1453,6 +1453,7 @@ impl ChainState {
                 *block_hash,
                 block,
                 self.coinbase_maturity,
+                chain_id.as_bytes(),
             )?;
         }
 
@@ -1488,7 +1489,9 @@ impl ChainState {
 
     fn validate_direct_extension_inputs(&self, block: &Block) -> Result<(), DomError> {
         let header = &block.header;
+        let chain_id = derive_chain_id(self.network_magic, &self.genesis_hash);
         for tx in &block.transactions {
+            let mut input_proofs = Vec::with_capacity(tx.inputs.len());
             for input in &tx.inputs {
                 let commitment_bytes = input.commitment.as_bytes();
                 let entry = self.store.get_utxo(commitment_bytes)?.ok_or_else(|| {
@@ -1505,7 +1508,14 @@ impl ChainState {
                         header.height.0, entry.block_height, self.coinbase_maturity
                     )));
                 }
+                input_proofs.push(entry.proof);
             }
+            dom_consensus::validate_swap_arbiter_input_proofs(
+                tx,
+                header.height,
+                chain_id.as_bytes(),
+                &input_proofs,
+            )?;
         }
         Ok(())
     }
@@ -1577,6 +1587,8 @@ fn reconstruct_canonical_utxo_set(
     network_magic: u32,
 ) -> Result<BTreeMap<[u8; 33], Vec<u8>>, DomError> {
     let mut utxos = BTreeMap::new();
+    let genesis_hash = dom_core::configured_genesis_hash_for_network_magic(network_magic)?;
+    let chain_id = derive_chain_id(network_magic, &genesis_hash);
     for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
             DomError::Internal(format!(
@@ -1629,6 +1641,36 @@ fn reconstruct_canonical_utxo_set(
         }
 
         for tx in &block.transactions {
+            let mut input_proofs = Vec::with_capacity(tx.inputs.len());
+            for input in &tx.inputs {
+                let commitment = *input.commitment.as_bytes();
+                let entry_bytes = utxos.get(&commitment).ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: canonical spend references missing UTXO {} at height {} during UTXO rebuild",
+                        hex::encode(commitment),
+                        h
+                    ))
+                })?;
+                let entry = UtxoEntry::from_bytes(entry_bytes).map_err(|error| {
+                    DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: canonical UTXO {} failed to decode at height {} during UTXO rebuild: {error}",
+                        hex::encode(commitment),
+                        h
+                    ))
+                })?;
+                input_proofs.push(entry.proof);
+            }
+            dom_consensus::validate_swap_arbiter_input_proofs(
+                tx,
+                block.header.height,
+                chain_id.as_bytes(),
+                &input_proofs,
+            )
+            .map_err(|error| {
+                DomError::Internal(format!(
+                    "{CHAIN_CORRUPT_SENTINEL}: canonical swap-arbiter spend is invalid at height {h} during UTXO rebuild: {error}"
+                ))
+            })?;
             for input in &tx.inputs {
                 let commitment = *input.commitment.as_bytes();
                 if utxos.remove(&commitment).is_none() {
@@ -1917,8 +1959,10 @@ fn apply_connect(
     block_hash: Hash256,
     block: &Block,
     coinbase_maturity: u64,
+    chain_id: &[u8; 32],
 ) -> Result<(), DomError> {
     for tx in &block.transactions {
+        let mut input_proofs = Vec::with_capacity(tx.inputs.len());
         for input in &tx.inputs {
             let commitment = *input.commitment.as_bytes();
             let entry = lookup_utxo(store, utxo_overlay, &commitment)?.ok_or_else(|| {
@@ -1933,8 +1977,15 @@ fn apply_connect(
                     block.header.height.0, entry.block_height, coinbase_maturity
                 )));
             }
+            input_proofs.push(entry.proof.clone());
             utxo_overlay.insert(commitment, None);
         }
+        dom_consensus::validate_swap_arbiter_input_proofs(
+            tx,
+            block.header.height,
+            chain_id,
+            &input_proofs,
+        )?;
     }
 
     let coinbase_commitment = *block.coinbase.output.commitment.as_bytes();

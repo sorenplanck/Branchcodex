@@ -79,6 +79,15 @@ pub(crate) trait ProductionDomChildClockV1 {
     fn now_unix_ms(&mut self) -> Result<u64, ChildAuthorityRefusalV1>;
 }
 
+/// Budget for one DOM chain validation context taken inside a route step.
+///
+/// The unbounded form walks from genesis to the tip with no ceiling of any
+/// kind, so its cost grows with the chain and one call can outlast the actuator
+/// lease the step is holding. Ten seconds is the same figure the F7 funding
+/// runtime already polls this context with (`F7_FUNDING_CONTEXT_POLL_BOUND_V24`),
+/// and running out is `TemporarilyUnavailable`, which every caller retries.
+const DOM_CHAIN_CONTEXT_BUDGET_V26: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Host wall-time boundary for production composition.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SystemProductionDomChildClockV1;
@@ -291,7 +300,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
             Ok((capability, DomOperationDispositionV1::AlreadyCompleted)) => {
                 Ok(CompletedDomCapabilityV1::Current(Box::new(capability)))
             }
-            Ok(_) => Err(ChildAuthorityRefusalV1::Conflict),
+            Ok(_) => Err(child_conflict_at_v25(294)),
             Err(DomActuatorError::ReconciliationRequired) => {
                 Ok(CompletedDomCapabilityV1::NeedsRefence)
             }
@@ -330,7 +339,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
         match scope.action() {
             DomActionV1::BroadcastFunding => {
                 if refund_context.is_some() {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(333));
                 }
                 let native = match funding_limit_v23 {
                     ProductionDomFundingLimitV23::Legacy => contracts
@@ -394,7 +403,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
                 })
             }
             DomActionV1::BroadcastRefund => {
-                let current_context = refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                let current_context = refund_context.ok_or_else(|| child_conflict_at_v25(397))?;
                 let broadcast =
                     match Self::completed_capability(control, lease, binding, now_unix_ms)? {
                         CompletedDomCapabilityV1::Current(capability) => contracts
@@ -423,7 +432,32 @@ impl ConcreteProductionDomActionAuthorityV1 {
             }
             DomActionV1::BroadcastClaim => {
                 if refund_context.is_some() {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(426));
+                }
+                if crate::production_relay_stage12::step_segment_v28(
+                    "claim_receiver_observation",
+                    || contracts.f7_receiver_observation_v25(trusted_chain_id),
+                )
+                .map_err(map_actuator_error)?
+                .is_some()
+                {
+                    return match crate::production_relay_stage12::step_segment_v28(
+                        "claim_receiver_verify",
+                        || {
+                            contracts.verified_f7_receiver_claim_v25(
+                                runtime,
+                                trusted_chain_id,
+                                binding.transaction_id(),
+                            )
+                        },
+                    ) {
+                        Ok(_) => Ok(ProductionDomActionResultV1::Externalized),
+                        Err(
+                            DomActuatorError::FinalityPending
+                            | DomActuatorError::RpcAuthorityUnavailable,
+                        ) => Ok(ProductionDomActionResultV1::Unknown),
+                        Err(error) => Err(map_actuator_error(error)),
+                    };
                 }
                 if let Some(progress) = contracts
                     .f7_final_claim_progress_v21(trusted_chain_id)
@@ -436,7 +470,9 @@ impl ConcreteProductionDomActionAuthorityV1 {
                         now_unix_ms,
                     };
                     let admitted = match progress {
-                        Progress::NeedsAdaptation => return Err(ChildAuthorityRefusalV1::Conflict),
+                        Progress::NeedsAdaptation => {
+                            return Err(ChildAuthorityRefusalV1::Unavailable)
+                        }
                         Progress::Exposed => {
                             let submission = contracts
                                 .resume_f7_final_claim_submission_v14(
@@ -446,14 +482,16 @@ impl ConcreteProductionDomActionAuthorityV1 {
                                     recovery,
                                 )
                                 .map_err(map_actuator_error)?;
-                            let receipt =
-                                match contracts.dispatch_f7_final_claim_v14(runtime, &submission) {
-                                    Ok(receipt) => receipt,
-                                    Err(DomActuatorError::RpcAuthorityUnavailable) => {
-                                        return Ok(ProductionDomActionResultV1::Unknown)
-                                    }
-                                    Err(error) => return Err(map_actuator_error(error)),
-                                };
+                            let receipt = match crate::production_relay_stage12::step_segment_v28(
+                                "claim_dispatch_f7_submit",
+                                || contracts.dispatch_f7_final_claim_v14(runtime, &submission),
+                            ) {
+                                Ok(receipt) => receipt,
+                                Err(DomActuatorError::RpcAuthorityUnavailable) => {
+                                    return Ok(ProductionDomActionResultV1::Unknown)
+                                }
+                                Err(error) => return Err(map_actuator_error(error)),
+                            };
                             let after_rpc = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .ok()
@@ -555,11 +593,11 @@ impl ConcreteProductionDomActionAuthorityV1 {
                         }
                     }
                     DomClaimCustodyClassificationV1::Unattempted => {
-                        Err(ChildAuthorityRefusalV1::Conflict)
+                        Err(ChildAuthorityRefusalV1::Unavailable)
                     }
                 }
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(564)),
         }
     }
 }
@@ -602,7 +640,7 @@ impl ProductionDomActionAuthorityV1 for ConcreteProductionDomActionAuthorityV1 {
                     {
                         Ok(ProductionDomActionResultV1::Externalized)
                     }
-                    Ok(_) => Err(ChildAuthorityRefusalV1::Conflict),
+                    Ok(_) => Err(child_conflict_at_v25(607)),
                     Err(
                         DomActuatorError::FinalityPending
                         | DomActuatorError::RpcAuthorityUnavailable,
@@ -626,6 +664,7 @@ pub(crate) struct ProductionDomChildPortV1<C, A> {
     lease_renewal_ms_v12: Option<u64>,
     funding_window_v23: Option<crate::production_timer::ProductionFundingWindowV23>,
     route_terms_digest: Digest32,
+    dom_consensus_rules_digest: Digest32,
     materialization_scope: ProductionDomMaterializationScopeV1,
 }
 
@@ -654,7 +693,7 @@ impl ProductionDomMaterializationScopeV1 {
                 upstream_scope,
                 downstream_scope,
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+            .map_err(|_| child_conflict_at_v25(659))?;
         let upstream = role_plan.entry(ComposedSettlementLegV1::Upstream);
         let downstream = role_plan.entry(ComposedSettlementLegV1::Downstream);
         if role_plan.route_id() != inputs.admission().route_id()
@@ -663,7 +702,7 @@ impl ProductionDomMaterializationScopeV1 {
             || upstream.secret_source_scope_digest() == ZERO_DIGEST
             || downstream.secret_source_scope_digest() == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(668));
         }
         Ok(Self {
             route_id: role_plan.route_id(),
@@ -691,6 +730,10 @@ struct ProductionDomChildSessionV1<A> {
     binding: DomSessionBindingV1,
     contracts: ProductionDomChildStoreAuthorityV1,
     actions: A,
+    // A process-local continuation of an already durable admission. The exact
+    // dispatch digest pins it across reconciliation; losing it on restart is
+    // harmless because the Contracts journal rehydrates that same admission.
+    pending_claim_transport_v29: Option<(Digest32, ProductionDomActionResultV1)>,
 }
 
 /// One exact DOM settlement context owned by the composed route port.
@@ -708,6 +751,12 @@ pub(crate) struct ProductionDomChildBindingsV1 {
     pub(crate) trusted_chain_id: TrustedChainIdV1,
     pub(crate) runtime: RealDomRpcRuntimeV1,
     pub(crate) route_terms_digest: Digest32,
+    /// Raw consensus-rules digest of the admitted DOM deployment. The F6
+    /// session binding commits to exactly this value, never to the
+    /// adapter-profile hash that the registry derives over the whole
+    /// deployment; the two are distinct commitments (the hash contains the
+    /// digest) and can never be equal to each other.
+    pub(crate) dom_consensus_rules_digest: Digest32,
     pub(crate) materialization_scope: ProductionDomMaterializationScopeV1,
 }
 
@@ -994,7 +1043,7 @@ pub(crate) fn compose_production_dom_child_port_v12(
     duration_ms: u64,
 ) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
     if duration_ms == 0 || duration_ms > 3_600_000 {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(999));
     }
     compose_production_dom_child_port_with_renewal_v12(control, bindings, Some(duration_ms))
 }
@@ -1008,7 +1057,7 @@ pub(crate) fn compose_production_dom_child_port_v23(
     funding_window: crate::production_timer::ProductionFundingWindowV23,
 ) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
     if duration_ms == 0 || duration_ms > 3_600_000 {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(1013));
     }
     compose_production_dom_child_port_bounded_v23(
         control,
@@ -1046,7 +1095,7 @@ fn compose_production_dom_child_port_bounded_v23(
     port.renew_actuator_lease_v12()?;
     let f7_scanner = ProductionDomF7ScannerAuthorityV1::from_child_runtime(&port.runtime);
     if !f7_scanner.shares_runtime(&port.runtime) {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(1051));
     }
     Ok(ProductionDomChildCompositionV1 {
         child: ProductionSettlementChildRouterV1::authenticate_dom(port),
@@ -1079,6 +1128,7 @@ where
             trusted_chain_id,
             runtime,
             route_terms_digest,
+            dom_consensus_rules_digest,
             materialization_scope,
         } = bindings;
         let [upstream, downstream] = sessions;
@@ -1089,6 +1139,9 @@ where
             || upstream.settlement_id == ZERO_DIGEST
             || downstream.settlement_id == ZERO_DIGEST
             || route_terms_digest == ZERO_DIGEST
+            || dom_consensus_rules_digest == ZERO_DIGEST
+            || upstream.binding.profile_digest() != dom_consensus_rules_digest
+            || downstream.binding.profile_digest() != dom_consensus_rules_digest
             || upstream.settlement_id == downstream.settlement_id
             || upstream.binding.session_id() == downstream.binding.session_id()
             || upstream.binding.route_id() != downstream.binding.route_id()
@@ -1107,7 +1160,7 @@ where
             || lease.fencing_epoch() == 0
             || lease.lease_until_unix_ms() == 0
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1112));
         }
         for session in [&upstream, &downstream] {
             let head = session
@@ -1124,7 +1177,7 @@ where
                 || head.session_id() != session.binding.session_id()
                 || head.terms_hash() != session.binding.terms_digest()
             {
-                return Err(ChildAuthorityRefusalV1::Conflict);
+                return Err(child_conflict_at_v25(1129));
             }
         }
         // Startup binds the existing DOM client and native Store only. The
@@ -1137,19 +1190,21 @@ where
                 upstream.leg,
                 upstream.settlement_id,
                 upstream.binding,
+                dom_consensus_rules_digest,
                 trusted_chain_id,
                 Arc::clone(&runtime),
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+            .map_err(|_| child_conflict_at_v25(1145))?,
             ProductionDomPublicSecretConsumerAuthorityV1::authenticate(
                 composition_digest,
                 downstream.leg,
                 downstream.settlement_id,
                 downstream.binding,
+                dom_consensus_rules_digest,
                 trusted_chain_id,
                 Arc::clone(&runtime),
             )
-            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+            .map_err(|_| child_conflict_at_v25(1154))?,
         ];
         let port = Self {
             control,
@@ -1160,6 +1215,7 @@ where
                     binding: upstream.binding,
                     contracts: upstream.contracts,
                     actions: upstream_actions,
+                    pending_claim_transport_v29: None,
                 },
                 ProductionDomChildSessionV1 {
                     leg: downstream.leg,
@@ -1167,6 +1223,7 @@ where
                     binding: downstream.binding,
                     contracts: downstream.contracts,
                     actions: downstream_actions,
+                    pending_claim_transport_v29: None,
                 },
             ],
             lease,
@@ -1176,6 +1233,7 @@ where
             lease_renewal_ms_v12: None,
             funding_window_v23: None,
             route_terms_digest,
+            dom_consensus_rules_digest,
             materialization_scope,
         };
         Ok((port, public_secret_consumers))
@@ -1252,6 +1310,7 @@ where
         expected.validate_static(
             session.settlement_id,
             self.route_terms_digest,
+            self.dom_consensus_rules_digest,
             session.binding,
             self.lease,
             &self.trusted_chain_id,
@@ -1294,7 +1353,9 @@ where
         {
             Some(
                 self.runtime
-                    .current_transaction_validation_context()
+                    .current_transaction_validation_context_bounded_v23(
+                        DOM_CHAIN_CONTEXT_BUDGET_V26,
+                    )
                     .map_err(map_runtime_binding_error)?,
             )
         } else {
@@ -1319,7 +1380,7 @@ where
             SettlementActionV1::Refund if native_refund_observer.is_some() => {
                 let driver = native_refund_observer
                     .as_ref()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(1324))?;
                 contracts.retained_native_xmr_refund_settlement_child_binding_v23(
                     &mut self.control,
                     self.lease,
@@ -1331,7 +1392,7 @@ where
             SettlementActionV1::Refund if native_refund.is_some() => {
                 let native = native_refund
                     .as_ref()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(1336))?;
                 contracts.bind_native_xmr_refund_settlement_child_v23(
                     &mut self.control,
                     self.lease,
@@ -1345,7 +1406,7 @@ where
                 &mut self.control,
                 self.lease,
                 binding_request,
-                refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?,
+                refund_context.ok_or_else(|| child_conflict_at_v25(1350))?,
                 now_unix_ms,
             ),
         }
@@ -1385,9 +1446,9 @@ where
         let evidence = ChildEvidenceBindingV1::from_dispatch(request);
         Ok(DomSettlementChildPortCallOutcomeV1::Externalized {
             evidence_digest: externalization_evidence_v1(&evidence)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1390))?,
             first_exposure_evidence_digest: first_exposure_evidence_v1(&evidence)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1392))?,
         })
     }
 
@@ -1403,19 +1464,19 @@ where
             DomSettlementChildPortCallOutcomeV1::RetryableBeforeExternalization { .. } => {
                 DomSettlementChildPortCallOutcomeV1::RetryableBeforeExternalization {
                     evidence_digest: retryable_before_externalization_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1408))?,
                 }
             }
             DomSettlementChildPortCallOutcomeV1::Unknown { .. } => {
                 DomSettlementChildPortCallOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1414))?,
                 }
             }
-            _ => return Err(ChildAuthorityRefusalV1::Conflict),
+            _ => return Err(child_conflict_at_v25(1417)),
         };
         if outcome != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1420));
         }
         Ok(expected)
     }
@@ -1434,19 +1495,19 @@ where
             {
                 DomSettlementChildPortCallOutcomeV1::ProvenNotExternalized {
                     evidence_digest: proven_not_externalized_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1439))?,
                 }
             }
             DomSettlementChildPortCallOutcomeV1::Unknown { .. } => {
                 DomSettlementChildPortCallOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1445))?,
                 }
             }
-            _ => return Err(ChildAuthorityRefusalV1::Conflict),
+            _ => return Err(child_conflict_at_v25(1448)),
         };
         if outcome != expected {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1451));
         }
         Ok(expected)
     }
@@ -1468,7 +1529,7 @@ where
                 let evidence = ChildEvidenceBindingV1::from_dispatch(request);
                 Ok(DomSettlementChildPortCallOutcomeV1::Unknown {
                     evidence_digest: unknown_evidence_v1(&evidence)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                        .map_err(|_| child_conflict_at_v25(1473))?,
                 })
             }
         }
@@ -1495,7 +1556,7 @@ where
             DomSettlementChildPortCallOutcomeV1::Unknown { evidence_digest } => {
                 Ok(ChildExecutionOutcomeV1::Unknown { evidence_digest })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1500)),
         }
     }
 
@@ -1520,7 +1581,7 @@ where
             DomSettlementChildPortCallOutcomeV1::Unknown { evidence_digest } => {
                 Ok(ChildReconciliationOutcomeV1::Unknown { evidence_digest })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1525)),
         }
     }
 
@@ -1530,7 +1591,7 @@ where
         let binding = ChildObservationEvidenceBindingV1::from_observation(request);
         Ok(DomSettlementChildPortCallOutcomeV1::Pending {
             evidence_digest: observation_pending_evidence_v1(&binding)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1535))?,
         })
     }
 
@@ -1539,7 +1600,7 @@ where
         observation: DomFinalityObservationV1,
     ) -> Result<DomSettlementChildPortCallOutcomeV1, ChildAuthorityRefusalV1> {
         if observation.transaction_id() != request.transaction_id {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1544));
         }
         let binding = ChildObservationEvidenceBindingV1::from_observation(request);
         let facts = ChildFinalityFactsV1 {
@@ -1549,7 +1610,7 @@ where
         };
         Ok(DomSettlementChildPortCallOutcomeV1::Final {
             evidence_digest: observation_final_evidence_v1(&binding, &facts)
-                .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                .map_err(|_| child_conflict_at_v25(1554))?,
         })
     }
 
@@ -1566,7 +1627,7 @@ where
                             evidence_digest: prior,
                         })
                     {
-                        return Err(ChildAuthorityRefusalV1::Conflict);
+                        return Err(child_conflict_at_v25(1571));
                     }
                 }
                 Ok(outcome)
@@ -1579,7 +1640,7 @@ where
                 reorg_evidence_digest,
             } => {
                 if transaction_id != request.transaction_id {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1584));
                 }
                 let binding = ChildObservationEvidenceBindingV1::from_observation(request);
                 let prior_facts = ChildFinalityFactsV1 {
@@ -1588,9 +1649,9 @@ where
                     final_block_number: prior_block_height,
                 };
                 let prior = observation_final_evidence_v1(&binding, &prior_facts)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+                    .map_err(|_| child_conflict_at_v25(1593))?;
                 if request.prior_finality_evidence_digest != Some(prior) {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1595));
                 }
                 Ok(DomSettlementChildPortCallOutcomeV1::FinalityInvalidated {
                     prior_finality_evidence_digest: prior,
@@ -1599,7 +1660,7 @@ where
                         prior,
                         reorg_evidence_digest,
                     )
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+                    .map_err(|_| child_conflict_at_v25(1604))?,
                 })
             }
         }
@@ -1622,17 +1683,33 @@ where
         now_unix_ms: u64,
     ) -> Result<DomSettlementChildPortCallOutcomeV1, ChildAuthorityRefusalV1> {
         let evidence = Self::evidence_ref(validated);
+        // Taken before the call borrows `self.control` mutably.
+        let funding_deadline = self.funding_observation_deadline_v26();
         let session = &self.sessions[validated.session_index];
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
         let observed = match validated.expected.action {
-            SettlementActionV1::Funding => contracts.observe_funding_finality(
+            // Bounded, resumable funding observation. The unbounded sibling
+            // rewalks the chain from genesis on every round, so its cost grows
+            // with the tip while the actuator lease stays fixed: past a few
+            // hundred blocks one round outlasts the lease, `renew_actuator_
+            // lease_v12` reports `Unavailable` and the composition root kills
+            // the process. This variant keeps the authenticated prefix across
+            // rounds and yields `TemporarilyUnavailable` when it runs out of
+            // budget, which the caller already treats as "observe again".
+            // A retained prefix is never evidence: each grant still re-anchors
+            // and walks the full canonical chain against the rechecked tip.
+            SettlementActionV1::Funding => contracts.observe_funding_finality_until_v23(
                 &mut self.control,
                 self.lease,
                 &self.runtime,
                 &self.trusted_chain_id,
                 &evidence,
                 now_unix_ms,
+                funding_deadline,
             ),
+            // Same budget as the funding sibling: the claim observation runs
+            // once per round while the tip keeps growing, so an unbounded walk
+            // here is what let the actuator lease lapse mid-claim.
             SettlementActionV1::Claim => contracts.observe_native_claim_settlement_finality_v15(
                 &mut self.control,
                 self.lease,
@@ -1640,11 +1717,12 @@ where
                 &self.trusted_chain_id,
                 &evidence,
                 now_unix_ms,
+                funding_deadline,
             ),
             SettlementActionV1::Refund if validated.native_driver_v23().is_some() => {
                 let driver = validated
                     .native_driver_v23()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(1649))?;
                 let observation_now = fresh_dom_time(&mut self.clock, now_unix_ms)?;
                 let observed = driver.observe_refund_share_bounded_v23(
                     native_refund_budget_v23(self.lease, observation_now)?,
@@ -1714,10 +1792,15 @@ where
                     .filter(|remaining| *remaining > 0)
                     .ok_or(DomActuatorError::LeaseExpired)?
                     .min(60_000);
+                // The lease-derived figure bounds this call alone; the armed
+                // route-step ceiling bounds the step all such calls share.
+                let budget =
+                    route_step_deadline::remaining(std::time::Duration::from_millis(budget_ms))
+                        .ok_or(DomActuatorError::RpcAuthorityUnavailable)?;
                 let observed = driver.observe_refund_reorg_v23(
                     &checkpoint,
                     validated.binding.transaction_id(),
-                    std::time::Duration::from_millis(budget_ms),
+                    budget,
                 );
                 let now_unix_ms = fresh_dom_time(&mut self.clock, observation_now)
                     .map_err(|_| DomActuatorError::RpcAuthorityUnavailable)?;
@@ -1834,7 +1917,7 @@ where
                     .map_err(map_actuator_error)?;
                 if prior.is_some() {
                     return recovered
-                        .ok_or(ChildAuthorityRefusalV1::Conflict)
+                        .ok_or_else(|| child_conflict_at_v25(1839))
                         .and_then(|value| Self::revalidation_observation(request, value));
                 }
             }
@@ -1850,7 +1933,7 @@ where
         match outcome {
             DomSettlementChildPortCallOutcomeV1::Pending { evidence_digest } => {
                 if outcome != Self::pending_observation(request)? {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1855));
                 }
                 Ok(ChildObservationOutcomeV1::Pending { evidence_digest })
             }
@@ -1859,7 +1942,7 @@ where
                     .prior_finality_evidence_digest
                     .is_some_and(|prior| prior != evidence_digest)
                 {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1864));
                 }
                 Ok(ChildObservationOutcomeV1::Final { evidence_digest })
             }
@@ -1868,15 +1951,35 @@ where
                 reorg_evidence_digest,
             } => {
                 if request.prior_finality_evidence_digest != Some(prior_finality_evidence_digest) {
-                    return Err(ChildAuthorityRefusalV1::Conflict);
+                    return Err(child_conflict_at_v25(1873));
                 }
                 Ok(ChildObservationOutcomeV1::FinalityInvalidated {
                     prior_finality_evidence_digest,
                     reorg_evidence_digest,
                 })
             }
-            _ => Err(ChildAuthorityRefusalV1::Conflict),
+            _ => Err(child_conflict_at_v25(1880)),
         }
+    }
+}
+
+impl<C, A> ProductionDomChildPortV1<C, A> {
+    /// Budget for one bounded funding observation, taken from the very lease
+    /// it must not outlast. `renew_actuator_lease_v12` tops up after one
+    /// eighth of the lease has been spent. This scan uses at most a quarter
+    /// of the configured duration and also respects the enclosing step's
+    /// deadline. Without automatic renewal, the fixed fallback still needs
+    /// the same Store lease checks before its result can be committed.
+    fn funding_observation_deadline_v26(&self) -> std::time::Instant {
+        const DEFAULT_BUDGET_MS_V26: u64 = 15_000;
+        let budget = self
+            .lease_renewal_ms_v12
+            .map_or(DEFAULT_BUDGET_MS_V26, |renewal| {
+                (renewal / 4).clamp(1_000, DEFAULT_BUDGET_MS_V26)
+            });
+        adapter_dom_real::route_step_deadline_v27::clamp_v27(
+            std::time::Instant::now() + std::time::Duration::from_millis(budget),
+        )
     }
 }
 
@@ -1894,15 +1997,60 @@ where
             return Ok(());
         };
         let now = self.clock.now_unix_ms()?;
-        let remaining = self
+        let Some(remaining) = self
             .lease
             .lease_until_unix_ms()
             .checked_sub(now)
             .filter(|remaining| *remaining > 0)
-            .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
-        if remaining <= duration / 2 {
+        else {
+            eprintln!(
+                "DOM_RENEW_SITE_V26 site=dom_lease_lapsed until={} now={now} phase={}",
+                self.lease.lease_until_unix_ms(),
+                crate::production_relay_stage12::lease_phase_v25()
+            );
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        };
+        // Top up as soon as an eighth of the lease has been spent. Renewing
+        // only at the half-way mark silently assumes the heartbeat is sampled
+        // far more often than half a lease; a single route step that outlasts
+        // that assumption never produces the half-way call, and the lease
+        // lapses while its owner is alive and working. Spending an eighth
+        // bounds the write rate to one per eighth-lease while leaving the
+        // full remaining lease as the margin against a slow step. Nothing is
+        // weakened: the lease still dies if the owner stops beating for a
+        // whole duration, and every operation revalidates it at the Store.
+        if remaining <= duration - duration / 8 {
             self.lease = renew_dom_lease_v12(&mut self.control, self.lease, now, duration)?;
         }
+        Ok(())
+    }
+
+    /// Unconditional variant for the instant before one route step. The step
+    /// spends its whole wall clock against this lease without renewing, so the
+    /// write-rate skip above is wrong there: skipping at a remaining lease of
+    /// 106 s once cost the step that then legitimately ran 113 s. One extra
+    /// single-row write per route step is the entire cost. A lapsed lease is
+    /// still refused, exactly as above.
+    fn renew_actuator_lease_before_step_v27(&mut self) -> Result<(), ChildAuthorityRefusalV1> {
+        let Some(duration) = self.lease_renewal_ms_v12 else {
+            return Ok(());
+        };
+        let now = self.clock.now_unix_ms()?;
+        if self
+            .lease
+            .lease_until_unix_ms()
+            .checked_sub(now)
+            .filter(|remaining| *remaining > 0)
+            .is_none()
+        {
+            eprintln!(
+                "DOM_RENEW_SITE_V26 site=dom_lease_lapsed until={} now={now} phase={}",
+                self.lease.lease_until_unix_ms(),
+                crate::production_relay_stage12::lease_phase_v25()
+            );
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        self.lease = renew_dom_lease_v12(&mut self.control, self.lease, now, duration)?;
         Ok(())
     }
 
@@ -1943,24 +2091,79 @@ where
             || request.role_plan_digest == ZERO_DIGEST
             || request.source_scope_digest == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(1948));
         }
         let session_index = self.session_index(request.settlement_id, request.leg)?;
         let session = &self.sessions[session_index];
-        if session.binding.route_id() != request.route_id
-            || session.settlement_id != request.settlement_id
-            || request.terms_digest != self.route_terms_digest
-            || session.binding.profile_digest() != request.profile_digest
-            || session.binding.deployment_digest() != request.deployment_digest
-            || session.binding.deployment_digest() != request.registry_digest
-            || self.lease.fencing_epoch() != request.fencing_epoch
-            || request.route_id != self.materialization_scope.route_id
-            || request.route_scope_digest != self.materialization_scope.route_scope_digest
-            || request.composition_digest != self.materialization_scope.composition_digest
-            || request.role_plan_digest != self.materialization_scope.role_plan_digest
-            || request.source_scope_digest != self.materialization_scope.source_scope(request.leg)
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+        // Every pin keeps its own name. One collapsed refusal over twelve
+        // distinct commitments hid a real defect behind another for three
+        // whole ceremony runs; the classification costs nothing and each pin
+        // below remains exactly as fatal as it was.
+        for (pin, refused) in [
+            (
+                "binding_route",
+                session.binding.route_id() != request.route_id,
+            ),
+            (
+                "session_settlement",
+                session.settlement_id != request.settlement_id,
+            ),
+            ("terms", request.terms_digest != self.route_terms_digest),
+            // The session binding carries the raw consensus-rules digest it
+            // was built from; `request.profile_digest` carries the adapter
+            // profile hash the registry derives over the whole deployment,
+            // which contains that digest. Pin the binding against its own
+            // source: the request side is already pinned to the admitted
+            // deployment by the router before this call.
+            (
+                "binding_consensus_rules",
+                session.binding.profile_digest() != self.dom_consensus_rules_digest,
+            ),
+            (
+                "binding_deployment",
+                session.binding.deployment_digest() != request.deployment_digest,
+            ),
+            (
+                "binding_registry",
+                session.binding.deployment_digest() != request.registry_digest,
+            ),
+            // Two independent fences, never one. `request.fencing_epoch` is
+            // the route fence: the route store owns it, keyed by route, and
+            // the supervisor authenticates it before this call. The actuator
+            // lease carries its own fence: the DOM actuator store owns it,
+            // keyed by participant, with its own duration. Neither
+            // `acquire_lease` accepts an epoch from the other, so the two
+            // counters cannot be aligned and coincide only while both are
+            // still their initial generation. Pin each against its own
+            // source, exactly as the profile digest above and as the XMR
+            // child already does.
+            ("route_fence", request.fencing_epoch == 0),
+            ("lease_fence", self.lease.fencing_epoch() == 0),
+            (
+                "scope_route",
+                request.route_id != self.materialization_scope.route_id,
+            ),
+            (
+                "scope_route_scope",
+                request.route_scope_digest != self.materialization_scope.route_scope_digest,
+            ),
+            (
+                "scope_composition",
+                request.composition_digest != self.materialization_scope.composition_digest,
+            ),
+            (
+                "scope_role_plan",
+                request.role_plan_digest != self.materialization_scope.role_plan_digest,
+            ),
+            (
+                "scope_source",
+                request.source_scope_digest != self.materialization_scope.source_scope(request.leg),
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_CHILD_MATERIALIZE_PIN_V25 pin={pin}");
+                return Err(ChildAuthorityRefusalV1::Conflict);
+            }
         }
         let leg = [leg_tag(request.leg)];
         let action = [action_tag(request.action)];
@@ -2015,7 +2218,9 @@ where
             if request.action == SettlementActionV1::Refund && native_refund.is_none() {
                 Some(
                     self.runtime
-                        .current_transaction_validation_context()
+                        .current_transaction_validation_context_bounded_v23(
+                            DOM_CHAIN_CONTEXT_BUDGET_V26,
+                        )
                         .map_err(map_runtime_binding_error)?,
                 )
             } else {
@@ -2026,6 +2231,19 @@ where
         } else {
             pre_context_now
         };
+        if request.action == SettlementActionV1::Claim {
+            // Full top-up right before the native claim exposure, which runs
+            // a bounded XMR funding check and a DOM RPC and then re-checks
+            // `now <= lease_until`. The entry renewal only tops up once half
+            // the lease is gone, so entering with half a lease is not enough.
+            let now = self.clock.now_unix_ms()?;
+            self.lease = top_up_dom_lease_v25(
+                &mut self.control,
+                self.lease,
+                now,
+                self.lease_renewal_ms_v12,
+            )?;
+        }
         let native_claim = request.action == SettlementActionV1::Claim
             && session
                 .contracts
@@ -2061,7 +2279,7 @@ where
             SettlementActionV1::Refund if native_refund.is_some() => {
                 let native = native_refund
                     .as_ref()
-                    .ok_or(ChildAuthorityRefusalV1::Conflict)?;
+                    .ok_or_else(|| child_conflict_at_v25(2079))?;
                 contracts.bind_native_xmr_refund_settlement_child_v23(
                     &mut self.control,
                     self.lease,
@@ -2075,7 +2293,7 @@ where
                 &mut self.control,
                 self.lease,
                 binding_request,
-                refund_context.ok_or(ChildAuthorityRefusalV1::Conflict)?,
+                refund_context.ok_or_else(|| child_conflict_at_v25(2093))?,
                 now,
             ),
         }
@@ -2085,7 +2303,7 @@ where
             || retained.locator().custody_digest() != custody_digest
             || retained.transaction_id() == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(2103));
         }
         Ok(SettlementChildPlanV1 {
             face: SettlementFaceV1::Dom,
@@ -2110,7 +2328,11 @@ where
         {
             return Err(ChildAuthorityRefusalV1::Unavailable);
         }
-        let validated = self.validate_dispatch(request, now)?;
+        let validated =
+            crate::production_relay_stage12::step_segment_v28("dom_validate_dispatch", || {
+                self.validate_dispatch(request, now)
+            })?;
+        self.renew_actuator_lease_v12()?;
         let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = dispatch_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
@@ -2133,9 +2355,21 @@ where
             request_digest,
             refund_context: validated.refund_context,
         };
+        let dispatch_identity = request_digest;
         let session = &mut self.sessions[validated.session_index];
+        let pending = session.pending_claim_transport_v29.take();
+        if pending
+            .as_ref()
+            .is_some_and(|(identity, _)| *identity != dispatch_identity)
+        {
+            session.pending_claim_transport_v29 = pending;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        let resuming_transport = pending.is_some();
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
-        let returned = if let Some(native) = &validated.native_refund {
+        let returned = if let Some((_, admitted)) = pending {
+            admitted
+        } else if let Some(native) = &validated.native_refund {
             // The completed locator is backed by a fresh canonical U token,
             // not a new send permission. Do not invoke the plain broadcaster.
             native
@@ -2144,25 +2378,49 @@ where
                 .map_err(map_runtime_binding_error)?;
             ProductionDomActionResultV1::Externalized
         } else {
-            session.actions.externalize(
-                ProductionDomActionContextV1 {
-                    contracts: &contracts,
-                    control: &mut self.control,
-                    lease: self.lease,
-                    trusted_chain_id: &self.trusted_chain_id,
-                    runtime: &self.runtime,
-                    now_unix_ms: now,
-                    funding_limit_v23,
-                },
-                call,
-            )?
+            crate::production_relay_stage12::step_segment_v28("dom_actions_externalize", || {
+                session.actions.externalize(
+                    ProductionDomActionContextV1 {
+                        contracts: &contracts,
+                        control: &mut self.control,
+                        lease: self.lease,
+                        trusted_chain_id: &self.trusted_chain_id,
+                        runtime: &self.runtime,
+                        now_unix_ms: now,
+                        funding_limit_v23,
+                    },
+                    call,
+                )
+            })?
         };
-        let returned = stage_final_claim_transport_v1(
-            &mut session.contracts,
-            &self.trusted_chain_id,
-            returned,
-        )?;
+        // Admission and transport staging are separate durable operations.
+        // Do not spend both in the same leased route step. In particular, a
+        // receiver's Externalized result never enters this sender continuation.
+        if !resuming_transport
+            && route_step_deadline::armed().is_some()
+            && matches!(
+                &returned,
+                ProductionDomActionResultV1::F7ClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimTransportStarted
+            )
+        {
+            session.pending_claim_transport_v29 = Some((dispatch_identity, returned));
+            self.renew_actuator_lease_v12()?;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        self.renew_actuator_lease_v12()?;
+        let session = &mut self.sessions[validated.session_index];
+        let returned =
+            crate::production_relay_stage12::step_segment_v28("dom_stage_claim_transport", || {
+                stage_final_claim_transport_v1(
+                    &mut session.contracts,
+                    &self.trusted_chain_id,
+                    returned,
+                )
+            })?;
         let outcome = Self::dispatch_authority_outcome(request, returned)?;
+        self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
         let committed = self
             .control
@@ -2180,14 +2438,22 @@ where
         let now = self.clock.now_unix_ms()?;
         let funding_limit_v23 =
             self.funding_limit_v23(request.dispatch.route_id(), now, started)?;
-        if request.current_route_fencing_epoch != request.dispatch.route_fencing_epoch()
+        // Refuse a regression, not an authenticated advance. The coordinator
+        // resumes a pending call under a newer owner by preserving the original
+        // operation and presenting the current authority separately, so
+        // demanding equality here turned a legitimate takeover into Conflict
+        // after any restart with a call in flight. The XMR child already
+        // compares both epochs this way, and the exact operation is still
+        // authenticated below by `validate_dispatch`.
+        if request.current_route_fencing_epoch < request.dispatch.route_fencing_epoch()
             || request.current_coordinator_fencing_epoch
                 < request.dispatch.coordinator_fencing_epoch()
             || request.reconciliation_attempt_id == ZERO_DIGEST
         {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+            return Err(child_conflict_at_v25(2204));
         }
         let validated = self.validate_dispatch(&request.dispatch, now)?;
+        self.renew_actuator_lease_v12()?;
         let now = fresh_dom_time(&mut self.clock, now)?;
         let request_digest = reconciliation_request_digest(request)?;
         let key = DomSettlementChildPortCallKeyV1::new(
@@ -2210,9 +2476,21 @@ where
             request_digest,
             refund_context: validated.refund_context,
         };
+        let dispatch_identity = dispatch_request_digest(&request.dispatch)?;
         let session = &mut self.sessions[validated.session_index];
+        let pending = session.pending_claim_transport_v29.take();
+        if pending
+            .as_ref()
+            .is_some_and(|(identity, _)| *identity != dispatch_identity)
+        {
+            session.pending_claim_transport_v29 = pending;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        let resuming_transport = pending.is_some();
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
-        let returned = if let Some(native) = &validated.native_refund {
+        let returned = if let Some((_, admitted)) = pending {
+            admitted
+        } else if let Some(native) = &validated.native_refund {
             native
                 .observed
                 .require_recent_v23()
@@ -2232,12 +2510,31 @@ where
                 call,
             )?
         };
+        // Admission and transport staging are separate durable operations.
+        // Do not spend both in the same leased route step. In particular, a
+        // receiver's Externalized result never enters this sender continuation.
+        if !resuming_transport
+            && route_step_deadline::armed().is_some()
+            && matches!(
+                &returned,
+                ProductionDomActionResultV1::F7ClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimAdmitted(_)
+                    | ProductionDomActionResultV1::FinalClaimTransportStarted
+            )
+        {
+            session.pending_claim_transport_v29 = Some((dispatch_identity, returned));
+            self.renew_actuator_lease_v12()?;
+            return Err(ChildAuthorityRefusalV1::Unavailable);
+        }
+        self.renew_actuator_lease_v12()?;
+        let session = &mut self.sessions[validated.session_index];
         let returned = stage_final_claim_transport_v1(
             &mut session.contracts,
             &self.trusted_chain_id,
             returned,
         )?;
         let outcome = Self::dispatch_authority_outcome(&request.dispatch, returned)?;
+        self.renew_actuator_lease_v12()?;
         let post_authority_now = fresh_dom_time(&mut self.clock, now)?;
         let committed = self
             .control
@@ -2270,6 +2567,7 @@ where
             return Self::observation_outcome(request, outcome);
         }
         let outcome = self.observe_result(request, &validated, now)?;
+        self.renew_actuator_lease_v12()?;
         let post_observation_now = fresh_dom_time(&mut self.clock, now)?;
         let committed = self
             .control
@@ -2357,6 +2655,7 @@ impl ExpectedDomBindingsV1 {
         &self,
         settlement_id: Digest32,
         route_terms_digest: Digest32,
+        dom_consensus_rules_digest: Digest32,
         binding: DomSessionBindingV1,
         lease: DomLeaseV1,
         trusted_chain_id: &TrustedChainIdV1,
@@ -2374,40 +2673,80 @@ impl ExpectedDomBindingsV1 {
         let expected_identity = binding
             .expected_dom_identity()
             .map_err(map_actuator_error)?;
-        if self.face != SettlementFaceV1::Dom
-            || !exposure_valid
-            || [
-                self.route_id,
-                self.effect_id,
-                self.settlement_id,
-                self.semantic_digest,
-                self.intent_digest,
-                self.custody_digest,
-                self.transaction_id,
-                self.terms_digest,
-                self.registry_digest,
-                self.profile_digest,
-                self.deployment_digest,
-                self.chain_id,
-            ]
-            .contains(&ZERO_DIGEST)
-            || self.route_fencing_epoch == 0
-            || self.route_fencing_epoch != lease.fencing_epoch()
-            || self
-                .coordinator_fencing_epoch
-                .is_some_and(|epoch| epoch == 0)
-            || lease.participant_id() != binding.participant().participant_id()
-            || binding.route_id() != self.route_id
-            || settlement_id != self.settlement_id
-            || route_terms_digest != self.terms_digest
-            || binding.profile_digest() != self.profile_digest
-            || binding.deployment_digest() != self.deployment_digest
-            || binding.deployment_digest() != self.registry_digest
-            || binding.chain_id() != self.chain_id
-            || trusted_chain_id.as_bytes() != &self.chain_id
-            || runtime.expected_identity() != &expected_identity
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+        // Every pin keeps its own name. Twenty-four distinct commitments used
+        // to collapse into one refusal, and a single structurally impossible
+        // comparison among them could stop the whole ceremony while looking
+        // exactly like any of the other twenty-three.
+        for (pin, refused) in [
+            ("face", self.face != SettlementFaceV1::Dom),
+            ("exposure", !exposure_valid),
+            (
+                "zero_digest",
+                [
+                    self.route_id,
+                    self.effect_id,
+                    self.settlement_id,
+                    self.semantic_digest,
+                    self.intent_digest,
+                    self.custody_digest,
+                    self.transaction_id,
+                    self.terms_digest,
+                    self.registry_digest,
+                    self.profile_digest,
+                    self.deployment_digest,
+                    self.chain_id,
+                ]
+                .contains(&ZERO_DIGEST),
+            ),
+            // Two independent fences, never one. The route fence and the
+            // actuator lease fence are owned by different stores and neither
+            // `acquire_lease` accepts an epoch from the other, so the two
+            // counters cannot be aligned. Pin each against its own source.
+            ("route_fence", self.route_fencing_epoch == 0),
+            ("lease_fence", lease.fencing_epoch() == 0),
+            (
+                "coordinator_fence",
+                self.coordinator_fencing_epoch
+                    .is_some_and(|epoch| epoch == 0),
+            ),
+            (
+                "lease_participant",
+                lease.participant_id() != binding.participant().participant_id(),
+            ),
+            ("binding_route", binding.route_id() != self.route_id),
+            ("session_settlement", settlement_id != self.settlement_id),
+            ("terms", route_terms_digest != self.terms_digest),
+            // The binding carries the raw consensus-rules digest of the
+            // admitted deployment; the request carries the adapter-profile
+            // hash derived over the whole deployment, which contains it. The
+            // two are different commitments and can never be equal, so the
+            // binding is pinned against its own source instead.
+            (
+                "binding_consensus_rules",
+                binding.profile_digest() != dom_consensus_rules_digest,
+            ),
+            (
+                "binding_deployment",
+                binding.deployment_digest() != self.deployment_digest,
+            ),
+            (
+                "binding_registry",
+                binding.deployment_digest() != self.registry_digest,
+            ),
+            ("binding_chain", binding.chain_id() != self.chain_id),
+            (
+                "trusted_chain",
+                trusted_chain_id.as_bytes() != &self.chain_id,
+            ),
+            (
+                "runtime_identity",
+                runtime.expected_identity() != &expected_identity,
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_CHILD_STATIC_PIN_V25 pin={pin}");
+                return Err(child_conflict_at_v25(2428));
+            }
         }
         Ok(())
     }
@@ -2421,24 +2760,65 @@ impl ExpectedDomBindingsV1 {
         let request = retained.request();
         let scope = request.scope();
         let locator = retained.locator();
-        if scope.binding() != binding
-            || scope.effect_id() != self.effect_id
-            || scope.action() != dom_action(self.action)
-            || request.semantic_digest() != self.semantic_digest
-            || request.registry_digest() != self.registry_digest
-            || request.intent_digest() != self.intent_digest
-            || request.custody_digest() != self.custody_digest
-            || request.exposure() != dom_exposure(self.exposure)
-            || retained.transaction_id() != self.transaction_id
-            || retained.operation_fencing_epoch() == 0
-            || retained.operation_fencing_epoch() > lease.fencing_epoch()
-            || retained.operation_evidence_digest() == ZERO_DIGEST
-            || retained.operation_authorization_digest() == ZERO_DIGEST
-            || locator.effect_id() != self.effect_id
-            || locator.custody_digest() != self.custody_digest
-            || locator.binding_record_digest() == ZERO_DIGEST
-        {
-            return Err(ChildAuthorityRefusalV1::Conflict);
+        // Named pins for the same reason as `validate_static`: every term here
+        // is a separate commitment, and one collapsed refusal cannot say which.
+        // The operation fence and the lease fence do belong together — both are
+        // counters of this one DOM actuator store — so comparing them is sound.
+        for (pin, refused) in [
+            ("scope_binding", scope.binding() != binding),
+            ("scope_effect", scope.effect_id() != self.effect_id),
+            ("scope_action", scope.action() != dom_action(self.action)),
+            (
+                "request_semantic",
+                request.semantic_digest() != self.semantic_digest,
+            ),
+            (
+                "request_registry",
+                request.registry_digest() != self.registry_digest,
+            ),
+            (
+                "request_intent",
+                request.intent_digest() != self.intent_digest,
+            ),
+            (
+                "request_custody",
+                request.custody_digest() != self.custody_digest,
+            ),
+            (
+                "request_exposure",
+                request.exposure() != dom_exposure(self.exposure),
+            ),
+            (
+                "transaction_id",
+                retained.transaction_id() != self.transaction_id,
+            ),
+            ("operation_fence", retained.operation_fencing_epoch() == 0),
+            (
+                "operation_fence_ahead",
+                retained.operation_fencing_epoch() > lease.fencing_epoch(),
+            ),
+            (
+                "operation_evidence",
+                retained.operation_evidence_digest() == ZERO_DIGEST,
+            ),
+            (
+                "operation_authorization",
+                retained.operation_authorization_digest() == ZERO_DIGEST,
+            ),
+            ("locator_effect", locator.effect_id() != self.effect_id),
+            (
+                "locator_custody",
+                locator.custody_digest() != self.custody_digest,
+            ),
+            (
+                "locator_record",
+                locator.binding_record_digest() == ZERO_DIGEST,
+            ),
+        ] {
+            if refused {
+                eprintln!("DOM_CHILD_RETAINED_PIN_V25 pin={pin}");
+                return Err(child_conflict_at_v25(2459));
+            }
         }
         Ok(())
     }
@@ -2503,7 +2883,11 @@ fn native_refund_budget_v23(
         .filter(|value| *value > 0)
         .ok_or(ChildAuthorityRefusalV1::Unavailable)?
         .min(60_000);
-    Ok(std::time::Duration::from_millis(millis))
+    // Narrow to the armed route-step ceiling: the lease-derived figure bounds
+    // this observation alone, and per-call budgets do not compose across the
+    // step. Unarmed callers keep the exact figure above.
+    route_step_deadline::remaining(std::time::Duration::from_millis(millis))
+        .ok_or(ChildAuthorityRefusalV1::Unavailable)
 }
 
 fn exact_dom_session_index_v1(
@@ -2515,9 +2899,9 @@ fn exact_dom_session_index_v1(
         .iter()
         .enumerate()
         .filter(|(_, session)| session.1 == settlement_id);
-    let (index, (retained_leg, _)) = matches.next().ok_or(ChildAuthorityRefusalV1::Conflict)?;
+    let (index, (retained_leg, _)) = matches.next().ok_or_else(|| child_conflict_at_v25(2536))?;
     if matches.next().is_some() || *retained_leg != leg {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2538));
     }
     Ok(index)
 }
@@ -2594,14 +2978,18 @@ fn map_contracts_outbound_error(
             | IdentityStoreError::RandomFailure
             | IdentityStoreError::KeyDerivation
             | IdentityStoreError::StoreBusy
-            | IdentityStoreError::SigningFailed,
+            | IdentityStoreError::SigningFailed
+            | IdentityStoreError::TransportUnavailable,
         ) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Identity(
             IdentityStoreError::InvalidInput
             | IdentityStoreError::AuthenticationFailed
             | IdentityStoreError::InvalidKey
             | IdentityStoreError::StoreRejected,
-        ) => ChildAuthorityRefusalV1::Conflict,
+        ) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_outbound variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
         ProductionContractsOutboundErrorV1::Store(
             SessionStoreError::Filesystem
             | SessionStoreError::StoreBusy
@@ -2620,7 +3008,10 @@ fn map_contracts_outbound_error(
             | SessionStoreError::FundingAuthorityUnavailable
             | SessionStoreError::ClaimSigningAuthorityUnavailable
             | SessionStoreError::LegacyV1RecoveryOnly,
-        ) => ChildAuthorityRefusalV1::Conflict,
+        ) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_outbound variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
         ProductionContractsOutboundErrorV1::Relay(
             RelayWorkerOutboundErrorV1::OwnerBusy | RelayWorkerOutboundErrorV1::EntropyUnavailable,
         ) => ChildAuthorityRefusalV1::Unavailable,
@@ -2630,12 +3021,22 @@ fn map_contracts_outbound_error(
             | DurableRelaySenderErrorV1::FramedTransferActive
             | DurableRelaySenderErrorV1::Queue(_),
         )) => ChildAuthorityRefusalV1::Unavailable,
+        // A busy or unavailable Store staged nothing; the next turn retries,
+        // exactly as the sender's StorageUnavailable above already does.
+        ProductionContractsOutboundErrorV1::Relay(RelayWorkerOutboundErrorV1::StoreRejected(
+            dom_scriptless_store::SessionStoreError::StoreBusy
+            | dom_scriptless_store::SessionStoreError::Filesystem
+            | dom_scriptless_store::SessionStoreError::ClaimSigningAuthorityUnavailable,
+        )) => ChildAuthorityRefusalV1::Unavailable,
         ProductionContractsOutboundErrorV1::Relay(
             RelayWorkerOutboundErrorV1::Sender(_)
-            | RelayWorkerOutboundErrorV1::StoreRejected
+            | RelayWorkerOutboundErrorV1::StoreRejected(_)
             | RelayWorkerOutboundErrorV1::InvalidDsc1
             | RelayWorkerOutboundErrorV1::WrongDsc1Scope,
-        ) => ChildAuthorityRefusalV1::Conflict,
+        ) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_outbound variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 
@@ -2667,7 +3068,7 @@ fn validate_dispatch_request_shape(
         || request.attempt() == 0
         || request.child_index() >= 2
     {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2689));
     }
     Ok(())
 }
@@ -2699,7 +3100,7 @@ fn validate_observation_request_shape(
             .prior_finality_evidence_digest
             .is_some_and(|digest| digest == ZERO_DIGEST)
     {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2721));
     }
     Ok(())
 }
@@ -2795,7 +3196,7 @@ fn request_digest(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, ChildAutho
     let mut hasher = Blake2bVar::new(32).map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
     hasher.update(domain);
     for part in parts {
-        let length = u64::try_from(part.len()).map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        let length = u64::try_from(part.len()).map_err(|_| child_conflict_at_v25(2817))?;
         hasher.update(&length.to_be_bytes());
         hasher.update(part);
     }
@@ -2804,7 +3205,7 @@ fn request_digest(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, ChildAutho
         .finalize_variable(&mut output)
         .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
     if output == ZERO_DIGEST {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2826));
     }
     Ok(output)
 }
@@ -2877,6 +3278,24 @@ fn map_runtime_binding_error(error: RealDomError) -> ChildAuthorityRefusalV1 {
 // A process heartbeat may extend a live storage lease; it never changes the
 // operation, signed scope, nonce transcript or fencing generation. The native
 // store also revalidates its retained physical owner and exact lease row.
+/// Renews a still-live DOM actuator lease to its full duration. An expired
+/// lease is never revived, and a child without a renewal duration keeps its
+/// lease unchanged.
+fn top_up_dom_lease_v25(
+    actuator: &mut DomActuatorStoreV1,
+    lease: DomLeaseV1,
+    now: u64,
+    duration: Option<u64>,
+) -> Result<DomLeaseV1, ChildAuthorityRefusalV1> {
+    let Some(duration) = duration else {
+        return Ok(lease);
+    };
+    if now >= lease.lease_until_unix_ms() {
+        return Err(ChildAuthorityRefusalV1::Unavailable);
+    }
+    renew_dom_lease_v12(actuator, lease, now, duration)
+}
+
 fn renew_dom_lease_v12(
     actuator: &mut DomActuatorStoreV1,
     lease: DomLeaseV1,
@@ -2884,14 +3303,18 @@ fn renew_dom_lease_v12(
     duration: u64,
 ) -> Result<DomLeaseV1, ChildAuthorityRefusalV1> {
     if duration == 0 || duration > 3_600_000 || now == 0 {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2924));
     }
     if now >= lease.lease_until_unix_ms() {
         return Err(ChildAuthorityRefusalV1::Unavailable);
     }
-    actuator
-        .renew_lease(lease, now, duration)
-        .map_err(map_actuator_error)
+    actuator.renew_lease(lease, now, duration).map_err(|error| {
+        eprintln!(
+            "DOM_RENEW_SITE_V26 site=dom_store_renew error={error:?} until={} now={now}",
+            lease.lease_until_unix_ms()
+        );
+        map_actuator_error(error)
+    })
 }
 
 fn map_actuator_error(error: DomActuatorError) -> ChildAuthorityRefusalV1 {
@@ -2931,7 +3354,10 @@ fn map_actuator_error(error: DomActuatorError) -> ChildAuthorityRefusalV1 {
         | DomActuatorError::SecretReuseDetected
         | DomActuatorError::FinalityEvidenceInvalid
         | DomActuatorError::FinalityPolicyUnsupported
-        | DomActuatorError::ReorgBeyondPolicy => ChildAuthorityRefusalV1::Conflict,
+        | DomActuatorError::ReorgBeyondPolicy => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=dom_actuator variant={error:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 
@@ -2941,7 +3367,7 @@ fn fresh_dom_time<C: ProductionDomChildClockV1>(
 ) -> Result<u64, ChildAuthorityRefusalV1> {
     let fresh = clock.now_unix_ms()?;
     if fresh < prior_unix_ms {
-        return Err(ChildAuthorityRefusalV1::Conflict);
+        return Err(child_conflict_at_v25(2981));
     }
     Ok(fresh)
 }
@@ -2961,7 +3387,18 @@ fn map_f7_claim_error_v21(
         Error::Anchors(crate::production_contracts::ProductionF7RuntimeErrorV12::Evidence(
             f7_anchor_authority::families_v11::F7FamilyAuthorityErrorV11::WindowClosed,
         )) => ChildAuthorityRefusalV1::Unavailable,
-        Error::Scope | Error::Store(_) | Error::Anchors(_) => ChildAuthorityRefusalV1::Conflict,
+        Error::Scope => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=f7_claim variant=scope");
+            ChildAuthorityRefusalV1::Conflict
+        }
+        Error::Store(store) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=f7_claim variant=store.{store:?}");
+            ChildAuthorityRefusalV1::Conflict
+        }
+        Error::Anchors(_) => {
+            eprintln!("DOM_REFUSAL_ORIGIN_V26 site=f7_claim variant=anchors");
+            ChildAuthorityRefusalV1::Conflict
+        }
     }
 }
 
@@ -3307,4 +3744,10 @@ mod tests {
             Err(ChildAuthorityRefusalV1::Conflict)
         ));
     }
+}
+
+// DIAG(temporary): names the source line of the child refusal that fired.
+fn child_conflict_at_v25(line: u32) -> ChildAuthorityRefusalV1 {
+    eprintln!("DOM_CHILD_CONFLICT_V25 file=production_child_dom.rs line={line}");
+    ChildAuthorityRefusalV1::Conflict
 }

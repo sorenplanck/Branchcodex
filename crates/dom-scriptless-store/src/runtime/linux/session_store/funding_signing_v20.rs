@@ -95,7 +95,52 @@ impl ContractsSessionStoreV1 {
         Ok(Some(record))
     }
 
+    /// The audit below is a pure function of the gate, signing record and
+    /// session record bytes and of records only this process writes (the
+    /// Store lock is exclusive), so an audit already completed over these
+    /// exact bytes at this mutation generation still holds. All three inputs
+    /// were just reread and decoded by the caller; only the audit is not
+    /// repeated.
     pub(super) fn audit_f7_funding_signing_v20(
+        &self,
+        gate: &F7GateRecordV12,
+        record: &F7FundingSigningV20,
+        current: &SessionRecordV1,
+        complete: bool,
+    ) -> Result<Option<SchnorrSignature>, SessionStoreError> {
+        let generation = self.store_mutation_generation_v26();
+        let record_digest = tagged_hash("DOM:f7-funding-signing-audit-input:v26", &record.bytes);
+        if let Ok(audits) = self.f7_funding_signing_audit_v26.lock() {
+            if let Some(audit) = audits.get(&gate.session_id) {
+                if audit.generation == generation
+                    && audit.gate_digest == gate.digest
+                    && audit.record_digest == record_digest
+                    && audit.current_digest == *current.digest()
+                    && audit.complete == complete
+                {
+                    return Ok(audit.signature.clone());
+                }
+            }
+        }
+        let signature =
+            self.audit_f7_funding_signing_uncached_v26(gate, record, current, complete)?;
+        if let Ok(mut audits) = self.f7_funding_signing_audit_v26.lock() {
+            audits.insert(
+                gate.session_id,
+                F7FundingSigningAuditV26 {
+                    generation,
+                    gate_digest: gate.digest,
+                    record_digest,
+                    current_digest: *current.digest(),
+                    complete,
+                    signature: signature.clone(),
+                },
+            );
+        }
+        Ok(signature)
+    }
+
+    fn audit_f7_funding_signing_uncached_v26(
         &self,
         gate: &F7GateRecordV12,
         record: &F7FundingSigningV20,

@@ -1,0 +1,18 @@
+{
+  "pid": 1580165,
+  "command": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "direct-pair-abandon-local-receipt",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge"
+  ],
+  "exit_code": 101,
+  "timed_out": false,
+  "wall_seconds": 16.021069267997518,
+  "timeout_seconds": 300,
+  "log": "target/abandon-signing-resume-1790485088669508591.log",
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  }
+}

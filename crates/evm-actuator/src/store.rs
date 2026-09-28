@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
@@ -164,6 +163,9 @@ pub struct DurableEvmActuatorV1 {
     path: PathBuf,
     database_authority: File,
     _process_lock: File,
+    /// Descriptors of the validated sidecars, held while the connection lives.
+    #[cfg(target_os = "linux")]
+    retained_sidecars: RetainedSidecarsV25,
 }
 
 struct AuditedTransaction<'connection> {
@@ -228,6 +230,8 @@ impl DurableEvmActuatorV1 {
             path: path.to_path_buf(),
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage_authority()?;
         sync_owner_directory(path)?;
@@ -279,6 +283,8 @@ impl DurableEvmActuatorV1 {
             path: path.to_path_buf(),
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage_authority()?;
         sync_owner_directory(path)?;
@@ -320,6 +326,8 @@ impl DurableEvmActuatorV1 {
             path: path.to_path_buf(),
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage_authority()?;
         Ok(store)
@@ -585,7 +593,10 @@ impl DurableEvmActuatorV1 {
         {
             return Err(EvmActuatorErrorV1::InvalidStorageAuthority);
         }
-        validate_resumable_sidecars(&self.path)
+        #[cfg(target_os = "linux")]
+        return self.retained_sidecars.validate_all(&self.path);
+        #[cfg(not(target_os = "linux"))]
+        return validate_resumable_sidecars(&self.path);
     }
 
     /// Acquires exclusive authority for the authenticated funder account.
@@ -7258,45 +7269,90 @@ enum SqliteSidecarKindV1 {
     RollbackJournal,
 }
 
+/// Pre-open validation: no connection exists yet, so releasing the
+/// descriptors here cannot unlock a live WAL index.
 fn validate_resumable_sidecars(path: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV1::Wal),
-        ("-shm", SqliteSidecarKindV1::SharedMemory),
-        ("-journal", SqliteSidecarKindV1::RollbackJournal),
-    ] {
-        let sidecar = sidecar_path(path, suffix);
-        match fs::symlink_metadata(&sidecar) {
-            Ok(_) => validate_sqlite_sidecar_shape(&sidecar, kind)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(EvmActuatorErrorV1::InvalidStorageAuthority),
-        }
-    }
+    return RetainedSidecarsV25::default().validate_all(path);
     #[cfg(not(target_os = "linux"))]
     return Err(EvmActuatorErrorV1::LinuxRequired);
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn validate_sqlite_sidecar_shape(path: &Path, kind: SqliteSidecarKindV1) -> Result<()> {
-    validate_owner_only_file(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
+/// Descriptors of every validated SQLite sidecar of one store.
+///
+/// Closing any descriptor for a file drops every POSIX (fcntl) lock this
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. Opening and closing a sidecar while the connection is live
+/// therefore unlocks the WAL index and lets a reader in another process
+/// reinitialize it under this process's mapping (measured: SIGBUS). The
+/// checks are unchanged; only the descriptors are now retained.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(u64, u64, File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(&self, path: &Path) -> Result<()> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV1::Wal),
+            ("-shm", SqliteSidecarKindV1::SharedMemory),
+            ("-journal", SqliteSidecarKindV1::RollbackJournal),
+        ] {
+            let sidecar = sidecar_path(path, suffix);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(_) => self.validate(&sidecar, kind)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(EvmActuatorErrorV1::InvalidStorageAuthority),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self, path: &Path, kind: SqliteSidecarKindV1) -> Result<()> {
+        validate_owner_only_file(path)?;
+        let named =
+            fs::symlink_metadata(path).map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
+        if let Some((_, _, retained)) = handles
+            .iter()
+            .find(|(dev, ino, _)| *dev == named.dev() && *ino == named.ino())
+        {
+            return validate_sqlite_sidecar_contents(retained, kind);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
+        let opened = file
+            .metadata()
+            .map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
+        if opened.dev() != named.dev() || opened.ino() != named.ino() {
+            return Err(EvmActuatorErrorV1::InvalidStorageAuthority);
+        }
+        validate_sqlite_sidecar_contents(&file, kind)?;
+        handles.push((named.dev(), named.ino(), file));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_sqlite_sidecar_contents(file: &File, kind: SqliteSidecarKindV1) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
     let retained = file
         .metadata()
         .map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
-    let named =
-        fs::symlink_metadata(path).map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
-    if retained.dev() != named.dev() || retained.ino() != named.ino() {
-        return Err(EvmActuatorErrorV1::InvalidStorageAuthority);
-    }
     if retained.len() == 0 {
         return Ok(());
     }
     let mut header = [0u8; 8];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| EvmActuatorErrorV1::InvalidStorageAuthority)?;
     let valid = match kind {
         SqliteSidecarKindV1::Wal => {

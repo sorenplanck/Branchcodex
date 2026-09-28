@@ -197,6 +197,8 @@ pub struct DurableInventoryStoreV1 {
     lock_file: File,
     authority_identity: RetainedFileIdentityV1,
     lock_identity: RetainedFileIdentityV1,
+    #[cfg(target_os = "linux")]
+    retained_sidecars: RetainedSidecarsV25,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -502,6 +504,7 @@ impl DurableInventoryStoreV1 {
             lock_file: opened.lock_file,
             authority_identity: opened.authority_identity,
             lock_identity: opened.lock_identity,
+            retained_sidecars: RetainedSidecarsV25::default(),
         }
     }
 
@@ -1806,7 +1809,7 @@ impl DurableInventoryStoreV1 {
                 false,
             )?;
             validate_retained_file(&self.lock_path, &self.lock_file, self.lock_identity, true)?;
-            validate_sidecars_for_mode(&self.path, AuthorityOpenModeV1::OpenExisting)?;
+            self.retained_sidecars.validate_all(&self.path, false)?;
         }
         Ok(())
     }
@@ -4436,6 +4439,174 @@ fn validate_sidecars_for_mode(
         validate_sidecar_contents(&sidecar, kind, mode == AuthorityOpenModeV1::ResumeCreate)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<RetainedSidecarV25>>,
+}
+
+#[cfg(target_os = "linux")]
+struct RetainedSidecarV25 {
+    path: PathBuf,
+    identity: RetainedFileIdentityV1,
+    file: File,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(
+        &self,
+        database: &Path,
+        permit_pristine_journal: bool,
+    ) -> Result<(), InventoryStoreErrorV1> {
+        for (path, kind) in sidecar_paths(database).into_iter().zip([
+            SqliteSidecarKindV1::Wal,
+            SqliteSidecarKindV1::SharedMemory,
+            SqliteSidecarKindV1::RollbackJournal,
+        ]) {
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let handles = self
+                        .handles
+                        .lock()
+                        .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?;
+                    if handles.iter().any(|retained| retained.path == path) {
+                        return Err(InventoryStoreErrorV1::InvalidStorageAuthority);
+                    }
+                    continue;
+                }
+                Err(_) => return Err(InventoryStoreErrorV1::InvalidStorageAuthority),
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.file_type().is_file()
+                || metadata.uid() != geteuid().as_raw()
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o7777 != FILE_MODE
+            {
+                return Err(InventoryStoreErrorV1::InvalidStorageAuthority);
+            }
+            let named = RetainedFileIdentityV1 {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            };
+            let mut handles = self
+                .handles
+                .lock()
+                .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?;
+            if let Some(retained) = handles.iter().find(|retained| retained.path == path) {
+                if retained.identity != named || retained_identity(&retained.file)? != named {
+                    return Err(InventoryStoreErrorV1::InvalidStorageAuthority);
+                }
+                validate_retained_sidecar_contents(&retained.file, kind, permit_pristine_journal)?;
+                continue;
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?;
+            if retained_identity(&file)? != named || named_identity(&path)? != named {
+                return Err(InventoryStoreErrorV1::InvalidStorageAuthority);
+            }
+            validate_retained_sidecar_contents(&file, kind, permit_pristine_journal)?;
+            handles.push(RetainedSidecarV25 {
+                path,
+                identity: named,
+                file,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_retained_sidecar_contents(
+    file: &File,
+    kind: SqliteSidecarKindV1,
+    permit_pristine_journal: bool,
+) -> Result<(), InventoryStoreErrorV1> {
+    use std::os::unix::fs::FileExt;
+
+    let length = file
+        .metadata()
+        .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?
+        .len();
+    if length == 0 {
+        return Ok(());
+    }
+    if length < 28 {
+        return Err(InventoryStoreErrorV1::InvalidStorageAuthority);
+    }
+    let mut header = [0u8; 28];
+    file.read_exact_at(&mut header, 0)
+        .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?;
+    let valid = match kind {
+        SqliteSidecarKindV1::Wal => {
+            let magic = u32::from_be_bytes(
+                header[..4]
+                    .try_into()
+                    .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?,
+            );
+            let version = u32::from_be_bytes(
+                header[4..8]
+                    .try_into()
+                    .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?,
+            );
+            let encoded_page_size = u32::from_be_bytes(
+                header[8..12]
+                    .try_into()
+                    .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?,
+            );
+            let page_size = if encoded_page_size == 1 {
+                65_536
+            } else {
+                u64::from(encoded_page_size)
+            };
+            matches!(magic, 0x377f_0682 | 0x377f_0683)
+                && version == 3_007_000
+                && (512..=65_536).contains(&page_size)
+                && page_size.is_power_of_two()
+                && header[16..24] != [0; 8]
+                && length >= 32
+                && (length - 32) % (24 + page_size) == 0
+        }
+        SqliteSidecarKindV1::SharedMemory => {
+            length >= 32_768
+                && length % 32_768 == 0
+                && u32::from_ne_bytes(
+                    header[..4]
+                        .try_into()
+                        .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?,
+                ) == 3_007_000
+                && header[12] <= 1
+        }
+        SqliteSidecarKindV1::RollbackJournal => {
+            if header[..8] == [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7] {
+                true
+            } else if permit_pristine_journal
+                && length == 512
+                && header[..12] == [0; 12]
+                && header[12..16] != [0; 4]
+                && header[16..20] == [0; 4]
+                && header[20..24] == 512u32.to_be_bytes()
+                && header[24..28] == 4096u32.to_be_bytes()
+            {
+                let mut tail = [0u8; 512 - 28];
+                file.read_exact_at(&mut tail, 28)
+                    .map_err(|_| InventoryStoreErrorV1::InvalidStorageAuthority)?;
+                tail == [0; 512 - 28]
+            } else {
+                false
+            }
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(InventoryStoreErrorV1::InvalidStorageAuthority)
+    }
 }
 
 #[cfg(target_os = "linux")]

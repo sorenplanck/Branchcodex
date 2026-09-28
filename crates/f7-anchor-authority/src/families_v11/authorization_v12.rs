@@ -7,7 +7,9 @@
 #[path = "xmr_bounded_v23.rs"]
 mod xmr_bounded_v23;
 pub use xmr_bounded_v23::{
-    verify_f7_xmr_bounded_anchor_authorization_v23, DomXmrBoundedAnchorValidationRequestV23,
+    verify_f7_xmr_bounded_anchor_authorization_v23,
+    verify_f7_xmr_bounded_anchor_authorization_with_progress_v24,
+    DomXmrBoundedAnchorValidationRequestV23,
 };
 
 use super::{
@@ -15,7 +17,6 @@ use super::{
     F7FundingIdV11, VerifiedDomXmrAnchorEvidenceV11, VerifiedEvmFundingV11,
     VerifiedSolanaFundingV11, MAX_V11_EXTERNAL_ANCHOR_AGE,
 };
-use crate::verify_dom_funding_evidence_inner;
 use dom_final_claim_binding::FinalClaimRoleBindingV1;
 use dom_scriptless_chain_adapter::DomHttpChainAdapterV1;
 use kaystra_core::types::{LockMechanism, TimelockSpec};
@@ -151,6 +152,8 @@ pub fn verify_f7_anchor_authorization_v12(
     expected_dom_funding_txid: [u8; 32],
     round_start_transcript_hash: [u8; 32],
     external: F7ExternalFundingV12,
+    // Bounds the DOM anchor scan below, which has no clock of its own.
+    external_deadline: Option<std::time::Instant>,
 ) -> Result<VerifiedF7AnchorAuthorizationV12, Error> {
     let facts: &ExternalFundingEvidenceV11 = match &external {
         F7ExternalFundingV12::Evm(value) => value.facts(),
@@ -176,13 +179,14 @@ pub fn verify_f7_anchor_authorization_v12(
     {
         return Err(Error::Binding);
     }
-    let snapshot = verify_dom_funding_evidence_inner(
+    let snapshot = crate::verify_dom_funding_evidence_until_v23(
         dom,
         expected_dom_funding_txid,
         role.shared_output_commitment(),
         role.funding_template_hash(),
         terms.dom_leg.finality.min_confirmations,
         true,
+        external_deadline,
     )
     .map_err(map_dom_v12)?;
     let deadline = match terms.dom_leg.deadline {
@@ -260,7 +264,7 @@ mod tests {
             F7ExternalFamilyV11::Solana,
             F7ExternalFamilyV11::Monero,
         ] {
-            let origin = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+            let origin = Instant::now() - Duration::from_secs(30);
             // These are private test facts, not a public authorization
             // constructor. Bitcoin's real M.8 token remains a separate path.
             let mut facts = ExternalFundingEvidenceV11 {
@@ -281,12 +285,17 @@ mod tests {
                 evidence_digest: [7; 32],
                 observed_at: origin,
             };
-            assert_eq!(retain_external_observation_origin(&facts).unwrap(), origin);
+            assert_eq!(
+                retain_external_observation_origin(&facts).ok(),
+                Some(origin)
+            );
             // Repeated promotion is not re-observation, even in the same process.
-            assert_eq!(retain_external_observation_origin(&facts).unwrap(), origin);
-            facts.observed_at = Instant::now()
-                .checked_sub(MAX_V11_EXTERNAL_ANCHOR_AGE + Duration::from_secs(1))
-                .unwrap();
+            assert_eq!(
+                retain_external_observation_origin(&facts).ok(),
+                Some(origin)
+            );
+            facts.observed_at =
+                Instant::now() - (MAX_V11_EXTERNAL_ANCHOR_AGE + Duration::from_secs(1));
             assert_eq!(
                 retain_external_observation_origin(&facts),
                 Err(Error::WindowClosed)

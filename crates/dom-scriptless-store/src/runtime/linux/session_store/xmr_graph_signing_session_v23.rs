@@ -3,6 +3,7 @@
 use super::signing_origin_v23::ReconstructedXmrGraphSigningOriginV23;
 use super::*;
 use crate::{SessionIrreversibleV1, SessionRecordFieldsV1};
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "xmr_graph_legacy_collision_v23_tests.rs"]
 mod legacy_collision_v23_tests;

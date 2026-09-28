@@ -1,0 +1,68 @@
+{
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--release",
+        "--locked",
+        "--test",
+        "local_xmr_checkpoint",
+        "--test",
+        "direct_xmr_recovery",
+        "--test",
+        "capsule_checkpoint",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/local-xmr-checkpoint-final-tests.log",
+      "results": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.75s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "--release",
+        "--locked",
+        "--all-targets",
+        "-j2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "target/local-xmr-checkpoint-clippy.log",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--offline",
+        "--release",
+        "--locked",
+        "--example",
+        "regtest_claim",
+        "-j2"
+      ],
+      "exit_code": 0,
+      "log": "target/local-xmr-checkpoint-build.log",
+      "results": []
+    }
+  ],
+  "sha256": {
+    "src/xmr_recovery.rs": "96c3a6646f1809444ec03e0d6a4b2d1cea14ecc26fd06df2ebbb8ec96a39669b",
+    "src/xmr_recovery/checkpoint.rs": "fa062eee8da3a2468d29e81a4de386bb1d9f4abbe5bf5e91669b5e8f5c112d8f",
+    "tests/local_xmr_checkpoint.rs": "f62ad0a5cf88e3820bc31ed5d697cf06903146965cc6229d026462628451d5e6",
+    "examples/regtest_claim.rs": "4952627dab06cf58ee28448589d4c59a1ab2b93115752c2580ba9379864a0f06"
+  }
+}

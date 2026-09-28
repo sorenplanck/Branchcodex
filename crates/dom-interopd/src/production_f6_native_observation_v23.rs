@@ -28,7 +28,7 @@ fn inventory_prefix(
     observations: &[InventoryObservationV1],
 ) -> Result<Vec<u8>, ProductionF6ActivationRefusalV2> {
     if observations.is_empty() || observations.len() > 8 {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let mut bytes = MAGIC.to_vec();
     bytes.extend_from_slice(&23_u16.to_be_bytes());
@@ -39,7 +39,7 @@ fn inventory_prefix(
     let mut previous = None;
     for value in observations {
         if previous.is_some_and(|key| key >= value.key) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         previous = Some(value.key);
         for digest in [
@@ -140,30 +140,30 @@ impl NativeF6ObservationBodyV23 {
         for signed in &self.statuses {
             if signed
                 .statement()
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?
+                .map_err(|_| invalid_binding_diag_v25(line!()))?
                 .source_evidence_digest()
                 != evidence
             {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
             let status = signed
                 .canonical_bytes()
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+                .map_err(|_| invalid_binding_diag_v25(line!()))?;
             if status.len() > 4096 {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
             bytes.extend_from_slice(&(status.len() as u16).to_be_bytes());
             bytes.extend_from_slice(&status);
         }
         let signatures = sign(digest_parts(&[DOMAIN, &bytes])?)?;
         if signatures.len() < 2 || signatures.len() > 16 {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         bytes.extend_from_slice(&(signatures.len() as u16).to_be_bytes());
         let mut previous = None;
         for (index, signature) in signatures {
             if previous.is_some_and(|old| old >= index) {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
             previous = Some(index);
             bytes.extend_from_slice(&index.to_be_bytes());
@@ -180,11 +180,11 @@ fn decode(
 ) -> Result<NativeF6ObservationBodyV23, ProductionF6ActivationRefusalV2> {
     let mut reader = BundleReaderV7::new(bytes);
     if reader.take::<8>()? != *MAGIC || reader.u16()? != 23 {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let count = reader.u16()?;
     if !(1..=8).contains(&count) {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let network = reader.take()?;
     let composition = reader.take()?;
@@ -239,9 +239,9 @@ fn decode(
     let inventory_end = reader.position();
     let statuses = [
         SignedSolverStatusV1::decode(reader.length_prefixed(4096)?)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+            .map_err(|_| invalid_binding_diag_v25(line!()))?,
         SignedSolverStatusV1::decode(reader.length_prefixed(4096)?)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+            .map_err(|_| invalid_binding_diag_v25(line!()))?,
     ];
     let end = reader.position();
     let count = reader.u16()?;
@@ -249,22 +249,22 @@ fn decode(
         || count < authorities.threshold()
         || usize::from(count) > authorities.xonly_keys().len()
     {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let digest = digest_parts(&[DOMAIN, &bytes[..end]])?;
     let mut previous = None;
     for _ in 0..count {
         let index = reader.u16()?;
         if previous.is_some_and(|old| old >= index) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         previous = Some(index);
         let key = authorities
             .xonly_keys()
             .get(usize::from(index))
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         secp.verify_bip340(key, &digest, &reader.take::<64>()?)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
     }
     reader.finish()?;
     let body = NativeF6ObservationBodyV23 {
@@ -275,7 +275,7 @@ fn decode(
         statuses,
     };
     if body.inventory_prefix()? != bytes[..inventory_end] {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let evidence = body.inventory_evidence_digest()?;
     if body.statuses.iter().any(|status| {
@@ -284,7 +284,7 @@ fn decode(
             .map(|statement| statement.source_evidence_digest() != evidence)
             .unwrap_or(true)
     }) {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     Ok(body)
 }
@@ -302,7 +302,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             ClaimPlanProfileV23::Enrollment(_)
         ) {
             if self.native_xmr_inventory_required || self.native_xmr_inventory.is_some() {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
             return Ok(None);
         }
@@ -317,7 +317,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             || body.composition != self.route.composition_digest
             || body.inventory_binding != self.bundle.inventory_binding_digest
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         if self.native_xmr_inventory_required {
             let native_xmr_inventory = self
@@ -331,10 +331,10 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
                 .count()
                 != 1
             {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
         } else if self.native_xmr_inventory.is_some() {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         Ok(Some(body))
     }
@@ -357,12 +357,12 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             .as_secs();
         let now_ms = now
             .checked_mul(1000)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         if lease.authority_id != self.bundle.solver
             || lease.owner_id != self.inventory_owner_id
             || lease.lease_until_unix_ms <= now_ms
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         for observation in &body.observations {
             let expected_asset = self
@@ -372,7 +372,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
                     kaystra_core::types::ChainId(observation.key.chain_id.0),
                     kaystra_core::types::AssetId(observation.key.asset_id.0),
                 )
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+                .map_err(|_| invalid_binding_diag_v25(line!()))?;
             let route_asset = [self.composition.upstream(), self.composition.downstream()]
                 .iter()
                 .any(|terms| {
@@ -411,7 +411,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
                             .max_evidence_age_seconds
                             .saturating_mul(1000))
             {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
         }
         if historical {
@@ -420,10 +420,10 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             // wall clock nor inventory snapshot is rewritten on this branch.
             upstream
                 .authenticate_retained_signed_v24(&body.statuses[0], secp)
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+                .map_err(|_| invalid_binding_diag_v25(line!()))?;
             downstream
                 .authenticate_retained_signed_v24(&body.statuses[1], secp)
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+                .map_err(|_| invalid_binding_diag_v25(line!()))?;
             return Ok(());
         }
         // Install authenticated status only; no boolean Active capability is
@@ -458,7 +458,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
                 .load_snapshot(observation.key)
                 .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
             if !retained_snapshot_matches_v23(&retained, observation) {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
         }
         Ok(())
@@ -514,4 +514,11 @@ mod v23_regressions {
         retained.evidence_digest[0] ^= 1;
         assert!(!retained_snapshot_matches_v23(&retained, &observation));
     }
+}
+
+/// Diagnostic constructor for InvalidBinding refusals in this module. It
+/// prints only the static source line, never identifiers or amounts.
+fn invalid_binding_diag_v25(line: u32) -> ProductionF6ActivationRefusalV2 {
+    eprintln!("DOM_F6_BIND_DIAG_V25 site=native_observation:{line}");
+    ProductionF6ActivationRefusalV2::InvalidBinding
 }

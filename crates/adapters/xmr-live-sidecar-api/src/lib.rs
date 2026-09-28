@@ -390,6 +390,9 @@ pub enum SidecarRequestV2 {
 }
 
 /// Length-framed Unix-domain sidecar response.
+// A wire enum decoded once per call; its in-memory size is irrelevant, and
+// boxing one variant would change every construction site in the GPL sidecar.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "result", content = "body", rename_all = "kebab-case")]
 pub enum SidecarResponseV2 {

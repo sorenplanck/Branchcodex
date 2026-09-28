@@ -102,9 +102,22 @@ pub enum CoordinatorErrorV1 {
     /// A child call remains ambiguous and requires exact reconciliation.
     #[error("settlement child externalization remains ambiguous")]
     ReconciliationRequired,
-    /// External child authority refused or became unavailable.
+    /// External child authority is temporarily unavailable; the same exact
+    /// child call is retried.
     #[error("settlement child authority refused")]
     ChildAuthorityRefused,
+    /// External child authority refused the exact child, found its retained
+    /// state in conflict, or answered for a different authority. No retry of
+    /// the same call can change that.
+    #[error("settlement child authority rejected the exact child")]
+    ChildAuthorityRejected,
+    /// External child authority found its retained state, fence or epoch in
+    /// conflict with the call. Also permanent for this call — but it is a
+    /// different fact from a policy refusal, and the route driver treats an
+    /// inconsistency differently from a refusal. Folding the two together
+    /// erased the cause at the first boundary it crossed.
+    #[error("settlement child authority state conflicts with the exact child")]
+    ChildAuthorityConflict,
     /// Chain observation authority refused or became unavailable.
     #[error("settlement child observer refused")]
     ChildObserverRefused,

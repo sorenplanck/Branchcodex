@@ -1,0 +1,12 @@
+{
+  "experiment": "direct-pair-xmr-first",
+  "pid": 865019,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 166.43703302997164,
+  "compilation_included": false,
+  "log": "target/direct-pair-xmr-first-journal-final-1790464765911250827.log",
+  "journal_bytes": 284,
+  "journal_sha256": "01c030da87146c3baeaec538c094043747a14e5ede309b2cafd5e80795ef30f9"
+}

@@ -1,0 +1,32 @@
+{
+  "pids_checked": [
+    1580411,
+    1582758,
+    1582656,
+    1582755,
+    1582757,
+    1581243,
+    1582658,
+    1582759,
+    1582760,
+    1582761,
+    1582762
+  ],
+  "remaining_group": [],
+  "hashes_match": true,
+  "crash_before_rpc_exit": 80,
+  "crash_after_ack_exit": 81,
+  "pool_suppresses_duplicate": true,
+  "native_inclusion_observed_by_worker": true,
+  "total_seconds": 186.557290261,
+  "recovery_seconds": 45.737311506,
+  "crash_after_opening_exit": 82,
+  "crash_partial_signature_exit": 83,
+  "crash_after_complete_signature_exit": 84,
+  "completed_opening_unchanged": true,
+  "no_solver_available_in_following_signers": true,
+  "complete_signature_promoted_without_resigning": true,
+  "whole_fixture_within_180_seconds": false,
+  "xmr_original_latest_unix": 1790485318,
+  "xmr_refund_observed_unix": 1790485299
+}

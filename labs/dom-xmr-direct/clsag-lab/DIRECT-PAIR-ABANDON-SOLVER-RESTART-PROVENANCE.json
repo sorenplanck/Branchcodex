@@ -1,0 +1,24 @@
+{
+  "sha256": {
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "8df248264e60d8f3282dd9c4fa6d7ae33c8b2241c744cc718fe43b582bf398f4",
+    "src/capsule_checkpoint.rs": "d356af6fa48b81ce0bbfe7101b847cdad0c622a73c0f63aac5bab808af6fa116",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "src/xmr_recovery.rs": "f68eb540293915a46f5ad8c9fc0bf2845231db2e6c1435ac19d29ddbc33fa3f7",
+    "examples/regtest_claim.rs": "21b8da931c89b64dcb69582aa5c70d69ce240db26d981ba1dadc0a5be4d9d3c1",
+    "examples/support/direct_recovery_bridge.rs": "bd372e4601deb736aca0913672181c281b45686b5cf2a9db218bc8ba4b620c89",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "tests/capsule_checkpoint.rs": "d04be8298370ec65a25629ae2c57f33233aadfe8ac5de944b6414b53666605a0",
+    "target/release/examples/regtest_claim": "d7f909d7b79e8c7ed0b555212cac51b72ecf836ba20e0e0b61e378741b94cafd",
+    "target/recovery-research/direct-dlog-bridge": "c4fa29414821b6a40bbf2aaa81524a06d8ae5f87123d487906ae5a728fc579f2",
+    "../recovery-audit/direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "../recovery-audit/direct_dlog_cli.go": "a3008f691983634f3a33a8b407a05457445b9113d896a1c963c4b7249d08f0f1",
+    "../recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b"
+  },
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "scope": "Own offline nodes, capsule record persisted before both shared deposits; kill original Go public solver, create a fresh verifier from record, repeat full setup/proof verification and open. Rust supervisor, roster, local signing material and nodes remain alive. Original window and receipt retained; not full daemon restart."
+}

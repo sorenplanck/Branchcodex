@@ -1,0 +1,261 @@
+{
+  "experiment": "absolute preparation and asymmetric recovery timing",
+  "bitcoin_involved": false,
+  "units": "dimensionless ticks",
+  "atomic_swap_proven": false,
+  "cryptographic_delay_proven": false,
+  "funding_and_maturity_assumed": true,
+  "authenticated_setup_proven": false,
+  "cases": {
+    "conditional_separated_bounds": {
+      "policy": {
+        "assets": [
+          "DOM",
+          "XMR"
+        ],
+        "recovery": [
+          12,
+          5
+        ],
+        "inclusion": [
+          1,
+          1
+        ],
+        "observation": 1,
+        "resume_claim_after_recovery": true,
+        "honest_recovery": [
+          14,
+          7
+        ],
+        "funded_at": [
+          2,
+          2
+        ],
+        "ready_at": 3
+      },
+      "timing_violations": [],
+      "outcomes": [
+        {
+          "malicious": [],
+          "explored_states": 7,
+          "settled_states": 3,
+          "counterexample": null,
+          "harmed_actor": null,
+          "terminal_allocations": [
+            [
+              1,
+              0
+            ]
+          ]
+        },
+        {
+          "malicious": [
+            0
+          ],
+          "explored_states": 77,
+          "settled_states": 75,
+          "counterexample": null,
+          "harmed_actor": null,
+          "terminal_allocations": [
+            [
+              -1,
+              1
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        {
+          "malicious": [
+            1
+          ],
+          "explored_states": 97,
+          "settled_states": 136,
+          "counterexample": null,
+          "harmed_actor": null,
+          "terminal_allocations": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        }
+      ]
+    },
+    "equal_speed_assumption": {
+      "policy": {
+        "assets": [
+          "DOM",
+          "XMR"
+        ],
+        "recovery": [
+          9,
+          5
+        ],
+        "inclusion": [
+          1,
+          1
+        ],
+        "observation": 1,
+        "resume_claim_after_recovery": true,
+        "honest_recovery": null,
+        "funded_at": [
+          2,
+          2
+        ],
+        "ready_at": 3
+      },
+      "timing_violations": [],
+      "outcomes": [
+        {
+          "malicious": [
+            0
+          ],
+          "explored_states": 46,
+          "settled_states": 43,
+          "counterexample": null,
+          "harmed_actor": null,
+          "terminal_allocations": [
+            [
+              -1,
+              1
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        }
+      ]
+    },
+    "slower_honest_refunder": {
+      "policy": {
+        "assets": [
+          "DOM",
+          "XMR"
+        ],
+        "recovery": [
+          9,
+          5
+        ],
+        "inclusion": [
+          1,
+          1
+        ],
+        "observation": 1,
+        "resume_claim_after_recovery": true,
+        "honest_recovery": [
+          11,
+          7
+        ],
+        "funded_at": [
+          2,
+          2
+        ],
+        "ready_at": 3
+      },
+      "timing_violations": [
+        "insufficient recovery separation: DOM"
+      ],
+      "outcomes": [
+        {
+          "malicious": [
+            0
+          ],
+          "explored_states": 42,
+          "settled_states": 44,
+          "counterexample": [
+            "t=7 actor=1 publishes refund XMR",
+            "t=8 actor=0 immediately publishes claim XMR",
+            "t=8 final claim XMR -> actor=0",
+            "t=9 actor=1 publishes claim DOM",
+            "t=9 actor=0 publishes refund DOM",
+            "t=9 final refund DOM -> actor=0"
+          ],
+          "harmed_actor": 1,
+          "terminal_allocations": [
+            [
+              0,
+              1
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        }
+      ]
+    },
+    "preparation_exhausts_window": {
+      "policy": {
+        "assets": [
+          "DOM",
+          "XMR"
+        ],
+        "recovery": [
+          12,
+          5
+        ],
+        "inclusion": [
+          1,
+          1
+        ],
+        "observation": 1,
+        "resume_claim_after_recovery": true,
+        "honest_recovery": [
+          14,
+          7
+        ],
+        "funded_at": [
+          2,
+          2
+        ],
+        "ready_at": 4
+      },
+      "timing_violations": [
+        "initiator has no strict final-asset settlement margin"
+      ],
+      "outcomes": [
+        {
+          "malicious": [],
+          "explored_states": 17,
+          "settled_states": 2,
+          "counterexample": null,
+          "harmed_actor": null,
+          "terminal_allocations": [
+            [
+              0,
+              1
+            ]
+          ]
+        }
+      ]
+    }
+  }
+}

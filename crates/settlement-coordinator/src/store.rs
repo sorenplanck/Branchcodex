@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 #[cfg(target_os = "linux")]
@@ -38,6 +37,18 @@ use crate::model::{
     MAX_SETTLEMENT_CHILDREN_V1, ZERO_DIGEST,
 };
 use crate::{CoordinatorErrorV1, Result};
+
+/// Keeps the one retryable child refusal retryable and carries every
+/// permanent one as such, instead of folding both into a retry that can only
+/// end at an outer deadline.
+fn child_refusal_v25(refusal: crate::model::ChildAuthorityRefusalV1) -> CoordinatorErrorV1 {
+    use crate::model::ChildAuthorityRefusalV1 as Child;
+    match refusal {
+        Child::Unavailable => CoordinatorErrorV1::ChildAuthorityRefused,
+        Child::Refused => CoordinatorErrorV1::ChildAuthorityRejected,
+        Child::Conflict => CoordinatorErrorV1::ChildAuthorityConflict,
+    }
+}
 
 mod migration_v19;
 
@@ -288,6 +299,9 @@ pub struct DurableSettlementCoordinatorV1 {
     plan_authority_id: Digest32,
     database_authority: File,
     _process_lock: File,
+    /// Descriptors of the validated sidecars, held while the connection lives.
+    #[cfg(target_os = "linux")]
+    retained_sidecars: RetainedSidecarsV25,
 }
 
 impl core::fmt::Debug for DurableSettlementCoordinatorV1 {
@@ -370,6 +384,8 @@ impl DurableSettlementCoordinatorV1 {
             plan_authority_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage()?;
         sync_directory(parent)?;
@@ -437,9 +453,10 @@ impl DurableSettlementCoordinatorV1 {
             plan_authority_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage()?;
-        validate_resumable_sidecars(path)?;
         sync_directory(parent)?;
         Ok(store)
     }
@@ -490,6 +507,8 @@ impl DurableSettlementCoordinatorV1 {
             plan_authority_id,
             database_authority,
             _process_lock: process_lock,
+            #[cfg(target_os = "linux")]
+            retained_sidecars: RetainedSidecarsV25::default(),
         };
         store.audit_storage()?;
         let retained: (Vec<u8>, Vec<u8>) = store
@@ -779,7 +798,7 @@ impl DurableSettlementCoordinatorV1 {
             return Err(CoordinatorErrorV1::InvalidState);
         };
         if preflight_deferred.materializer_authority_id != materializer_authority_id {
-            return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+            return Err(CoordinatorErrorV1::ChildAuthorityRejected);
         }
         let (capability, descriptor_digest, expected_plan_digest, expected_attempt_id) = {
             let transaction = self.immediate(now_unix_ms)?;
@@ -792,7 +811,7 @@ impl DurableSettlementCoordinatorV1 {
                 return Err(CoordinatorErrorV1::InvalidState);
             };
             if deferred.materializer_authority_id != materializer_authority_id {
-                return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+                return Err(CoordinatorErrorV1::ChildAuthorityRejected);
             }
             let children = load_child_rows(&transaction, row.plan_id)?;
             validate_child_prefix(&children, &plan)?;
@@ -919,12 +938,12 @@ impl DurableSettlementCoordinatorV1 {
 
         let materialized = authority
             .materialize_deferred_child(capability)
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
+            .map_err(child_refusal_v25)?;
         if authority.authority_id() != materializer_authority_id
             || materialized.authority_id() != materializer_authority_id
             || materialized.attempt_id() != expected_attempt_id
         {
-            return Err(CoordinatorErrorV1::ChildAuthorityRefused);
+            return Err(CoordinatorErrorV1::ChildAuthorityRejected);
         }
         let exact = materialized.into_child();
         exact.validate()?;
@@ -1428,7 +1447,8 @@ impl DurableSettlementCoordinatorV1 {
         validate_database_path(&self.connection, &self.path)?;
         validate_backend_and_schema(&self.connection)?;
         validate_owner_file(&self.path)?;
-        validate_resumable_sidecars(&self.path)?;
+        #[cfg(target_os = "linux")]
+        self.retained_sidecars.validate_all(&self.path)?;
         let retained: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = self
             .connection
             .query_row(
@@ -3689,12 +3709,26 @@ impl DurableSettlementCoordinatorV1 {
         }
     }
 
-    /// Persist and execute at most one child authority call.
+    /// Persist and execute at most one child authority call using a fixed clock.
+    /// Blocking production callers must use [`Self::drive_one_with_clock_v28`].
     pub fn drive_one<A: SettlementChildAuthorityV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
         now_unix_ms: u64,
+    ) -> Result<CoordinatorDriveOutcomeV1> {
+        self.drive_one_with_clock_v28(lease, authority, now_unix_ms, || Ok(now_unix_ms))
+    }
+
+    /// Persist one exact child call, then recheck its lease at the trusted
+    /// post-call time before retaining any result. A late result leaves the
+    /// original attempt pending for reconciliation; it cannot renew ownership.
+    pub fn drive_one_with_clock_v28<A: SettlementChildAuthorityV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        authority: &mut A,
+        now_unix_ms: u64,
+        post_authority_time: F,
     ) -> Result<CoordinatorDriveOutcomeV1> {
         let view = self.load_plan(lease.plan_id)?;
         if matches!(
@@ -3711,8 +3745,8 @@ impl DurableSettlementCoordinatorV1 {
         let pending = self.prepare_next_child_call(lease, now_unix_ms)?;
         let outcome = authority
             .externalize_child(pending.request())
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
-        self.complete_child_call(lease, pending, outcome, now_unix_ms)
+            .map_err(child_refusal_v25)?;
+        self.complete_child_call(lease, pending, outcome, post_authority_time()?)
     }
 
     /// Reconstruct the exact current custody outcome without invoking a child.
@@ -3792,12 +3826,31 @@ impl DurableSettlementCoordinatorV1 {
     }
 
     /// Persist and perform at most one same-fence reconciliation authority
-    /// call. This method never invokes `externalize_child`.
+    /// call. This fixed-clock method never invokes `externalize_child`.
+    /// Blocking production callers must use
+    /// [`Self::reconcile_current_child_one_with_clock_v28`].
     pub fn reconcile_current_child_one<A: SettlementChildAuthorityV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
         now_unix_ms: u64,
+    ) -> Result<CoordinatorDriveOutcomeV1> {
+        self.reconcile_current_child_one_with_clock_v28(lease, authority, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
+    }
+
+    /// Reconcile the retained same-fence attempt and validate its lease using
+    /// a fresh trusted clock after the child call, before recording the result.
+    pub fn reconcile_current_child_one_with_clock_v28<
+        A: SettlementChildAuthorityV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        authority: &mut A,
+        now_unix_ms: u64,
+        post_authority_time: F,
     ) -> Result<CoordinatorDriveOutcomeV1> {
         let status = self.current_custody_progress(lease, now_unix_ms)?;
         if !matches!(status, CoordinatorDriveOutcomeV1::Unknown { .. }) {
@@ -3806,8 +3859,8 @@ impl DurableSettlementCoordinatorV1 {
         let pending = self.prepare_current_reconciliation(lease, now_unix_ms)?;
         let outcome = authority
             .reconcile_child(pending.request())
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
-        self.complete_current_reconciliation(lease, pending, outcome, now_unix_ms)
+            .map_err(child_refusal_v25)?;
+        self.complete_current_reconciliation(lease, pending, outcome, post_authority_time()?)
     }
 
     /// Persist or resume exact reconciliation of the single pending child
@@ -3832,12 +3885,31 @@ impl DurableSettlementCoordinatorV1 {
         self.takeover_status(lease, now_unix_ms)
     }
 
-    /// Persist and perform at most one child reconciliation authority call.
+    /// Persist and perform at most one child reconciliation call at a fixed time.
+    /// Blocking production callers must use
+    /// [`Self::reconcile_takeover_one_with_clock_v28`].
     pub fn reconcile_takeover_one<A: SettlementChildAuthorityV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         authority: &mut A,
         now_unix_ms: u64,
+    ) -> Result<CustodyTakeoverStatusV1> {
+        self.reconcile_takeover_one_with_clock_v28(lease, authority, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
+    }
+
+    /// Reconcile an exact takeover attempt and recheck both fences and lease
+    /// expiry at the trusted post-call time before accepting its result.
+    pub fn reconcile_takeover_one_with_clock_v28<
+        A: SettlementChildAuthorityV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        authority: &mut A,
+        now_unix_ms: u64,
+        post_authority_time: F,
     ) -> Result<CustodyTakeoverStatusV1> {
         let status = self.takeover_status(lease, now_unix_ms)?;
         if !matches!(status, CustodyTakeoverStatusV1::Unknown { .. }) {
@@ -3846,8 +3918,8 @@ impl DurableSettlementCoordinatorV1 {
         let pending = self.prepare_takeover_reconciliation(lease, now_unix_ms)?;
         let outcome = authority
             .reconcile_child(pending.request())
-            .map_err(|_| CoordinatorErrorV1::ChildAuthorityRefused)?;
-        self.complete_takeover_reconciliation(lease, pending, outcome, now_unix_ms)
+            .map_err(child_refusal_v25)?;
+        self.complete_takeover_reconciliation(lease, pending, outcome, post_authority_time()?)
     }
 
     fn prepare_reconciliation(
@@ -4449,12 +4521,32 @@ impl DurableSettlementCoordinatorV1 {
 
     /// Observe one exact child. The request is journaled before the single
     /// chain-observer call, and aggregate finality requires both child proofs.
+    /// Blocking production callers must use
+    /// [`Self::observe_child_once_with_clock_v28`] instead of this fixed clock.
     pub fn observe_child_once<O: SettlementChildObserverV1>(
         &mut self,
         lease: CoordinatorLeaseV1,
         child_index: u8,
         observer: &mut O,
         now_unix_ms: u64,
+    ) -> Result<CoordinatorObservationOutcomeV1> {
+        self.observe_child_once_with_clock_v28(lease, child_index, observer, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
+    }
+
+    /// Observe one exact child and validate lease expiry at the trusted
+    /// post-observation time before recording either child or aggregate finality.
+    pub fn observe_child_once_with_clock_v28<
+        O: SettlementChildObserverV1,
+        F: FnOnce() -> Result<u64>,
+    >(
+        &mut self,
+        lease: CoordinatorLeaseV1,
+        child_index: u8,
+        observer: &mut O,
+        now_unix_ms: u64,
+        post_observation_time: F,
     ) -> Result<CoordinatorObservationOutcomeV1> {
         if usize::from(child_index) >= MAX_SETTLEMENT_CHILDREN_V1 {
             return Err(CoordinatorErrorV1::InvalidBound);
@@ -4464,7 +4556,13 @@ impl DurableSettlementCoordinatorV1 {
         let outcome = observer
             .observe_child(&request)
             .map_err(|_| CoordinatorErrorV1::ChildObserverRefused)?;
-        self.complete_observation(lease, request, request_digest, outcome, now_unix_ms)
+        self.complete_observation(
+            lease,
+            request,
+            request_digest,
+            outcome,
+            post_observation_time()?,
+        )
     }
 
     fn prepare_observation(
@@ -6942,20 +7040,10 @@ enum SqliteSidecarKindV1 {
 }
 
 #[cfg(target_os = "linux")]
+/// Pre-open validation: no connection exists yet, so releasing the
+/// descriptors here cannot unlock a live WAL index.
 fn validate_resumable_sidecars(path: &Path) -> Result<()> {
-    for (suffix, kind) in [
-        ("-wal", SqliteSidecarKindV1::Wal),
-        ("-shm", SqliteSidecarKindV1::SharedMemory),
-        ("-journal", SqliteSidecarKindV1::RollbackJournal),
-    ] {
-        let sidecar = sidecar_path(path, suffix);
-        match fs::symlink_metadata(&sidecar) {
-            Ok(_) => validate_sqlite_sidecar_shape(&sidecar, kind)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(CoordinatorErrorV1::StorageUnavailable),
-        }
-    }
-    Ok(())
+    RetainedSidecarsV25::default().validate_all(path)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -6964,24 +7052,80 @@ fn validate_resumable_sidecars(_path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_sqlite_sidecar_shape(path: &Path, kind: SqliteSidecarKindV1) -> Result<()> {
-    validate_owner_file(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+/// Descriptors of every validated SQLite sidecar of one store.
+///
+/// Closing any descriptor for a file drops every POSIX (fcntl) lock this
+/// process holds on it, including the coordination locks SQLite keeps inside
+/// `-shm`. Opening and closing a sidecar while the connection is live
+/// therefore unlocks the WAL index and lets a reader in another process
+/// reinitialize it under this process's mapping (measured: SIGBUS). The
+/// checks are unchanged; only the descriptors are now retained.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RetainedSidecarsV25 {
+    handles: std::sync::Mutex<Vec<(u64, u64, File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedSidecarsV25 {
+    fn validate_all(&self, path: &Path) -> Result<()> {
+        for (suffix, kind) in [
+            ("-wal", SqliteSidecarKindV1::Wal),
+            ("-shm", SqliteSidecarKindV1::SharedMemory),
+            ("-journal", SqliteSidecarKindV1::RollbackJournal),
+        ] {
+            let sidecar = sidecar_path(path, suffix);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(_) => self.validate(&sidecar, kind)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(CoordinatorErrorV1::StorageUnavailable),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self, path: &Path, kind: SqliteSidecarKindV1) -> Result<()> {
+        validate_owner_file(path)?;
+        let named =
+            fs::symlink_metadata(path).map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        if let Some((_, _, retained)) = handles
+            .iter()
+            .find(|(dev, ino, _)| *dev == named.dev() && *ino == named.ino())
+        {
+            return validate_sqlite_sidecar_contents(retained, kind);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        let opened = file
+            .metadata()
+            .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
+        if opened.dev() != named.dev() || opened.ino() != named.ino() {
+            return Err(CoordinatorErrorV1::InvalidStorageAuthority);
+        }
+        validate_sqlite_sidecar_contents(&file, kind)?;
+        handles.push((named.dev(), named.ino(), file));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_sqlite_sidecar_contents(file: &File, kind: SqliteSidecarKindV1) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
     let retained = file
         .metadata()
         .map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
-    let named = fs::symlink_metadata(path).map_err(|_| CoordinatorErrorV1::StorageUnavailable)?;
-    if retained.dev() != named.dev() || retained.ino() != named.ino() {
-        return Err(CoordinatorErrorV1::InvalidStorageAuthority);
-    }
     if retained.len() == 0 {
         return Ok(());
     }
     let mut header = [0u8; 8];
-    file.read_exact(&mut header)
+    file.read_exact_at(&mut header, 0)
         .map_err(|_| CoordinatorErrorV1::InvalidStorageAuthority)?;
     let valid = match kind {
         SqliteSidecarKindV1::Wal => {
@@ -7510,5 +7654,31 @@ mod provisioning_tests {
             CoordinatorErrorV1::InvalidStorageAuthority
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod child_refusal_v25_tests {
+    use super::child_refusal_v25;
+    use crate::model::ChildAuthorityRefusalV1;
+    use crate::CoordinatorErrorV1;
+
+    #[test]
+    fn only_unavailable_child_refusal_stays_retryable() {
+        assert_eq!(
+            child_refusal_v25(ChildAuthorityRefusalV1::Unavailable),
+            CoordinatorErrorV1::ChildAuthorityRefused
+        );
+        // Both are permanent for the call, and each keeps its own name: a
+        // policy refusal and a state conflict reach the route driver as
+        // different refusals and are handled differently there.
+        assert_eq!(
+            child_refusal_v25(ChildAuthorityRefusalV1::Refused),
+            CoordinatorErrorV1::ChildAuthorityRejected
+        );
+        assert_eq!(
+            child_refusal_v25(ChildAuthorityRefusalV1::Conflict),
+            CoordinatorErrorV1::ChildAuthorityConflict
+        );
     }
 }

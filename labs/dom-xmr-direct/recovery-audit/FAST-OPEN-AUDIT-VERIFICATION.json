@@ -1,0 +1,47 @@
+{
+  "security_assumption_refuted": true,
+  "profile_work": 10000000,
+  "refuted_minimum_seconds": 30,
+  "funded_theft_race_reproduced": false,
+  "production_ready": false,
+  "pids_checked_absent": [
+    1590037,
+    1590168,
+    1590518,
+    1592789,
+    1592815
+  ],
+  "rust_command": [
+    "cargo",
+    "test",
+    "--offline",
+    "--release",
+    "--locked",
+    "--test",
+    "recovery_time_bounds",
+    "-j2"
+  ],
+  "rust_exit_code": 0,
+  "rust_results": [
+    "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s"
+  ],
+  "rust_log": "clsag-lab/target/fast-opening-timing-counterexample.log",
+  "sha256": {
+    "clsag-lab/tests/recovery_time_bounds.rs": "0f367cdf8c94db6ca3e742b3a6a6ba37620f92ce36ce727f4b71aa59ee18b5a5",
+    "clsag-lab/src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "clsag-lab/examples/regtest_claim.rs": "be293801a3e55adfc2345b43976402f034eed26e4b0d508f75036821f5dcc732"
+  },
+  "c_compile_command": [
+    "cc",
+    "-O3",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-o",
+    "clsag-lab/target/recovery-research/direct-montgomery-audit",
+    "recovery-audit/direct_montgomery_audit.c",
+    "-lcrypto"
+  ],
+  "c_compile_exit_code": 0,
+  "no_funding_or_new_native_transaction_in_audit": true
+}

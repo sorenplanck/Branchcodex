@@ -225,7 +225,14 @@ impl ContractsSessionStoreV1 {
         let state = if old_ready.is_some() {
             XmrGraphResourceStateV23::Ready
         } else {
-            self.require_graph_resource_unused_locally_v23(&binding)?;
+            match kind {
+                XmrGraphResourceKindV23::NonceVault => {
+                    self.require_graph_resource_unused_locally_v23(&binding)?;
+                }
+                XmrGraphResourceKindV23::AuxiliaryRelay => {
+                    self.require_graph_auxiliary_relay_unadvanced_v23(&binding)?;
+                }
+            }
             if old_started.is_none() {
                 self.publish_graph_resource_v23(
                     target,
@@ -297,7 +304,14 @@ impl ContractsSessionStoreV1 {
             }
             None => {}
         }
-        self.require_graph_resource_unused_locally_v23(&binding)?;
+        match permit.kind {
+            XmrGraphResourceKindV23::NonceVault => {
+                self.require_graph_resource_unused_locally_v23(&binding)?;
+            }
+            XmrGraphResourceKindV23::AuxiliaryRelay => {
+                self.require_graph_auxiliary_relay_unadvanced_v23(&binding)?;
+            }
+        }
         self.publish_graph_resource_v23(
             permit.target,
             permit.edge,
@@ -327,7 +341,14 @@ impl ContractsSessionStoreV1 {
                 Ok(())
             }
             Some(_) => Err(SessionStoreError::Quarantined),
-            None => self.require_graph_resource_unused_locally_v23(&binding),
+            None => match kind {
+                XmrGraphResourceKindV23::NonceVault => {
+                    self.require_graph_resource_unused_locally_v23(&binding)
+                }
+                XmrGraphResourceKindV23::AuxiliaryRelay => {
+                    self.require_graph_auxiliary_relay_unadvanced_v23(&binding)
+                }
+            },
         }
     }
 
@@ -475,6 +496,21 @@ impl ContractsSessionStoreV1 {
         // All legitimate local consumption/message rows require their native
         // request; the global audit before issuance authenticates that linkage.
         if used {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        Ok(())
+    }
+
+    fn require_graph_auxiliary_relay_unadvanced_v23(
+        &self,
+        binding: &GraphSigningSessionBindingV23,
+    ) -> Result<(), SessionStoreError> {
+        let current = self.load_session_locked(binding.origin.session)?;
+        if current.as_bytes() != binding.start.as_bytes()
+            || current.irreversible().funding_authorized
+            || current.irreversible().any_signing_share_sent
+            || current.irreversible().adaptor_secret_exposed
+        {
             return Err(SessionStoreError::InvalidTransition);
         }
         Ok(())

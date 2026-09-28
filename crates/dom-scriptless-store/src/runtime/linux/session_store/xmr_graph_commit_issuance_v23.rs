@@ -72,6 +72,61 @@ impl ContractsSessionStoreV1 {
         )
     }
 
+    /// Repair a crash window where an accepted graph-commit message record is
+    /// durable but its session successor was not published yet. This does not
+    /// accept new bytes: every retained record is reauthenticated against the
+    /// exact graph prefix and only the immediate `head + 1` successor may be
+    /// materialized.
+    pub fn heal_retained_xmr_graph_commit_successor_v23(
+        &self,
+        chain: TrustedChainIdV1,
+        route: [u8; 32],
+        session: [u8; 32],
+    ) -> Result<(), SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        self.audit_transport()?;
+        let context = self.authenticate_graph_commit_context_issuance_v23(chain, route, session)?;
+        let current = self.load_session_locked(session)?;
+        if current.revision() >= context.revision.saturating_add(2)
+            || current.phase() == SessionPhaseV1::FailedClosed
+        {
+            return Ok(());
+        }
+        let roster = self.load_transport_roster(session)?;
+        let retained =
+            super::message_collect_v25::collect_untrusted_messages_v25(&self.messages, session)?;
+        for (name, record) in retained {
+            let (envelope, direction) = self.authenticate_transport_record(&name, &record)?;
+            if envelope.session_id != session
+                || envelope.chain_id != *chain.as_bytes()
+                || envelope.message_type != 0x18
+                || record.equivocation
+                || record.successor.revision() != current.revision().saturating_add(1)
+            {
+                continue;
+            }
+            if self
+                .load_session_revision(session, record.successor.revision())
+                .is_ok()
+            {
+                return Ok(());
+            }
+            self.require_next_xmr_graph_commit_message_v23(
+                session,
+                &current,
+                &roster,
+                &envelope,
+                &record.signed_bytes,
+                None,
+            )?;
+            require_transport_successor(&current, &envelope, direction, &record.successor)
+                .map_err(|_| SessionStoreError::Quarantined)?;
+            self.persist_session_record(&record.successor)?;
+            break;
+        }
+        Ok(())
+    }
+
     /// Persist the next local identity-signing request for graph agreement.
     /// Sender, sequence, predecessor and payload all come from retained state.
     /// A peer turn or completed two-message prefix returns None without issuing
@@ -161,42 +216,90 @@ impl ContractsSessionStoreV1 {
         session: [u8; 32],
         signed_bytes: &[u8],
     ) -> Result<DurableTransportOutcomeV1, SessionStoreError> {
-        let _guard = self.operation_lock()?;
-        self.audit_transport()?;
-        let context = self.authenticate_graph_commit_context_issuance_v23(chain, route, session)?;
-        let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
-        if envelope.message_type != 0x18
-            || envelope.chain_id != *chain.as_bytes()
-            || envelope.session_id != session
-        {
-            return Err(SessionStoreError::InvalidTransition);
-        }
-        let roster = self.load_transport_roster(session)?;
-        let identities = self.load_transport_identity_binding(session)?;
-        require_transport_identity_binding(&roster, &identities)?;
-        let participant = roster
-            .participants
-            .iter()
-            .find(|participant| participant.participant_id == envelope.sender_id)
-            .ok_or(SessionStoreError::Canonical)?;
-        // Never allow unverified bytes to trigger the equivocation successor.
-        envelope.verify(&participant.identity_key)?;
-        let current = self.load_session_locked(session)?;
-        let name = transport_message_name(session, envelope.sender_id, envelope.sequence, false);
-        match self.messages.read_bounded_file(
-            &ValidatedComponent::registered(&name)?,
-            TRANSPORT_MESSAGE_MAX_LEN,
-        ) {
-            Ok(bytes) => {
-                let retained = TransportMessageRecordV1::from_bytes(&bytes)?;
-                self.authenticate_transport_record(&name, &retained)?;
-                if retained.signed_bytes == signed_bytes {
-                    return self.accept_transport_message_with_successor_locked(
-                        signed_bytes,
-                        &current,
-                        None,
-                    );
+        let outcome = {
+            let _guard = self.operation_lock()?;
+            self.audit_transport()?;
+            let context =
+                self.authenticate_graph_commit_context_issuance_v23(chain, route, session)?;
+            let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+            if envelope.message_type != 0x18
+                || envelope.chain_id != *chain.as_bytes()
+                || envelope.session_id != session
+            {
+                return Err(SessionStoreError::InvalidTransition);
+            }
+            let roster = self.load_transport_roster(session)?;
+            let identities = self.load_transport_identity_binding(session)?;
+            require_transport_identity_binding(&roster, &identities)?;
+            let participant = roster
+                .participants
+                .iter()
+                .find(|participant| participant.participant_id == envelope.sender_id)
+                .ok_or(SessionStoreError::Canonical)?;
+            // Never allow unverified bytes to trigger the equivocation successor.
+            envelope.verify(&participant.identity_key)?;
+            let current = self.load_session_locked(session)?;
+            let name =
+                transport_message_name(session, envelope.sender_id, envelope.sequence, false);
+            let retained_outcome = match self.messages.read_bounded_file(
+                &ValidatedComponent::registered(&name)?,
+                TRANSPORT_MESSAGE_MAX_LEN,
+            ) {
+                Ok(bytes) => {
+                    let retained = TransportMessageRecordV1::from_bytes(&bytes)?;
+                    self.authenticate_transport_record(&name, &retained)?;
+                    Some(if retained.signed_bytes == signed_bytes {
+                        self.accept_transport_message_with_successor_locked(
+                            signed_bytes,
+                            &current,
+                            None,
+                        )?
+                    } else {
+                        let failed = current.advance(
+                            current.revision(),
+                            SessionPhaseV1::FailedClosed,
+                            current.transcript_hash(),
+                            current.irreversible(),
+                            current.chain(),
+                            current.encrypted_payload(),
+                        )?;
+                        self.accept_transport_message_with_successor_locked(
+                            signed_bytes,
+                            &current,
+                            Some(&failed),
+                        )?
+                    })
                 }
+                Err(LinuxCapabilityError::NotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(outcome) = retained_outcome {
+                outcome
+            } else {
+                self.require_live_graph_commit_reconstruction_v23(chain, route, session, &context)?;
+                let phase = self.require_next_xmr_graph_commit_message_v23(
+                    session,
+                    &current,
+                    &roster,
+                    &envelope,
+                    signed_bytes,
+                    None,
+                )?;
+                let transcript = accepted_transport_transcript_hash(
+                    &current.transcript_hash(),
+                    &envelope.message_digest,
+                    participant.direction,
+                    envelope.message_type,
+                    phase,
+                )?;
+                let successor = current.advance(
+                    current.revision(),
+                    phase,
+                    transcript,
+                    current.irreversible(),
+                    current.chain(),
+                    current.encrypted_payload(),
+                )?;
                 let failed = current.advance(
                     current.revision(),
                     SessionPhaseV1::FailedClosed,
@@ -205,48 +308,15 @@ impl ContractsSessionStoreV1 {
                     current.chain(),
                     current.encrypted_payload(),
                 )?;
-                return self.accept_transport_message_with_successor_locked(
+                self.accept_transport_message_with_successor_locked(
                     signed_bytes,
-                    &current,
+                    &successor,
                     Some(&failed),
-                );
+                )?
             }
-            Err(LinuxCapabilityError::NotFound) => {}
-            Err(error) => return Err(error.into()),
-        }
-        self.require_live_graph_commit_reconstruction_v23(chain, route, session, &context)?;
-        let phase = self.require_next_xmr_graph_commit_message_v23(
-            session,
-            &current,
-            &roster,
-            &envelope,
-            signed_bytes,
-            None,
-        )?;
-        let transcript = accepted_transport_transcript_hash(
-            &current.transcript_hash(),
-            &envelope.message_digest,
-            participant.direction,
-            envelope.message_type,
-            phase,
-        )?;
-        let successor = current.advance(
-            current.revision(),
-            phase,
-            transcript,
-            current.irreversible(),
-            current.chain(),
-            current.encrypted_payload(),
-        )?;
-        let failed = current.advance(
-            current.revision(),
-            SessionPhaseV1::FailedClosed,
-            current.transcript_hash(),
-            current.irreversible(),
-            current.chain(),
-            current.encrypted_payload(),
-        )?;
-        self.accept_transport_message_with_successor_locked(signed_bytes, &successor, Some(&failed))
+        };
+        self.retain_terminal_xmr_graph_signing_origins_v23(chain, route, session)?;
+        Ok(outcome)
     }
 
     // Historical context authentication: do not add a live phase gate here.

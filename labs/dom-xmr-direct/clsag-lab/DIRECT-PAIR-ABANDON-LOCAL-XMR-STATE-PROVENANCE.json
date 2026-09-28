@@ -1,0 +1,31 @@
+{
+  "sha256": {
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "8df248264e60d8f3282dd9c4fa6d7ae33c8b2241c744cc718fe43b582bf398f4",
+    "src/capsule_checkpoint.rs": "1de9add49121ffecfc30a2625066fd020c841ab449ab85cc781a3022beb6b69f",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "src/xmr_recovery.rs": "96c3a6646f1809444ec03e0d6a4b2d1cea14ecc26fd06df2ebbb8ec96a39669b",
+    "src/xmr_recovery/checkpoint.rs": "fa062eee8da3a2468d29e81a4de386bb1d9f4abbe5bf5e91669b5e8f5c112d8f",
+    "examples/regtest_claim.rs": "4952627dab06cf58ee28448589d4c59a1ab2b93115752c2580ba9379864a0f06",
+    "examples/support/direct_recovery_bridge.rs": "dfed746e0ada114ff764e0a32d5c071219100b866384a0e60232627c74b34339",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "tests/capsule_checkpoint.rs": "d04be8298370ec65a25629ae2c57f33233aadfe8ac5de944b6414b53666605a0",
+    "tests/local_xmr_checkpoint.rs": "f62ad0a5cf88e3820bc31ed5d697cf06903146965cc6229d026462628451d5e6",
+    "target/release/examples/regtest_claim": "781a30b0dc876a0730db8a8b9a200b95e1e42f6e899969eaf45684968ad0204c",
+    "target/recovery-research/direct-dlog-bridge": "a8ef8155e2e2542af1cb7630d40d5a300e7208ca77db38c2421fbe3610e81858",
+    "../recovery-audit/direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "../recovery-audit/direct_dlog_cli.go": "3c264cb1af6406eb1636834b962cf9104400cf705366fec2bbbb33f47bd6c70c",
+    "../recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b"
+  },
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "resource_pressure_before": {
+    "io": "some avg10=0.77 avg60=7.79 avg300=33.42 total=22237459763\nfull avg10=0.76 avg60=7.44 avg300=31.42 total=21183133916\n",
+    "memory": "some avg10=0.01 avg60=2.34 avg300=6.42 total=1390136585\nfull avg10=0.01 avg60=2.26 avg300=6.18 total=1319601366\n",
+    "cpu": "some avg10=0.00 avg60=0.09 avg300=0.49 total=1108943152\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+  },
+  "scope": "Own offline nodes. Local original XMR share/roster/capsule link persisted before deposits; original objects dropped and reloaded in the same Rust coordinator during timed recovery. Go verifier killed and replaced; local setup receipt authenticated, proof rechecked, capsule opened. Not a complete coordinator restart; fresh Rust restore separately tested without native funding."
+}

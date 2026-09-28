@@ -989,6 +989,33 @@ impl ProductionRelayV1 {
         Ok(self.len()? == 0)
     }
 
+    /// Returns retained canonical envelopes for one session without mutating
+    /// delivery state. The Relay still treats payloads as opaque; callers that
+    /// own a higher-level protocol may decode the returned bytes after the
+    /// envelope codec revalidates the stored canonical form.
+    pub fn pending_canonical_envelopes_for_session(
+        &self,
+        session_id: &Digest32,
+    ) -> Result<Vec<Vec<u8>>, ProductionRelayError> {
+        let mut statement = self.connection.prepare(
+            "SELECT canonical_bytes FROM relay_envelopes
+             WHERE session_id = ?1
+             ORDER BY ordinal ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_slice()], |row| row.get(0))?;
+        let mut envelopes = Vec::new();
+        for row in rows {
+            let bytes: Vec<u8> = row?;
+            let decoded =
+                RelayEnvelopeV1::decode(&bytes).map_err(|_| ProductionRelayError::CorruptState)?;
+            if &decoded.session_id != session_id {
+                return Err(ProductionRelayError::CorruptState);
+            }
+            envelopes.push(bytes);
+        }
+        Ok(envelopes)
+    }
+
     /// Durably stores one canonical envelope before returning its ACK.
     ///
     /// Same key and exact bytes returns the same canonical ACK after any

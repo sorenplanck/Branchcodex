@@ -1,0 +1,25 @@
+{
+  "sha256": {
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "8df248264e60d8f3282dd9c4fa6d7ae33c8b2241c744cc718fe43b582bf398f4",
+    "src/capsule_checkpoint.rs": "1de9add49121ffecfc30a2625066fd020c841ab449ab85cc781a3022beb6b69f",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "src/xmr_recovery.rs": "f68eb540293915a46f5ad8c9fc0bf2845231db2e6c1435ac19d29ddbc33fa3f7",
+    "examples/regtest_claim.rs": "3a4c80e10e57bcd643a2a7fd765219ceefbcbc60a66980ec49dbf47d03eff7dc",
+    "examples/support/direct_recovery_bridge.rs": "dfed746e0ada114ff764e0a32d5c071219100b866384a0e60232627c74b34339",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "tests/capsule_checkpoint.rs": "d04be8298370ec65a25629ae2c57f33233aadfe8ac5de944b6414b53666605a0",
+    "target/release/examples/regtest_claim": "763a8e16246de7b908d0d572987385fe826cdff60f07c546fc3486c2736b300e",
+    "target/recovery-research/direct-dlog-bridge": "a8ef8155e2e2542af1cb7630d40d5a300e7208ca77db38c2421fbe3610e81858",
+    "../recovery-audit/direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "../recovery-audit/direct_dlog_cli.go": "3c264cb1af6406eb1636834b962cf9104400cf705366fec2bbbb33f47bd6c70c",
+    "../recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b",
+    "../recovery-audit/direct_setup_receipt_test.go": "e8b256462c4748c19e2436c0e73a3f7ac9eeac68bf6174aec5b8a2b1dfd38801"
+  },
+  "environment_overrides": {
+    "GOMAXPROCS": "2",
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "scope": "Own offline nodes, capsule record persisted before both shared deposits; kill original Go public solver, create a fresh verifier from record, authenticate a local verifier-issued setup receipt under a separately configured private authority, reverify the proof and open. Rust supervisor, roster, local signing material and nodes remain alive. Original window and receipt retained; not full daemon restart."
+}

@@ -1,0 +1,29 @@
+{
+  "checks": [
+    {
+      "command": [
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/go/bin/go",
+        "vet",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli.go"
+      ],
+      "exit_code": 0,
+      "log": "clsag-lab/target/direct-parallel-vet.log"
+    },
+    {
+      "command": [
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/go/bin/go",
+        "build",
+        "-o",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/lhtlp_bridge.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog.go",
+        "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/recovery-audit/direct_dlog_cli.go"
+      ],
+      "exit_code": 0,
+      "log": "clsag-lab/target/direct-parallel-build.log"
+    }
+  ],
+  "binary_sha256": "c4fa29414821b6a40bbf2aaa81524a06d8ae5f87123d487906ae5a728fc579f2"
+}

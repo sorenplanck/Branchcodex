@@ -70,6 +70,15 @@ impl ProductionRelayStage12OwnerV1 {
         {
             return Ok(());
         }
+        // A ready graph record is written exclusively by this process's own
+        // custody mount, which only runs after the lifecycle has left
+        // `Awaiting`. After one authenticated probe found nothing, re-probing
+        // on every tick pays a full transport audit to re-learn the same
+        // absence for the entire bootstrap phase. Reopen starts a new process
+        // and probes afresh; mounting retained custody clears the flag.
+        if self.ready_graph_probe_done_v25[index] {
+            return Ok(());
+        }
         let owner = match leg {
             LegIdV1::Upstream => &self.upstream,
             LegIdV1::Downstream => &self.downstream,
@@ -77,7 +86,12 @@ impl ProductionRelayStage12OwnerV1 {
         if let Some((produced, role)) = owner
             .contracts
             .retained_xmr_graph_ready_for_activation_v23(owner.trusted_chain_id)
-            .map_err(|_| Error::Binding)?
+            .map_err(|error| match error {
+                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(store) => {
+                    Error::Store(store)
+                }
+                _ => Error::Binding,
+            })?
         {
             if self.xmr_graph_setup_v22[index]
                 .as_ref()
@@ -109,6 +123,7 @@ impl ProductionRelayStage12OwnerV1 {
             self.xmr_graph_templates_v23[index] =
                 GraphLifecycleV23::Produced(SignedXmrGraphV23 { produced, role });
         }
+        self.ready_graph_probe_done_v25[index] = true;
         Ok(())
     }
 
@@ -168,6 +183,7 @@ impl ProductionRelayStage12OwnerV1 {
         {
             return Err(Error::Binding);
         }
+        self.ready_graph_probe_done_v25[index] = false;
         let setup = self.xmr_custody_setup_v23(leg)?;
         recovery.require_sweep(sweep).map_err(|_| Error::Binding)?;
         if self.xmr_f7_resources_v23[index].is_some() || self.xmr_f7_observers_v23[index].is_some()
@@ -232,7 +248,26 @@ impl ProductionRelayStage12OwnerV1 {
             LegIdV1::Downstream => 1,
         };
         if let GraphLifecycleV23::Custodied { custody, .. } = &self.xmr_graph_templates_v23[index] {
-            return custody.revalidate().map_err(|_| Error::Binding);
+            // Revalidating here rebuilds the whole recovery graph and re-audits
+            // both ordinary rounds. Measured on RUN26: 658 calls, 5.8 s median,
+            // 76 min of a 124 min run — 61% of the ceremony spent re-auditing a
+            // lifecycle that is terminal and a custody object that cannot change
+            // while it holds. This is a polling tick with nothing left to do,
+            // not a use: every consumer revalidates at its own point of use
+            // (`ProductionXmrGraphCustodyV23::activate_recovery_v23` opens with
+            // `self.revalidate()?`), so no use loses its guard. Audit once per
+            // entry into `Custodied`, then let the use sites carry it.
+            if self.xmr_custody_revalidated_v25[index] {
+                return Ok(());
+            }
+            custody.revalidate().map_err(|error| match error {
+                crate::production_contracts::ProductionXmrGraphCustodyErrorV23::Store(store) => {
+                    Error::Store(store)
+                }
+                _ => Error::Binding,
+            })?;
+            self.xmr_custody_revalidated_v25[index] = true;
+            return Ok(());
         }
         if !matches!(
             self.xmr_graph_templates_v23[index],
@@ -263,6 +298,7 @@ impl ProductionRelayStage12OwnerV1 {
             pending.private_owner.as_ref(),
         ) {
             Ok(custody) => {
+                self.xmr_custody_revalidated_v25[index] = false;
                 self.xmr_graph_templates_v23[index] = GraphLifecycleV23::Custodied {
                     custody,
                     recovery: pending.recovery,
@@ -330,11 +366,10 @@ impl ProductionRelayStage12OwnerV1 {
             .ok_or(Error::Binding)?
             .needs_refund_binding_v23()
         {
-            if let Some(authority) = owner
+            let polled = owner
                 .contracts
-                .poll_xmr_refund_template_binding_v23(owner.trusted_chain_id)
-                .map_err(|_| Error::Binding)?
-            {
+                .poll_xmr_refund_template_binding_v23(owner.trusted_chain_id);
+            if let Some(authority) = polled.map_err(|_| Error::Binding)? {
                 owner
                     .contracts
                     .revalidate_xmr_refund_template_binding_v23(&authority)

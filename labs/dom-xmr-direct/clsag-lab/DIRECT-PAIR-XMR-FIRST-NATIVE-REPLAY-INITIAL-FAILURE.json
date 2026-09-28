@@ -1,0 +1,9 @@
+{
+  "exit_code": 101,
+  "wall_seconds": 99.98876982799266,
+  "phase": "after XMR funding/maturity, before paired offers",
+  "reason": "conditional timing fixture expired before releasing paired offers",
+  "initial_replay_exercised": false,
+  "claim_recovery_worker_count": 0,
+  "log": "target/direct-pair-xmr-first-native-replay-native-1790475233676981436.log"
+}

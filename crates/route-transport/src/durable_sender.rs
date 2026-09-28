@@ -924,6 +924,27 @@ impl DurableRelaySenderV1 {
         self.require_meta().map(|meta| meta.checkpoint)
     }
 
+    /// Whether an envelope of this Relay kind was ever prepared on this
+    /// flow: still pending, or already acknowledged into history. Used by the
+    /// F6 initiator so a one-shot negotiation message survives restarts
+    /// without a second staging. Read-only.
+    pub fn kind_ever_prepared_v25(
+        &self,
+        message_type: u16,
+    ) -> Result<bool, DurableRelaySenderErrorV1> {
+        if let Some(pending) = self.pending_envelope()? {
+            if pending.message_type() == message_type {
+                return Ok(true);
+            }
+        }
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM sender_history WHERE message_type = ?1",
+            [i64::from(message_type)],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Returns the exact pending signed bytes, if any, after full validation.
     pub fn pending_envelope(
         &self,

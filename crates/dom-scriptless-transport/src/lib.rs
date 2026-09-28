@@ -1588,6 +1588,13 @@ pub struct EncryptedTransportV1<S> {
 }
 
 impl<S: Read + Write> EncryptedTransportV1<S> {
+    /// The underlying stream, for callers that manage its transport-level
+    /// deadlines between application phases. The Noise state is not exposed
+    /// and no handshake or record boundary can be altered through this.
+    pub fn stream_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
     /// Complete Noise XX and require the peer static key frozen in terms.
     pub fn establish(stream: S, config: NoiseSessionConfigV1<'_>) -> Result<Self, TransportError> {
         if config.chain_id == [0; 32]

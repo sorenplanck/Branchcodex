@@ -14,6 +14,17 @@ use dom_scriptless_store::{OutboundDsc1RecoveryV1, SessionPhaseV1, SessionStoreE
 use dom_scriptless_transport::SignedMessageV1;
 use relay::TimelockSpec;
 use route_transport::F6TransportPortV1;
+use std::time::Duration;
+
+pub(crate) const F7_FUNDING_CONTEXT_POLL_BOUND_V24: Duration = Duration::from_secs(10);
+
+fn bounded_f7_funding_context_budget_v24(
+    funding_window: &crate::production_timer::ProductionFundingWindowV23,
+) -> Duration {
+    funding_window
+        .remaining()
+        .min(F7_FUNDING_CONTEXT_POLL_BOUND_V24)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProductionFundingErrorV20 {
@@ -34,11 +45,19 @@ impl ProductionFundingErrorV20 {
     pub(crate) fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::Store(SessionStoreError::StoreBusy | SessionStoreError::Filesystem)
-                | Self::Observation(adapter_dom_real::RealDomError::Chain(
-                    dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
-                ))
-                | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
+            // The two *AuthorityUnavailable answers mean the Store has no
+            // authority to hand out *yet* (gate not prepared, observation
+            // aged past its window); the next round prepares or re-observes.
+            // Run 84 died on the claim-signing one; the funding one is the
+            // same answer from the fresh-gate predicates in recovery.
+            Self::Store(
+                SessionStoreError::StoreBusy
+                    | SessionStoreError::Filesystem
+                    | SessionStoreError::FundingAuthorityUnavailable
+                    | SessionStoreError::ClaimSigningAuthorityUnavailable
+            ) | Self::Observation(adapter_dom_real::RealDomError::Chain(
+                dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
+            )) | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
         )
     }
 }
@@ -146,7 +165,9 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         }
         // Fresh DOM context on every signing tick. No private operation is
         // authorized by the bootstrap's historical chain projection.
-        let context = scanner.funding_validation_context_bounded_v23(funding_window.remaining())?;
+        let context = scanner.funding_validation_context_bounded_v23(
+            bounded_f7_funding_context_budget_v24(funding_window),
+        )?;
         if !funding_window.available() {
             return Ok(Step::WindowClosed);
         }
@@ -187,8 +208,9 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         }
         if accepted.accepted_signing_messages().count() == 6 {
             // Re-read after signing/replay, immediately before materialization.
-            let context =
-                scanner.funding_validation_context_bounded_v23(funding_window.remaining())?;
+            let context = scanner.funding_validation_context_bounded_v23(
+                bounded_f7_funding_context_budget_v24(funding_window),
+            )?;
             if !funding_window.available() {
                 return Ok(Step::WindowClosed);
             }
@@ -198,8 +220,9 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             self.release_funding_vault_v20(material, chain)?;
             return Ok(Step::Committed);
         }
-        let signing_context =
-            scanner.funding_validation_context_bounded_v23(funding_window.remaining())?;
+        let signing_context = scanner.funding_validation_context_bounded_v23(
+            bounded_f7_funding_context_budget_v24(funding_window),
+        )?;
         if !funding_window.available() {
             return Ok(Step::WindowClosed);
         }

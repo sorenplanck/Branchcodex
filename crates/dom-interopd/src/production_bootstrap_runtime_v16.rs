@@ -59,6 +59,12 @@ pub(crate) enum ProductionBootstrapRuntimeErrorV16 {
     /// diagnosable from a single daemon exit line.
     #[error("no local surface for a peer graph candidate: {0:?}")]
     GraphCandidateSurfaceMissingV25(GraphCandidateSurfaceV25),
+    /// The retained DOM actuator lease could not be renewed between two
+    /// bootstrap phases. One bootstrap call carries the whole recovery
+    /// signing ceremony, which has no upper bound in wall clock, so the
+    /// lease has to be renewed inside it and not only around it.
+    #[error("bootstrap DOM actuator lease renewal failed")]
+    ActuatorLeaseRenewalV25,
 }
 
 /// The construction-time surface a peer graph candidate failed to bind to.

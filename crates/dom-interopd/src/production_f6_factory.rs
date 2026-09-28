@@ -75,6 +75,15 @@ use crate::production_f6_activation::{pair_factory_seal, ProductionF6PairAuthori
 use crate::production_f6_lifecycle::ProductionF6ActivationRefusalV2;
 use crate::production_inputs::{AuthenticatedProductionInputsV1, ProductionRosterLegV1};
 
+/// Diagnostic constructor for every InvalidBinding refusal site in this
+/// module. It prints only the static source line — no identifiers, amounts
+/// or key material — so a refused production activation names its exact
+/// boundary in the daemon's stderr.
+fn invalid_binding_diag_v25(line: u32) -> ProductionF6ActivationRefusalV2 {
+    eprintln!("DOM_F6_BIND_DIAG_V25 site=factory:{line}");
+    ProductionF6ActivationRefusalV2::InvalidBinding
+}
+
 const ZERO_DIGEST: Digest32 = [0; 32];
 #[path = "production_f6_claim_enrollment_v23.rs"]
 mod claim_enrollment_v23;
@@ -119,7 +128,7 @@ impl ProductionF6ExternalPreparedBindingsV7 {
         composition_digest: Digest32,
     ) -> Result<Self, ProductionF6ActivationRefusalV2> {
         if [provisioning_binding, route_id, composition_digest].contains(&ZERO_DIGEST) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let derive = |position: u8, role: u8| {
             digest_parts(&[
@@ -141,7 +150,7 @@ impl ProductionF6ExternalPreparedBindingsV7 {
         };
         let distinct: BTreeSet<_> = value.all().into_iter().collect();
         if distinct.len() != value.all().len() || distinct.contains(&ZERO_DIGEST) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         Ok(value)
     }
@@ -165,7 +174,7 @@ impl ProductionF6ExternalPreparedBindingsV7 {
     ) -> Result<(), ProductionF6ActivationRefusalV2> {
         for (path, digest) in paths.all().into_iter().zip(self.all()) {
             let binding = ProductionStoreBindingV1::new(digest)
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+                .map_err(|_| invalid_binding_diag_v25(line!()))?;
             Store::prepare_resume_create_production(path, binding)
                 .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
         }
@@ -191,19 +200,19 @@ impl ProductionF6ExternalPathsV7 {
         paths: [PathBuf; 6],
     ) -> Result<Self, ProductionF6ActivationRefusalV2> {
         if !state_root.is_absolute() || !lexically_normal(state_root) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let mut distinct = BTreeSet::new();
         for path in &paths {
             let relative = path
                 .strip_prefix(state_root)
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+                .map_err(|_| invalid_binding_diag_v25(line!()))?;
             if !path.is_absolute()
                 || !lexically_normal(path)
                 || relative.as_os_str().is_empty()
                 || !distinct.insert(path.clone())
             {
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
         }
         let [upstream_status, downstream_status, upstream_time, downstream_time, upstream_candidate, downstream_candidate] =
@@ -335,7 +344,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
         authenticated: &AuthenticatedProductionInputsV1,
     ) -> Result<Self, ProductionF6ActivationRefusalV2> {
         if bytes.len() > MAX_BUNDLE_BYTES_V7 {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let mut reader = BundleReaderV7::new(bytes);
         let magic = reader.take::<8>()?;
@@ -345,7 +354,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
         if (!enrollment && (magic != *BUNDLE_MAGIC_V7 || version != BUNDLE_VERSION_V7))
             || reader.u16()? != 0
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         if enrollment
             && [
@@ -360,7 +369,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
                     .is_none()
             })
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let network_id = reader.take::<32>()?;
         let route_id = reader.take::<32>()?;
@@ -395,15 +404,15 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             let role_plan = ComposedFinalClaimRolePlanV1::decode_canonical(
                 reader.bytes_exact(FINAL_CLAIM_ROLE_PLAN_BYTES_V7)?,
             )
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
             let upstream_source_scope = FinalClaimSecretSourceScopeV1::decode_canonical(
                 reader.bytes_exact(FINAL_CLAIM_SOURCE_SCOPE_BYTES_V7)?,
             )
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
             let downstream_source_scope = FinalClaimSecretSourceScopeV1::decode_canonical(
                 reader.bytes_exact(FINAL_CLAIM_SOURCE_SCOPE_BYTES_V7)?,
             )
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
             ClaimPlanProfileV23::Bound {
                 role_plan,
                 upstream: upstream_source_scope,
@@ -455,7 +464,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
                     .frozen_bindings()
                     .profile_bundle_digest
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let expected_relay_keys: Vec<_> = authenticated
             .roster_bundle()
@@ -482,7 +491,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             || value.reserved_relay_keys != expected_relay_keys
             || value.reserved_chain_keys != expected_chain_keys
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         value
             .claim_profile
@@ -512,19 +521,22 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             || self.registry_epoch == 0
             || self.required_collateral == 0
             || self.status_max_lifetime_seconds == 0
+            || self.status_max_lifetime_seconds > solver_status::MAX_STATUS_LIFETIME_SECONDS_V1
             || self.pre_f6_limits.valid_from_seconds >= self.pre_f6_limits.expires_at_seconds
             || self.pre_f6_limits.max_evidence_age_seconds == 0
+            || self.pre_f6_limits.max_evidence_age_seconds
+                > route_time_anchor::MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2
             || self.bond_authorities.threshold() < 2
             || self.bond_authorities.xonly_keys().len() < 2
             || self.status_authorities.threshold() < 2
             || self.status_authorities.xonly_keys().len() < 2
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         bond_reservation_authority_set_digest_v2(&self.bond_authorities, secp)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
         candidate_status_authority_set_digest_v2(&self.status_authorities, secp)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
         let status_keys: BTreeSet<_> = self
             .status_authorities
             .xonly_keys()
@@ -537,7 +549,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             .iter()
             .any(|key| status_keys.contains(key))
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         validate_signer_descriptors(&self.bond_authorities, &self.upstream_signers)?;
         validate_signer_descriptors(&self.bond_authorities, &self.downstream_signers)?;
@@ -546,7 +558,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             self.reserved_participant_keys.clone(),
             self.reserved_chain_keys.clone(),
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
         let reserved: BTreeSet<_> = self
             .reserved_relay_keys
             .iter()
@@ -561,7 +573,7 @@ impl AuthenticatedProductionF6AuthorityBundleV7 {
             .chain(self.status_authorities.xonly_keys())
             .any(|key| reserved.contains(key))
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         Ok(())
     }
@@ -582,7 +594,7 @@ fn acquire_or_renew_inventory_lease_at(
         || duration_ms == 0
         || duration_ms > MAX_F6_INVENTORY_LEASE_DURATION_MS_V7
     {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let outcome = inventory
         .acquire_lease(authenticated_solver, owner_id, now_unix_ms, duration_ms)
@@ -595,7 +607,7 @@ fn acquire_or_renew_inventory_lease_at(
     };
     let expected_until = now_unix_ms
         .checked_add(duration_ms)
-        .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
     if lease.authority_id != authenticated_solver
         || lease.owner_id != owner_id
         || lease.fencing_epoch == 0
@@ -661,14 +673,14 @@ impl ProductionF6CounterpartyTermsOwnerV7 {
             inputs.monero_session(leg).is_some(),
         ];
         if present.into_iter().filter(|v| *v).count() != 1 || payout.is_some() != present[1] {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         if let Some(session) = inputs.evm_session(leg) {
             Ok(Self::Evm(
                 inputs
                     .admission()
                     .evm_deployment_capability(leg, session)
-                    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+                    .map_err(|_| invalid_binding_diag_v25(line!()))?,
             ))
         } else if let Some(payout) = payout {
             Ok(Self::Bitcoin {
@@ -676,7 +688,7 @@ impl ProductionF6CounterpartyTermsOwnerV7 {
                 deployment: inputs
                     .admission()
                     .bitcoin_deployment_capability(leg)
-                    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+                    .map_err(|_| invalid_binding_diag_v25(line!()))?,
             })
         } else if let Some(session) = inputs.solana_session(leg) {
             Ok(Self::Solana(
@@ -689,10 +701,10 @@ impl ProductionF6CounterpartyTermsOwnerV7 {
                 crate::production_f6::extended_terms::ProductionXmrF6TermsOwnerV7::from_session(
                     session,
                 )
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+                .map_err(|_| invalid_binding_diag_v25(line!()))?,
             ))
         } else {
-            Err(ProductionF6ActivationRefusalV2::InvalidBinding)
+            Err(invalid_binding_diag_v25(line!()))
         }
     }
 }
@@ -779,7 +791,7 @@ impl AuthenticatedProductionF6FinalClaimPlanV7 {
         if composition.binding_digest() != self.composition_digest
             || composition.route_scope_digest() != self.route_scope_digest
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         self.profile
             .materialize(self.route_id, composition, bindings)
@@ -850,7 +862,7 @@ fn exact_inventory_fencing_epoch(
         || inventory_lease.fencing_epoch == 0
         || inventory_lease.lease_until_unix_ms == 0
     {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     Ok(inventory_lease.fencing_epoch)
 }
@@ -926,7 +938,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             || !credentials_are_independent(&credentials.upstream)
             || !credentials_are_independent(&credentials.downstream)
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         bundle.claim_profile.authenticate(&composition)?;
         let final_claim_plan = AuthenticatedProductionF6FinalClaimPlanV7 {
@@ -978,7 +990,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             || self.bound.is_some()
             || self.historical_recovery_v24.is_some()
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         self.historical_recovery_v24 = Some(recovery);
         Ok(self)
@@ -1062,13 +1074,13 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             &self.route.registry,
             self.bundle.pre_f6_limits,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
         let downstream_policy = build_policy(
             downstream_scope,
             &self.route.registry,
             self.bundle.pre_f6_limits,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
 
         let upstream_status_config =
             status_config(&self.route, &self.bundle, upstream_wire, &upstream_secp)?;
@@ -1077,12 +1089,12 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
         if upstream_scope.scope_digest() == downstream_scope.scope_digest()
             || upstream_status_config
                 .store_binding_digest()
-                .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?
+                .map_err(|_| invalid_binding_diag_v25(line!()))?
                 == downstream_status_config
                     .store_binding_digest()
-                    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?
+                    .map_err(|_| invalid_binding_diag_v25(line!()))?
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let upstream_pins = pins(
             &self.bundle,
@@ -1103,7 +1115,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             self.route.registry.manifest().dom.chain_id,
             upstream_pins,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
         let downstream_binding = ProductionSolverF6BindingV2::new(
             downstream_wire,
             &downstream_rfq,
@@ -1111,7 +1123,7 @@ impl ProductionF6PairAuthoritiesFactoryV7 {
             self.route.registry.manifest().dom.chain_id,
             downstream_pins,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
 
         let credentials = self
             .credentials
@@ -1297,7 +1309,7 @@ impl ProductionF6PairAuthoritiesFactoryV2 for ProductionF6PairAuthoritiesFactory
             || bound.downstream_binding != downstream_binding
         {
             self.poisoned = true;
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let (upstream_shared, downstream_shared) = bound.shared.into_two_legs();
         let upstream = ProductionF6AuthoritiesV2 {
@@ -1555,7 +1567,7 @@ impl ProductionF6UnixBondSignerV7 {
         credential: Zeroizing<[u8; 32]>,
     ) -> Result<Self, ProductionF6ActivationRefusalV2> {
         if credential.as_slice().iter().all(|byte| *byte == 0) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let metadata =
             authenticated_socket_metadata(&descriptor.endpoint, descriptor.endpoint_uid)?;
@@ -1666,7 +1678,7 @@ fn validate_wire_rfq(
     rfq: &RfqV2,
 ) -> Result<(), ProductionF6ActivationRefusalV2> {
     rfq.validate()
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
     let expected_position = match position {
         SettlementPositionV2::Upstream => {
             crate::production_inputs::ProductionRoutePositionV1::Upstream
@@ -1687,7 +1699,7 @@ fn validate_wire_rfq(
         || rfq.initiator == bundle.solver
         || rfq.negotiation_clock.chain_id != route.registry.manifest().dom.chain_id
     {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let solver_member = roster
         .members
@@ -1700,7 +1712,7 @@ fn validate_wire_rfq(
         .find(|member| member.role == SenderRoleV1::Initiator)
         .map(|member| member.participant_id);
     if solver_member != Some(bundle.solver) || initiator_member != Some(rfq.initiator) {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     Ok(())
 }
@@ -1721,7 +1733,7 @@ fn pre_f6_scope(
         registry_epoch: route.registry.epoch(),
         profile_bundle_digest: route.profile_bundle_digest,
     })
-    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)
+    .map_err(|_| invalid_binding_diag_v25(line!()))
 }
 
 fn status_config(
@@ -1744,7 +1756,7 @@ fn status_config(
             max_status_lifetime_seconds: bundle.status_max_lifetime_seconds,
         },
     )
-    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)
+    .map_err(|_| invalid_binding_diag_v25(line!()))
 }
 
 fn pins(
@@ -1765,15 +1777,15 @@ fn pins(
             &bundle.bond_authorities,
             secp,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+        .map_err(|_| invalid_binding_diag_v25(line!()))?,
         remote_status_authority_set_digest: candidate_status_authority_set_digest_v2(
             &bundle.status_authorities,
             secp,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+        .map_err(|_| invalid_binding_diag_v25(line!()))?,
         solver_status_scope_digest: status
             .store_binding_digest()
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+            .map_err(|_| invalid_binding_diag_v25(line!()))?,
         pre_f6_time_scope_digest: pre_f6_scope_digest,
     })
 }
@@ -1792,7 +1804,7 @@ fn open_candidate(
         bundle.reserved_participant_keys.clone(),
         bundle.reserved_chain_keys.clone(),
     )
-    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+    .map_err(|_| invalid_binding_diag_v25(line!()))?;
     let inputs = ProductionF6CandidateAuthorityInputsV2::new(
         bundle.bond_authorities.clone(),
         bundle.status_authorities.clone(),
@@ -1826,7 +1838,7 @@ fn build_terms_pair(
     let dom_deployment = route
         .registry
         .resolve_dom()
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
     let upstream_dom = owners
         .upstream_dom
         .into_face(
@@ -1835,7 +1847,7 @@ fn build_terms_pair(
             composition,
             dom_deployment,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
     let downstream_dom = owners
         .downstream_dom
         .into_face(
@@ -1844,7 +1856,7 @@ fn build_terms_pair(
             composition,
             dom_deployment,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
     let upstream_counterparty = counterparty_face(
         owners.upstream_counterparty,
         &upstream_binding,
@@ -1864,14 +1876,14 @@ fn build_terms_pair(
             upstream_dom,
             upstream_counterparty,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+        .map_err(|_| invalid_binding_diag_v25(line!()))?,
         ProductionAdapterF6TermsAuthorityV2::new(
             downstream_binding,
             composition,
             downstream_dom,
             downstream_counterparty,
         )
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?,
+        .map_err(|_| invalid_binding_diag_v25(line!()))?,
     ))
 }
 
@@ -1901,7 +1913,7 @@ fn counterparty_face(
             owner.into_face(binding, settlement, composition)
         }
     }
-    .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)
+    .map_err(|_| invalid_binding_diag_v25(line!()))
 }
 
 fn open_signers(
@@ -1909,7 +1921,7 @@ fn open_signers(
     credentials: Vec<Zeroizing<[u8; 32]>>,
 ) -> Result<Vec<Box<dyn ProductionF6BondAttestationSignerV2>>, ProductionF6ActivationRefusalV2> {
     if descriptors.len() != credentials.len() {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     descriptors
         .iter()
@@ -1936,7 +1948,7 @@ fn authenticated_socket_metadata(
     expected_uid: u32,
 ) -> Result<std::fs::Metadata, ProductionF6ActivationRefusalV2> {
     if !path.is_absolute() || !lexically_normal(path) {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| ProductionF6ActivationRefusalV2::Unavailable)?;
@@ -1944,7 +1956,7 @@ fn authenticated_socket_metadata(
         || metadata.uid() != expected_uid
         || metadata.permissions().mode() & 0o777 != 0o600
     {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     Ok(metadata)
 }
@@ -1967,7 +1979,7 @@ fn verify_bundle_signatures(
 ) -> Result<(), ProductionF6ActivationRefusalV2> {
     let count = usize::from(reader.u16()?);
     if count < usize::from(trusted_roots.threshold()) || count > trusted_roots.xonly_keys().len() {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let domain: &[u8] = match signed_prefix.get(..8) {
         Some(magic) if magic == claim_enrollment_v23::MAGIC_V23 => claim_enrollment_v23::DOMAIN_V23,
@@ -1980,15 +1992,15 @@ fn verify_bundle_signatures(
     for _ in 0..count {
         let index = reader.u16()?;
         if previous.is_some_and(|value| value >= index) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let key = trusted_roots
             .xonly_keys()
             .get(usize::from(index))
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         let signature = reader.take::<64>()?;
         secp.verify_bip340(key, &digest, &signature)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .map_err(|_| invalid_binding_diag_v25(line!()))?;
         previous = Some(index);
     }
     Ok(())
@@ -1998,8 +2010,7 @@ fn decode_authorities(
     reader: &mut BundleReaderV7<'_>,
 ) -> Result<AuthoritySetV1, ProductionF6ActivationRefusalV2> {
     let bytes = reader.length_prefixed(MAX_AUTHORITY_BYTES_V7)?;
-    AuthoritySetV1::decode_canonical(bytes)
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)
+    AuthoritySetV1::decode_canonical(bytes).map_err(|_| invalid_binding_diag_v25(line!()))
 }
 
 fn decode_keys(
@@ -2007,13 +2018,13 @@ fn decode_keys(
 ) -> Result<Vec<[u8; 32]>, ProductionF6ActivationRefusalV2> {
     let count = usize::from(reader.u16()?);
     if count == 0 || count > MAX_SIGNERS_V7 {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let mut keys = Vec::with_capacity(count);
     for _ in 0..count {
         let key = reader.take::<32>()?;
         if key == ZERO_DIGEST || keys.last().is_some_and(|previous| *previous >= key) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         keys.push(key);
     }
@@ -2025,7 +2036,7 @@ fn decode_signers(
 ) -> Result<Vec<ProductionF6BondSignerDescriptorV7>, ProductionF6ActivationRefusalV2> {
     let count = usize::from(reader.u16()?);
     if !(2..=MAX_SIGNERS_V7).contains(&count) {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let mut signers = Vec::with_capacity(count);
     for _ in 0..count {
@@ -2034,17 +2045,17 @@ fn decode_signers(
         let signer_public_key = reader.take::<32>()?;
         let endpoint_uid = reader.u32()?;
         let endpoint_bytes = reader.length_prefixed(MAX_ENDPOINT_BYTES_V7)?;
-        let endpoint_text = std::str::from_utf8(endpoint_bytes)
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        let endpoint_text =
+            std::str::from_utf8(endpoint_bytes).map_err(|_| invalid_binding_diag_v25(line!()))?;
         if endpoint_text
             .bytes()
             .any(|byte| byte == 0 || byte.is_ascii_control())
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let endpoint = PathBuf::from(endpoint_text);
         if !endpoint.is_absolute() || !lexically_normal(&endpoint) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         signers.push(ProductionF6BondSignerDescriptorV7 {
             independent_authority_id,
@@ -2062,7 +2073,7 @@ fn validate_signer_descriptors(
     signers: &[ProductionF6BondSignerDescriptorV7],
 ) -> Result<(), ProductionF6ActivationRefusalV2> {
     if signers.len() != authorities.xonly_keys().len() {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     let mut previous = None;
     let mut ids = BTreeSet::new();
@@ -2078,7 +2089,7 @@ fn validate_signer_descriptors(
             || !ids.insert(signer.independent_authority_id)
             || !endpoints.insert(signer.endpoint.clone())
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         previous = Some(signer.signer_index);
     }
@@ -2095,17 +2106,16 @@ fn lexically_normal(path: &Path) -> bool {
 }
 
 fn digest_parts(parts: &[&[u8]]) -> Result<Digest32, ProductionF6ActivationRefusalV2> {
-    let mut hasher =
-        Blake2bVar::new(32).map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+    let mut hasher = Blake2bVar::new(32).map_err(|_| invalid_binding_diag_v25(line!()))?;
     for part in parts {
         hasher.update(part);
     }
     let mut digest = [0_u8; 32];
     hasher
         .finalize_variable(&mut digest)
-        .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)?;
+        .map_err(|_| invalid_binding_diag_v25(line!()))?;
     if digest == ZERO_DIGEST {
-        return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+        return Err(invalid_binding_diag_v25(line!()));
     }
     Ok(digest)
 }
@@ -2128,26 +2138,26 @@ impl<'a> BundleReaderV7<'a> {
         let end = self
             .cursor
             .checked_add(N)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         let bytes = self
             .bytes
             .get(self.cursor..end)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         self.cursor = end;
         bytes
             .try_into()
-            .map_err(|_| ProductionF6ActivationRefusalV2::InvalidBinding)
+            .map_err(|_| invalid_binding_diag_v25(line!()))
     }
 
     fn bytes_exact(&mut self, length: usize) -> Result<&'a [u8], ProductionF6ActivationRefusalV2> {
         let end = self
             .cursor
             .checked_add(length)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         let bytes = self
             .bytes
             .get(self.cursor..end)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?;
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?;
         self.cursor = end;
         Ok(bytes)
     }
@@ -2158,7 +2168,7 @@ impl<'a> BundleReaderV7<'a> {
     ) -> Result<&'a [u8], ProductionF6ActivationRefusalV2> {
         let length = usize::from(self.u16()?);
         if length == 0 || length > maximum {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         self.bytes_exact(length)
     }
@@ -2183,7 +2193,7 @@ impl<'a> BundleReaderV7<'a> {
         if self.cursor == self.bytes.len() {
             Ok(())
         } else {
-            Err(ProductionF6ActivationRefusalV2::InvalidBinding)
+            Err(invalid_binding_diag_v25(line!()))
         }
     }
 }

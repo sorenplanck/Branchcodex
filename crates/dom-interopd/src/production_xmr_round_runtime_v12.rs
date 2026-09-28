@@ -53,8 +53,61 @@ pub(crate) enum ProductionXmrRoundErrorV12 {
     Contracts,
     #[error("native XMR recovery vault refused nonce/signature operation")]
     Signer,
+    /// Identity signing or Relay staging hit a condition that clears by
+    /// itself: a busy owner, momentarily unavailable storage or entropy, or
+    /// Relay backpressure while an earlier envelope drains. Callers retry.
     #[error("native XMR recovery identity/Relay staging failed")]
     Transport,
+    /// Identity signing or Relay staging was refused for a reason no retry
+    /// can change, such as exhausted sender capacity, an application
+    /// identity conflict or corrupt retained state. Callers must stop.
+    #[error("native XMR recovery identity/Relay staging was refused")]
+    TransportRefused,
+}
+
+/// Keeps retryable only what clears by itself. The staging path is the one
+/// that meets Relay backpressure while an earlier durable edge drains, and
+/// that must keep retrying; every other refusal from the sender or the
+/// shared Store is permanent for this message and is surfaced instead of
+/// being retried until an outer deadline.
+fn classify_staging_v25(
+    error: crate::relay_worker::RelayWorkerOutboundErrorV1,
+) -> ProductionXmrRoundErrorV12 {
+    use crate::relay_worker::RelayWorkerOutboundErrorV1 as Outbound;
+    use route_transport::DurableRelaySenderErrorV1 as Sender;
+    match error {
+        Outbound::OwnerBusy
+        | Outbound::EntropyUnavailable
+        | Outbound::Sender(
+            Sender::StorageUnavailable
+            | Sender::PendingEnvelopeExists
+            | Sender::FramedTransferActive
+            | Sender::NoPendingEnvelope
+            | Sender::NoFramedTransfer
+            | Sender::Queue(_),
+        ) => ProductionXmrRoundErrorV12::Transport,
+        _ => ProductionXmrRoundErrorV12::TransportRefused,
+    }
+}
+
+/// Same split for signing through the retained identity, matching the
+/// classification the DOM settlement child already applies to these errors.
+fn classify_identity_signing_v25(
+    error: dom_scriptless_identity_store::IdentityStoreError,
+) -> ProductionXmrRoundErrorV12 {
+    use dom_scriptless_identity_store::IdentityStoreError as Identity;
+    match error {
+        Identity::Filesystem
+        | Identity::RandomFailure
+        | Identity::KeyDerivation
+        | Identity::StoreBusy
+        | Identity::SigningFailed
+        | Identity::TransportUnavailable => ProductionXmrRoundErrorV12::Transport,
+        Identity::InvalidInput
+        | Identity::AuthenticationFailed
+        | Identity::InvalidKey
+        | Identity::StoreRejected => ProductionXmrRoundErrorV12::TransportRefused,
+    }
 }
 type Result<T> = core::result::Result<T, ProductionXmrRoundErrorV12>;
 
@@ -190,7 +243,7 @@ where
             }
             relay
                 .stage_store_outbound_dsc1(*message, expiry)
-                .map_err(|_| ProductionXmrRoundErrorV12::Transport)?;
+                .map_err(classify_staging_v25)?;
             return Ok(ProductionXmrRoundProgressV12::Staged);
         }
     }
@@ -273,10 +326,10 @@ fn stage<F: F6TransportPortV1>(
     }
     let message = identity
         .sign_and_commit_store_prepared_dsc1(store, request)
-        .map_err(|_| ProductionXmrRoundErrorV12::Transport)?;
+        .map_err(classify_identity_signing_v25)?;
     relay
         .stage_store_outbound_dsc1(message, expiry)
-        .map_err(|_| ProductionXmrRoundErrorV12::Transport)?;
+        .map_err(classify_staging_v25)?;
     Ok(())
 }
 

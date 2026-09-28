@@ -1,0 +1,34 @@
+{
+  "experiment": "conditional accepted-capsule failure for bounded ascending recovery search",
+  "participants": 198,
+  "opened": 99,
+  "transcript_attempts": "18446744073709551616",
+  "security_bits_for_this_component_only": 128,
+  "minimum_solve_budget": 99,
+  "cases": [
+    {
+      "solve_budget": 1,
+      "upper_bound": "1",
+      "within_target": false
+    },
+    {
+      "solve_budget": 2,
+      "upper_bound": "1",
+      "within_target": false
+    },
+    {
+      "solve_budget": 98,
+      "upper_bound": "4611686018427387904/56877207698557337415454885098922213489010420650385261835",
+      "within_target": false
+    },
+    {
+      "solve_budget": 99,
+      "upper_bound": "1152921504606846976/1421930192463933435386372127473055337225260516259631545875",
+      "within_target": true
+    }
+  ],
+  "backend_security_proven": false,
+  "time_bound_proven": false,
+  "atomic_swap_proven": false,
+  "probability_is_conditioned_on_acceptance": false
+}

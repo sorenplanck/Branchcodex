@@ -257,7 +257,7 @@ impl DomParticipantWalletV1 {
             self.state
                 .outputs
                 .get(&input.commitment)
-                .is_none_or(|output| output.status != OutputStatus::Confirmed)
+                .map_or(true, |output| output.status != OutputStatus::Confirmed)
         }) {
             return Err(DomActuatorError::WalletUnavailable);
         }
@@ -337,11 +337,14 @@ fn funding_shape(
     Ok(None)
 }
 
+/// Chosen funding inputs with their commitments and values, plus fee and change.
+type SelectedFundingV16 = (Vec<([u8; 33], u64)>, u64, u64);
+
 fn select_funding(
     state: &WalletV2State,
     principal: u64,
     ceiling: u64,
-) -> DomActuatorResult<(Vec<([u8; 33], u64)>, u64, u64)> {
+) -> DomActuatorResult<SelectedFundingV16> {
     let mut required = principal;
     for _ in 0..dom_core::MAX_INPUTS_PER_TX {
         let inputs = select_outputs(state, required)?;
@@ -393,6 +396,7 @@ fn funding_budget(
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 #[path = "wallet_funding_xmr_v22_tests.rs"]
 mod xmr_tests;

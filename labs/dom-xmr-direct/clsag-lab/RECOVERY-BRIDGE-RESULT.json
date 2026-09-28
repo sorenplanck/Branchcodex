@@ -1,0 +1,19 @@
+{
+  "curve": "Ed25519",
+  "encryption_seconds": 12.46031528,
+  "participants": 198,
+  "proof_generation_seconds": 9.898659256,
+  "proof_verification_seconds": 10.754079332,
+  "range_bits": 160,
+  "recovered_original_key": true,
+  "rejected_forged_share": true,
+  "rejected_mutated_proof": true,
+  "result": "passed",
+  "rsa_bits": 2048,
+  "scope": "throwaway local shares; no pre-funding proof, swap or mainnet timing guarantee",
+  "setup_seconds": 0.084133798,
+  "solve_seconds": 1.954770902,
+  "squarings": 200000,
+  "threshold": 100,
+  "total_seconds": 40.942934005
+}

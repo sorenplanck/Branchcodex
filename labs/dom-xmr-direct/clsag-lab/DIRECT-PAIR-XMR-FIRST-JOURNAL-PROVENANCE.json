@@ -1,0 +1,13 @@
+{
+  "sha256": {
+    "target/release/examples/regtest_claim": "93bae126890fd8674e5e6bc1714ec1d2ebf1091d514911105412574e58e99cde",
+    "target/recovery-research/direct-dlog-bridge": "94be42247ce8e12b4c098335b450dca1993c0692db28f3f406ab95ee3eea7b27",
+    "examples/regtest_claim.rs": "41521c13b9690945593cf8536399781033c97450b46636d3b9288b19f82c90ff",
+    "examples/support/dom_regtest.rs": "dd95624b9afdd3a559d6587bd833430decc20f3c4982088c22401fd7527c7568",
+    "examples/support/direct_recovery_bridge.rs": "710b2e2a928b0dae44c653c4754a95eb14b47bf43db5a16298e9ca02f2175336",
+    "src/time_bounds.rs": "7f5d5eaf5bb1a0883333c57a1d3922c5e04c2ead846d509777c68e770fa16f74",
+    "src/release_journal.rs": "010755939cc7dfa1c5e9b1187f2aeb8ce2c993576d4cbd68d60257950bbcb442",
+    "tests/release_journal.rs": "707d8dcda4b8f86a7e4379087a3eda9becb95e3fb895a61389614b5a1b214eba"
+  },
+  "scope": "Owned offline native DOM-XMR claims with durable initial-exposure gate; handle reopen only, not full executor restart or production security proof."
+}

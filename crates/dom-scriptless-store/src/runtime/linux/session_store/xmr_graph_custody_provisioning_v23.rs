@@ -179,6 +179,15 @@ impl ContractsSessionStoreV1 {
         Ok(Some((produced, role)))
     }
 
+    // Compare all retained graph transactions, binding, and signatures.
+    pub(in super::super) fn require_same_xmr_graph_v25(
+        &self,
+        rebuilt: &ProducedXmrRecoveryGraphV12,
+        retained: &ProducedXmrRecoveryGraphV12,
+    ) -> Result<(), SessionStoreError> {
+        require_same_graph(rebuilt, retained)
+    }
+
     /// Strictly reauthenticate immutable Ready custody; never create a missing journal.
     pub fn require_xmr_graph_custody_ready_v23(
         &self,
@@ -199,17 +208,29 @@ impl ContractsSessionStoreV1 {
         produced: &ProducedXmrRecoveryGraphV12,
         custody_id: [u8; 32],
     ) -> Result<XmrRecoveryCustodyScopeV11, SessionStoreError> {
-        let parent = role.session_id().0;
-        let (scope, started) = self.graph_custody_record_v23(role, custody_id, false)?;
-        let rebuilt = self.reconstruct_completed_xmr_graph_v23(parent)?;
+        let (scope, rebuilt) = self.reconstruct_ready_xmr_graph_locked_v25(role, custody_id)?;
         require_same_graph(&rebuilt, produced)?;
+        Ok(scope)
+    }
+
+    /// Caller holds operation_lock. Reconstruct from native journals and check
+    /// both immutable custody markers in this operation. Returning this exact
+    /// graph lets gate authentication use it without a second reconstruction;
+    /// no caller-supplied graph or cached authority enters this path.
+    pub(in super::super) fn reconstruct_ready_xmr_graph_locked_v25(
+        &self,
+        role: &FinalClaimRoleBindingV1,
+        custody_id: [u8; 32],
+    ) -> Result<(XmrRecoveryCustodyScopeV11, ProducedXmrRecoveryGraphV12), SessionStoreError> {
+        let parent = role.session_id().0;
+        let (scope, started, rebuilt) = self.graph_custody_record_v23(role, custody_id, false)?;
         if self.read_graph_custody_record_v23(parent, false)?.as_ref() != Some(&started)
             || self.read_graph_custody_record_v23(parent, true)?.as_ref()
                 != Some(&change_state(&started, true))
         {
             return Err(SessionStoreError::Quarantined);
         }
-        Ok(scope)
+        Ok((scope, rebuilt))
     }
 
     /// Authenticate all three completed native rounds before retaining Started.
@@ -223,6 +244,12 @@ impl ContractsSessionStoreV1 {
         let _guard = self.operation_lock()?;
         self.audit_transport()?;
         let parent = role.session_id().0;
+        // This function writes the Started record: drop any audited copy so
+        // the next transport audit re-authenticates the new bytes in full
+        // instead of quarantining our own legitimate write as tampering.
+        if let Ok(mut audited) = self.audited_custody_pairs_v26.lock() {
+            audited.remove(&parent);
+        }
         let current = self.load_session_locked(parent)?;
         if current.phase() != SessionPhaseV1::RefundSigning
             || current.irreversible().funding_authorized
@@ -233,8 +260,7 @@ impl ContractsSessionStoreV1 {
         {
             return Err(SessionStoreError::InvalidTransition);
         }
-        let (scope, started) = self.graph_custody_record_v23(role, custody_id, false)?;
-        let rebuilt = self.reconstruct_completed_xmr_graph_v23(parent)?;
+        let (scope, started, rebuilt) = self.graph_custody_record_v23(role, custody_id, false)?;
         require_same_graph(&rebuilt, produced)?;
         let ready = change_state(&started, true);
         let old_start = self.read_graph_custody_record_v23(parent, false)?;
@@ -272,6 +298,11 @@ impl ContractsSessionStoreV1 {
         let _guard = self.operation_lock()?;
         self.audit_transport()?;
         let parent = permit.scope.binding.session_id;
+        // This function writes the Ready record over an audited Started pair:
+        // invalidate the audited copy for the same reason as in `prepare_...`.
+        if let Ok(mut audited) = self.audited_custody_pairs_v26.lock() {
+            audited.remove(&parent);
+        }
         if permit.store != self._store_id
             || permit.opening != self.open_instance_id
             || custody.scope() != &permit.scope
@@ -319,7 +350,7 @@ impl ContractsSessionStoreV1 {
     pub(in super::super) fn audit_xmr_graph_custody_provisioning_v23(
         &self,
         parent: [u8; 32],
-    ) -> Result<(), SessionStoreError> {
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), SessionStoreError> {
         let started = self
             .read_graph_custody_record_v23(parent, false)?
             .ok_or(SessionStoreError::Quarantined)?;
@@ -327,25 +358,53 @@ impl ContractsSessionStoreV1 {
         let role =
             FinalClaimRoleBindingV1::decode_canonical(&chain, &started[FIXED..started.len() - 32])
                 .map_err(|_| SessionStoreError::Quarantined)?;
-        let (_, expected) =
+        let (_, expected, _) =
             self.graph_custody_record_v23(&role, copy_array(&started[176..208])?, false)?;
         if started != expected || role.session_id().0 != parent {
             return Err(SessionStoreError::Quarantined);
         }
-        if let Some(ready) = self.read_graph_custody_record_v23(parent, true)? {
-            if ready != change_state(&started, true) {
+        let ready = self.read_graph_custody_record_v23(parent, true)?;
+        if let Some(ready) = ready.as_ref() {
+            if ready != &change_state(&started, true) {
                 return Err(SessionStoreError::Quarantined);
             }
+        }
+        Ok((started, ready))
+    }
+
+    // Same inventory scan only. Both markers were authenticated together;
+    // reread their exact bytes before reusing that reconstruction for the
+    // second filename. Nothing survives the enclosing transport audit.
+    pub(in super::super) fn recheck_xmr_graph_custody_records_v26(
+        &self,
+        parent: [u8; 32],
+        audited: &(Vec<u8>, Option<Vec<u8>>),
+    ) -> Result<(), SessionStoreError> {
+        if self.read_graph_custody_record_v23(parent, false)?.as_ref() != Some(&audited.0)
+            || self.read_graph_custody_record_v23(parent, true)? != audited.1
+        {
+            return Err(SessionStoreError::Quarantined);
         }
         Ok(())
     }
 
+    // Return the graph authenticated for these exact record bytes as well.
+    // Callers hold operation_lock and can compare that fresh result without
+    // repeating the entire reconstruction. Nothing is cached across calls,
+    // and no caller-provided graph replaces native transcript authentication.
     fn graph_custody_record_v23(
         &self,
         role: &FinalClaimRoleBindingV1,
         custody_id: [u8; 32],
         ready: bool,
-    ) -> Result<(XmrRecoveryCustodyScopeV11, Vec<u8>), SessionStoreError> {
+    ) -> Result<
+        (
+            XmrRecoveryCustodyScopeV11,
+            Vec<u8>,
+            ProducedXmrRecoveryGraphV12,
+        ),
+        SessionStoreError,
+    > {
         let parent = role.session_id().0;
         let produced = self.reconstruct_completed_xmr_graph_v23(parent)?;
         let graph = produced.graph();
@@ -443,7 +502,7 @@ impl ContractsSessionStoreV1 {
         bytes.extend_from_slice(&(canonical_role.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&canonical_role);
         bytes.extend_from_slice(&tagged_hash(DOMAIN, &bytes));
-        Ok((scope, bytes))
+        Ok((scope, bytes, produced))
     }
 
     fn read_graph_custody_record_v23(

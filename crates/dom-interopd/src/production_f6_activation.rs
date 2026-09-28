@@ -28,6 +28,15 @@ use crate::production_f6_lifecycle::{
     ProductionF6ActivationRefusalV2,
 };
 
+/// Diagnostic constructor for every InvalidBinding refusal site in this
+/// module. It prints only the static source line — no identifiers, amounts
+/// or key material — so a refused production activation names its exact
+/// boundary in the daemon's stderr.
+fn invalid_binding_diag_v25(line: u32) -> ProductionF6ActivationRefusalV2 {
+    eprintln!("DOM_F6_BIND_DIAG_V25 site=activation:{line}");
+    ProductionF6ActivationRefusalV2::InvalidBinding
+}
+
 /// Opaque process-live proof that both F6 activation handles and the terminal
 /// route-store receiver came from one exact pair split. It deliberately has no
 /// public constructor, equality implementation, raw identifier or `Clone`.
@@ -101,15 +110,15 @@ impl ProductionF6ActivationPathsV2 {
         };
         let binding_log = layout
             .f6_path_v4(binding_role)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?
             .to_path_buf();
         let receipt_store = layout
             .f6_path_v4(receipt_role)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?
             .to_path_buf();
         let candidate_book = layout
             .f6_path_v4(candidate_role)
-            .ok_or(ProductionF6ActivationRefusalV2::InvalidBinding)?
+            .ok_or_else(|| invalid_binding_diag_v25(line!()))?
             .to_path_buf();
         if [
             binding_log.as_path(),
@@ -122,7 +131,7 @@ impl ProductionF6ActivationPathsV2 {
             || binding_log == candidate_book
             || receipt_store == candidate_book
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         Ok(Self {
             binding_log,
@@ -241,7 +250,7 @@ impl ProductionF6ActivationAuthorityV2 for ProductionReadyF6ActivationAuthorityV
             self.solver,
             self.dom_chain_id,
         ) {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         if self.poisoned {
             return Err(ProductionF6ActivationRefusalV2::Unavailable);
@@ -254,6 +263,7 @@ impl ProductionF6ActivationAuthorityV2 for ProductionReadyF6ActivationAuthorityV
             Ok(authority) => Ok(authority),
             Err(error) => {
                 self.poisoned = true;
+                eprintln!("DOM_F6_BIND_DIAG_V25 site=activation_open error={error:?}");
                 Err(match error {
                     ProductionF6ErrorV2::InvalidBinding
                     | ProductionF6ErrorV2::InvalidPayload
@@ -427,7 +437,7 @@ impl ProductionF6PairActivationRequestV2 {
             || self.downstream.position != SettlementPositionV2::Downstream
             || self.upstream.dom_chain_id != self.downstream.dom_chain_id
         {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let state = Rc::new(RefCell::new(ProductionF6PairActivationStateV2 {
             route_store: Some(self.route_store),
@@ -506,7 +516,7 @@ impl ProductionF6PairActivationStateV2 {
             (Some(existing), Some(existing_rfq)) if existing == wire && existing_rfq == rfq => {}
             (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {
                 self.poisoned = true;
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
             (None, None) => {
                 *wire_slot = Some(wire);
@@ -564,7 +574,7 @@ impl ProductionF6PairActivationStateV2 {
             self.dom_chain_id,
         ) {
             self.poisoned = true;
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let store = self
             .route_store
@@ -581,7 +591,7 @@ impl ProductionF6PairActivationStateV2 {
             Ok(owner) => owner,
             Err(_) => {
                 self.poisoned = true;
-                return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+                return Err(invalid_binding_diag_v25(line!()));
             }
         };
         let (runtime, upstream_terminal, downstream_terminal) = terminal_owner.into_handles();
@@ -718,7 +728,7 @@ impl ProductionF6ActivationAuthorityV2 for ProductionF6PairActivationAuthorityV2
         }
         let rfq: RfqV2 = pending.rfq();
         if rfq.route.position != self.position {
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let (binding, authorities) = {
             let mut state = self
@@ -733,7 +743,7 @@ impl ProductionF6ActivationAuthorityV2 for ProductionF6PairActivationAuthorityV2
             if let Ok(mut state) = self.state.try_borrow_mut() {
                 state.poisoned = true;
             }
-            return Err(ProductionF6ActivationRefusalV2::InvalidBinding);
+            return Err(invalid_binding_diag_v25(line!()));
         }
         let authority = match ProductionSolverF6AuthorityV2::open_or_resume_prepared_production(
             self.paths.borrowed(),
@@ -746,6 +756,7 @@ impl ProductionF6ActivationAuthorityV2 for ProductionF6PairActivationAuthorityV2
                 if let Ok(mut state) = self.state.try_borrow_mut() {
                     state.poisoned = true;
                 }
+                eprintln!("DOM_F6_BIND_DIAG_V25 site=pair_open error={error:?}");
                 return Err(match error {
                     ProductionF6ErrorV2::InvalidBinding
                     | ProductionF6ErrorV2::InvalidPayload

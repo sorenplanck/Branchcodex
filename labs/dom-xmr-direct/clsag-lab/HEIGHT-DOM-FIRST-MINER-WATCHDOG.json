@@ -1,0 +1,10 @@
+{
+  "experiment": "height-dom-first",
+  "pid": 857041,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "exit_code": 0,
+  "wall_seconds": 29.118011230020784,
+  "compilation_included": false,
+  "log": "target/height-dom-first-1790462054469688977.log"
+}

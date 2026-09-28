@@ -4,6 +4,14 @@
 use super::*;
 use dom_scriptless_crypto::VerifiedXmrRecoveryGraphV11;
 
+/// Graph trace, resumable cursor and the authenticated chain identity.
+type XmrRecoveryFinalityTraceV23 = (
+    GraphTrace,
+    CursorStateV1,
+    ObservedDomIdentityV1,
+    std::collections::BTreeMap<u64, [u8; 32]>,
+);
+
 #[path = "xmr_refund_reorg_v23.rs"]
 mod refund_reorg_v23;
 pub use refund_reorg_v23::{VerifiedDomXmrRefundReorgV23, VerifiedDomXmrRefundRevalidationV23};
@@ -278,9 +286,15 @@ impl RealDomRpcRuntimeV1 {
         if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
             return Err(unavailable());
         }
-        let deadline = std::time::Instant::now()
-            .checked_add(budget)
-            .ok_or_else(unavailable)?;
+        // The caller's budget bounds this scan; the armed route-step ceiling
+        // bounds the step that contains it. Narrow to whichever ends first —
+        // a budget anchored at "now" otherwise admits a fresh full minute
+        // inside a step that has already spent most of its lease.
+        let deadline = crate::route_step_deadline_v27::clamp_v27(
+            std::time::Instant::now()
+                .checked_add(budget)
+                .ok_or_else(unavailable)?,
+        );
         self.verified_xmr_recovery_state_until_v24(
             graph,
             minimum_confirmations,
@@ -351,15 +365,7 @@ impl RealDomRpcRuntimeV1 {
         watched: &std::collections::BTreeSet<u64>,
         deadline: Option<std::time::Instant>,
         cache_scope: Option<[u8; 32]>,
-    ) -> Result<
-        (
-            GraphTrace,
-            CursorStateV1,
-            ObservedDomIdentityV1,
-            std::collections::BTreeMap<u64, [u8; 32]>,
-        ),
-        RealDomError,
-    > {
+    ) -> Result<XmrRecoveryFinalityTraceV23, RealDomError> {
         if watched.len() > MAX_CURSOR_HISTORY + 1 {
             return Err(RealDomError::BoundsExceeded);
         }

@@ -71,6 +71,45 @@ impl EvolvingDomV23 {
             pending: std::collections::BTreeMap::new(),
         }
     }
+    // The daemon scenario may mature only an already admitted funding tx.
+    // Pending submissions stay behind the non-cooperation barrier.
+    pub(super) fn funding_confirmation_target_v25(
+        &self,
+        hash: &[u8; 32],
+        confirmations: u32,
+    ) -> Result<Option<u64>> {
+        self.require_history_v24()?;
+        if confirmations == 0 || confirmations > 64 {
+            return Err("DOM collateral confirmation bound".into());
+        }
+        if !self.ledger.contains_transaction(hash) {
+            return Ok(None);
+        }
+        let included = if let Some(history) = &self.campaign_v24 {
+            history.inclusion(hash)?
+        } else {
+            self.blocks
+                .iter()
+                .find(|block| {
+                    block["transactions"]
+                        .as_array()
+                        .is_some_and(|transactions| {
+                            transactions.iter().any(|tx| {
+                                tx["tx_hash"].as_str() == Some(hex::encode(hash).as_str())
+                            })
+                        })
+                })
+                .and_then(|block| block["height"].as_u64())
+                .ok_or("admitted funding absent from native history")?
+        };
+        collateral_target_v25(
+            self.public["tip_height"].as_u64().ok_or("local tip")?,
+            included,
+            confirmations,
+            self.maximum_height_v24()?,
+        )
+    }
+
     pub(super) fn identity_json(&self) -> Result<&Value> {
         self.require_history_v24()?;
         Ok(&self.public)
@@ -606,4 +645,73 @@ pub(super) fn submit_http_with_v24(
     };
     let response = serde_json::to_vec(&value)?;
     http_v24::write_json_v24(stream, status, &response)
+}
+
+// Inclusion is counted as the first confirmation. No inferred inclusion or
+// deadline growth is permitted by this fixture-only maturation calculation.
+fn collateral_target_v25(
+    tip: u64,
+    included: u64,
+    confirmations: u32,
+    maximum: u64,
+) -> Result<Option<u64>> {
+    if included > tip || tip > maximum || confirmations == 0 || confirmations > 64 {
+        return Err("invalid collateral maturation scope".into());
+    }
+    let target = included
+        .checked_add(u64::from(confirmations - 1))
+        .filter(|target| *target <= maximum)
+        .ok_or("collateral maturation exceeds negotiated history")?;
+    Ok((target > tip).then_some(target))
+}
+
+#[cfg(test)]
+mod collateral_maturation_v25_tests {
+    use super::*;
+    #[test]
+    fn six_confirmations_require_four_more_blocks_than_run21_history() -> Result<()> {
+        assert_eq!(collateral_target_v25(1005, 1004, 6, 1100)?, Some(1009));
+        assert_eq!(collateral_target_v25(1009, 1004, 6, 1100)?, None);
+        assert_eq!(collateral_target_v25(1010, 1004, 6, 1100)?, None);
+        assert_eq!(collateral_target_v25(1005, 1004, 2, 1100)?, None);
+        Ok(())
+    }
+    #[test]
+    fn pending_or_unknown_funding_cannot_advance_the_chain() -> Result<()> {
+        let identity = ExpectedDomIdentityV1 {
+            network: "mainnet".into(),
+            network_magic: dom_core::NETWORK_MAGIC_MAINNET,
+            chain_id: [1; 32],
+            genesis_hash: dom_core::GENESIS_HASH_MAINNET,
+            protocol_version: dom_core::PROTOCOL_VERSION,
+            range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+        };
+        let mut state = EvolvingDomV23::new(
+            ledger_v23::NativeDomLedgerV23::new([1; 32])?,
+            identity,
+            json!({"tip_height":0}),
+            Vec::new(),
+            2,
+        );
+        state.arm_submission_barrier()?;
+        // Deliberately not a valid transaction: no admission may be attempted.
+        state.pending.insert([2; 32], vec![0]);
+        assert_eq!(state.funding_confirmation_target_v25(&[2; 32], 6)?, None);
+        assert_eq!(state.funding_confirmation_target_v25(&[3; 32], 6)?, None);
+        assert_eq!(state.identity_json()?["tip_height"], 0);
+        assert!(state.hold_submissions);
+        assert_eq!(state.pending.len(), 1);
+        state.history_healthy_v24 = false;
+        assert!(state.funding_confirmation_target_v25(&[2; 32], 6).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn maturation_cannot_infer_inclusion_or_extend_negotiated_bounds() {
+        assert!(collateral_target_v25(1003, 1004, 6, 1100).is_err());
+        assert!(collateral_target_v25(1005, 1004, 6, 1008).is_err());
+        assert!(collateral_target_v25(1005, 1004, 0, 1100).is_err());
+        assert!(collateral_target_v25(1005, 1004, 65, 1100).is_err());
+        assert!(collateral_target_v25(u64::MAX, u64::MAX, 6, u64::MAX).is_err());
+    }
 }

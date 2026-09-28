@@ -1,0 +1,14 @@
+{
+  "pid": 842316,
+  "external_group_deadline_seconds": 240,
+  "external_timeout": false,
+  "exit_code": 0,
+  "observed_wall_seconds": 52.08227836800506,
+  "args": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "xmr-direct-recovery",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge"
+  ],
+  "compilation_included": false
+}

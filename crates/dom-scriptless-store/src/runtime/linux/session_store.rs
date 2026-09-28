@@ -4126,6 +4126,9 @@ pub(crate) type XmrGraphReconstructionV24 = std::sync::Arc<(
 
 /// Retained-capability operational store for authenticated session records.
 ///
+/// One audited Started record and its optional Ready companion.
+type AuditedCustodyPairV26 = (Vec<u8>, Option<Vec<u8>>);
+
 /// This is a sibling authority to the nonce vault. It never derives, stores,
 /// exports, or recreates a nonce.
 pub struct ContractsSessionStoreV1 {
@@ -4150,6 +4153,51 @@ pub struct ContractsSessionStoreV1 {
     process_downstream_claim_gates_v23: Mutex<BTreeMap<[u8; 32], f7_v12::DownstreamClaimLeaseV23>>,
     process_evm_signed_action_imports: Mutex<BTreeSet<[u8; 32]>>,
     xmr_graph_reconstruction_cache_v24: Mutex<Vec<([u8; 32], XmrGraphReconstructionV24)>>,
+    /// Custody Started/Ready record pairs already fully audited by this open
+    /// instance, keyed by parent session. `audit_transport` re-reads both
+    /// durable records on every pass and byte-compares them against this
+    /// audited copy (`recheck_xmr_graph_custody_records_v26`), quarantining on
+    /// any difference, so external tampering is still caught on every audit;
+    /// only the graph reconstruction — a pure function of those same bytes —
+    /// stops being repeated. The two writers of these records invalidate their
+    /// entry, so this process's own Started -> Ready transition is re-audited
+    /// in full rather than mistaken for tampering.
+    audited_custody_pairs_v26: Mutex<BTreeMap<[u8; 32], AuditedCustodyPairV26>>,
+    /// The last complete F7 inventory audit this opening performed, named by
+    /// the Store mutation generation it ran at and by the digest of every
+    /// artifact's exact bytes it read. `audit_f7_artifact_inventory_v12`
+    /// still rereads and revalidates every artifact on every call and only
+    /// skips re-deriving the ancestry it already authenticated when both
+    /// names match: nothing this process wrote since, and no artifact byte
+    /// differs. The exclusive Store lock excludes other writers.
+    f7_inventory_audit_v26: Mutex<Option<AuditedF7InventoryV26>>,
+    /// Gate ancestry verdicts this opening already derived, per session,
+    /// named by the mutation generation and the exact gate digest they were
+    /// derived for. `authenticate_f7_gate_ancestry_v12` is a pure verdict
+    /// over the gate bytes and over records only this process writes.
+    f7_gate_ancestry_v26: Mutex<BTreeMap<[u8; 32], (u64, [u8; 32])>>,
+    /// Funding-signing audits this opening already completed, per session,
+    /// named by the mutation generation and by the exact gate, signing
+    /// record and session record bytes they were completed over.
+    f7_funding_signing_audit_v26: Mutex<BTreeMap<[u8; 32], F7FundingSigningAuditV26>>,
+}
+
+/// One completed funding-signing audit and every byte it was computed over.
+#[derive(Clone)]
+pub(super) struct F7FundingSigningAuditV26 {
+    pub(super) generation: u64,
+    pub(super) gate_digest: [u8; 32],
+    pub(super) record_digest: [u8; 32],
+    pub(super) current_digest: [u8; 32],
+    pub(super) complete: bool,
+    pub(super) signature: Option<SchnorrSignature>,
+}
+
+/// One complete F7 inventory audit, named by when and over what it ran.
+#[derive(Clone, Copy)]
+pub(super) struct AuditedF7InventoryV26 {
+    pub(super) generation: u64,
+    pub(super) artifact_digest: [u8; 32],
 }
 
 /// Move-only, locked production Store opening authenticated before recovery.
@@ -4696,6 +4744,10 @@ impl ContractsSessionStoreV1 {
             operation: Mutex::new(()),
             recovery_projection: Mutex::new(None),
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
+            audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
+            f7_inventory_audit_v26: Mutex::new(None),
+            f7_gate_ancestry_v26: Mutex::new(BTreeMap::new()),
+            f7_funding_signing_audit_v26: Mutex::new(BTreeMap::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4873,6 +4925,10 @@ impl ContractsSessionStoreV1 {
             operation: Mutex::new(()),
             recovery_projection: Mutex::new(None),
             xmr_graph_reconstruction_cache_v24: Mutex::new(Vec::new()),
+            audited_custody_pairs_v26: Mutex::new(BTreeMap::new()),
+            f7_inventory_audit_v26: Mutex::new(None),
+            f7_gate_ancestry_v26: Mutex::new(BTreeMap::new()),
+            f7_funding_signing_audit_v26: Mutex::new(BTreeMap::new()),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
@@ -4895,6 +4951,22 @@ impl ContractsSessionStoreV1 {
             staging_inventory,
             recovery_plan,
         })
+    }
+
+    /// Sum of the mutations this process applied through every directory of
+    /// this opening. Any Store write changes it; nothing else does.
+    pub(super) fn store_mutation_generation_v26(&self) -> u64 {
+        [
+            &self.root,
+            &self.records,
+            &self.artifacts,
+            &self.consumptions,
+            &self.rosters,
+            &self.messages,
+            &self.reservation_lookups,
+        ]
+        .iter()
+        .fold(0u64, |sum, directory| sum.wrapping_add(directory.mutation_count()))
     }
 
     fn durable_profile_directories(&self) -> [(M8F7DurableDirectory, &RetainedDirectory); 6] {
@@ -20150,8 +20222,25 @@ impl ContractsSessionStoreV1 {
         // scan reports the flattened error: reading it first is what lets the
         // host condition win. Nothing is captured without also returning an
         // error, so the inventory always aborts on the first capture.
+        // Opt-in development profiling prints only classes, counts and time.
+        // It does not change any authentication or failure path.
+        #[cfg(debug_assertions)]
+        let profile_v26 =
+            std::env::var_os("DOM_STORE_AUDIT_TIMINGS_V26").map(|_| std::time::Instant::now());
+        #[cfg(debug_assertions)]
+        let mut roster_cost_v26: BTreeMap<&str, (usize, u128)> = BTreeMap::new();
+        #[cfg(debug_assertions)]
+        let mut message_cost_v26: BTreeMap<u8, (usize, u128)> = BTreeMap::new();
         let mut host_failure: Option<SessionStoreError> = None;
+        // Started and Ready name the same custody pair. Authenticate its
+        // graph once in this scan, but reread both records on the other name.
+        let mut audited_custody_pairs_v26 = self
+            .audited_custody_pairs_v26
+            .lock()
+            .map_err(|_| SessionStoreError::StoreBusy)?;
         let inventory = self.rosters.scan_lexicographic(|name, node| {
+            #[cfg(debug_assertions)]
+            let started_v26 = profile_v26.map(|_| std::time::Instant::now());
             if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
                 return Err(LinuxCapabilityError::InvalidObject);
             }
@@ -20367,8 +20456,15 @@ impl ContractsSessionStoreV1 {
             } else if let Some(parent) =
                 xmr_graph_proposal_v22::parse_xmr_graph_custody_provisioning_name_v23(name)
             {
-                self.audit_xmr_graph_custody_provisioning_v23(parent)
-                    .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+                if let Some(audited) = audited_custody_pairs_v26.get(&parent) {
+                    self.recheck_xmr_graph_custody_records_v26(parent, audited)
+                        .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+                } else {
+                    let audited = self
+                        .audit_xmr_graph_custody_provisioning_v23(parent)
+                        .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+                    audited_custody_pairs_v26.insert(parent, audited);
+                }
                 parent
             } else if let Some((target, edge, kind, _)) =
                 xmr_graph_proposal_v22::parse_xmr_graph_resource_name_v23(name)
@@ -20451,6 +20547,21 @@ impl ContractsSessionStoreV1 {
             };
             self.load_session_locked(session)
                 .map_err(|error| capture_host_failure(&mut host_failure, error))?;
+            #[cfg(debug_assertions)]
+            if let Some(started) = started_v26 {
+                let class = if name.contains(".outbound-dsc1-") {
+                    "outbound"
+                } else if name.contains(".xmr-graph-custody-") {
+                    "graph-custody"
+                } else if name.contains(".xmr-graph-") {
+                    "graph-other"
+                } else {
+                    "other"
+                };
+                let cost = roster_cost_v26.entry(class).or_default();
+                cost.0 += 1;
+                cost.1 += started.elapsed().as_micros();
+            }
             Ok(())
         });
         if let Some(error) = host_failure {
@@ -20499,6 +20610,8 @@ impl ContractsSessionStoreV1 {
         // same node behind a by-name read fails at `openat2` and reports
         // `Filesystem`.
         for (name, record) in records {
+            #[cfg(debug_assertions)]
+            let started_v26 = profile_v26.map(|_| std::time::Instant::now());
             let (envelope, direction) = self.authenticate_transport_record(&name, &record)?;
             let durable =
                 match self.load_session_revision(record.session_id, record.successor.revision()) {
@@ -20563,6 +20676,12 @@ impl ContractsSessionStoreV1 {
                 let count = accepted_counts.entry(record.session_id).or_default();
                 *count = count.checked_add(1).ok_or(SessionStoreError::Quarantined)?;
             }
+            #[cfg(debug_assertions)]
+            if let Some(started) = started_v26 {
+                let cost = message_cost_v26.entry(record.message_type).or_default();
+                cost.0 += 1;
+                cost.1 += started.elapsed().as_micros();
+            }
         }
         if accepted_counts
             .values()
@@ -20580,6 +20699,13 @@ impl ContractsSessionStoreV1 {
                     return Err(SessionStoreError::Quarantined);
                 }
             }
+        }
+        #[cfg(debug_assertions)]
+        if let Some(started) = profile_v26 {
+            eprintln!(
+                "DOM_STORE_AUDIT_COST_V26 total_us={} rosters={roster_cost_v26:?} messages={message_cost_v26:?}",
+                started.elapsed().as_micros()
+            );
         }
         Ok(())
     }
@@ -39078,6 +39204,7 @@ fn require_transport_identity_binding(
 }
 
 impl ContractsSessionStoreV1 {
+    #[allow(clippy::too_many_arguments)]
     fn validate_signing_roster_and_kernel_ancestry(
         &self,
         trusted_chain_id: &TrustedChainIdV1,
@@ -40201,7 +40328,7 @@ fn encode_canonical_unsigned_dsc1(
     {
         return Err(SessionStoreError::Canonical);
     }
-    if matches!(fields.message_type, 0x17 | 0x18 | 0x19 | 0x1a) {
+    if matches!(fields.message_type, 0x17..=0x1a) {
         validate_registered_transport_payload(fields.message_type, fields.payload)?;
     }
     let payload_len =
@@ -43013,6 +43140,7 @@ pub(crate) mod evidence_only_staging {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test module
 #[cfg(test)]
 mod tests {
     include!("session_store/session_head_scan_v25_tests.rs");
@@ -62490,7 +62618,19 @@ mod tests {
         use xmr_remote_sweep_wire::*;
         let original = store.load_session(session_id)?;
         assert_eq!(original.phase(), SessionPhaseV1::FundingConfirmed);
-        store.bind_local_transport_signer(session_id, [0x31; 32])?;
+        // The request below is sent by participant 1, so the response signer
+        // is participant 0. Bind that participant's own key reference rather
+        // than the initiator's fixed reference: in the crypto-real fixture
+        // participant 0 is the Responder, and binding the initiator's key
+        // made the Store correctly refuse to prepare the response.
+        let signer_key_reference = store
+            .load_transport_identity_binding(session_id)?
+            .references
+            .iter()
+            .find(|reference| reference.participant_id == fixture.participant_ids[0])
+            .map(|reference| reference.key_reference)
+            .ok_or(SessionStoreError::Quarantined)?;
+        store.bind_local_transport_signer(session_id, signer_key_reference)?;
         let request = RemoteSweepRequestV23 {
             network_genesis: [1; 32],
             route_id: [2; 32],
@@ -62922,15 +63062,29 @@ mod tests {
         // Deliberately exact: adding any outbound authority class must break
         // this census until the new class is reviewed against 0x14 and the
         // role-scoped EVM classes and the V12 readiness/pre-signature classes.
-        assert_eq!(registered, (1_u8..=25).collect::<BTreeSet<_>>());
-        assert_eq!(
-            OutboundDsc1AuthorityClassV1::try_from(24)?.message_type(),
-            0x17
-        );
-        assert_eq!(
-            OutboundDsc1AuthorityClassV1::try_from(25)?.message_type(),
-            0x0f
-        );
+        // Classes 26..=32 (the V14 final claim and the V23 XMR graph and
+        // remote-sweep classes) were reviewed: none maps to 0x14, and the EVM
+        // classes 22 and 23 keep 0x15 and 0x16.
+        assert_eq!(registered, (1_u8..=32).collect::<BTreeSet<_>>());
+        for (encoded, message_type) in [
+            (22_u8, 0x15_u8),
+            (23, 0x16),
+            (24, 0x17),
+            (25, 0x0f),
+            (26, 0x12),
+            (27, 0x18),
+            (28, 0x0c),
+            (29, 0x0d),
+            (30, 0x0e),
+            (31, 0x19),
+            (32, 0x1a),
+        ] {
+            assert_eq!(
+                OutboundDsc1AuthorityClassV1::try_from(encoded)?.message_type(),
+                message_type,
+                "class {encoded}"
+            );
+        }
 
         let temporary = TestDirectory::create()?;
         let evidence_policy = policy(BudgetPolicyProfileV1::EvidenceOnly)?;

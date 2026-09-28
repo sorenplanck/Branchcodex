@@ -25,14 +25,19 @@ impl ProductionClaimReceiverErrorV15 {
     pub(crate) fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::Store(SessionStoreError::StoreBusy | SessionStoreError::Filesystem)
-                | Self::Observation(
-                    RealDomError::LockPoisoned
-                        | RealDomError::Chain(
-                            dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
-                        )
-                )
-                | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
+            // Same class as the F7 runtime's retryable_v20: an authority the
+            // Store cannot hand out yet is "observe again", not a defect.
+            Self::Store(
+                SessionStoreError::StoreBusy
+                    | SessionStoreError::Filesystem
+                    | SessionStoreError::FundingAuthorityUnavailable
+                    | SessionStoreError::ClaimSigningAuthorityUnavailable
+            ) | Self::Observation(
+                RealDomError::LockPoisoned
+                    | RealDomError::Chain(
+                        dom_scriptless_chain_adapter::ChainAdapterError::TemporarilyUnavailable
+                    )
+            ) | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
         )
     }
 }

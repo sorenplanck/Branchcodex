@@ -468,7 +468,7 @@ impl DomParticipantWalletSessionV1<'_> {
                 request.cancelled,
             )?,
         ];
-        let keys = shares.each_ref().map(|share| share.public_key().clone());
+        let keys = std::array::from_fn(|index| shares[index].public_key().clone());
         self.wallet.audit_physical_authority()?;
         Ok(DomXmrGraphSigningSharesV22 {
             binding,

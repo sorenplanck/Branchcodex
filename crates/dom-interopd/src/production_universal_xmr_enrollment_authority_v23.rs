@@ -3,7 +3,7 @@
 use super::*;
 #[path = "production_xmr_enrollment_resources_v23.rs"]
 mod resources_v23;
-pub(crate) use resources_v23::{ProductionOpenedXmrEnrollmentV23, ProductionXmrEnrolledFundingV23};
+pub(crate) use resources_v23::ProductionOpenedXmrEnrollmentV23;
 #[cfg(test)]
 #[path = "production_xmr_enrollment_authority_codec_v23_tests.rs"]
 mod codec_tests;
@@ -41,7 +41,7 @@ impl ProductionUniversalXmrEnrollmentAuthorityV23 {
         if self.scope.is_none() {
             return Err(Refusal::Conflict);
         }
-        require_milliseconds(self.sidecar_timeout_ms, 180_000)?;
+        require_milliseconds(self.sidecar_timeout_ms, MAX_SIDECAR_CALL_MS_V26)?;
         Ok((
             existing_resource(state_dir, &self.secret_store, false)?,
             existing_resource(state_dir, &self.sidecar_socket, true)?,
@@ -140,7 +140,7 @@ impl ProductionUniversalXmrEnrollmentAuthorityV23 {
         {
             return Err(Refusal::Conflict);
         }
-        require_milliseconds(self.sidecar_timeout_ms, 180_000)?;
+        require_milliseconds(self.sidecar_timeout_ms, MAX_SIDECAR_CALL_MS_V26)?;
         let paths = self.resource_paths_v23();
         for (index, (path, _)) in paths.iter().enumerate() {
             relative_path(path)?;

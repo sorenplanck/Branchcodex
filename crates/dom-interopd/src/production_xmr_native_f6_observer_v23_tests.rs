@@ -236,8 +236,15 @@ impl NativeF6XmrInventorySourceV23
         }
         .digest()?;
         let observed_at = now.checked_mul(1000).ok_or("XMR inventory clock overflow")?;
+        // Inventory observations are pre-F6 evidence: their validity window
+        // is bounded by the pre-F6 cap the F6 bundle authenticates, not by
+        // the hours-long route time policy.
         let valid_until_seconds = now
-            .checked_add(limits.max_evidence_age_seconds)
+            .checked_add(
+                limits
+                    .max_evidence_age_seconds
+                    .min(route_time_anchor::MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2),
+            )
             .ok_or("XMR inventory expiry overflow")?
             .min(limits.expires_at_seconds)
             .min(decoded_evidence.expires_at_seconds());
@@ -387,8 +394,13 @@ impl NativeF6ProvisionV23 {
             .as_secs();
         let limits =
             route_time_anchor::RouteTimePolicyV2::decode(time.policy.policy_bytes())?.limits();
+        // Same pre-F6 cap as the F6 bundle; see the XMR inventory producer.
         let until = now
-            .checked_add(limits.max_evidence_age_seconds)
+            .checked_add(
+                limits
+                    .max_evidence_age_seconds
+                    .min(route_time_anchor::MAX_PRE_F6_EVIDENCE_LIFETIME_SECONDS_V2),
+            )
             .ok_or("native observer time overflow")?
             .min(limits.expires_at_seconds);
         if now < limits.valid_from_seconds || until <= now {

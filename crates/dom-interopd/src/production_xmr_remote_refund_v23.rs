@@ -289,6 +289,10 @@ pub(crate) fn verify_local_refund_response_v24(
     quorum: &QuorumXmrObservationPortV1,
 ) -> Result<XmrBuiltSweepV1, ChildAuthorityRefusalV1> {
     authorized.require_recent()?;
+    // Bounded like every other quorum read on the route step. Unbounded, this
+    // resolves sixteen ring members and the funding bytes with no aggregate
+    // ceiling, which outlives the DOM actuator lease the step is holding. A
+    // timed-out verification refuses; it never accepts unverified material.
     let built = verify_refund_response_artifacts_v24(
         authorized.request(),
         authorized.authorization_digest(),
@@ -296,7 +300,7 @@ pub(crate) fn verify_local_refund_response_v24(
         authorized.observed().finality().graph_digest(),
         response,
         quorum,
-        None,
+        Some(crate::production_child_xmr::observation_deadline_v26()),
     )?;
     authorized.require_recent()?;
     Ok(built)

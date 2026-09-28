@@ -116,7 +116,10 @@ impl BlockingPrivateFundingWalletV12 {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(120))
+            // 120 s was exactly the DOM actuator lease: one slow transfer could
+            // spend the whole lease of the route step that issued it. Sixty
+            // seconds is the external-call ceiling every other adapter obeys.
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|_| PrivateFundingErrorV12::Unavailable)?;
         Ok(Self { base_url, client })

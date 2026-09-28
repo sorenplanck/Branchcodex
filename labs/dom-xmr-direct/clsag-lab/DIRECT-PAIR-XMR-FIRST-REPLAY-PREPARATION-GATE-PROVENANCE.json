@@ -1,0 +1,39 @@
+{
+  "sha256": {
+    "src/preparation_gate.rs": "be3e77c1789e9f18277dbbc17a698021614cb8f507c4cf4b7a313594a290ca83",
+    "tests/preparation_gate.rs": "fb09b4ee3541493e04ce6d01922885da45a5969ab1b43a860e1178014fce4910",
+    "examples/support/refund_recovery_worker.rs": "d738c209789869727ac6b605b16a1c11b7829d9885478bca83358de4ba7153cc",
+    "src/native/recovery_checkpoint.rs": "e8f63c3710ef7b7ab61fe6b3b612a8bf10d8a3cf171ed503c2ea5ffb69761d87",
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "cabca3080f6d0377fc1fc7833b5a1bc8d54c06a8cd1cbc470a30c8f95209d424",
+    "src/native.rs": "81fcc947f8dc09a22723d48ab996ff37e3308c4f3d3eb1a3783f691fb3297c24",
+    "src/native_dom.rs": "55abd49873194b6f4f91880c753614c67cf620851528c890fccaf99294824800",
+    "src/claim_resume.rs": "60c58aa0c02a21d5ff8ab9d0da1f3fd57b383615078d847cd115668f03513234",
+    "src/operation_checkpoint.rs": "4c261c7e0ef253de7169f7e919557169be851a3c7e9efefd0811f3844eba04a3",
+    "src/release_journal.rs": "a742c7bcd192948edc45a681aa7f5b4ce9e1866c2677d8c3a9cbe504741fb99d",
+    "src/counterpart_delivery.rs": "43bb88b7c3669afc986e5682a94b21997259fc5a38f13111f0a86fb035f8b553",
+    "src/time_bounds.rs": "0464cb6030c5b0e14bb6f2e6380ff7ac7696d05b1cf46d482ea56b2229d7c4f9",
+    "examples/regtest_claim.rs": "f13b6a440fa622a7cd3b30e45dff339e4e4d04691c2ebb8f78ebdb7289d69f3a",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "examples/support/claim_resume_bridge.rs": "806cd0c2f5f668192b8ac438e4bbdd60a3b53fd322751230500927e72a9dda5f",
+    "examples/support/counterpart_delivery_bridge.rs": "676b98068ca3c368b0df995322369cf02cf1152436c66f8645fe61e3d37ac833",
+    "examples/support/settlement_resume.rs": "2a7b86514d2813aac0185b408763ed62cca54b30630c797a8e30003bf3ba3d21",
+    "examples/support/direct_recovery_bridge.rs": "dfed746e0ada114ff764e0a32d5c071219100b866384a0e60232627c74b34339",
+    "tests/operation_checkpoint.rs": "8e1663c99d374aaf520024df870e36d8904ed8d32cb461353ee2eee6a90c4492",
+    "tests/counterpart_delivery.rs": "4a82893f4e57686c2c22ec44049551a198b76f28241cd6857629d0be636ab7a1",
+    "tests/release_journal.rs": "fc6706ca07584378fb75623f6d7479ce29e8342024a1d1a6ba36bf8f8779a496",
+    "target/release/examples/regtest_claim": "cece31da6962e8906cf0750c3f78be6efb60c9336d4a8528d4227b8efedfdcf1",
+    "../recovery-audit/lhtlp_bridge.go": "1a10d8114a46279583d1e2ac830371ff970577466f705ec4ed0268a0229a409b",
+    "../recovery-audit/direct_dlog.go": "4eb67fb677365da181bc85023dea862a6b2992787f35b82bd34d69f7eada20f8",
+    "../recovery-audit/direct_dlog_cli.go": "3c264cb1af6406eb1636834b962cf9104400cf705366fec2bbbb33f47bd6c70c",
+    "../recovery-audit/direct_dlog_test.go": "7321c033d3c61cf010b91fec780cf2f4b0a858f4dfef644563fc996859f3e337",
+    "target/recovery-research/direct-dlog-bridge": "a8ef8155e2e2542af1cb7630d40d5a300e7208ca77db38c2421fbe3610e81858"
+  },
+  "environment_overrides": {
+    "DOM_RPC_RATELIMIT_READ": "100",
+    "GOMAXPROCS": "2"
+  },
+  "reinclusion_scope": "First native XMR claim is detached/evicted by fixture, replayed directly by restored worker after historical obligation and original-window/current-counterpart checks, then mined by fixture. Exit 79 after native acknowledgment; supervisor supplies no replay bytes. Independent current canonical verification, no full initial-leg coordinator restart or competing-peer fork choice.",
+  "scope": "Fresh worker reconstructs obligation after exit 75 before post-inclusion files/journal exist. Initial native bytes and exposure policy were persisted before first send. Reopens existing obligation without recompleting adaptor; native submission is performed by the restored worker, with exit 77 before RPC and exit 76 after receiving native admission acknowledgment. Pool/block/unavailable-RPC send requests must be suppressed. Host/miners remain live; not full executor restart or production timing proof."
+}

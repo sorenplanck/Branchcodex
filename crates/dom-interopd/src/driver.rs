@@ -562,15 +562,47 @@ where
         }
     }
 
+    // A funding that was already externalized before the route entered
+    // recovery still has to be observed final. Preserve the priority of an
+    // existing claim/refund above, but observe funding before authorizing a
+    // new refund: an absent U owner can leave that authorization unavailable
+    // forever. This observation also remains necessary after DOM compensation,
+    // which closes the economic leg without recording funding finality. An
+    // Externalized action only observes the chain here; it cannot dispatch,
+    // commit or re-broadcast funding in the exit-only lane.
+    for (leg, stage) in [
+        (LegIdV1::Upstream, RouteDriveStageV1::UpstreamFunding),
+        (LegIdV1::Downstream, RouteDriveStageV1::DownstreamFunding),
+    ] {
+        if snapshot.leg(leg).funding.progress() == ActionProgressV1::Externalized {
+            return drive_action_once(
+                supervisor,
+                ActionDriveContextV1 {
+                    before_revision,
+                    stage,
+                    leg,
+                    action: ActionKindV1::Funding,
+                },
+                action_authority,
+                observer,
+                runner,
+                external_custody,
+                timers,
+            );
+        }
+    }
+
     for (leg, stage) in [
         (LegIdV1::Downstream, RouteDriveStageV1::DownstreamRefund),
         (LegIdV1::Upstream, RouteDriveStageV1::UpstreamRefund),
     ] {
         let leg_snapshot = snapshot.leg(leg);
-        if matches!(
-            leg_snapshot.funding.progress(),
-            ActionProgressV1::Externalized | ActionProgressV1::Final
-        ) && leg_snapshot.claim.progress() == ActionProgressV1::NotPrepared
+        if !leg_snapshot.is_terminal()
+            && matches!(
+                leg_snapshot.funding.progress(),
+                ActionProgressV1::Externalized | ActionProgressV1::Final
+            )
+            && leg_snapshot.claim.progress() == ActionProgressV1::NotPrepared
             && leg_snapshot.refund.progress() == ActionProgressV1::NotPrepared
         {
             return drive_action_once(
@@ -693,11 +725,16 @@ where
                 }
             }
             let event_id = driver_event_id(snapshot.route_id, stage, Some((leg, action)), None)?;
-            let result = supervisor.authorize_action(event_id, leg, action, action_authority);
+            let result =
+                crate::route_step_segment_v28::step_segment_v28("authorize_action", || {
+                    supervisor.authorize_action(event_id, leg, action, action_authority)
+                });
             authority_step(supervisor, before_revision, stage, result)
         }
         ActionStateV1::Committed(reference) => {
-            match supervisor.dispatch_one_due_timer(timers) {
+            match crate::route_step_segment_v28::step_segment_v28("committed_timer", || {
+                supervisor.dispatch_one_due_timer(timers)
+            }) {
                 Ok(report) => {
                     if report.urgent_externalized != 0
                         || report.runner_externalized != 0
@@ -743,7 +780,9 @@ where
                 }
                 Err(error) => return Err(error.into()),
             }
-            match supervisor.dispatch_one_effect(runner, external_custody) {
+            match crate::route_step_segment_v28::step_segment_v28("committed_effect", || {
+                supervisor.dispatch_one_effect(runner, external_custody)
+            }) {
                 Ok(report) => {
                     let after = supervisor.snapshot()?;
                     let (reported_stage, disposition) = match after.leg(leg).action(action) {
@@ -799,15 +838,18 @@ where
                 Some((leg, action)),
                 Some((transaction_id, snapshot.last_event_digest)),
             )?;
-            let result = supervisor.record_chain_observation(
-                event_id,
-                ChainObservationQueryV1::Finality {
-                    leg,
-                    action,
-                    transaction_id,
-                },
-                observer,
-            );
+            let result =
+                crate::route_step_segment_v28::step_segment_v28("externalized_observation", || {
+                    supervisor.record_chain_observation(
+                        event_id,
+                        ChainObservationQueryV1::Finality {
+                            leg,
+                            action,
+                            transaction_id,
+                        },
+                        observer,
+                    )
+                });
             authority_step(supervisor, before_revision, stage, result)
         }
         ActionStateV1::Final { .. } => Err(RouteDriverErrorV1::InconsistentProgress),

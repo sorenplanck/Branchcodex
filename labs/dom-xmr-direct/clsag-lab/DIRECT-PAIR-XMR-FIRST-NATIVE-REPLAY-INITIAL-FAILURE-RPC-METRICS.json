@@ -1,0 +1,12 @@
+{
+  "scope": "DOM RPC attempts by recovery workers only; excludes supervisor and XMR RPC. Per-worker wait budget, not a global liveness bound.",
+  "workers": [],
+  "totals": {
+    "public_read_attempts": 0,
+    "authenticated_read_attempts": 0,
+    "submit_attempts": 0,
+    "throttle_retries": 0,
+    "wait_requested_ms": 0,
+    "wait_elapsed_ms": 0
+  }
+}

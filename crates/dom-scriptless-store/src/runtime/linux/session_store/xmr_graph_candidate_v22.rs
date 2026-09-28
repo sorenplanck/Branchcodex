@@ -196,9 +196,9 @@ mod tests {
             changed[end..].copy_from_slice(&checksum);
             assert!(XmrGraphCandidateV22::decode(&changed).is_err());
         }
-        for index in 0..5 {
+        for (index, limit) in FIELD_LIMITS.iter().enumerate() {
             let mut changed = XmrGraphCandidateV22::decode(&encoded)?;
-            changed.fields[index] = vec![1; FIELD_LIMITS[index] + 1];
+            changed.fields[index] = vec![1; limit + 1];
             assert!(changed.encode().is_err());
         }
         Ok(())

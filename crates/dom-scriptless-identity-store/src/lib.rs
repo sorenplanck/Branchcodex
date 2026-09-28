@@ -47,7 +47,7 @@ use dom_scriptless_transport::{
 use rand_core::{OsRng, RngCore};
 use rustix::{
     fs::{
-        fchmod, flock, fstat, fsync, mkdirat, openat2, renameat_with, unlinkat, AtFlags, FileType,
+        fchmod, flock, fstat, mkdirat, openat2, renameat_with, unlinkat, AtFlags, FileType,
         FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags,
     },
     process::geteuid,
@@ -110,8 +110,8 @@ const KDF_MEMO_CAPACITY: usize = 16;
 /// run in this process. Entries hold the same 32-byte key an open envelope
 /// already keeps in process memory while in use, are zeroized on eviction,
 /// and grant no authority a process holding the passphrase lacks.
-static KDF_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
-    std::sync::Mutex::new(Vec::new());
+type KdfMemoEntryV1 = ([u8; 32], Zeroizing<[u8; 32]>);
+static KDF_MEMO: std::sync::Mutex<Vec<KdfMemoEntryV1>> = std::sync::Mutex::new(Vec::new());
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
@@ -137,6 +137,12 @@ pub enum IdentityStoreError {
     SigningFailed,
     /// The retained Contracts Store rejected the prepared request or commit.
     StoreRejected,
+    /// The Noise handshake stream failed (timeout, end of stream or reset)
+    /// before the peer's static key could be checked. This is a statement
+    /// about the socket, not about the peer: a peer that completes the
+    /// handshake with any key other than the expected one is still reported
+    /// as `AuthenticationFailed`.
+    TransportUnavailable,
 }
 
 impl fmt::Display for IdentityStoreError {
@@ -149,6 +155,7 @@ impl fmt::Display for IdentityStoreError {
             Self::AuthenticationFailed => "Contracts identity envelope authentication failed",
             Self::InvalidKey => "Contracts identity key material is invalid",
             Self::StoreBusy => "Contracts identity store is busy",
+            Self::TransportUnavailable => "Contracts identity handshake stream is unavailable",
             Self::SigningFailed => "Contracts DSC1 identity signing failed",
             Self::StoreRejected => "Contracts Store rejected the DSC1 operation",
         })
@@ -286,7 +293,13 @@ impl ContractsTransportIdentityV1 {
                 expected_remote_static: *remote_reference.noise_public_key(),
             },
         )
-        .map_err(|_| IdentityStoreError::AuthenticationFailed)
+        // Only a stream failure is separated out. Every Noise refusal,
+        // including a completed handshake with an unexpected static key,
+        // keeps the authentication verdict.
+        .map_err(|error| match error {
+            TransportError::IoFailure => IdentityStoreError::TransportUnavailable,
+            _ => IdentityStoreError::AuthenticationFailed,
+        })
     }
 
     fn require_local_reference(

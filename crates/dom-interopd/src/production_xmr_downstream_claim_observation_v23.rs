@@ -18,14 +18,21 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             return Ok(true);
         }
         let head = self.store.load_session(self.session_id)?;
-        if head.irreversible().adaptor_secret_exposed
-            || matches!(
-                head.phase(),
-                dom_scriptless_store::SessionPhaseV1::RefundBroadcast
-                    | dom_scriptless_store::SessionPhaseV1::Refunded
-                    | dom_scriptless_store::SessionPhaseV1::FailedClosed
-            )
-        {
+        // Exposure alone does not end the observation. Preparing, signing and
+        // resuming the claim still require the retained gate lease, and only
+        // this observer refreshes it: stopping at exposure let it age past
+        // its sixty seconds while that work was still running, and the Store
+        // refused with ClaimSigningAuthorityUnavailable (run 84). Keep
+        // observing while the gate is required; a refund or failed close ends
+        // it, since no claim work remains on those paths. No claim-progress
+        // query is consulted here: the one tried in run 86 assumes the local
+        // participant is the DOM claim sender, which the gate's owner is not.
+        if matches!(
+            head.phase(),
+            dom_scriptless_store::SessionPhaseV1::RefundBroadcast
+                | dom_scriptless_store::SessionPhaseV1::Refunded
+                | dom_scriptless_store::SessionPhaseV1::FailedClosed
+        ) {
             return Ok(true);
         }
         if self

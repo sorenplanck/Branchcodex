@@ -90,6 +90,40 @@ pub(super) fn configure_wallet_fixture_with_policy_v23(
         policy.xmr_principal_piconero = xmr_principal;
         policy.quote_dom_numerator = dom_principal / divisor_left;
         policy.quote_xmr_denominator = xmr_principal / divisor_left;
+        // Negotiate recovery fees the DOM relay policy will actually accept.
+        // The graph copies these scalars straight into each kernel
+        // (`xmr-refund-policy/src/graph_builder.rs`), and the node rejects any
+        // transaction under `minimum_fee_noms` for its own shape. The inherited
+        // fixture scalars (2/3/2/8) are three orders of magnitude below that,
+        // so the success claim was unrelayable and every run died at the first
+        // claim submission. `dom_max` is already raised above, and the
+        // collateral is derived from these fees, so the payout commitments
+        // recomputed below absorb the change.
+        let recommended = |outputs| {
+            dom_core::fee_policy::fee_breakdown(
+                dom_core::fee_policy::TransactionShape::from_counts(1, outputs, 1).unwrap(),
+            )
+            .unwrap()
+            .recommended_fee_noms
+        };
+        // Claim spends the collateral into principal plus change; cancel,
+        // refund and compensation each produce a single payout.
+        policy.claim_fee_noms = recommended(2);
+        policy.cancel_fee_noms = recommended(1);
+        policy.refund_fee_noms = recommended(1);
+        // `validate_for` requires the compensation fee to strictly dominate the
+        // refund fee once the counterparty ceiling is converted at the frozen
+        // quote, so the revealing refund always outbids catastrophe recovery.
+        let counterparty_ceiling = u64::try_from(terms.fee_limit.counterparty_max).unwrap();
+        let converted = counterparty_ceiling
+            .checked_mul(policy.quote_dom_numerator)
+            .unwrap()
+            .div_ceil(policy.quote_xmr_denominator);
+        policy.compensation_fee_noms = policy
+            .refund_fee_noms
+            .checked_add(converted)
+            .and_then(|bound| bound.checked_add(1))
+            .unwrap();
         terms.assurance_policy_hash = Some(policy.policy_hash().unwrap());
         let validated = policy.validate_for(&terms).unwrap();
         let values = [

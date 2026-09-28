@@ -693,6 +693,26 @@ pub enum ContractsRelayIngressErrorV1 {
     /// No Store-issued authority exists for this unseen message phase.
     #[error("unseen DSC1 message has no prepared Contracts authority")]
     UnpreparedMessage,
+    /// A claim signing-round message arrived before this side's claim step
+    /// installed its OperationalSigning ingress authority. The authority lives
+    /// only in this worker's memory and the Store already entitles this side
+    /// to it, so the message waits for that step instead of ending the route.
+    #[error("claim signing round is awaiting its ingress handoff")]
+    AwaitingClaimSigningHandoffV29,
+    /// The peer's adaptor pre-signature arrived before this side's claim step
+    /// reconstructed its own record and installed the pre-signature ingress
+    /// authority. The durable journal already holds the complete round, so the
+    /// message waits for that step instead of ending the route.
+    #[error("claim pre-signature is awaiting its ingress handoff")]
+    AwaitingClaimPreSignatureHandoffV29,
+    /// The peer's authenticated first funding edge arrived in the same Relay
+    /// batch that completed bilateral readiness. Keep it pending until the
+    /// native owner observes the chain and installs its linear authority.
+    #[error("native XMR funding commitment is awaiting its signing handoff")]
+    AwaitingNativeXmrFundingHandoffV25,
+    /// Authenticated first readiness vote awaits the local native gate. No ACK.
+    #[error("native XMR readiness is awaiting local gate construction")]
+    AwaitingNativeXmrReadinessGateV25,
     /// Exact native claim verified, but chain observation has not committed.
     /// Relay keeps this row pending; this is never an acceptance receipt.
     #[error("verified final claim is awaiting its canonical chain observation")]
@@ -831,8 +851,13 @@ pub enum RelayWorkerOutboundErrorV1 {
     Sender(#[from] DurableRelaySenderErrorV1),
     /// The shared Contracts Store rejected, quarantined or could not
     /// reauthenticate the Store-issued outbound handle.
-    #[error("Contracts Store refused outbound Relay staging")]
-    StoreRejected,
+    /// Carries the Store's own answer. A unit variant here discarded it, and
+    /// with it the difference between "busy, try again" and "this is wrong" —
+    /// a difference that `is_retryable` in the DOM claim runtime, and
+    /// `child_dom`'s refusal mapping, both already act on for every other
+    /// Store error. Run 87 died as `store_rejected` with the cause erased.
+    #[error("Contracts Store refused outbound Relay staging: {0}")]
+    StoreRejected(SessionStoreError),
     /// The proposed inner payload is not one exact canonical DSC1 envelope.
     #[error("outbound DSC1 is not canonically encoded")]
     InvalidDsc1,
@@ -1538,9 +1563,16 @@ impl ContractsStoreTransportPortV1 {
                 .ok_or(ContractsRelayIngressErrorV1::UnpreparedMessage);
         };
         let accepted = match &authority.inner {
-            PreparedContractsIngressKindV1::XmrGraphSigningV23(prepared) => self
-                .store
-                .accept_xmr_graph_signing_ingress_v23(prepared, signed_dsc1),
+            PreparedContractsIngressKindV1::XmrGraphSigningV23(prepared) => {
+                if self
+                    .store
+                    .xmr_readiness_awaits_gate_v25(prepared, signed_dsc1)?
+                {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingNativeXmrReadinessGateV25);
+                }
+                self.store
+                    .accept_xmr_graph_signing_ingress_v23(prepared, signed_dsc1)
+            }
             PreparedContractsIngressKindV1::XmrGraphCommitV23(prepared) => self
                 .store
                 .accept_xmr_graph_commit_ingress_v23(prepared, signed_dsc1),
@@ -1736,6 +1768,32 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                     .ok_or(ContractsRelayIngressErrorV1::Store(error)),
             };
         }
+        // DIAG(temporary): the ready-to-fund vote is the one message whose
+        // semantic acceptance lives behind the generic derived entry point.
+        // Name the branch that consumed it and the session revision on both
+        // sides of the call: a vote that is acknowledged without advancing the
+        // recipient's revision is the deadlock this run keeps reproducing.
+        let ready_vote_v25 = parsed.unsigned().kind() as u8 == 0x17;
+        let rev_before_v25 = if ready_vote_v25 {
+            self.store
+                .load_session(self.session_id)
+                .map(|s| s.revision())
+                .ok()
+        } else {
+            None
+        };
+        let diag_v25 = |branch: &str, worker: &Self| {
+            if let Some(before) = rev_before_v25 {
+                let after = worker
+                    .store
+                    .load_session(worker.session_id)
+                    .map(|s| s.revision())
+                    .ok();
+                eprintln!(
+                    "DOM_READY_APPLY_V25 branch={branch} rev_before={before} rev_after={after:?}"
+                );
+            }
+        };
         match self
             .store
             .accept_transport_message_derived(delivery.signed_dsc1())
@@ -1743,7 +1801,10 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
             Ok(DurableTransportOutcomeV1::EquivocationPersisted) if was_failed_closed => self
                 .terminal_commit(true)?
                 .ok_or(ContractsRelayIngressErrorV1::InvalidReceipt),
-            Ok(outcome) => self.map_outcome(outcome),
+            Ok(outcome) => {
+                diag_v25("derived", self);
+                self.map_outcome(outcome)
+            }
             Err(SessionStoreError::InvalidTransition) => {
                 let stale_refund_ingress = matches!(
                     (&self.authority, parsed.unsigned().kind() as u8),
@@ -1780,11 +1841,38 @@ impl ContractsTransportPortV1 for ContractsStoreTransportPortV1 {
                 )? {
                     return Err(ContractsRelayIngressErrorV1::AwaitingFinalClaimObservationV16);
                 }
-                self.accept_unseen(delivery.signed_dsc1())
+                if self.authority.is_none()
+                    && self.store.xmr_bounded_claim_round_awaits_handoff_v29(
+                        self.session_id,
+                        delivery.signed_dsc1(),
+                    )?
+                {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingClaimSigningHandoffV29);
+                }
+                if !matches!(
+                    self.authority.as_ref().map(|value| &value.inner),
+                    Some(PreparedContractsIngressKindV1::UniversalClaimPreSignatureV12(_))
+                ) && self.store.f7_claim_pre_signature_awaits_handoff_v29(
+                    self.session_id,
+                    delivery.signed_dsc1(),
+                )? {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingClaimPreSignatureHandoffV29);
+                }
+                if self.store.xmr_funding_commitment_awaits_handoff_v25(
+                    self.session_id,
+                    delivery.signed_dsc1(),
+                )? {
+                    return Err(ContractsRelayIngressErrorV1::AwaitingNativeXmrFundingHandoffV25);
+                }
+                let outcome = self.accept_unseen(delivery.signed_dsc1());
+                diag_v25("unseen", self);
+                outcome
             }
-            Err(error) => self
-                .terminal_commit(true)?
-                .ok_or(ContractsRelayIngressErrorV1::Store(error)),
+            Err(error) => {
+                diag_v25("store_error", self);
+                self.terminal_commit(true)?
+                    .ok_or(ContractsRelayIngressErrorV1::Store(error))
+            }
         }
     }
 }
@@ -2079,15 +2167,71 @@ where
         Ok(prepared_report(&pending))
     }
 
+    /// Returns true when an RFQ envelope was ever prepared by this durable
+    /// sender (still pending or already handed to the Relay). The initiator's
+    /// RFQ is deterministic for the route, so crash recovery must not prepare
+    /// a second RFQ envelope with a fresh expiry.
+    pub fn f6_rfq_already_prepared_v25(&mut self) -> Result<bool, RelayWorkerOutboundErrorV1> {
+        Ok(self
+            .sender
+            .kind_ever_prepared_v25(message_type::RFQ)
+            .map_err(RelayWorkerOutboundErrorV1::from)?)
+    }
+
+    /// Applies the initiator's own deterministic RFQ to the local F6 port.
+    ///
+    /// F6 is a replicated machine: the same RFQ object the initiator submits
+    /// over the Relay must also activate the initiator's own F6 authority.
+    /// This method only forwards a kind-restricted local delivery into the
+    /// same `accept_f6` boundary used by network traffic — the port itself
+    /// re-authenticates the payload against its pinned bindings, and the
+    /// F6 lifecycle authority is never exposed to the caller. The delivery
+    /// digest is derived deterministically from the exact payload bytes so
+    /// crash-recovery redelivery presents the same evidence.
+    pub fn accept_local_initiator_rfq_v25(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<DurablePayloadCommitV1, F::Error> {
+        let mut hasher = Blake2bVar::new(32).expect("BLAKE2b-256 output length is valid");
+        hasher.update(b"DOM-INTEROP/F6/LOCAL-INITIATOR-RFQ/V25\0");
+        hasher.update(payload);
+        let mut digest: Digest32 = ZERO_DIGEST;
+        hasher
+            .finalize_variable(&mut digest)
+            .expect("BLAKE2b-256 output length is valid");
+        let sender_id = self.contracts.contracts_mut().local_participant;
+        let delivery = F6PayloadDeliveryV1::local_initiator_rfq_v25(sender_id, digest, payload);
+        self.f6.accept_f6(delivery)
+    }
+
+    /// Returns true when the exact Store-owned DSC1 application is already
+    /// durable in the route sender and still waiting for Relay ACK. Crash
+    /// recovery must wait in that state instead of preparing the same
+    /// application again with a fresh expiry.
+    pub(crate) fn store_outbound_dsc1_pending_v24(
+        &mut self,
+        outbound: &CommittedOutboundDsc1V1,
+    ) -> Result<bool, RelayWorkerOutboundErrorV1> {
+        let store = Rc::clone(&self.contracts.contracts_mut().store);
+        store
+            .revalidate_committed_outbound_dsc1(outbound)
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
+
+        Ok(self
+            .sender
+            .pending_envelope()?
+            .is_some_and(|pending| pending.application_id() == Some(outbound.application_id())))
+    }
+
     /// Stages or reconciles one DSC1 object already signed and committed by
     /// the same physical Contracts Store opening embedded in this worker.
     ///
     /// The opaque handle is reauthenticated before its exact signed bytes are
     /// decoded and cross-checked against both the handle and the worker's
-    /// frozen sender/session.  The bytes then enter only the durable Route
+    /// frozen sender/session. The bytes then enter only the durable Route
     /// application V2 API under the Store-minted application identifier.
     /// `AlreadyAcked` is returned only after the Store has durably recorded
-    /// the completed Relay handoff.  A pending handle is deliberately not
+    /// the completed Relay handoff. A pending handle is deliberately not
     /// returned: crash recovery reissues it from the same Store journal.
     pub fn stage_store_outbound_dsc1(
         &mut self,
@@ -2117,7 +2261,7 @@ where
         let store = Rc::clone(&self.contracts.contracts_mut().store);
         store
             .revalidate_committed_outbound_dsc1(&outbound)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
 
         let parsed = SignedMessageV1::decode_exact(outbound.signed_bytes())
             .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
@@ -2161,7 +2305,7 @@ where
             RouteApplicationDispositionV2::AlreadyAcked(_) => {
                 store
                     .complete_outbound_dsc1_relay_handoff(outbound)
-                    .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+                    .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
                 Ok(disposition)
             }
         }
@@ -2202,7 +2346,7 @@ where
         let session = contracts.session_id;
         let retained = store
             .resume_outbound_dsc1(session)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
         let retained = match retained {
             dom_scriptless_store::OutboundDsc1RecoveryV1::None if pending.is_none() && !frames => {
                 return Ok(RelayOutboundStepV1::Idle);
@@ -2222,7 +2366,11 @@ where
                 return Ok(RelayOutboundStepV1::Idle);
             }
             dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) => retained,
-            _ => return Err(RelayWorkerOutboundErrorV1::StoreRejected),
+            _ => {
+                return Err(RelayWorkerOutboundErrorV1::StoreRejected(
+                    SessionStoreError::InvalidTransition,
+                ))
+            }
         };
         let message = SignedMessageV1::decode_exact(retained.signed_bytes())
             .map_err(|_| RelayWorkerOutboundErrorV1::InvalidDsc1)?;
@@ -2261,9 +2409,11 @@ where
         if matches!(submitted, RelayOutboundStepV1::Acked { .. }) {
             let dom_scriptless_store::OutboundDsc1RecoveryV1::Committed(retained) = store
                 .resume_outbound_dsc1(session)
-                .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?
+                .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?
             else {
-                return Err(RelayWorkerOutboundErrorV1::StoreRejected);
+                return Err(RelayWorkerOutboundErrorV1::StoreRejected(
+                    SessionStoreError::InvalidTransition,
+                ));
             };
             if retained.application_id() != &application_id
                 || retained.message_digest() != &message_digest
@@ -2284,7 +2434,7 @@ where
         let retained = contracts
             .store
             .resume_outbound_dsc1(contracts.session_id)
-            .map_err(|_| RelayWorkerOutboundErrorV1::StoreRejected)?;
+            .map_err(RelayWorkerOutboundErrorV1::StoreRejected)?;
         let retained_refund = match retained {
             dom_scriptless_store::OutboundDsc1RecoveryV1::None => false,
             dom_scriptless_store::OutboundDsc1RecoveryV1::SigningRequest(request) => {
@@ -2658,3 +2808,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "production_xmr_readiness_handoff_v25_tests.rs"]
+mod readiness_gate_v25_tests;

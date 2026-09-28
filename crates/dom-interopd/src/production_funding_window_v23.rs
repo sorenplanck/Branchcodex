@@ -8,7 +8,7 @@ use route_executor::{ActionIntentV1, ActionKindV1};
 use settlement_coordinator::{
     ChildAuthorityRefusalV1, ChildDispatchRequestV1, ChildExecutionOutcomeV1,
     ChildObservationOutcomeV1, ChildObservationRequestV1, ChildReconciliationOutcomeV1,
-    ChildReconciliationRequestV1, SettlementActionV1, SettlementChildAuthorityV1,
+    ChildReconciliationRequestV1, SettlementChildAuthorityV1,
     SettlementChildObserverV1,
 };
 use std::{
@@ -83,6 +83,23 @@ pub(crate) struct FundingGuardV23<T> {
 #[cfg(not(any(feature = "development", feature = "simulation", test)))]
 impl<T> crate::supervisor::authority_seal::Sealed for FundingGuardV23<T> {}
 
+/// DIAG(temporary): count the funding refusals this closed window produced and
+/// print on the first one and then on each power-of-two, so a permanent stall
+/// is visible without one line per round.
+fn diag_window_refusal_v25(site: &'static str) {
+    use std::cell::Cell;
+    thread_local! {
+        static REFUSALS_V25: Cell<u64> = const { Cell::new(0) };
+    }
+    REFUSALS_V25.with(|count| {
+        let seen = count.get().saturating_add(1);
+        count.set(seen);
+        if seen.is_power_of_two() {
+            eprintln!("DOM_FUNDING_WINDOW_REFUSAL_V25 site={site} count={seen}");
+        }
+    });
+}
+
 impl<T: RouteActionAuthority> RouteActionAuthority for FundingGuardV23<T> {
     fn authorize_route_action(
         &mut self,
@@ -92,6 +109,10 @@ impl<T: RouteActionAuthority> RouteActionAuthority for FundingGuardV23<T> {
             return Err(AuthorityRefusalV1::Refused);
         }
         if request.action() == ActionKindV1::Funding && !self.window.available() {
+            // DIAG(temporary): this refusal is the single reason a route can
+            // sit in `NotPrepared` for an entire run. It is `Unavailable`, so
+            // no existing diagnostic covers it and the driver simply waits.
+            diag_window_refusal_v25("authorize");
             return Err(AuthorityRefusalV1::Unavailable);
         }
         self.inner.authorize_route_action(request)
@@ -106,9 +127,17 @@ impl<T: SettlementChildAuthorityV1> SettlementChildAuthorityV1 for FundingGuardV
         if request.route_id() != self.window.route_id {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
-        if request.action() == SettlementActionV1::Funding && !self.window.available() {
-            return Err(ChildAuthorityRefusalV1::Unavailable);
-        }
+        // No window check here. `externalize_child` only ever dispatches an
+        // action the route has already committed, and a funding action can
+        // only reach `Committed` by passing `authorize_route_action` above --
+        // which requires a live window, i.e. a height observation made fresh
+        // in that same round. Re-checking here does not make the observation
+        // any fresher; it re-gates a decision already taken under one. The
+        // window is a 60 s lease refreshed once per round, so whenever a
+        // round's observation fails the loop closes it explicitly
+        // (`production_run_universal.rs`, before the route half) and this
+        // second check refuses to externalize funding the route legitimately
+        // committed -- killing the run instead of completing it.
         self.inner.externalize_child(request)
     }
 

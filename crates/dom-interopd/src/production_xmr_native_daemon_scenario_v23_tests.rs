@@ -9,7 +9,10 @@ use route_executor::{
     SecretVisibilityV1,
 };
 use std::{
+    collections::BTreeMap,
+    io::Read,
     net::TcpListener,
+    path::Path,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -22,7 +25,7 @@ mod barrier;
 use barrier::{NativeBarrierV23, XmrLedgerPumpV23};
 #[path = "production_xmr_native_daemon_scenario_v23_coordinator.rs"]
 pub(super) mod coordinator;
-use coordinator::{CoordinatorObserverV23, NativeActionV23};
+use coordinator::{CoordinatorObserverV23, NativeActionV23, NativeEconomicIdentityV25};
 use route_executor::ActionKindV1;
 #[path = "production_xmr_native_refund_publication_v24_tests.rs"]
 mod refund_publication_v24;
@@ -32,6 +35,203 @@ use timing_v24::{LaneV24, PhaseV24, SnapshotTimingV24};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const PHASE_TIMEOUT: Duration = Duration::from_secs(7200);
+const CUSTODY_READY_TIMEOUT_V25: Duration = Duration::from_secs(1800);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CustodyMarkerStateV25 {
+    started: usize,
+    ready: usize,
+}
+
+impl CustodyMarkerStateV25 {
+    fn complete(self) -> bool {
+        self.started == 1 && self.ready == 1
+    }
+}
+
+// Structural observation only: the production Store authenticates the graph.
+// Mirror its immutable journal framing so mere filenames cannot prove Ready.
+const CUSTODY_RECORD_MAX_V25: usize = 16_384;
+const CUSTODY_RECORD_DOMAIN_V25: &str = "DOM:xmr-graph-custody-provisioning:v23";
+
+fn validate_custody_record_v25(bytes: &[u8], prefix: &str, ready: bool) -> Result<()> {
+    if !(372..=CUSTODY_RECORD_MAX_V25).contains(&bytes.len()) {
+        return Err("focused custody record size".into());
+    }
+    let parent: String = bytes[48..80]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let role_length = u32::from_le_bytes(bytes[336..340].try_into()?);
+    let end = bytes.len() - 32;
+    if &bytes[..8] != b"DXGCPV23"
+        || bytes[8] != u8::from(ready)
+        || !matches!(bytes[9], 1 | 2)
+        || bytes[10..16] != [0; 6]
+        || parent != prefix
+        || bytes[48..80] == [0; 32]
+        || role_length as usize != end - 340
+        || dom_crypto::blake2b_256_tagged(CUSTODY_RECORD_DOMAIN_V25, &bytes[..end]).as_bytes()
+            != &bytes[end..]
+    {
+        return Err("focused custody record framing or identity".into());
+    }
+    Ok(())
+}
+
+fn read_custody_record_v25(path: &Path, prefix: &str, ready: bool) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    observer::owned_file(path)?
+        .take(CUSTODY_RECORD_MAX_V25 as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    validate_custody_record_v25(&bytes, prefix, ready)?;
+    Ok(bytes)
+}
+
+fn require_custody_record_pair_v25(started: &[u8], ready: &[u8]) -> Result<()> {
+    // State and its checksum are the only differences allowed by change_state.
+    if started.len() != ready.len()
+        || started[..8] != ready[..8]
+        || started[9..started.len() - 32] != ready[9..ready.len() - 32]
+    {
+        return Err("focused custody Started/Ready binding mismatch".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod custody_observation_v25_tests {
+    use super::*;
+
+    fn seal(bytes: &mut [u8]) {
+        let end = bytes.len() - 32;
+        let hash = dom_crypto::blake2b_256_tagged(CUSTODY_RECORD_DOMAIN_V25, &bytes[..end]);
+        bytes[end..].copy_from_slice(hash.as_bytes());
+    }
+
+    // Framing fixture only; this cannot pass the production graph auditor.
+    fn record(ready: bool) -> Vec<u8> {
+        let mut bytes = vec![0; 376];
+        bytes[..8].copy_from_slice(b"DXGCPV23");
+        bytes[8] = u8::from(ready);
+        bytes[9] = 1;
+        bytes[48..80].fill(0x12);
+        bytes[336..340].copy_from_slice(&4_u32.to_le_bytes());
+        seal(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn custody_observer_requires_bytes_state_identity_and_checksum() {
+        let prefix = "12".repeat(32);
+        assert!(validate_custody_record_v25(&[], &prefix, true).is_err());
+        let bytes = record(true);
+        assert!(validate_custody_record_v25(&bytes, &prefix, true).is_ok());
+        assert!(validate_custody_record_v25(&bytes, &prefix, false).is_err());
+        assert!(validate_custody_record_v25(&bytes, &"13".repeat(32), true).is_err());
+        for offset in [0, 9, 10, 48, 100, 336, 375] {
+            let mut bad = bytes.clone();
+            bad[offset] ^= 0xff;
+            assert!(validate_custody_record_v25(&bad, &prefix, true).is_err());
+        }
+    }
+
+    #[test]
+    fn custody_observer_rejects_validly_checksummed_mismatched_graph_pair() {
+        let started = record(false);
+        let mut ready = record(true);
+        assert!(require_custody_record_pair_v25(&started, &ready).is_ok());
+        ready[144] ^= 1;
+        seal(&mut ready);
+        assert!(validate_custody_record_v25(&ready, &"12".repeat(32), true).is_ok());
+        assert!(require_custody_record_pair_v25(&started, &ready).is_err());
+    }
+}
+
+/// Observe the daemon-owned immutable provisioning records without opening a
+/// live Contracts Store. Exact prefix pairing prevents an unrelated Started
+/// and Ready record from satisfying the focused bilateral test.
+fn custody_marker_state_v25(state: &Path) -> Result<[CustodyMarkerStateV25; 2]> {
+    use crate::production_config::{
+        ProductionBootstrapConfigV1, ProductionBootstrapModeV1, ProductionPathRoleV1,
+        PRODUCTION_CREATE_CONFIG_FILE_V11,
+    };
+
+    let mut bytes = Vec::new();
+    observer::owned_file(&state.join(PRODUCTION_CREATE_CONFIG_FILE_V11))?
+        .take(65_537)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 65_536 {
+        return Err("focused custody manifest exceeds canonical bound".into());
+    }
+    let config = ProductionBootstrapConfigV1::decode_canonical_v11_for_mode(
+        &bytes,
+        ProductionBootstrapModeV1::Create,
+    )?;
+    let mut result = [CustodyMarkerStateV25::default(); 2];
+    for (index, role) in [
+        ProductionPathRoleV1::UpstreamContracts,
+        ProductionPathRoleV1::DownstreamContracts,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = state
+            .join(config.relative_path(role))
+            .join("session-rosters");
+        let mut started = BTreeMap::new();
+        let mut ready = BTreeMap::new();
+        match std::fs::read_dir(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    let name = name.to_str().ok_or("focused custody marker encoding")?;
+                    let (prefix, is_ready, destination) = if let Some(prefix) =
+                        name.strip_suffix(".xmr-graph-custody-started-v23")
+                    {
+                        (prefix, false, &mut started)
+                    } else if let Some(prefix) = name.strip_suffix(".xmr-graph-custody-ready-v23") {
+                        (prefix, true, &mut ready)
+                    } else {
+                        continue;
+                    };
+                    if prefix.len() != 64
+                        || prefix.bytes().any(|byte| !byte.is_ascii_hexdigit())
+                        || prefix.bytes().all(|byte| byte == b'0')
+                    {
+                        return Err("focused custody marker has invalid session name".into());
+                    }
+                    let record = read_custody_record_v25(&entry.path(), prefix, is_ready)?;
+                    destination.insert(prefix.to_owned(), record);
+                }
+            }
+        }
+        // Directory iteration is not an atomic snapshot: Ready may be published
+        // during enumeration. Read its original Started by exact path if the
+        // iterator did not return it; a genuinely absent Started remains an error.
+        for (prefix, record) in &ready {
+            if !started.contains_key(prefix) {
+                let path = directory.join(format!("{prefix}.xmr-graph-custody-started-v23"));
+                started.insert(
+                    prefix.clone(),
+                    read_custody_record_v25(&path, prefix, false)?,
+                );
+            }
+            require_custody_record_pair_v25(&started[prefix], record)?;
+        }
+        if started.len() > 1 || ready.len() > 1 {
+            return Err("focused custody markers are unpaired or ambiguous".into());
+        }
+        result[index] = CustodyMarkerStateV25 {
+            started: started.len(),
+            ready: ready.len(),
+        };
+    }
+    Ok(result)
+}
 
 fn fresh_local_policy() -> Result<route_time_anchor::RouteTimePolicyLimitsV2> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -136,42 +336,143 @@ fn wait_claims(
         for actor in 0..2 {
             let exited = running.poll_actor_v23(actor)?;
             if exited.is_some_and(|status| !status.success()) {
+                running.report_diagnostics_v25();
                 return Err("real daemon exited unsuccessfully before final claims".into());
             }
             match observers[actor].poll()? {
                 Some(snapshot) => {
                     if snapshot.aborted_unfunded {
+                        running.report_diagnostics_v25();
                         return Err(
                             "real daemon aborted unfunded; this is not a successful swap".into(),
                         );
                     }
                     if exited.is_some() && !claimed(&snapshot) {
+                        running.report_diagnostics_v25();
                         return Err("daemon exit 0 did not leave both economic claims final".into());
                     }
                     timing.observe(actor, &snapshot);
                     complete &= claimed(&snapshot) && exited.is_some();
-                    scoped_snapshots.push(snapshot);
+                    // Carry the actor that produced this snapshot: the pump
+                    // must ask that actor's own coordinator about it. The two
+                    // actors can hold different aggregate identities for the
+                    // same effect, so crossing them fails a binding check that
+                    // is not actually violated.
+                    scoped_snapshots.push((actor, snapshot));
                 }
-                None if exited.is_some() => return Err("daemon exit has no durable route".into()),
+                None if exited.is_some() => {
+                    running.report_diagnostics_v25();
+                    return Err("daemon exit has no durable route".into());
+                }
                 None => complete = false,
             }
         }
-        xmr.pump(running, &scoped_snapshots.iter().collect::<Vec<_>>())?;
+        xmr.pump(
+            running,
+            &scoped_snapshots
+                .iter()
+                .map(|(actor, snapshot)| (*actor, snapshot))
+                .collect::<Vec<_>>(),
+        )?;
         if complete {
             return Ok(());
         }
         if start.elapsed() >= PHASE_TIMEOUT {
+            // Both daemons are still alive here, so nothing has drained their
+            // stderr. Stop them first: a stalled run is exactly the failure
+            // whose diagnostics decide where the stall is.
+            running.report_stall_v25();
             return Err("real daemon claim observation reached its explicit deadline".into());
         }
         if start.elapsed().saturating_sub(announced) >= Duration::from_secs(30) {
             announced = start.elapsed();
+            let custody = [
+                custody_marker_state_v25(running.state_dir(0)?)?,
+                custody_marker_state_v25(running.state_dir(1)?)?,
+            ];
             eprintln!(
-                "native real daemon: awaiting two final economic claims after {}s",
-                announced.as_secs()
+                "native real daemon: awaiting two final economic claims after {}s custody={custody:?}",
+                announced.as_secs(),
             );
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Focused real-daemon reproduction for the graph-signing/custody handoff.
+/// It deliberately stops before Funding, Claim, compensation or refund.
+#[test]
+#[ignore = "requires the real release daemon, offline funding helper and GPL sidecar"]
+fn native_real_daemon_bilateral_xmr_graph_custody_ready_v25() -> Result<()> {
+    let binary = NativeDaemonBinaryV23::from_environment()?;
+    let configuration = Configuration::require()?;
+    let startup = NativeMainnetStartupV23::prepare(&configuration, fresh_local_policy()?, 10_000)?;
+    let mut xmr = XmrLedgerPumpV23::new(&startup)?;
+    let mut running = launch(startup, &binary)?;
+    let result = (|| -> Result<()> {
+        let mut route_observers = observers(&running)?;
+        let started = Instant::now();
+        let mut announced = Duration::ZERO;
+        loop {
+            let mut snapshots = Vec::with_capacity(2);
+            let mut markers = [[CustodyMarkerStateV25::default(); 2]; 2];
+            for actor in 0..2 {
+                if let Some(status) = running.poll_actor_v23(actor)? {
+                    running.report_diagnostics_v25();
+                    return Err(format!(
+                        "focused custody actor {actor} exited before bilateral Ready: {status}"
+                    )
+                    .into());
+                }
+                if let Some(snapshot) = route_observers[actor].poll()? {
+                    snapshots.push((actor, snapshot));
+                }
+                markers[actor] = custody_marker_state_v25(running.state_dir(actor)?)?;
+            }
+            xmr.pump(
+                &mut running,
+                &snapshots
+                    .iter()
+                    .map(|(actor, snapshot)| (*actor, snapshot))
+                    .collect::<Vec<_>>(),
+            )?;
+            if markers
+                .iter()
+                .flatten()
+                .copied()
+                .all(CustodyMarkerStateV25::complete)
+            {
+                eprintln!(
+                    "DOM_FOCUSED_CUSTODY_READY_V25 elapsed_seconds={} markers={markers:?}",
+                    started.elapsed().as_secs()
+                );
+                // This scenario intentionally ends before the economic route
+                // can return naturally. Reap both harness-owned processes as
+                // controlled crashes after the durable proof has been read.
+                running.crash_actor(0)?;
+                running.crash_actor(1)?;
+                return Ok(());
+            }
+            if started.elapsed() >= CUSTODY_READY_TIMEOUT_V25 {
+                running.report_stall_v25();
+                return Err(
+                    format!("focused bilateral custody deadline; markers={markers:?}").into(),
+                );
+            }
+            if started.elapsed().saturating_sub(announced) >= Duration::from_secs(30) {
+                announced = started.elapsed();
+                eprintln!(
+                    "DOM_FOCUSED_CUSTODY_PROGRESS_V25 elapsed_seconds={} markers={markers:?}",
+                    announced.as_secs()
+                );
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    })();
+    if result.is_err() {
+        running.report_diagnostics_v25();
+    }
+    result
 }
 
 /// A dedicated dependency-gated test: absent real release binary/helper is an
@@ -214,18 +515,15 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
         for snapshot in &before {
             require_claimed(snapshot)?;
         }
-        for actor in 0..2 {
-            require_native_claims(running.state_dir(actor)?, &before[actor])?;
-        }
-        for (left, right) in [
-            (&before[0].upstream, &before[1].upstream),
-            (&before[0].downstream, &before[1].downstream),
-        ] {
-            if left.funding.transaction_id() != right.funding.transaction_id()
-                || left.claim.transaction_id() != right.claim.transaction_id()
-            {
-                return Err("real actors disagree on final funding or claim identities".into());
-            }
+        let native_before = [
+            require_native_claims(running.state_dir(0)?, &before[0])?,
+            require_native_claims(running.state_dir(1)?, &before[1])?,
+        ];
+        // Aggregate IDs also bind actor-local fences and first-exposure
+        // attempts. Compare authenticated chain identities; each actor's
+        // aggregate/effect binding was checked by its own coordinator replay.
+        if native_before[0] != native_before[1] {
+            return Err("real actors disagree on final native funding or claim identities".into());
         }
         let heartbeats = [observers[0].heartbeat()?, observers[1].heartbeat()?];
         audit.finish();
@@ -268,13 +566,14 @@ fn native_real_daemon_two_claims_survive_original_store_reopen_v23() -> Result<(
         for actor in 0..2 {
             let after = observers[actor].replay_stopped()?;
             require_claimed(&after)?;
-            require_native_claims(running.state_dir(actor)?, &after)?;
+            let native_after = require_native_claims(running.state_dir(actor)?, &after)?;
             // Recovery may add administrative journal events, but must never
             // replace economic identities, finality evidence or first exposure.
             if before[actor].upstream != after.upstream
                 || before[actor].downstream != after.downstream
                 || before[actor].secret_visibility != after.secret_visibility
                 || before[actor].bindings != after.bindings
+                || native_before[actor] != native_after
             {
                 return Err("reopening changed final economic state or secret evidence".into());
             }
@@ -377,6 +676,7 @@ pub(super) trait FundingBarrierControlV23 {
     fn pump_expected_xmr(
         &mut self,
         running: &mut NativeXmrRunningColdStartV23,
+        actor: usize,
         snapshot: &RouteSnapshotV1,
     ) -> Result<()>;
 
@@ -641,7 +941,7 @@ fn run_noncooperative_exit_v23(
                 // reopened. Retain the new exact candidate before inclusion.
                 if expected != RecoveryExitV23::XmrRefund || retained_refund_without_peer.is_some()
                 {
-                    control.pump_expected_xmr(&mut running, &snapshot)?;
+                    control.pump_expected_xmr(&mut running, boundary.survivor, &snapshot)?;
                 }
                 let funded = selected(&snapshot, boundary.leg);
                 if funded.funding.progress() == ActionProgressV1::Final {
@@ -693,7 +993,11 @@ fn run_noncooperative_exit_v23(
                             // absent. The GPL pool verifies proof/conservation;
                             // the controller supplies neither U nor a LOAD grant.
                             retained_refund_without_peer = Some((action.aggregate_id, id));
-                            control.pump_expected_xmr(&mut running, &snapshot)?;
+                            control.pump_expected_xmr(
+                                &mut running,
+                                boundary.survivor,
+                                &snapshot,
+                            )?;
                         }
                     }
                 }
@@ -826,24 +1130,29 @@ fn require_unbuilt_refund_v24(
     Ok(())
 }
 
-fn require_native_claims(state: &std::path::Path, snapshot: &RouteSnapshotV1) -> Result<()> {
+fn require_native_claims(
+    state: &std::path::Path,
+    snapshot: &RouteSnapshotV1,
+) -> Result<Vec<NativeEconomicIdentityV25>> {
     let observer = CoordinatorObserverV23::new(state)?;
+    let mut identities = Vec::with_capacity(4);
     for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
         let mut native = Vec::<NativeActionV23>::new();
         for action in [ActionKindV1::Funding, ActionKindV1::Claim] {
-            let recorded = observer
-                .replay_stopped(snapshot, leg, action)?
+            let (recorded, identity) = observer
+                .replay_stopped_with_identity(snapshot, leg, action)?
                 .ok_or("final native coordinator action absent")?;
             if !recorded.xmr_final {
                 return Err("aggregate finality lacks native XMR child finality".into());
             }
             native.push(recorded);
+            identities.push(identity);
         }
         if native[0].xmr_id == native[1].xmr_id || native[0].dom_id == native[1].dom_id {
             return Err("native funding and claim identities aliased".into());
         }
     }
-    Ok(())
+    Ok(identities)
 }
 
 fn retained_refund_candidate(

@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "direct-pair-xmr-first-reinclude",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge"
+  ],
+  "pid": 943166,
+  "exit_code": 0,
+  "wall_seconds": 179.7759333969443,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "log": "target/direct-pair-xmr-first-reinclude-native-1790474213797710449.log",
+  "environment_overrides": {
+    "DOM_RPC_RATELIMIT_READ": "100"
+  },
+  "whole_fixture_within_180_seconds": true
+}

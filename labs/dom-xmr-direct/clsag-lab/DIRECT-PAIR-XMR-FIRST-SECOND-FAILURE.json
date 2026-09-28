@@ -1,0 +1,21 @@
+{
+  "experiment": "direct-pair-xmr-first after separating ordinary DOM preparation",
+  "pid": 852637,
+  "exit_code": 101,
+  "internal_timeout_seconds": 240,
+  "internal_timeout_reached": true,
+  "external_watchdog_timeout_seconds": 300,
+  "external_watchdog_timed_out": false,
+  "wall_seconds": 240.18488752300618,
+  "assertion": "regtest exceeded 240 seconds: Elapsed(())",
+  "artifact_directory": "target/regtest-852637-1790460107582320921",
+  "watchdog_source": "target/direct-pair-xmr-first-watchdog-852637.json",
+  "full_result_report_written": false,
+  "last_observed_message": "Direct XMR capsule verified",
+  "phase_at_timeout_known": false,
+  "claims_completion_proven": false,
+  "evidence_scope": "terminal process result; phase instrumentation was absent",
+  "atomic_swap": false,
+  "safe_bilateral_window_proven": false,
+  "compilation_included": false
+}

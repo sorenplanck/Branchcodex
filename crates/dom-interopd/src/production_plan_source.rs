@@ -163,10 +163,12 @@ impl ProductionPublicSecretRetentionV1 {
             {
                 self.vault.read(&self.key, bindings).map_err(|error| {
                     if error == RouteSecretVaultError::NotFound {
-                        // The coordinator proves the exposure, not that this
-                        // process completed its pre-release seal. Never turn
-                        // an absent seal into a generic private fallback.
-                        AuthorityRefusalV1::Inconsistent
+                        // A first normal sealing attempt uses this same
+                        // coordinator capability. Its vault entry does not
+                        // exist yet, so a transient canonical-read failure
+                        // must wait for fresh evidence. No scalar is returned
+                        // and the supervisor must not journal Public yet.
+                        AuthorityRefusalV1::Unavailable
                     } else {
                         map_route_secret_vault_error(error)
                     }
@@ -271,6 +273,10 @@ pub(crate) struct ProductionDomPublicSecretConsumerAuthorityV1 {
     leg: SettlementLegV1,
     settlement_id: Digest32,
     binding: DomSessionBindingV1,
+    /// Raw consensus-rules digest of the admitted DOM deployment, which is
+    /// what the session binding commits to. It is never the adapter-profile
+    /// hash the registry derives over the whole deployment.
+    dom_consensus_rules_digest: Digest32,
     trusted_chain_id: TrustedChainIdV1,
     runtime: Arc<RealDomRpcRuntimeV1>,
 }
@@ -289,6 +295,7 @@ impl ProductionDomPublicSecretConsumerAuthorityV1 {
         leg: SettlementLegV1,
         settlement_id: Digest32,
         binding: DomSessionBindingV1,
+        dom_consensus_rules_digest: Digest32,
         trusted_chain_id: TrustedChainIdV1,
         runtime: Arc<RealDomRpcRuntimeV1>,
     ) -> Result<Self, AuthorityRefusalV1> {
@@ -297,6 +304,8 @@ impl ProductionDomPublicSecretConsumerAuthorityV1 {
             .map_err(map_dom_secret_source_error)?;
         if composition_digest == ZERO_DIGEST
             || settlement_id == ZERO_DIGEST
+            || dom_consensus_rules_digest == ZERO_DIGEST
+            || binding.profile_digest() != dom_consensus_rules_digest
             || trusted_chain_id.as_bytes() != &binding.chain_id()
             || runtime.expected_identity() != &expected_identity
         {
@@ -307,6 +316,7 @@ impl ProductionDomPublicSecretConsumerAuthorityV1 {
             leg,
             settlement_id,
             binding,
+            dom_consensus_rules_digest,
             trusted_chain_id,
             runtime,
         })
@@ -432,6 +442,7 @@ struct ProductionLateDomSecretSlotV1 {
     settlement_id: Digest32,
     chain_id: Digest32,
     binding: DomSessionBindingV1,
+    dom_consensus_rules_digest: Digest32,
     trusted_chain_id: TrustedChainIdV1,
     state: RefCell<ProductionLateDomSecretSlotStateV1>,
 }
@@ -502,6 +513,7 @@ impl ProductionDomPublicSecretSourceV1 {
             leg,
             settlement_id,
             binding,
+            dom_consensus_rules_digest,
             trusted_chain_id,
             runtime,
         } = authority;
@@ -533,6 +545,7 @@ impl ProductionDomPublicSecretSourceV1 {
             settlement_id,
             chain_id,
             binding,
+            dom_consensus_rules_digest,
             trusted_chain_id,
             state: RefCell::new(ProductionLateDomSecretSlotStateV1::Pending(Some(pending))),
         });
@@ -656,7 +669,11 @@ fn require_dom_installation_scope(
         || retained.trusted_chain_id.as_bytes() != &retained.chain_id
         || retained.binding.route_id() != retained.route_id
         || retained.binding.chain_id() != retained.chain_id
-        || retained.binding.profile_digest() != request.profile_digest
+        // The retained binding carries the raw consensus-rules digest; the
+        // request carries the adapter-profile hash derived over the whole
+        // deployment, which contains it. Pin the binding against its own
+        // source, exactly as the DOM child and refund arming do.
+        || retained.binding.profile_digest() != retained.dom_consensus_rules_digest
         || retained.binding.deployment_digest() != request.deployment_digest
         || request.route_id != retained.route_id
         || request.composition_digest != retained.composition_digest
@@ -1801,24 +1818,36 @@ impl ProductionSettlementPlanSourceV1 for VerifiedProductionSettlementPlanSource
         &mut self,
         request: &RouteActionAuthorizationRequestV1<'_>,
     ) -> Result<ProductionSettlementPlanDraftV1, AuthorityRefusalV1> {
-        self.require_request_scope(request)?;
+        use crate::production_settlement::diag_route_action_v25 as diag;
+        diag("draft.scope", self.require_request_scope(request))?;
         let draft = match (request.action(), &request.snapshot().secret_visibility) {
             (ActionKindV1::Claim, SecretVisibilityV1::Public { first_exposure }) => {
-                let scalar = self.extract_verified_scalar(
-                    first_exposure,
-                    VaultRecoveryAuthorizationV1::AuthenticatedPublicSnapshot,
+                let scalar = diag(
+                    "draft.scalar",
+                    self.extract_verified_scalar(
+                        first_exposure,
+                        VaultRecoveryAuthorizationV1::AuthenticatedPublicSnapshot,
+                    ),
                 )?;
-                self.materializer.materialize_with_verified_public_secret(
-                    &self.composition,
-                    request,
-                    scalar,
+                diag(
+                    "draft.materialize_public",
+                    self.materializer.materialize_with_verified_public_secret(
+                        &self.composition,
+                        request,
+                        scalar,
+                    ),
                 )?
             }
-            _ => self
-                .materializer
-                .materialize_without_preexisting_secret(&self.composition, request)?,
+            _ => diag(
+                "draft.materialize_plain",
+                self.materializer
+                    .materialize_without_preexisting_secret(&self.composition, request),
+            )?,
         };
-        self.validate_materialized_draft(request, &draft)?;
+        diag(
+            "draft.validate",
+            self.validate_materialized_draft(request, &draft),
+        )?;
         Ok(draft)
     }
 
@@ -2585,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_exposure_without_a_completed_seal_cannot_fabricate_private_recovery(
+    fn coordinator_exposure_without_a_completed_seal_waits_for_canonical_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let authority =
@@ -2604,7 +2633,7 @@ mod tests {
                 Err(AuthorityRefusalV1::Unavailable),
                 VaultRecoveryAuthorizationV1::AuthenticatedCoordinatorExposure(&authority),
             ),
-            Err(AuthorityRefusalV1::Inconsistent)
+            Err(AuthorityRefusalV1::Unavailable)
         ));
         Ok(())
     }

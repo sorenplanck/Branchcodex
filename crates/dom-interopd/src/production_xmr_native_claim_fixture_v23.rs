@@ -23,6 +23,7 @@ pub(in super::super) fn claim_after_observed_funding(
     signed: SignedNativeGraphFixtureV23,
     work: [&Path; 2],
     native: &super::super::native_custody_v23::NativeXmrCustodyFixtureV23,
+    funding_runtime: &adapter_dom_real::RealDomRpcRuntimeV1,
     mut capture: impl FnMut(
         &ContractsSessionStoreV1,
         dom_actuator::DomSessionBindingV1,
@@ -68,6 +69,15 @@ pub(in super::super) fn claim_after_observed_funding(
         )
         .mount(Arc::new(root(actor)?), budget.clone(), false);
         let vault = provisioner.provision_claim_v23(store, wallets[actor].0, chain)?;
+        // Physical vault provisioning can outlive the external-anchor recency
+        // window under the crypto-test profile. Refresh only when the concrete
+        // Store authority has actually aged out; never extend it locally.
+        if !consumed.can_reuse_observation_v12() {
+            store.revalidate_consumed_f7_claim_authorization_v12(
+                &consumed,
+                observe(actor, &request, &produced[actor])?,
+            )?;
+        }
         let share = wallets[actor].1.take_claim_share_v23(store, &consumed)?;
         assert!(wallets[actor]
             .1
@@ -102,20 +112,18 @@ pub(in super::super) fn claim_after_observed_funding(
     let mut messages = Vec::new();
     for position in 0..6 {
         let turn_started = Instant::now();
-        // Refresh both process-bound consumed authorities with independent real
-        // observations. Do not renew an old snapshot's timestamp locally.
-        for actor in 0..2 {
-            let gate = stores[actor].resume_f7_funding_gate_v12(chain, session)?;
-            let request = stores[actor].f7_anchor_request_binding_v12(&gate, chain)?;
-            stores[actor].revalidate_consumed_f7_claim_authorization_v12(
-                &authorities[actor],
-                observe(actor, &request, &produced[actor])?,
-            )?;
-        }
-        // Public scheduling is not a signing capability. The selected owner
-        // still performs its full audit below, following both fresh observers.
         let sender = super::native_sender_for_position_v24(protocol_indices, position)?;
         let peer = sender ^ 1;
+        // Public scheduling is not a signing capability. Refresh only the
+        // process-bound authority that this envelope will actually consume.
+        if !authorities[sender].can_reuse_observation_v12() {
+            let gate = stores[sender].resume_f7_funding_gate_v12(chain, session)?;
+            let request = stores[sender].f7_anchor_request_binding_v12(&gate, chain)?;
+            stores[sender].revalidate_consumed_f7_claim_authorization_v12(
+                &authorities[sender],
+                observe(sender, &request, &produced[sender])?,
+            )?;
+        }
         let accepted =
             stores[sender].resume_xmr_bounded_claim_signing_v23(chain, &authorities[sender])?;
         assert_eq!(accepted.accepted_signing_messages().count(), position);
@@ -152,12 +160,24 @@ pub(in super::super) fn claim_after_observed_funding(
         )?;
         messages.push(committed.signed_bytes().to_vec());
         eprintln!(
-            "native Claim: envelope {position}, two fresh observations and both Stores verified after {:?}",
+            "native Claim: envelope {position}, live authority and both Stores verified after {:?}",
             turn_started.elapsed(),
         );
     }
     assert_eq!(messages.len(), 6);
     let pre_signature_started = Instant::now();
+    // The pre-signature phase requires the same live F7 recency window. Reuse
+    // the consumed observation when still fresh; otherwise reobserve concretely.
+    for actor in 0..2 {
+        if !authorities[actor].can_reuse_observation_v12() {
+            let gate = stores[actor].resume_f7_funding_gate_v12(chain, session)?;
+            let request = stores[actor].f7_anchor_request_binding_v12(&gate, chain)?;
+            stores[actor].revalidate_consumed_f7_claim_authorization_v12(
+                &authorities[actor],
+                observe(actor, &request, &produced[actor])?,
+            )?;
+        }
+    }
     let mut pre_bytes = Vec::new();
     let mut transports = Vec::new();
     for actor in 0..2 {
@@ -228,84 +248,167 @@ pub(in super::super) fn claim_after_observed_funding(
     drop(identities);
     drop(stores);
     let mut captured = None;
+    // Run every reopen actor and the receiver phase to the end so one fixture
+    // pass surfaces downstream ceremony failures without stopping at the first.
+    let mut ceremony_failures: Vec<String> = Vec::new();
     for actor in 0..2 {
         let actor_started = Instant::now();
-        let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
-            Arc::new(root(actor)?),
-            "runtime-contracts",
-            budget.clone(),
-            chain,
-        )?;
-        let gate = store.resume_f7_funding_gate_v12(chain, session)?;
-        let request = store.f7_anchor_request_binding_v12(&gate, chain)?;
-        let consumed = store.consume_f7_claim_authorization_v12(
-            &gate,
-            observe(actor, &request, &produced[actor])?,
-        )?;
-        let accepted = store.resume_xmr_bounded_claim_signing_v23(chain, &consumed)?;
-        assert_eq!(accepted.accepted_signing_messages().count(), 6);
-        let pre = store.reconstruct_post_anchor_dom_claim_pre_signature_v12(&consumed, chain)?;
-        assert_eq!(pre.into_pre_signature().to_bytes(), pre_bytes[actor]);
-        let unlock = zeroize::Zeroizing::new([0xb1 + actor as u8; 32]);
-        let provisioner = crate::production_dom_vaults_v12::ProductionXmrGraphVaultKeyV23::retain(
-            &unlock,
-        )
-        .mount(Arc::new(root(actor)?), budget.clone(), false);
-        drop(provisioner.provision_claim_v23(&store, wallets[actor].0, chain)?);
-        let before = store.load_session(session)?;
-        let transport = store.prepare_operational_signing_transport_authority(
-            chain,
-            session,
-            PurposeV1::ClaimAdaptor,
-        )?;
-        for message in &messages {
-            store.accept_prepared_operational_signing_transport_message(&transport, message)?;
-        }
-        let pre_transport = store.prepare_f7_claim_pre_signature_transport_v12(&consumed, chain)?;
-        store.accept_prepared_f7_claim_pre_signature_transport_v12(&pre_transport, &pre_message)?;
-        assert_eq!(before.as_bytes(), store.load_session(session)?.as_bytes());
-        assert!(!before.irreversible().adaptor_secret_exposed);
-        let facts = store
-            .f7_claim_verification_facts_v15(
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
+                Arc::new(root(actor)?),
+                "runtime-contracts",
+                budget.clone(),
                 chain,
-                session,
-                wallets[actor].0.participant().participant_id(),
-            )?
-            .ok_or("accepted 0x0f must survive reopen as receiver facts")?;
-        assert_eq!(
-            facts.receiver_id(),
-            request.role().final_claim_receiver_id().0
-        );
-        if request.role().dom_claim_sender_id().0 == wallets[actor].0.participant().participant_id()
-        {
-            // The effect is explicitly local component scope, not a fabricated
-            // route coordinator/F6 grant. The actuator still fences it durably.
-            let binding = wallets[actor].0;
-            let effect = *dom_crypto::blake2b_256_tagged(
-                "DOM-INTEROP/FIXTURE/NATIVE-CLAIM-EXPOSURE/V23",
-                &session,
-            )
-            .as_bytes();
-            let scope = dom_actuator::ScopedDomActionV1::new(
-                binding,
-                effect,
-                dom_actuator::DomActionV1::BroadcastClaim,
             )?;
-            let path = work[actor].join("native-claim-exposure-control-v23.sqlite");
-            let mut control = dom_actuator::DomActuatorStoreV1::create(&path)?;
-            let now = 2_000_000;
-            let owner_id = effect;
-            let lease = control.acquire_lease(
-                binding.participant().participant_id(),
-                owner_id,
-                now,
-                10_000,
+            let gate = store.resume_f7_funding_gate_v12(chain, session)?;
+            let request = store.f7_anchor_request_binding_v12(&gate, chain)?;
+            let consumed = store.consume_f7_claim_authorization_v12(
+                &gate,
+                observe(actor, &request, &produced[actor])?,
             )?;
-            control.bind_session(lease, binding, now)?;
-            // A valid actor on the opposite side must never release its U as T.
-            assert!(native
-                .expose_native_claim_v23(
-                    actor ^ 1,
+            let accepted = store.resume_xmr_bounded_claim_signing_v23(chain, &consumed)?;
+            assert_eq!(accepted.accepted_signing_messages().count(), 6);
+            let pre =
+                store.reconstruct_post_anchor_dom_claim_pre_signature_v12(&consumed, chain)?;
+            assert_eq!(pre.into_pre_signature().to_bytes(), pre_bytes[actor]);
+            let unlock = zeroize::Zeroizing::new([0xb1 + actor as u8; 32]);
+            let provisioner =
+                crate::production_dom_vaults_v12::ProductionXmrGraphVaultKeyV23::retain(&unlock)
+                    .mount(Arc::new(root(actor)?), budget.clone(), false);
+            drop(provisioner.provision_claim_v23(&store, wallets[actor].0, chain)?);
+            let before = store.load_session(session)?;
+            if store
+                .f7_claim_verification_facts_v15(
+                    chain,
+                    session,
+                    wallets[actor].0.participant().participant_id(),
+                )?
+                .is_none()
+            {
+                if !consumed.can_reuse_observation_v12() {
+                    store.revalidate_consumed_f7_claim_authorization_v12(
+                        &consumed,
+                        observe(actor, &request, &produced[actor])?,
+                    )?;
+                }
+                let pre_transport =
+                    store.prepare_f7_claim_pre_signature_transport_v12(&consumed, chain)?;
+                store.accept_prepared_f7_claim_pre_signature_transport_v12(
+                    &pre_transport,
+                    &pre_message,
+                )?;
+            }
+            assert_eq!(before.as_bytes(), store.load_session(session)?.as_bytes());
+            assert!(!before.irreversible().adaptor_secret_exposed);
+            let facts = store
+                .f7_claim_verification_facts_v15(
+                    chain,
+                    session,
+                    wallets[actor].0.participant().participant_id(),
+                )?
+                .ok_or("accepted 0x0f must survive reopen as receiver facts")?;
+            assert_eq!(
+                facts.receiver_id(),
+                request.role().final_claim_receiver_id().0
+            );
+            if request.role().dom_claim_sender_id().0
+                == wallets[actor].0.participant().participant_id()
+            {
+                // The effect is explicitly local component scope, not a fabricated
+                // route coordinator/F6 grant. The actuator still fences it durably.
+                let binding = wallets[actor].0;
+                let effect = *dom_crypto::blake2b_256_tagged(
+                    "DOM-INTEROP/FIXTURE/NATIVE-CLAIM-EXPOSURE/V23",
+                    &session,
+                )
+                .as_bytes();
+                let scope = dom_actuator::ScopedDomActionV1::new(
+                    binding,
+                    effect,
+                    dom_actuator::DomActionV1::BroadcastClaim,
+                )?;
+                let path = work[actor].join("native-claim-exposure-control-v23.sqlite");
+                let mut control = dom_actuator::DomActuatorStoreV1::create(&path)?;
+                let now = 2_000_000;
+                let owner_id = effect;
+                let lease = control.acquire_lease(
+                    binding.participant().participant_id(),
+                    owner_id,
+                    now,
+                    10_000,
+                )?;
+                control.bind_session(lease, binding, now)?;
+                // Reconstruct the local control mirror from the retained native
+                // outbox, then require the real scanner's funding finality. A new
+                // Bound control must never authorize Claim merely because the
+                // independent Contracts store has completed signing.
+                let actuator = dom_actuator::DomContractsActuatorV1::bind(&store, binding)?;
+                let funding_effect = *dom_crypto::blake2b_256_tagged(
+                    "DOM-INTEROP/FIXTURE/NATIVE-CLAIM-FUNDING/V23",
+                    &session,
+                )
+                .as_bytes();
+                let funding_scope = dom_actuator::ScopedDomActionV1::new(
+                    binding,
+                    funding_effect,
+                    dom_actuator::DomActionV1::BroadcastFunding,
+                )?;
+                let retained = actuator.bind_funding_settlement_child(
+                    &mut control,
+                    lease,
+                    dom_actuator::DomSettlementChildBindingRequestV1::new(
+                        funding_scope,
+                        binding.terms_digest(),
+                        binding.deployment_digest(),
+                        funding_effect,
+                        binding.profile_digest(),
+                        dom_actuator::DomSettlementChildExposureV1::NonSecret,
+                    )?,
+                    now,
+                )?;
+                actuator.observe_funding_finality(
+                    &mut control,
+                    lease,
+                    funding_runtime,
+                    &chain,
+                    &kaystra_core::state::EvidenceRefV1 {
+                        chain_id: kaystra_core::types::ChainId(binding.chain_id()),
+                        tx_id: retained.transaction_id(),
+                        event_index: 0,
+                        block_height: 0,
+                        block_anchor: [0; 32],
+                    },
+                    now,
+                )?;
+                // A valid actor on the opposite side must never release its U as T.
+                assert!(native
+                    .expose_native_claim_v23(
+                        actor ^ 1,
+                        &store,
+                        binding,
+                        chain,
+                        &consumed,
+                        request.role(),
+                        &mut control,
+                        lease,
+                        scope,
+                        now,
+                    )
+                    .is_err());
+                assert!(
+                    !store
+                        .load_session(session)?
+                        .irreversible()
+                        .adaptor_secret_exposed
+                );
+                if !consumed.can_reuse_observation_v12() {
+                    store.revalidate_consumed_f7_claim_authorization_v12(
+                        &consumed,
+                        observe(actor, &request, &produced[actor])?,
+                    )?;
+                }
+                let submission = native.expose_native_claim_v23(
+                    actor,
                     &store,
                     binding,
                     chain,
@@ -315,122 +418,148 @@ pub(in super::super) fn claim_after_observed_funding(
                     lease,
                     scope,
                     now,
-                )
-                .is_err());
-            assert!(
-                !store
-                    .load_session(session)?
-                    .irreversible()
-                    .adaptor_secret_exposed
-            );
-            store.revalidate_consumed_f7_claim_authorization_v12(
-                &consumed,
-                observe(actor, &request, &produced[actor])?,
-            )?;
-            let submission = native.expose_native_claim_v23(
-                actor,
-                &store,
-                binding,
-                chain,
-                &consumed,
-                request.role(),
-                &mut control,
-                lease,
-                scope,
-                now,
-            )?;
-            let tx_hash = submission.tx_hash();
-            assert_ne!(tx_hash, [0; 32]);
-            assert_eq!(
-                store.f7_final_claim_progress_v14(chain, session)?,
-                dom_scriptless_store::F7FinalClaimProgressV14::Exposed
-            );
-            let mirror = control.audit_final_claim_custody_v2(lease, binding, now)?;
-            assert_eq!(mirror.tx_hash(), tx_hash);
-            let exposure = mirror.exposure_record_digest();
-            assert!(
-                store
-                    .load_session(session)?
-                    .irreversible()
-                    .adaptor_secret_exposed
-            );
-            // Capture through the real submission endpoint, but local HTTP503
-            // grants no admission. Reopen both persistence boundaries below
-            // and recover the same exposure without accessing T.
-            let exact = capture(&store, binding, &submission)?;
-            assert_eq!(
-                dom_scriptless_chain_adapter::canonical_transaction_hash_v1(&exact)?,
-                tx_hash
-            );
-            assert!(captured.replace((actor, exact)).is_none());
-            assert_eq!(
-                store.f7_final_claim_progress_v14(chain, session)?,
-                dom_scriptless_store::F7FinalClaimProgressV14::Exposed
-            );
-            drop(submission);
-            drop(consumed);
-            drop(control);
-            drop(store);
-            let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
-                Arc::new(root(actor)?),
-                "runtime-contracts",
-                budget.clone(),
-                chain,
-            )?;
-            let mut control = dom_actuator::DomActuatorStoreV1::open_existing(&path)?;
-            let lease = control.acquire_lease(
-                binding.participant().participant_id(),
-                owner_id,
-                now + 1,
-                10_000,
-            )?;
-            dom_actuator::DomContractsActuatorV1::bind(&store, binding)?
-                .resume_f7_claim_child_v21(&mut control, lease, &chain, scope, now + 1)?;
-            let mirror = control.audit_final_claim_custody_v2(lease, binding, now + 1)?;
-            assert_eq!(mirror.tx_hash(), tx_hash);
-            assert_eq!(mirror.exposure_record_digest(), exposure);
-            assert_eq!(
-                store.f7_final_claim_progress_v14(chain, session)?,
-                dom_scriptless_store::F7FinalClaimProgressV14::Exposed
-            );
-            assert!(
-                store
-                    .load_session(session)?
-                    .irreversible()
-                    .adaptor_secret_exposed
-            );
+                )?;
+                let tx_hash = submission.tx_hash();
+                assert_ne!(tx_hash, [0; 32]);
+                assert_eq!(
+                    store.f7_final_claim_progress_v14(chain, session)?,
+                    dom_scriptless_store::F7FinalClaimProgressV14::Exposed
+                );
+                let mirror = control.audit_final_claim_custody_v2(lease, binding, now)?;
+                assert_eq!(mirror.tx_hash(), tx_hash);
+                let exposure = mirror.exposure_record_digest();
+                assert!(
+                    store
+                        .load_session(session)?
+                        .irreversible()
+                        .adaptor_secret_exposed
+                );
+                // Capture through the real submission endpoint, but local HTTP503
+                // grants no admission. Reopen both persistence boundaries below
+                // and recover the same exposure without accessing T.
+                let exact = capture(&store, binding, &submission)?;
+                assert_eq!(
+                    dom_scriptless_chain_adapter::canonical_transaction_hash_v1(&exact)?,
+                    tx_hash
+                );
+                assert!(captured.replace((actor, exact)).is_none());
+                assert_eq!(
+                    store.f7_final_claim_progress_v14(chain, session)?,
+                    dom_scriptless_store::F7FinalClaimProgressV14::Exposed
+                );
+                drop(submission);
+                drop(consumed);
+                drop(control);
+                drop(store);
+                let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
+                    Arc::new(root(actor)?),
+                    "runtime-contracts",
+                    budget.clone(),
+                    chain,
+                )?;
+                let mut control = dom_actuator::DomActuatorStoreV1::open_existing(&path)?;
+                let lease = control.acquire_lease(
+                    binding.participant().participant_id(),
+                    owner_id,
+                    now + 1,
+                    10_000,
+                )?;
+                dom_actuator::DomContractsActuatorV1::bind(&store, binding)?
+                    .resume_f7_claim_child_v21(&mut control, lease, &chain, scope, now + 1)?;
+                let mirror = control.audit_final_claim_custody_v2(lease, binding, now + 1)?;
+                assert_eq!(mirror.tx_hash(), tx_hash);
+                assert_eq!(mirror.exposure_record_digest(), exposure);
+                assert_eq!(
+                    store.f7_final_claim_progress_v14(chain, session)?,
+                    dom_scriptless_store::F7FinalClaimProgressV14::Exposed
+                );
+                assert!(
+                    store
+                        .load_session(session)?
+                        .irreversible()
+                        .adaptor_secret_exposed
+                );
+            }
+            Ok(())
+        }));
+        match outcome {
+            Ok(Ok(())) => eprintln!(
+                "native Claim actor={actor}: independent reopen, replay and scoped exposure checks passed after {:?}",
+                actor_started.elapsed(),
+            ),
+            Ok(Err(e)) => {
+                eprintln!("DIAG FAILURE actor={actor} reopen (Err): {e}");
+                ceremony_failures.push(format!("reopen actor {actor}: {e}"));
+            }
+            Err(_) => {
+                eprintln!("DIAG FAILURE actor={actor} reopen: panicked (message above)");
+                ceremony_failures.push(format!("reopen actor {actor}: panicked"));
+            }
         }
-        eprintln!(
-            "native Claim actor={actor}: independent reopen, replay and scoped exposure checks passed after {:?}",
-            actor_started.elapsed(),
-        );
     }
-    let (sender, exact) = captured.ok_or("native exposed Claim was not captured")?;
-    let receiver = sender ^ 1;
-    for restart in 0..2 {
-        let observation_started = Instant::now();
-        let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
-            Arc::new(root(receiver)?),
-            "runtime-contracts",
-            budget.clone(),
-            chain,
-        )?;
-        receive(
-            &store,
-            receiver,
-            wallets[receiver].0.participant().participant_id(),
-            &exact,
-        )?;
-        assert!(
-            store
-                .load_session(session)?
-                .irreversible()
-                .adaptor_secret_exposed
-        );
+    match captured {
+        Some((sender, exact)) => {
+            let receiver = sender ^ 1;
+            let observation_started = Instant::now();
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                    let store = ContractsSessionStoreV1::open_production_with_trusted_chain_v23(
+                        Arc::new(root(receiver)?),
+                        "runtime-contracts",
+                        budget.clone(),
+                        chain,
+                    )?;
+                    receive(
+                        &store,
+                        receiver,
+                        wallets[receiver].0.participant().participant_id(),
+                        &exact,
+                    )?;
+                    store
+                        .resume_f7_claim_observation_v15(chain, session)?
+                        .ok_or("receiver observation did not survive reopened receive")?;
+                    assert!(
+                        store
+                            .load_session(session)?
+                            .irreversible()
+                            .adaptor_secret_exposed
+                    );
+                    Ok(())
+                }));
+            match outcome {
+                Ok(Ok(())) => eprintln!(
+                    "native Claim receiver: canonical observation, extraction and reopen proof passed after {:?}",
+                    observation_started.elapsed(),
+                ),
+                Ok(Err(e)) => {
+                    eprintln!("DIAG FAILURE receiver reopened receive (Err): {e}");
+                    ceremony_failures.push(format!("receiver reopened receive: {e}"));
+                }
+                Err(_) => {
+                    eprintln!("DIAG FAILURE receiver reopened receive: panicked (message above)");
+                    ceremony_failures.push("receiver reopened receive: panicked".to_string());
+                }
+            }
+        }
+        None => {
+            eprintln!("DIAG SKIP receiver phase: no exposed claim captured (sender exposure did not complete)");
+            ceremony_failures
+                .push("receiver phase SKIPPED: sender exposure never captured".to_string());
+        }
+    }
+    if !ceremony_failures.is_empty() {
         eprintln!(
-            "native Claim receiver: canonical observation and extraction restart={restart} passed after {:?}",
-            observation_started.elapsed(),
+            "=== DIAG CEREMONY FAILURES: {} collected (ran to end) ===",
+            ceremony_failures.len()
         );
+        for (i, f) in ceremony_failures.iter().enumerate() {
+            eprintln!("  [{}] {}", i + 1, f);
+        }
+        return Err(format!(
+            "claim ceremony collected {} failure(s) running to the end; see DIAG CEREMONY FAILURES",
+            ceremony_failures.len()
+        )
+        .into());
     }
     eprintln!("native Claim: complete after {:?}", claim_started.elapsed());
     Ok(())

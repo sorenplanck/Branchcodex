@@ -1,0 +1,24 @@
+{
+  "sha256": {
+    "Cargo.toml": "eba67853eee7b42ccd93c9dab2bba48cfd877fc83dcc704302b22f87776a7617",
+    "Cargo.lock": "4720fe0dbb399baaa05741698e4587f029da81e2c1643afe534ff6bcaea537d9",
+    "src/lib.rs": "5be6325967b225b65740dda2341fd377652c344830f8ba94aee2bebc5ac52c87",
+    "src/native.rs": "31f9c3fab3bbbdc15512da4f30f44feb679557afbd49efcb95daebfd247458ec",
+    "src/native_dom.rs": "55abd49873194b6f4f91880c753614c67cf620851528c890fccaf99294824800",
+    "src/claim_resume.rs": "60c58aa0c02a21d5ff8ab9d0da1f3fd57b383615078d847cd115668f03513234",
+    "src/operation_checkpoint.rs": "8d7cb501a8d76efc81637e4d1b55968b405a0e9437e429a84a96492ad029fa49",
+    "src/release_journal.rs": "593ebeddf2509a36bb36c6fd9a381a1c9a1b6c2cfdf85865c7f8abaa18f7eed0",
+    "src/counterpart_delivery.rs": "990097068819635c6ed066064a022d78bc3e002a6eac0e701c45a512d61b79fb",
+    "src/time_bounds.rs": "7f5d5eaf5bb1a0883333c57a1d3922c5e04c2ead846d509777c68e770fa16f74",
+    "examples/regtest_claim.rs": "2ad9a89fcd53afe6b4032c232f0896536d15564a07a8089d9ea87105873ea6e4",
+    "examples/support/dom_regtest.rs": "b5d8eaa3162b1eff782c5613512ea83c29bdf6e8d20490cba4570f8a280fc0a2",
+    "examples/support/claim_resume_bridge.rs": "6c3f8de18591b7d14db08b6b6cf462103062f4a8b80c14f51d15ff8694353e0b",
+    "examples/support/counterpart_delivery_bridge.rs": "5f4f7c1bcbe3835d23cfb8ced831798d4bb89c54bea5eefa25b92057b36d5ced",
+    "examples/support/settlement_resume.rs": "760bd5f980e6c94e7e172758cb64230688e8207e9c1ef00b1f5903e2fff9de08",
+    "examples/support/direct_recovery_bridge.rs": "710b2e2a928b0dae44c653c4754a95eb14b47bf43db5a16298e9ca02f2175336",
+    "tests/operation_checkpoint.rs": "702f8ed342b4ce066f43ea426eed737b5eeceb67335df4f8578714ff1967db2a",
+    "target/release/examples/regtest_claim": "b4615637eb975fd5a103f075084ab71471d49c08a9648bbd284b80e10f9666d6",
+    "target/recovery-research/direct-dlog-bridge": "94be42247ce8e12b4c098335b450dca1993c0692db28f3f406ab95ee3eea7b27"
+  },
+  "scope": "Fresh read-only settlement observer restores trusted local operation checkpoint and queries owned native DOM/XMR RPC. Parent remains fixture host/miner. Not full executor restart or production timing proof."
+}

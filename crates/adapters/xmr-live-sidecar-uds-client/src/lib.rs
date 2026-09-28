@@ -102,9 +102,14 @@ impl BlockingUdsSidecarPort {
 
     #[cfg(unix)]
     fn call(&self, request: &SidecarRequestV2) -> Result<SidecarResponseV2, SpendPortError> {
-        let deadline = Instant::now()
-            .checked_add(self.timeout)
-            .ok_or(SpendPortError::Rejected)?;
+        // The configured timeout is this call's own budget; the route-step
+        // ceiling, when one is armed, is the outer bound the step is holding
+        // its lease under. Narrow to it, never widen.
+        let deadline = route_step_deadline::clamp(
+            Instant::now()
+                .checked_add(self.timeout)
+                .ok_or(SpendPortError::Rejected)?,
+        );
         self.call_until_v24(request, deadline)
     }
 
@@ -623,7 +628,7 @@ mod tests {
                 return;
             }
             for _ in 0..100 {
-                if peer.write_all(&[b'a']).is_err() {
+                if peer.write_all(b"a").is_err() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));

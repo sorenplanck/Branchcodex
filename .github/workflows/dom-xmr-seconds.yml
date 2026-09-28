@@ -1,0 +1,128 @@
+name: Fast DOM XMR arbiter
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/dom-xmr-seconds.yml'
+      - 'crates/adapters/xmr-dleq-sigma/**'
+      - 'crates/dom-consensus/**'
+      - 'crates/dom-core/**'
+      - 'crates/dom-crypto/**'
+      - 'crates/dom-mempool/**'
+      - 'crates/dom-chain/**'
+      - 'crates/dom-node/**'
+      - 'crates/dom-rpc/**'
+      - 'crates/dom-xmr-fast-handoff/**'
+      - 'crates/dom-scriptless-primitives/**'
+      - 'crates/dom-serialization/**'
+      - 'crates/dom-wallet/**'
+      - 'crates/dom-wire/**'
+      - 'labs/dom-xmr-direct/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dom-xmr-seconds-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  funded-arbiter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: ${{ github.workspace }}/labs/dom-xmr-direct/clsag-lab/target
+      MONERO_VERSION: 0.18.4.0
+      MONERO_ARCHIVE_SHA256: 16cb74c899922887827845a41d37c7f3121462792a540843f2fcabcc1603993f
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: labs/dom-xmr-direct/clsag-lab -> target
+          key: dxf1-fast-handoff-v1
+          cache-on-failure: true
+
+      - name: Install pinned Monero daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/monero-linux-x64-v${MONERO_VERSION}.tar.bz2"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "$archive" \
+            "https://downloads.getmonero.org/cli/monero-linux-x64-v${MONERO_VERSION}.tar.bz2"
+          printf '%s  %s\n' "$MONERO_ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
+          tar -tjf "$archive" | awk '/\/monerod$/ { print; exit }' > "$RUNNER_TEMP/monerod-member"
+          IFS= read -r member < "$RUNNER_TEMP/monerod-member"
+          [[ -n "$member" && "$member" != /* ]]
+          [[ "$member" != ../* && "$member" != */../* && "$member" != */.. ]]
+          tar -xjf "$archive" -C "$RUNNER_TEMP" "$member"
+          monerod_path="$(realpath -e -- "$RUNNER_TEMP/$member")"
+          [[ -f "$monerod_path" && ! -L "$monerod_path" && -x "$monerod_path" ]]
+          "$monerod_path" --version
+          printf 'DXA1_MONEROD=%s\n' "$monerod_path" >> "$GITHUB_ENV"
+
+      - name: Build and verify DXF1
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          cargo fmt --all --manifest-path ../../../Cargo.toml -- --check
+          cargo fmt --all -- --check
+          cargo test --locked --manifest-path ../../../Cargo.toml \
+            -p dom-consensus --test swap_arbiter_consensus
+          cargo test --locked --manifest-path ../../../Cargo.toml \
+            -p dom-mempool --test swap_arbiter_admission
+          cargo test --locked --manifest-path ../../../Cargo.toml \
+            -p dom-xmr-fast-handoff
+          cargo test --locked --lib -j2
+          cargo test --locked --test dom_joint --test dom_reserve \
+            --test swap_arbiter_pair --test swap_arbiter_node -j2
+          cargo clippy --locked --manifest-path ../../../Cargo.toml \
+            -p dom-core -p dom-consensus -p dom-mempool -p dom-chain \
+            --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path ../../../Cargo.toml \
+            -p dom-xmr-fast-handoff --all-targets -- -D warnings
+          cargo clippy --locked --lib --test swap_arbiter_pair --example arbiter_regtest --example arbiter_party --example arbiter_party_proxy -- -D warnings
+          cargo build --locked --example arbiter_regtest --example arbiter_party --example arbiter_party_proxy
+          python3 -B scripts/test_arbiter_party_state.py \
+            --binary target/debug/examples/arbiter_party
+
+      - name: Run DXF1 reorg across isolated participant containers
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          python3 -B scripts/test_arbiter_containers.py \
+            --binary target/debug/examples/arbiter_regtest \
+            --party target/debug/examples/arbiter_party \
+            --proxy target/debug/examples/arbiter_party_proxy \
+            --monerod "$DXA1_MONEROD" \
+            --outcome fast-reorg \
+            --timeout 300 \
+            --evidence-file "$RUNNER_TEMP/dxf1-container-reorg.json"
+
+      - name: Run prepared DXF1 fast handoff
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          python3 -B scripts/test_fast_handoff.py \
+            --binary target/debug/examples/arbiter_regtest \
+            --monerod "$DXA1_MONEROD" \
+            --evidence-file "$RUNNER_TEMP/dxf1-fast-handoff.json"
+
+      - name: Preserve timing and daemon evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxf1-fast-handoff-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dxf1-container-reorg.json
+            ${{ runner.temp }}/dxf1-fast-handoff.json
+          if-no-files-found: warn
+          retention-days: 14

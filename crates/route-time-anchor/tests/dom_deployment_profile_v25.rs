@@ -62,10 +62,13 @@ fn authenticate(manifest: &RegistryManifestV1) -> Result<ResolvedRegistryV1, Box
     Ok(signed.verify(&authorities, &secp, validation(manifest))?)
 }
 
-fn change_network(manifest: &mut RegistryManifestV1, network: DomNetworkV1) {
+fn change_network(
+    manifest: &mut RegistryManifestV1,
+    network: DomNetworkV1,
+) -> Result<(), Box<dyn Error>> {
     let old_chain = manifest.dom.chain_id;
     let magic = network.canonical_magic();
-    let genesis = configured_genesis_hash_for_network_magic(magic).unwrap();
+    let genesis = configured_genesis_hash_for_network_magic(magic)?;
     manifest.dom.chain_id = ChainId(*derive_chain_id(magic, &genesis).as_bytes());
     manifest.dom.genesis_hash = *genesis.as_bytes();
     manifest.dom.runtime_identity = DomRuntimeIdentityV1::pinned(network);
@@ -77,6 +80,7 @@ fn change_network(manifest: &mut RegistryManifestV1, network: DomNetworkV1) {
     manifest
         .assets
         .sort_by_key(|asset| (asset.chain_id.0, asset.asset_id.0));
+    Ok(())
 }
 
 #[test]
@@ -90,7 +94,7 @@ fn resolved_dom_deployment_matches_original_profile_on_all_authenticated_network
         DomNetworkV1::Mainnet,
     ] {
         let mut manifest = fixture.registry.manifest().clone();
-        change_network(&mut manifest, network);
+        change_network(&mut manifest, network)?;
         let registry = authenticate(&manifest)?;
         let deployment = registry.resolve_dom()?;
         let original = resolved_dom_profile_digest_v1(&registry)?;
@@ -135,7 +139,7 @@ fn every_independently_mutable_dom_profile_field_changes_both_authenticated_dige
                     .assets
                     .iter_mut()
                     .find(|asset| asset.chain_id == dom_chain && asset.asset_id == previous)
-                    .unwrap();
+                    .ok_or("dom native asset binding missing")?;
                 binding.asset_id = manifest.dom.native_asset;
                 manifest
                     .assets

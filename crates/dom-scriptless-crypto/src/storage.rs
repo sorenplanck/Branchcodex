@@ -1078,8 +1078,8 @@ fn expand_unlock_kek(
 /// memory while in use.
 const ARGON_MEMO_TAG: &str = "DOM:vault-master-kdf-memo:v1";
 const ARGON_MEMO_CAPACITY: usize = 16;
-static ARGON_MEMO: std::sync::Mutex<Vec<([u8; 32], Zeroizing<[u8; 32]>)>> =
-    std::sync::Mutex::new(Vec::new());
+type ArgonMemoEntryV1 = ([u8; 32], Zeroizing<[u8; 32]>);
+static ARGON_MEMO: std::sync::Mutex<Vec<ArgonMemoEntryV1>> = std::sync::Mutex::new(Vec::new());
 
 fn derive_argon_output(
     passphrase: &Passphrase,

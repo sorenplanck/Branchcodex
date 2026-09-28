@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/release/examples/regtest_claim",
+    "/home/leonardov/.local/bin/monerod",
+    "direct-pair-xmr-first-ack-loss",
+    "/home/leonardov/DOM-XMR-Segundos/labs/dom-xmr-direct/clsag-lab/target/recovery-research/direct-dlog-bridge"
+  ],
+  "pid": 887515,
+  "exit_code": 0,
+  "wall_seconds": 167.86468814098043,
+  "timeout_seconds": 300,
+  "timed_out": false,
+  "log": "target/direct-pair-xmr-first-ack-loss-obligation-1790469737691560631.log",
+  "whole_fixture_within_180_seconds": true
+}

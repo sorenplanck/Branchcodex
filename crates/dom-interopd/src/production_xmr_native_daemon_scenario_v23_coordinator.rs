@@ -32,6 +32,26 @@ pub(in super::super) struct NativeActionV23 {
     pub xmr_final: bool,
 }
 
+/// Economic identities shared by both actors. Local effect, fencing and
+/// observation-attempt commitments remain checked by coordinator replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct NativeEconomicIdentityV25 {
+    pub route_id: [u8; 32],
+    pub settlement_id: [u8; 32],
+    pub leg: SettlementLegV1,
+    pub action: SettlementActionV1,
+    /// Fixed face order: DOM, then XMR. The XMR identity uses the existing
+    /// domain-separated native hash encoding, as in NativeActionV23.
+    pub children: [NativeEconomicChildV25; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct NativeEconomicChildV25 {
+    pub face: SettlementFaceV1,
+    pub chain_id: [u8; 32],
+    pub transaction_id: [u8; 32],
+}
+
 impl NativeActionV23 {
     pub(in super::super) fn matches_xmr(&self, raw_hash: [u8; 32]) -> bool {
         raw_hash != [0; 32] && self.xmr_id == xmr_child_identity(raw_hash)
@@ -215,6 +235,17 @@ impl CoordinatorObserverV23 {
         leg: LegIdV1,
         kind: ActionKindV1,
     ) -> Result<Option<NativeActionV23>> {
+        Ok(self
+            .replay_stopped_with_identity(snapshot, leg, kind)?
+            .map(|(action, _)| action))
+    }
+
+    pub(super) fn replay_stopped_with_identity(
+        &self,
+        snapshot: &RouteSnapshotV1,
+        leg: LegIdV1,
+        kind: ActionKindV1,
+    ) -> Result<Option<(NativeActionV23, NativeEconomicIdentityV25)>> {
         let state = snapshot.leg(leg).action(kind);
         let Some(effect) = state.effect() else {
             return Ok(None);
@@ -252,7 +283,56 @@ impl CoordinatorObserverV23 {
         let (Some(xmr_id), Some(dom_id)) = (xmr.transaction_id, dom.transaction_id) else {
             return Ok(None);
         };
-        Ok(Some(NativeActionV23 {
+        if state.progress() == ActionProgressV1::Final
+            && (xmr.stage != ChildStageV1::Final || dom.stage != ChildStageV1::Final)
+        {
+            return Err("final route action lacks both native child finalities".into());
+        }
+        let child_identity = |child: &settlement_coordinator::ChildProgressViewV1,
+                              transaction_id: [u8; 32]|
+         -> Result<NativeEconomicChildV25> {
+            let chain_id = if let Some(materialized) = stored
+                .plan()
+                .materialized_child(usize::from(child.child_index))
+            {
+                if materialized.face != child.face
+                    || materialized.expected_transaction_id != transaction_id
+                {
+                    return Err("replayed native identity differs from its plan".into());
+                }
+                materialized.chain_id
+            } else {
+                let settlement_coordinator::SettlementChildrenV1::FirstExposureStaged {
+                    deferred,
+                    ..
+                } = stored.plan().child_layout()
+                else {
+                    return Err("replayed native child has no plan descriptor".into());
+                };
+                if child.child_index != 1 || deferred.face != child.face {
+                    return Err("replayed deferred native face differs from its plan".into());
+                }
+                // The lookup authenticated the durable materialization journal
+                // against this descriptor before exposing its child view.
+                deferred.chain_id
+            };
+            if chain_id == [0; 32] || transaction_id == [0; 32] {
+                return Err("replayed native economic identity is zero".into());
+            }
+            Ok(NativeEconomicChildV25 {
+                face: child.face,
+                chain_id,
+                transaction_id,
+            })
+        };
+        let economic = NativeEconomicIdentityV25 {
+            route_id: stored.plan().bindings().route_id,
+            settlement_id: stored.plan().bindings().settlement_id,
+            leg: stored.plan().bindings().leg,
+            action: stored.plan().bindings().action,
+            children: [child_identity(dom, dom_id)?, child_identity(xmr, xmr_id)?],
+        };
+        let action = NativeActionV23 {
             aggregate_id: view.aggregate_action_id,
             xmr_id,
             dom_id,
@@ -264,7 +344,8 @@ impl CoordinatorObserverV23 {
                     | ChildStageV1::FinalityInvalidated
             ),
             xmr_final: xmr.stage == ChildStageV1::Final,
-        }))
+        };
+        Ok(Some((action, economic)))
     }
 
     fn require_plan(

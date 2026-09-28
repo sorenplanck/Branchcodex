@@ -1,0 +1,15 @@
+{
+  "amount_atomic": 1000000000000,
+  "atomic_swap": false,
+  "claim_construction_seconds": 0.127233455,
+  "claim_through_local_inclusion_seconds": 0.307797879,
+  "experiment": "DXP1 joint CLSAG native XMR claim",
+  "fee_atomic": 7082900000,
+  "mainnet_latency_measurement": false,
+  "network": "owned offline regtest",
+  "preparation_blocks": 140,
+  "preparation_seconds": 14.312936266,
+  "recipient_maturity_blocks_mined": 10,
+  "recipient_onward_spend_included": true,
+  "total_seconds": 15.700532825
+}

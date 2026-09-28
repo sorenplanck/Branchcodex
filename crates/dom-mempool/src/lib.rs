@@ -272,7 +272,13 @@ impl Mempool {
             now: Timestamp(now_secs),
         };
         validate_transaction(&tx, &ctx)?;
-        validate_tx_against_chain_view(&tx, current_height, coinbase_maturity, &mut lookup_utxo)?;
+        validate_tx_against_chain_view(
+            &tx,
+            current_height,
+            coinbase_maturity,
+            chain_id,
+            &mut lookup_utxo,
+        )?;
         self.accept_validated_tx(tx, tx_hash, now_secs)
     }
 
@@ -575,11 +581,13 @@ pub fn validate_tx_against_chain_view<F>(
     tx: &Transaction,
     current_height: u64,
     coinbase_maturity: u64,
+    chain_id: [u8; 32],
     mut lookup_utxo: F,
 ) -> Result<(), DomError>
 where
     F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
 {
+    let mut input_proofs = Vec::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
         let commitment = input.commitment.as_bytes();
         let Some(entry) = lookup_utxo(commitment)? else {
@@ -594,7 +602,20 @@ where
                 current_height, entry.block_height, coinbase_maturity
             )));
         }
+        input_proofs.push(entry.proof);
     }
+    // Admission targets the next possible block. Consensus repeats this check
+    // against the actual block height, so a stale mempool snapshot cannot
+    // extend a claim/refund phase.
+    let next_height = current_height
+        .checked_add(1)
+        .ok_or_else(|| DomError::Invalid("next block height overflow".into()))?;
+    dom_consensus::validate_swap_arbiter_input_proofs(
+        tx,
+        BlockHeight(next_height),
+        &chain_id,
+        &input_proofs,
+    )?;
     Ok(())
 }
 

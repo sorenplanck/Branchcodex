@@ -121,7 +121,7 @@ impl ProductionXmrRecoveryDriverV12 {
     pub(crate) fn observe_refund_share(
         &self,
     ) -> Result<adapter_dom_real::VerifiedDomRefundSecretV11, Refusal> {
-        self.observe_refund_share_bounded_v23(std::time::Duration::from_secs(60))
+        self.observe_refund_share_bounded_v23(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn observe_refund_share_bounded_v23(
@@ -148,7 +148,12 @@ impl ProductionXmrRecoveryDriverV12 {
             {
                 adapter_dom_real::VerifiedDomXmrRecoveryStateV11::Refunded(secret) => Ok(secret),
                 adapter_dom_real::VerifiedDomXmrRecoveryStateV11::Compensated(_) => {
-                    Err(Refusal::Conflict)
+                    // The recovery pump observes and records compensation in
+                    // separate ticks. Until its durable route marker arrives,
+                    // the route may still ask for U. Refuse that competing
+                    // refund without terminating the writer that must record
+                    // compensation; a compensated graph never supplies U.
+                    Err(Refusal::Unavailable)
                 }
                 _ => Err(Refusal::Unavailable),
             }
@@ -160,7 +165,7 @@ impl ProductionXmrRecoveryDriverV12 {
     /// U revelation and DOM compensation are deliberately different variants;
     /// only the XMR actuator can later report an actual refunded XMR sweep.
     pub(crate) fn tick(&self) -> Result<DomXmrRecoveryProgressV12, Refusal> {
-        self.tick_bounded_v23(std::time::Duration::from_secs(60))
+        self.tick_bounded_v23(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn tick_bounded_v23(
@@ -184,7 +189,7 @@ impl ProductionXmrRecoveryDriverV12 {
         &self,
         funding: f7_anchor_authority::families_v11::VerifiedXmrFundingV11,
     ) -> Result<DomXmrRecoveryProgressV12, Refusal> {
-        self.tick_with_funding_bounded_v23(funding, std::time::Duration::from_secs(60))
+        self.tick_with_funding_bounded_v23(funding, default_recovery_budget_v27()?)
     }
 
     pub(crate) fn tick_with_funding_bounded_v23(
@@ -259,6 +264,19 @@ impl ProductionXmrRecoveryDriverV12 {
                             | route_executor::RouteStoreErrorV1::LeaseExpired
                             | route_executor::RouteStoreErrorV1::RevisionConflict,
                         ) => Refusal::Unavailable,
+                        // The Store repeats the two freshness checks made just
+                        // above and reports a failure as InvalidMaterial. If
+                        // either proof has aged past its bound in between, the
+                        // refusal is that race and is retried with a new
+                        // observation, exactly like the checks above. Any other
+                        // InvalidMaterial is still a conflict.
+                        crate::supervisor::RouteSupervisorErrorV1::Store(
+                            route_executor::RouteStoreErrorV1::InvalidMaterial,
+                        ) if fresh.require_recent_v12().is_err()
+                            || authority.require_xmr_funding_observed_v12().is_err() =>
+                        {
+                            Refusal::Unavailable
+                        }
                         _ => Refusal::Conflict,
                     })
             },
@@ -317,7 +335,7 @@ impl ProductionXmrRecoveryDriverV12 {
     pub(crate) fn verify_funding_prerequisite(
         &self,
     ) -> Result<VerifiedDomXmrFundingPrerequisiteV12, Refusal> {
-        self.verify_funding_prerequisite_bounded_v23(std::time::Duration::from_secs(60))
+        self.verify_funding_prerequisite_bounded_v23(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn verify_funding_prerequisite_bounded_v23(
@@ -340,7 +358,7 @@ impl ProductionXmrRecoveryDriverV12 {
     pub(crate) fn observe_remote_refund_event_v23(
         &self,
     ) -> Result<(adapter_dom_real::VerifiedDomRefundSecretV11, [u8; 32]), Refusal> {
-        self.observe_remote_refund_event_bounded_v24(std::time::Duration::from_secs(60))
+        self.observe_remote_refund_event_bounded_v24(default_recovery_budget_v27()?)
     }
 
     pub(crate) fn observe_remote_refund_event_bounded_v24(
@@ -437,10 +455,22 @@ fn recovery_deadline_v23(
     if budget.is_zero() || budget > std::time::Duration::from_secs(60) {
         return Err(Refusal::Unavailable);
     }
+    // Narrow to the route-step ceiling when one is armed: this is the single
+    // constructor every bounded recovery call goes through, so clamping here
+    // covers the whole family at once. Per-call budgets do not compose, and
+    // several of these run inside one step.
     started
         .checked_add(budget)
+        .map(adapter_dom_real::route_step_deadline_v27::clamp_v27)
         .filter(|deadline| *deadline > std::time::Instant::now())
         .ok_or(Refusal::Unavailable)
+}
+
+/// Sixty seconds is each unnamed caller's own budget; when a route-step or
+/// pump ceiling is armed on this thread, narrow to what it leaves. Budgets do
+/// not compose across one step, and these observations all run inside one.
+fn default_recovery_budget_v27() -> Result<std::time::Duration, Refusal> {
+    route_step_deadline::remaining(std::time::Duration::from_secs(60)).ok_or(Refusal::Unavailable)
 }
 
 #[cfg(test)]
@@ -601,9 +631,15 @@ mod compensation_handoff_tests {
 
 fn map_store(error: SessionStoreError) -> Refusal {
     match error {
+        // Every "not yet" answer from the Store is Unavailable, never
+        // Conflict: a claim-signing authority whose observation aged out and a
+        // refund transport still awaiting canonical public U are both
+        // resolved by the next round, and Conflict is fatal at the pump.
         SessionStoreError::Filesystem
         | SessionStoreError::StoreBusy
-        | SessionStoreError::FundingAuthorityUnavailable => Refusal::Unavailable,
+        | SessionStoreError::FundingAuthorityUnavailable
+        | SessionStoreError::ClaimSigningAuthorityUnavailable
+        | SessionStoreError::NativeXmrRefundTransportPendingV23 => Refusal::Unavailable,
         _ => Refusal::Conflict,
     }
 }
@@ -618,7 +654,9 @@ fn map_real(error: RealDomError) -> Refusal {
         | RealDomError::Store(
             SessionStoreError::Filesystem
             | SessionStoreError::StoreBusy
-            | SessionStoreError::FundingAuthorityUnavailable,
+            | SessionStoreError::FundingAuthorityUnavailable
+            | SessionStoreError::ClaimSigningAuthorityUnavailable
+            | SessionStoreError::NativeXmrRefundTransportPendingV23,
         ) => Refusal::Unavailable,
         _ => Refusal::Conflict,
     }

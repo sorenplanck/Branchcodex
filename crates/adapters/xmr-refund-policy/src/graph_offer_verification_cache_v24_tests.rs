@@ -504,9 +504,8 @@ fn real_graph_offer_warm_repeat64_reports_actual_verifier_counts_v24() -> TestRe
         original_verified += 1;
     }
     assert_eq!(original_verified, 64);
-    // The two loops above were also timed and the durations printed. Timing was
-    // never a pass condition here — the assertions are the whole test — and the
-    // xmr-v7 static gate refuses a direct output macro in an active XMR source,
-    // so the measurement is gone rather than the reuse check it surrounded.
+    // Per-layer timing was previously emitted here as informational evidence.
+    // Direct stderr output is refused in active XMR sources, and the timing was
+    // never a pass condition or a promised bound, so it is simply not printed.
     Ok(())
 }

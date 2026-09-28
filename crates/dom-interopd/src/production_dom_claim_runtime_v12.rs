@@ -3,7 +3,7 @@
 //! A driver owns one wallet share and one purpose-separated nonce vault across
 //! ticks. Both participant messages and the aggregate pre-signature use the
 //! exact Store-issued DSC1 identity signing and durable Relay staging path.
-//! Every tick consumes fresh native F7 observations for the selected profile.
+//! Ticks consume native F7 observations when the selected profile needs a fresh recency window.
 
 use super::{
     ProductionContractsConsumedPostAnchorV2, ProductionContractsOutboundErrorV1,
@@ -51,6 +51,7 @@ pub(crate) struct ProductionDomClaimTemplateV12 {
 pub(crate) enum ProductionDomClaimAnchorsV12 {
     BitcoinV2(VerifiedF7AnchorAuthorizationV2),
     Universal(VerifiedF7AnchorAuthorizationV12),
+    UniversalRecent,
 }
 
 enum ConsumedAuthorityV12 {
@@ -80,6 +81,8 @@ enum CompletedPreSignatureV12 {
 pub(crate) enum ProductionDomClaimRuntimeErrorV12 {
     #[error("DOM claim driver belongs to another Contracts owner or F7 profile")]
     Scope,
+    #[error("native F7 observation must be refreshed before continuing claim signing")]
+    RefreshRequired,
     #[error("native DOM claim journal refused the operation")]
     Store(#[from] SessionStoreError),
     #[error("native DOM claim participant refused signing or nonce recovery")]
@@ -97,11 +100,13 @@ pub(crate) enum ProductionDomClaimRuntimeErrorV12 {
 }
 
 impl ProductionDomClaimRuntimeErrorV12 {
-    /// Retry only explicit host contention or I/O. Missing records, signatures,
+    /// Retry explicit host contention, I/O, or a spent observation reuse margin.
+    /// Missing records, signatures,
     /// inconsistent identities and unauthorized scopes are never peer absence.
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
-            Self::Store(SessionStoreError::Filesystem | SessionStoreError::StoreBusy)
+            Self::RefreshRequired
+            | Self::Store(SessionStoreError::Filesystem | SessionStoreError::StoreBusy)
             | Self::Outbound(ProductionContractsOutboundErrorV1::OwnerBusy)
             | Self::Outbound(ProductionContractsOutboundErrorV1::Identity(
                 IdentityStoreError::Filesystem | IdentityStoreError::StoreBusy,
@@ -110,7 +115,17 @@ impl ProductionDomClaimRuntimeErrorV12 {
                 SessionStoreError::Filesystem | SessionStoreError::StoreBusy,
             ))
             | Self::Outbound(ProductionContractsOutboundErrorV1::Relay(
-                RelayWorkerOutboundErrorV1::OwnerBusy,
+                RelayWorkerOutboundErrorV1::OwnerBusy
+                | RelayWorkerOutboundErrorV1::StoreRejected(
+                    SessionStoreError::Filesystem
+                    | SessionStoreError::StoreBusy
+                    // Staging a final claim re-checks the downstream claim
+                    // gate, which answers this once its retained observation
+                    // lease passes sixty seconds. Run 87's claim step measured
+                    // 98.3 s, so the lease aged out mid-step. Observe again and
+                    // retry, as every other consumer of this answer now does.
+                    | SessionStoreError::ClaimSigningAuthorityUnavailable,
+                ),
             ))
             | Self::Ingress(ContractsRelayIngressErrorV1::OwnerBusy)
             | Self::Ingress(ContractsRelayIngressErrorV1::Store(
@@ -195,8 +210,11 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
         &self,
         binding: DomSessionBindingV1,
         chain: TrustedChainIdV1,
-        vault: Vault,
-        share: DomParticipantSigningShareV1,
+        // Borrowed, not moved: every refusal below happens before the signing
+        // material becomes unrecoverable, and the caller holds the only copy.
+        // Taking it up front destroyed it on refusals that had consumed
+        // nothing, which left the route with no signer and no way back.
+        signer_material: &mut Option<(Vault, DomParticipantSigningShareV1)>,
         gate: &PreparedF7FundingGateV12,
         anchors: VerifiedF7AnchorAuthorizationV12,
     ) -> Result<ProductionDomClaimRuntimeV12<Vault>, ProductionDomClaimRuntimeErrorV12>
@@ -217,6 +235,11 @@ impl<F: F6TransportPortV1> ProductionContractsV1<F> {
             .consume_f7_claim_authorization_v12(gate, anchors)?;
         self.store
             .bind_retained_f7_claim_signing_session_v12(&authorization, chain)?;
+        // Point of no return: the authorization is consumed and the signing
+        // session is bound, so the material is committed to this attempt.
+        let (vault, share) = signer_material
+            .take()
+            .ok_or(ProductionDomClaimRuntimeErrorV12::Wallet)?;
         let signer = participant_retained_vault_signer_v12(
             vault,
             Rc::clone(&self.store),
@@ -364,6 +387,13 @@ where
             .map_err(|_| ProductionDomClaimRuntimeErrorV12::Scope)
     }
 
+    pub(crate) fn universal_authority_recent_v12(&self) -> bool {
+        matches!(
+            &self.authorization,
+            ConsumedAuthorityV12::Universal(authority) if authority.can_reuse_observation_v12()
+        )
+    }
+
     fn refresh(
         &self,
         anchors: ProductionDomClaimAnchorsV12,
@@ -382,6 +412,19 @@ where
                 .store
                 .revalidate_consumed_f7_claim_authorization_v12(authority, anchors)
                 .map_err(Into::into),
+            (
+                ConsumedAuthorityV12::Universal(authority),
+                ProductionDomClaimAnchorsV12::UniversalRecent,
+            ) => {
+                // The outer driver may have selected reuse just before the
+                // margin expired. Defer before any nonce/signing operation;
+                // its next tick must obtain fresh opaque chain observations.
+                if authority.can_reuse_observation_v12() {
+                    Ok(())
+                } else {
+                    Err(ProductionDomClaimRuntimeErrorV12::RefreshRequired)
+                }
+            }
             _ => Err(ProductionDomClaimRuntimeErrorV12::Scope),
         }
     }
@@ -617,6 +660,8 @@ mod tests {
 
     #[test]
     fn missing_or_substituted_identity_is_not_waiting_for_peer() {
+        assert!(!ProductionDomClaimRuntimeErrorV12::Scope.is_retryable());
+        assert!(ProductionDomClaimRuntimeErrorV12::RefreshRequired.is_retryable());
         for error in [
             IdentityStoreError::AuthenticationFailed,
             IdentityStoreError::InvalidInput,
