@@ -24,16 +24,25 @@ janela. O contrato do ensaio mantém uma janela maior para a recuperação. Cens
 além de três blocos ou reorg posterior à profundidade adotada permanece fora da
 garantia; PoW não oferece limite determinístico.
 
-O primeiro ensaio financiado com nó DOM e `monerod` reais completou o handoff
-ativo em **18,96 s**. Claim DOM e pagamento XMR foram posteriormente minerados e
-verificados, fora do cronômetro ativo; preparação, handoff e comprovação final
-levaram **133,82 s**. O teste reproduzível é:
+Os ensaios financiados com nó DOM e `monerod` reais completaram o handoff ativo
+normal em **17,00 s** e o handoff seguido de reorg em **16,99 s**. No segundo,
+uma cadeia concorrente retirou o Claim depois do compromisso XMR; o journal
+manteve Refund proibido, exigiu republicação, e o mesmo Claim voltou à cadeia e
+alcançou seis confirmações. Claim DOM e pagamento XMR foram minerados e
+verificados fora do cronômetro ativo. Preparação, handoff e comprovação levaram
+**119,75 s** no caso normal e **146,65 s** no caso com reorg. Os testes são:
 
 ```text
 python3 -B scripts/test_fast_handoff.py \
   --binary target/debug/examples/arbiter_regtest \
   --monerod /caminho/absoluto/monerod \
   --evidence-file /caminho/dxf1-fast-handoff.json
+
+python3 -B scripts/test_fast_handoff.py \
+  --binary target/debug/examples/arbiter_regtest \
+  --monerod /caminho/absoluto/monerod \
+  --outcome fast-reorg \
+  --evidence-file /caminho/dxf1-fast-reorg.json
 ```
 
 ## Primitivo de arbitragem reutilizado: DXA1
@@ -80,6 +89,9 @@ inclusive todos os seus fragmentos, tem prazo total de 45 s. Um peer que apenas
 abre o TCP ou envia o primeiro fragmento não consegue manter o helper preso por
 tempo indefinido. Depois de qualquer timeout o canal é descartado; o modo
 persistente volta a aceitar uma conexão autenticada nova.
+Durante preparações longas, o coordenador envia presença autenticada entre
+operações do daemon para conservar a mesma sessão e as mesmas chaves DOM
+efêmeras.
 
 O helper persiste sua share cifrada em um arquivo exclusivo `0600`, sincronizado
 e ligado à operação. A chave de wrapping pode ficar num arquivo `0600` separado

@@ -399,6 +399,11 @@ impl PartyProcess {
         fixed_hex(value["joint_xmr_key"].as_str().unwrap())
     }
 
+    fn keep_alive(&mut self) {
+        let value = self.request(json!({"op":"ping"}));
+        assert_eq!(value["role"], self.role);
+    }
+
     fn authorize_dom(&mut self, contract: &SwapArbiterContract, offer: &DomClaimOffer) {
         let offer_bytes = offer.to_swap_arbiter_resume_bytes().unwrap();
         let value = self.request(json!({
@@ -510,6 +515,7 @@ impl PartyProcess {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
     FastClaim,
+    FastReorg,
     Claim,
     Refund,
     Punish,
@@ -520,17 +526,22 @@ impl Outcome {
     fn parse(value: &str) -> Self {
         match value {
             "fast-claim" => Self::FastClaim,
+            "fast-reorg" => Self::FastReorg,
             "claim" => Self::Claim,
             "refund" => Self::Refund,
             "punish" => Self::Punish,
             "reorg-guard" => Self::ReorgGuard,
-            _ => panic!("outcome must be fast-claim, claim, refund, punish, or reorg-guard"),
+            _ => panic!(
+                "outcome must be fast-claim, fast-reorg, claim, refund, punish, or reorg-guard"
+            ),
         }
     }
 
     fn path(self) -> SwapArbiterPath {
         match self {
-            Self::FastClaim | Self::Claim | Self::ReorgGuard => SwapArbiterPath::Claim,
+            Self::FastClaim | Self::FastReorg | Self::Claim | Self::ReorgGuard => {
+                SwapArbiterPath::Claim
+            }
             Self::Refund => SwapArbiterPath::Refund,
             Self::Punish => SwapArbiterPath::Punish,
         }
@@ -539,11 +550,16 @@ impl Outcome {
     fn label(self) -> &'static str {
         match self {
             Self::FastClaim => "fast-claim",
+            Self::FastReorg => "fast-reorg",
             Self::Claim => "claim",
             Self::Refund => "refund",
             Self::Punish => "punish",
             Self::ReorgGuard => "reorg-guard",
         }
+    }
+
+    fn is_fast(self) -> bool {
+        matches!(self, Self::FastClaim | Self::FastReorg)
     }
 }
 
@@ -1285,13 +1301,15 @@ async fn exercise(
     .unwrap();
     let mut setup = funded_arbiter(
         &party_binary,
-        outcome == Outcome::ReorgGuard,
-        outcome == Outcome::FastClaim,
+        matches!(outcome, Outcome::ReorgGuard | Outcome::FastReorg),
+        outcome.is_fast(),
         remote_parties.as_ref(),
     )
     .await;
+    setup.dom_owner.keep_alive();
+    setup.xmr_owner.keep_alive();
     let handle = NodeHandleImpl(setup.node.clone());
-    if outcome == Outcome::FastClaim {
+    if outcome.is_fast() {
         let funding = setup.journal.state().unwrap().dom_funding.unwrap();
         assert_eq!(mine(&setup.node).await, funding.height + 1);
     }
@@ -1384,6 +1402,8 @@ async fn exercise(
         serde_json::from_str(&rpc.json_rpc_call("get_info", None, 16384).await.unwrap()).unwrap();
     assert_eq!(info["offline"], true);
     assert_eq!(info["nettype"], "fakechain");
+    setup.dom_owner.keep_alive();
+    setup.xmr_owner.keep_alive();
 
     let mining = Instant::now();
     loop {
@@ -1409,6 +1429,8 @@ async fn exercise(
         assert_eq!(response["result"]["status"], "OK", "{response}");
         break;
     }
+    setup.dom_owner.keep_alive();
+    setup.xmr_owner.keep_alive();
     // Keep each daemon request short enough to remain reliable when the matrix
     // prepares multiple isolated Monero reserves concurrently.
     let mut height = 0;
@@ -1418,6 +1440,8 @@ async fn exercise(
         let (_, batch_height) = rpc.generate_blocks(&reserve_address, batch).await.unwrap();
         height = batch_height;
         remaining_reserve_blocks -= batch;
+        setup.dom_owner.keep_alive();
+        setup.xmr_owner.keep_alive();
     }
     let first_hash = rpc.block_by_number(1).await.unwrap().hash();
     let funding_block = rpc.scannable_block(first_hash).await.unwrap();
@@ -1582,7 +1606,7 @@ async fn exercise(
     setup.xmr_owner.authorize_dom(&setup.contract, &claim_offer);
 
     let (branch, selected_offer, replacement_offer, settlement_height) = match outcome {
-        Outcome::FastClaim => (
+        Outcome::FastClaim | Outcome::FastReorg => (
             &setup.claim,
             &claim_offer,
             &claim_replacement_offer,
@@ -1626,7 +1650,11 @@ async fn exercise(
                 .dom_owner
                 .complete_dom(selected_offer, settlement_height)
         }
-        Outcome::FastClaim | Outcome::Claim | Outcome::Punish | Outcome::ReorgGuard => {
+        Outcome::FastClaim
+        | Outcome::FastReorg
+        | Outcome::Claim
+        | Outcome::Punish
+        | Outcome::ReorgGuard => {
             assert!(setup
                 .dom_owner
                 .rejects_dom(selected_offer, settlement_height));
@@ -1640,7 +1668,7 @@ async fn exercise(
     };
     let settlement_bytes = settlement.to_bytes().unwrap();
     let prospective_dom_id = *dom_crypto::blake2b_256(&settlement_bytes).as_bytes();
-    let mut fast_journal = if outcome == Outcome::FastClaim {
+    let mut fast_journal = if outcome.is_fast() {
         let funding = setup.journal.state().unwrap().dom_funding.unwrap();
         let funding_confirmations = handle
             .chain_height()
@@ -1697,7 +1725,7 @@ async fn exercise(
             )
             .unwrap();
     }
-    if outcome == Outcome::FastClaim {
+    if outcome.is_fast() {
         let (mut journal, path, binding) = fast_journal.take().unwrap();
         journal
             .record_xmr_release_commitment(
@@ -1759,14 +1787,66 @@ async fn exercise(
         journal
             .record_dom_claim_inclusion(settlement_admission.tx_hash, settlement_height)
             .unwrap();
-        let mut dom_finality_height = settlement_height;
+        let mut recovery_inclusion_height = settlement_height;
+        let fast_reorg_exercised = outcome == Outcome::FastReorg;
+        if fast_reorg_exercised {
+            let original_claim_block = handle.get_block_hash_at_height(settlement_height).unwrap();
+            let funding = setup.journal.state().unwrap().dom_funding.unwrap();
+            let shadow = setup.shadow.as_ref().unwrap().clone();
+            for expected_height in (funding.height + 1)..=(settlement_height + 1) {
+                assert_eq!(mine(&shadow).await, expected_height);
+            }
+            let mut promoted = false;
+            for height in (funding.height + 1)..=(settlement_height + 1) {
+                let alternate = canonical_block(&shadow, height).await;
+                let result = setup
+                    .node
+                    .chain
+                    .lock()
+                    .await
+                    .connect_block(&alternate, validation_now())
+                    .unwrap();
+                promoted |= matches!(result, dom_chain::ConnectResult::Reorg(_));
+            }
+            assert!(promoted);
+            assert_ne!(
+                handle.get_block_hash_at_height(settlement_height).unwrap(),
+                original_claim_block
+            );
+            assert!(!canonical_block(&setup.node, settlement_height)
+                .await
+                .transactions
+                .iter()
+                .any(|transaction| transaction == &settlement));
+            journal
+                .record_dom_claim_reorg(settlement_admission.tx_hash)
+                .unwrap();
+            assert!(journal.state().unwrap().rebroadcast_required());
+            assert!(journal.authorize_refund(u64::MAX).is_err());
+            let readmission = handle.submit_tx(settlement.to_bytes().unwrap()).unwrap();
+            assert_eq!(readmission.tx_hash, settlement_admission.tx_hash);
+            assert!(matches!(
+                readmission.state,
+                TxAdmissionState::New | TxAdmissionState::Mempool
+            ));
+            recovery_inclusion_height = mine(&setup.node).await;
+            assert_eq!(recovery_inclusion_height, settlement_height + 2);
+            assert_eq!(
+                observed_transaction(&setup, recovery_inclusion_height, &settlement).await,
+                settlement
+            );
+            journal
+                .record_dom_claim_inclusion(settlement_admission.tx_hash, recovery_inclusion_height)
+                .unwrap();
+        }
+        let mut dom_finality_height = recovery_inclusion_height;
         for _ in 1..binding.policy().minimum_dom_claim_confirmations() {
             dom_finality_height = mine(&setup.node).await;
         }
         journal
             .record_dom_claim_finality(
                 settlement_admission.tx_hash,
-                settlement_height,
+                recovery_inclusion_height,
                 dom_finality_height,
             )
             .unwrap();
@@ -1810,6 +1890,9 @@ async fn exercise(
                 "required_dom_finality_height":state.required_dom_finality_height(),
                 "dom_claim_eventually_included":true,
                 "dom_claim_eventually_finalized":true,
+                "dom_claim_reorg_exercised":fast_reorg_exercised,
+                "dom_claim_rebroadcast_after_xmr_commitment":fast_reorg_exercised,
+                "refund_forbidden_after_reorg":fast_reorg_exercised,
                 "xmr_payment_eventually_included":true,
                 "active_handoff_seconds":active_handoff_seconds,
                 "active_deadline_seconds":binding.policy().active_deadline_seconds(),
@@ -1944,7 +2027,7 @@ async fn exercise(
 
     let recipient_role = match outcome {
         Outcome::Refund => "xmr_owner",
-        Outcome::FastClaim | Outcome::Claim | Outcome::Punish => "dom_owner",
+        Outcome::FastClaim | Outcome::FastReorg | Outcome::Claim | Outcome::Punish => "dom_owner",
         Outcome::ReorgGuard => unreachable!(),
     };
     let recheck_tip_height = handle.chain_height();
@@ -1972,7 +2055,7 @@ async fn exercise(
                 .xmr_owner
                 .sign_xmr(&signable_xmr_transaction, *opening, outcome.path())
         }
-        Outcome::FastClaim | Outcome::Claim | Outcome::Punish => {
+        Outcome::FastClaim | Outcome::FastReorg | Outcome::Claim | Outcome::Punish => {
             assert!(setup.xmr_owner.rejects_xmr(
                 &signable_xmr_transaction,
                 *opening,

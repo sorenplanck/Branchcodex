@@ -108,6 +108,11 @@ jobs:
             --binary target/debug/examples/arbiter_regtest \
             --monerod "$DXA1_MONEROD" \
             --evidence-file "$RUNNER_TEMP/dxf1-fast-handoff.json"
+          python3 -B scripts/test_fast_handoff.py \
+            --binary target/debug/examples/arbiter_regtest \
+            --monerod "$DXA1_MONEROD" \
+            --outcome fast-reorg \
+            --evidence-file "$RUNNER_TEMP/dxf1-fast-reorg.json"
 
       - name: Run settlements and competing reorg concurrently
         working-directory: labs/dom-xmr-direct/clsag-lab
@@ -129,5 +134,6 @@ jobs:
             ${{ runner.temp }}/dxa1-arbiter-evidence/
             ${{ runner.temp }}/dxa1-container-participants.json
             ${{ runner.temp }}/dxf1-fast-handoff.json
+            ${{ runner.temp }}/dxf1-fast-reorg.json
           if-no-files-found: warn
           retention-days: 14

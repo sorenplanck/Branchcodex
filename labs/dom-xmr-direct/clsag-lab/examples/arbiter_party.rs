@@ -991,6 +991,7 @@ impl Party {
 
     fn handle(&mut self, request: &Value) -> Result<Value, String> {
         match string_field(request, "op")? {
+            "ping" => Ok(json!({"role":self.role.label()})),
             "bind-peer" => self.bind_peer(request),
             "configure-branch" => self.configure_branch(request),
             "reserve-possession" => self.reserve_possession(request),

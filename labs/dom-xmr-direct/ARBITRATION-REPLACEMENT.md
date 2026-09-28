@@ -178,15 +178,18 @@ para uma cabe nominalmente, mas enfraquece a segurança e não cria garantia.
 O novo fluxo DXF1 não reduz silenciosamente as confirmações do DXA1. DOM e XMR
 são preparados antes de `Ready`; no intervalo ativo, o Claim DOM exato é
 persistido e aceito pelo daemon. A decisão XMR irreversível é então sincronizada
-antes da assinatura e do RPC Monero. O primeiro ensaio financiado fez esse
-handoff em 18,96 s sem minerar novos blocos durante a medição. As duas
-transações foram mineradas e verificadas depois.
+antes da assinatura e do RPC Monero. O ensaio normal fez esse handoff em
+17,00 s sem minerar novos blocos durante a medição. Um segundo ensaio fez o
+handoff em 16,99 s, removeu o Claim por uma cadeia concorrente depois do
+compromisso XMR, manteve Refund proibido, republicou exatamente o mesmo Claim e
+acumulou as seis confirmações exigidas. As transações DOM e XMR foram mineradas
+e verificadas depois do intervalo ativo.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
 em até três blocos e acumular seis confirmações ainda dentro de sua fase
 exclusiva. Depois do compromisso XMR, o journal nunca autoriza Refund; reorg
 apenas reabre a republicação do mesmo Claim. Isso fornece um caminho rápido sob
-liveness limitada, não finalidade PoW em 18,96 segundos. Censura além do limite
+liveness limitada, não finalidade PoW em cerca de 17 segundos. Censura além do limite
 ou reorg posterior à profundidade adotada viola a hipótese e precisa ser medido
 em teste público antes de produção.
 
