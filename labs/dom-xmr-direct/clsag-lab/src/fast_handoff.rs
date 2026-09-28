@@ -220,6 +220,8 @@ pub struct FastHandoff {
     latest_assumed_claim_height: Option<u64>,
     required_dom_finality_height: Option<u64>,
     dom_claim_canonical_height: Option<u64>,
+    dom_claim_canonical_block: Option<[u8; 32]>,
+    dom_claim_finality_tip: Option<[u8; 32]>,
     dom_claim_finalized: bool,
     xmr_transaction: Option<[u8; 32]>,
     rebroadcast_required: bool,
@@ -234,6 +236,8 @@ impl FastHandoff {
             latest_assumed_claim_height: None,
             required_dom_finality_height: None,
             dom_claim_canonical_height: None,
+            dom_claim_canonical_block: None,
+            dom_claim_finality_tip: None,
             dom_claim_finalized: false,
             xmr_transaction: None,
             rebroadcast_required: false,
@@ -258,6 +262,14 @@ impl FastHandoff {
 
     pub const fn dom_claim_finalized(self) -> bool {
         self.dom_claim_finalized
+    }
+
+    pub const fn dom_claim_canonical_block(self) -> Option<[u8; 32]> {
+        self.dom_claim_canonical_block
+    }
+
+    pub const fn dom_claim_finality_tip(self) -> Option<[u8; 32]> {
+        self.dom_claim_finality_tip
     }
 
     pub const fn xmr_transaction(self) -> Option<[u8; 32]> {
@@ -389,6 +401,7 @@ impl FastHandoff {
         &mut self,
         dom_claim: [u8; 32],
         height: u64,
+        canonical_block: [u8; 32],
     ) -> Result<(), FastHandoffError> {
         if !matches!(
             self.phase,
@@ -398,8 +411,11 @@ impl FastHandoff {
         ) {
             return Err(FastHandoffError::WrongOrder);
         }
-        if dom_claim != self.binding.dom_claim {
+        if dom_claim != self.binding.dom_claim || canonical_block == [0; 32] {
             return Err(FastHandoffError::DifferentTransaction);
+        }
+        if self.dom_claim_canonical_height.is_some() || self.dom_claim_canonical_block.is_some() {
+            return Err(FastHandoffError::WrongOrder);
         }
         let latest = self
             .latest_assumed_claim_height
@@ -408,6 +424,9 @@ impl FastHandoff {
             return Err(FastHandoffError::ClaimMarginExhausted);
         }
         self.dom_claim_canonical_height = Some(height);
+        self.dom_claim_canonical_block = Some(canonical_block);
+        self.dom_claim_finality_tip = None;
+        self.dom_claim_finalized = false;
         self.rebroadcast_required = false;
         Ok(())
     }
@@ -417,12 +436,19 @@ impl FastHandoff {
         &mut self,
         dom_claim: [u8; 32],
         inclusion_height: u64,
+        inclusion_block: [u8; 32],
         tip_height: u64,
+        tip_block: [u8; 32],
     ) -> Result<u64, FastHandoffError> {
-        if dom_claim != self.binding.dom_claim {
+        if dom_claim != self.binding.dom_claim || inclusion_block == [0; 32] || tip_block == [0; 32]
+        {
             return Err(FastHandoffError::DifferentTransaction);
         }
-        if self.dom_claim_canonical_height != Some(inclusion_height) {
+        if self.dom_claim_canonical_height != Some(inclusion_height)
+            || self.dom_claim_canonical_block != Some(inclusion_block)
+            || (tip_height == inclusion_height && tip_block != inclusion_block)
+            || self.dom_claim_finalized
+        {
             return Err(FastHandoffError::WrongOrder);
         }
         let depth = tip_height
@@ -434,18 +460,28 @@ impl FastHandoff {
         {
             return Err(FastHandoffError::ClaimMarginExhausted);
         }
+        self.dom_claim_finality_tip = Some(tip_block);
         self.dom_claim_finalized = true;
         Ok(depth)
     }
 
     /// A reorg after XMR commitment restores the exact rebroadcast obligation.
-    pub fn record_dom_claim_reorg(&mut self, dom_claim: [u8; 32]) -> Result<(), FastHandoffError> {
-        if dom_claim != self.binding.dom_claim {
+    pub fn record_dom_claim_reorg(
+        &mut self,
+        dom_claim: [u8; 32],
+        orphaned_block: [u8; 32],
+    ) -> Result<(), FastHandoffError> {
+        if dom_claim != self.binding.dom_claim || orphaned_block == [0; 32] {
             return Err(FastHandoffError::DifferentTransaction);
         }
-        if self.dom_claim_canonical_height.take().is_none() {
+        if self.dom_claim_canonical_height.is_none()
+            || self.dom_claim_canonical_block != Some(orphaned_block)
+        {
             return Err(FastHandoffError::WrongOrder);
         }
+        self.dom_claim_canonical_height = None;
+        self.dom_claim_canonical_block = None;
+        self.dom_claim_finality_tip = None;
         self.dom_claim_finalized = false;
         self.rebroadcast_required = true;
         Ok(())
@@ -590,11 +626,30 @@ mod tests {
         handoff
             .record_xmr_daemon_admission(id(6), id(7), 4)
             .unwrap();
-        handoff.record_dom_claim_inclusion(id(5), 96).unwrap();
-        assert_eq!(handoff.record_dom_claim_finality(id(5), 96, 97), Ok(2));
+        handoff
+            .record_dom_claim_inclusion(id(5), 96, id(8))
+            .unwrap();
+        assert_eq!(
+            handoff.record_dom_claim_inclusion(id(5), 96, id(8)),
+            Err(FastHandoffError::WrongOrder)
+        );
+        assert_eq!(
+            handoff.record_dom_claim_finality(id(5), 96, id(9), 97, id(10)),
+            Err(FastHandoffError::WrongOrder)
+        );
+        assert_eq!(
+            handoff.record_dom_claim_finality(id(5), 96, id(8), 97, id(9)),
+            Ok(2)
+        );
         assert!(handoff.dom_claim_finalized());
         assert!(!handoff.rebroadcast_required());
-        handoff.record_dom_claim_reorg(id(5)).unwrap();
+        assert_eq!(
+            handoff.record_dom_claim_reorg(id(5), id(9)),
+            Err(FastHandoffError::WrongOrder)
+        );
+        handoff.record_dom_claim_reorg(id(5), id(8)).unwrap();
+        assert_eq!(handoff.dom_claim_canonical_block(), None);
+        assert_eq!(handoff.dom_claim_finality_tip(), None);
         assert!(!handoff.dom_claim_finalized());
         assert!(handoff.rebroadcast_required());
         assert_eq!(

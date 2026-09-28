@@ -209,11 +209,11 @@ mainnet.
 Um mecanismo novo `DXF1` agora remove a produção de blocos do intervalo ativo.
 As reservas DOM e XMR ficam prontas antes de `Ready`. O Claim DOM exato é
 persistido e aceito pelo daemon; depois a decisão de liberar o pagamento XMR é
-sincronizada, reaberta após restart e submetida ao `monerod`. Os ensaios
-financiados completaram o handoff normal em **17,00 s** e o caso com reorg em
-**16,99 s**, sem esperar bloco de nenhuma chain no intervalo ativo. Claim DOM e
+sincronizada, reaberta após restart e submetida ao `monerod`. Os ensaios mais
+recentes completaram o handoff normal em **17,51 s** e o caso com reorg em
+**16,34 s**, sem esperar bloco de nenhuma chain no intervalo ativo. Claim DOM e
 pagamento XMR foram depois minerados e verificados; os ensaios inteiros levaram
-**119,75 s** e **146,65 s**, respectivamente.
+**153,81 s** e **145,02 s**, respectivamente.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
 DOM de no máximo três blocos, exige que essa margem termine antes da primeira
@@ -221,7 +221,9 @@ altura de Refund com espaço para seis confirmações e proíbe Refund
 permanentemente depois do compromisso XMR. Um reorg restaura apenas a obrigação
 de republicar o mesmo Claim. O ensaio concorrente retirou o Claim já incluído
 depois do compromisso XMR, confirmou que Refund continuava proibido, republicou
-a transação byte a byte e alcançou as seis confirmações exigidas. Se mineradores
+a transação byte a byte e alcançou as seis confirmações exigidas. O journal v2
+liga cada transição ao hash canônico observado: bloco órfão, nova inclusão e
+ponta de confirmação precisam formar a sequência esperada. Se mineradores
 censurarem o Claim além do limite ou
 um reorg superar a profundidade adotada, a hipótese de segurança foi violada. O
 teste real de rede precisa medir essa hipótese e manter

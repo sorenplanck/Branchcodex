@@ -1380,11 +1380,11 @@ async fn exercise(
     let startup = Instant::now();
     let url = format!("http://127.0.0.1:{rpc_port}");
     let mut last_rpc_error: String;
-    let rpc = loop {
+    loop {
         assert!(daemon.0.try_wait().unwrap().is_none(), "monerod exited");
         match SimpleRequestTransport::with_custom_timeout(url.clone(), Duration::from_secs(2)).await
         {
-            Ok(rpc) => break rpc,
+            Ok(_) => break,
             Err(error) => last_rpc_error = format!("{error:?}"),
         }
         if startup.elapsed() >= Duration::from_secs(30) {
@@ -1397,7 +1397,12 @@ async fn exercise(
             );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    }
+    // The short transport above is only a startup probe. Mining reserve
+    // batches may legitimately take longer on a loaded CI runner.
+    let rpc = SimpleRequestTransport::with_custom_timeout(url, Duration::from_secs(15))
+        .await
+        .unwrap();
     let info: serde_json::Value =
         serde_json::from_str(&rpc.json_rpc_call("get_info", None, 16384).await.unwrap()).unwrap();
     assert_eq!(info["offline"], true);
@@ -1784,13 +1789,20 @@ async fn exercise(
         assert_eq!(mine(&setup.node).await, settlement_height);
         let observed = observed_transaction(&setup, settlement_height, &settlement).await;
         assert_eq!(observed, settlement);
+        let initial_claim_block = handle.get_block_hash_at_height(settlement_height).unwrap();
         journal
-            .record_dom_claim_inclusion(settlement_admission.tx_hash, settlement_height)
+            .record_dom_claim_inclusion(
+                settlement_admission.tx_hash,
+                settlement_height,
+                initial_claim_block,
+            )
             .unwrap();
         let mut recovery_inclusion_height = settlement_height;
+        let mut recovery_inclusion_block = initial_claim_block;
+        let mut orphaned_claim_block = None;
         let fast_reorg_exercised = outcome == Outcome::FastReorg;
         if fast_reorg_exercised {
-            let original_claim_block = handle.get_block_hash_at_height(settlement_height).unwrap();
+            let original_claim_block = initial_claim_block;
             let funding = setup.journal.state().unwrap().dom_funding.unwrap();
             let shadow = setup.shadow.as_ref().unwrap().clone();
             for expected_height in (funding.height + 1)..=(settlement_height + 1) {
@@ -1819,8 +1831,9 @@ async fn exercise(
                 .iter()
                 .any(|transaction| transaction == &settlement));
             journal
-                .record_dom_claim_reorg(settlement_admission.tx_hash)
+                .record_dom_claim_reorg(settlement_admission.tx_hash, original_claim_block)
                 .unwrap();
+            orphaned_claim_block = Some(original_claim_block);
             assert!(journal.state().unwrap().rebroadcast_required());
             assert!(journal.authorize_refund(u64::MAX).is_err());
             let readmission = handle.submit_tx(settlement.to_bytes().unwrap()).unwrap();
@@ -1831,23 +1844,36 @@ async fn exercise(
             ));
             recovery_inclusion_height = mine(&setup.node).await;
             assert_eq!(recovery_inclusion_height, settlement_height + 2);
+            recovery_inclusion_block = handle
+                .get_block_hash_at_height(recovery_inclusion_height)
+                .unwrap();
+            assert_ne!(recovery_inclusion_block, original_claim_block);
             assert_eq!(
                 observed_transaction(&setup, recovery_inclusion_height, &settlement).await,
                 settlement
             );
             journal
-                .record_dom_claim_inclusion(settlement_admission.tx_hash, recovery_inclusion_height)
+                .record_dom_claim_inclusion(
+                    settlement_admission.tx_hash,
+                    recovery_inclusion_height,
+                    recovery_inclusion_block,
+                )
                 .unwrap();
         }
         let mut dom_finality_height = recovery_inclusion_height;
         for _ in 1..binding.policy().minimum_dom_claim_confirmations() {
             dom_finality_height = mine(&setup.node).await;
         }
+        let dom_finality_block = handle
+            .get_block_hash_at_height(dom_finality_height)
+            .unwrap();
         journal
             .record_dom_claim_finality(
                 settlement_admission.tx_hash,
                 recovery_inclusion_height,
+                recovery_inclusion_block,
                 dom_finality_height,
+                dom_finality_block,
             )
             .unwrap();
         let (blocks, _) = rpc.generate_blocks(&recipient_address, 1).await.unwrap();
@@ -1893,6 +1919,9 @@ async fn exercise(
                 "dom_claim_reorg_exercised":fast_reorg_exercised,
                 "dom_claim_rebroadcast_after_xmr_commitment":fast_reorg_exercised,
                 "refund_forbidden_after_reorg":fast_reorg_exercised,
+                "dom_claim_orphaned_block":orphaned_claim_block.map(|block| hex(&block)),
+                "dom_claim_canonical_block":hex(&state.dom_claim_canonical_block().unwrap()),
+                "dom_claim_finality_tip_block":hex(&state.dom_claim_finality_tip().unwrap()),
                 "xmr_payment_eventually_included":true,
                 "active_handoff_seconds":active_handoff_seconds,
                 "active_deadline_seconds":binding.policy().active_deadline_seconds(),

@@ -82,6 +82,32 @@ def verify(result: dict, outcome: str) -> None:
     ):
         if result.get(field) is not reorg:
             raise RuntimeError(f"incorrect DXF1 reorg evidence: {field}")
+    canonical = result.get("dom_claim_canonical_block")
+    finality = result.get("dom_claim_finality_tip_block")
+    for field, value in (
+        ("dom_claim_canonical_block", canonical),
+        ("dom_claim_finality_tip_block", finality),
+    ):
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or value == "0" * 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise RuntimeError(f"invalid canonical DOM block evidence: {field}")
+    if canonical == finality:
+        raise RuntimeError("DOM finality tip did not advance beyond Claim inclusion")
+    orphaned = result.get("dom_claim_orphaned_block")
+    if reorg:
+        if (
+            not isinstance(orphaned, str)
+            or len(orphaned) != 64
+            or orphaned == "0" * 64
+            or orphaned == canonical
+        ):
+            raise RuntimeError("invalid orphaned DOM Claim block evidence")
+    elif orphaned is not None:
+        raise RuntimeError("normal DXF1 path unexpectedly reported an orphaned block")
 
 
 def main() -> int:

@@ -24,13 +24,16 @@ janela. O contrato do ensaio mantém uma janela maior para a recuperação. Cens
 além de três blocos ou reorg posterior à profundidade adotada permanece fora da
 garantia; PoW não oferece limite determinístico.
 
-Os ensaios financiados com nó DOM e `monerod` reais completaram o handoff ativo
-normal em **17,00 s** e o handoff seguido de reorg em **16,99 s**. No segundo,
+Os ensaios mais recentes, com journal ligado aos hashes canônicos do nó DOM,
+completaram o handoff ativo normal em **17,51 s** e o handoff seguido de reorg em
+**16,34 s**. No segundo,
 uma cadeia concorrente retirou o Claim depois do compromisso XMR; o journal
 manteve Refund proibido, exigiu republicação, e o mesmo Claim voltou à cadeia e
-alcançou seis confirmações. Claim DOM e pagamento XMR foram minerados e
-verificados fora do cronômetro ativo. Preparação, handoff e comprovação levaram
-**119,75 s** no caso normal e **146,65 s** no caso com reorg. Os testes são:
+alcançou seis confirmações. O registro persistiu hashes distintos para o bloco
+órfão, a reinclusão e a ponta de confirmação. Claim DOM e pagamento XMR foram
+minerados e verificados fora do cronômetro ativo. Preparação, handoff e
+comprovação levaram **153,81 s** no caso normal e **145,02 s** no caso com reorg.
+Os testes são:
 
 ```text
 python3 -B scripts/test_fast_handoff.py \

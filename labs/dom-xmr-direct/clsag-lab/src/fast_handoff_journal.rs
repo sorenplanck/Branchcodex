@@ -13,7 +13,7 @@ use crate::fast_handoff::{
     FastHandoff, FastHandoffBinding, FastHandoffError, FastHandoffPhase, DXF1_PROTOCOL,
 };
 
-const MAGIC: &[u8] = b"DXF1/fast-handoff-journal/v1\0";
+const MAGIC: &[u8] = b"DXF1/fast-handoff-journal/v2\0";
 const MAX_FILE_BYTES: u64 = 4096;
 
 #[derive(Debug)]
@@ -102,10 +102,11 @@ fn payload_len(tag: u8) -> Option<usize> {
     match tag {
         1 => Some(73),
         2 | 3 => Some(48),
-        4 | 6 => Some(40),
+        4 => Some(40),
         5 => Some(72),
-        8 => Some(48),
-        7 => Some(32),
+        6 => Some(72),
+        7 => Some(64),
+        8 => Some(112),
         _ => None,
     }
 }
@@ -171,15 +172,28 @@ fn apply(state: &mut FastHandoff, event: &[u8]) -> Result<(), FastHandoffError> 
         6 => {
             let claim = take_id(&mut input)?;
             let height = take_u64(&mut input)?;
-            state.record_dom_claim_inclusion(claim, height)
+            let block = take_id(&mut input)?;
+            state.record_dom_claim_inclusion(claim, height, block)
         }
-        7 => state.record_dom_claim_reorg(take_id(&mut input)?),
+        7 => {
+            let claim = take_id(&mut input)?;
+            let block = take_id(&mut input)?;
+            state.record_dom_claim_reorg(claim, block)
+        }
         8 => {
             let claim = take_id(&mut input)?;
             let inclusion_height = take_u64(&mut input)?;
+            let inclusion_block = take_id(&mut input)?;
             let tip_height = take_u64(&mut input)?;
+            let tip_block = take_id(&mut input)?;
             state
-                .record_dom_claim_finality(claim, inclusion_height, tip_height)
+                .record_dom_claim_finality(
+                    claim,
+                    inclusion_height,
+                    inclusion_block,
+                    tip_height,
+                    tip_block,
+                )
                 .map(|_| ())
         }
         _ => Err(FastHandoffError::WrongOrder),
@@ -346,19 +360,23 @@ impl FastHandoffJournal {
         &mut self,
         claim: [u8; 32],
         height: u64,
+        canonical_block: [u8; 32],
     ) -> Result<(), FastHandoffJournalError> {
         let mut event = vec![6];
         event.extend(claim);
         event.extend(height.to_le_bytes());
+        event.extend(canonical_block);
         self.append(event)
     }
 
     pub fn record_dom_claim_reorg(
         &mut self,
         claim: [u8; 32],
+        orphaned_block: [u8; 32],
     ) -> Result<(), FastHandoffJournalError> {
         let mut event = vec![7];
         event.extend(claim);
+        event.extend(orphaned_block);
         self.append(event)
     }
 
@@ -366,12 +384,16 @@ impl FastHandoffJournal {
         &mut self,
         claim: [u8; 32],
         inclusion_height: u64,
+        inclusion_block: [u8; 32],
         tip_height: u64,
+        tip_block: [u8; 32],
     ) -> Result<(), FastHandoffJournalError> {
         let mut event = vec![8];
         event.extend(claim);
         event.extend(inclusion_height.to_le_bytes());
+        event.extend(inclusion_block);
         event.extend(tip_height.to_le_bytes());
+        event.extend(tip_block);
         self.append(event)
     }
 
@@ -466,11 +488,18 @@ mod tests {
             .record_xmr_daemon_admission(id(6), id(7), 4)
             .unwrap();
         assert!(journal.completed().unwrap());
-        journal.record_dom_claim_inclusion(id(5), 96).unwrap();
-        journal.record_dom_claim_finality(id(5), 96, 97).unwrap();
+        journal
+            .record_dom_claim_inclusion(id(5), 96, id(8))
+            .unwrap();
+        journal
+            .record_dom_claim_finality(id(5), 96, id(8), 97, id(9))
+            .unwrap();
         drop(journal);
         let journal = FastHandoffJournal::open(&path, binding()).unwrap();
-        assert!(journal.state().unwrap().dom_claim_finalized());
+        let state = journal.state().unwrap();
+        assert!(state.dom_claim_finalized());
+        assert_eq!(state.dom_claim_canonical_block(), Some(id(8)));
+        assert_eq!(state.dom_claim_finality_tip(), Some(id(9)));
     }
 
     #[test]
