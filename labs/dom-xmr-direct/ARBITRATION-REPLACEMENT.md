@@ -202,9 +202,11 @@ O envio XMR também recebe um deadline absoluto calculado da janela persistida.
 Sem ao menos dois segundos inteiros restantes, a autoridade recusa antes do
 RPC; um segundo completo fica reservado para validar e sincronizar a admissão
 em disco. O cliente Monero conserva esse limite durante verificação, envio e
-reconciliação, e uma resposta posterior ao deadline não conclui o journal.
-Depois dessa reserva conservadora, o ensaio financiado `fast-reorg` passou em
-18,678 s de handoff ativo e 200,861 s no fixture completo, incluindo preparação
+reconciliação, e uma resposta posterior ao deadline não conclui o journal. O
+ensaio financiado `fast-reorg` aceita a transação no `monerod`, perde a primeira
+resposta de propósito, reinicia a autoridade, restaura os mesmos bytes e
+conclui por `AlreadyKnown`, sem reabrir Refund. Junto ao reorg DOM, passou em
+17,206 s de handoff ativo e 152,600 s no fixture completo, incluindo preparação
 e maturação das reservas em Regtest.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído

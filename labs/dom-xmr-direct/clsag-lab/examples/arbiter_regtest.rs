@@ -33,8 +33,9 @@ use dom_scriptless_primitives::scriptless_add_public_points;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_wallet::{Bip39Seed, Network, WalletDir};
 use dom_xmr_fast_handoff::{
-    DomClaimAdmission, DomClaimFn, FastHandoffAuthority, XmrDaemonAdmission, XmrPaymentFn,
-    XmrPreparedIdentity, XmrPreparedPayment, XmrSubmissionFn,
+    DomClaimAdmission, DomClaimFn, FastHandoffAuthority, FastHandoffAuthorityError,
+    FastHandoffPhase, XmrDaemonAdmission, XmrPaymentFn, XmrPreparedIdentity, XmrPreparedPayment,
+    XmrSubmissionFn,
 };
 use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
@@ -1804,12 +1805,76 @@ async fn exercise(
                 .xmr_transaction_digest(),
             Some(submission.identity().transaction_digest)
         );
+        let ambiguous_xmr_response_recovered = outcome == Outcome::FastReorg;
+        let final_submission = if ambiguous_xmr_response_recovered {
+            let monerod_endpoint = url.clone();
+            let mut lost_response =
+                XmrSubmissionFn(|expected_transaction_id, transaction: &[u8], deadline| {
+                    assert_eq!(
+                        expected_transaction_id,
+                        submission.identity().transaction_id
+                    );
+                    let acceptance = std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| {
+                                let mut broadcaster =
+                                    BlockingMoneroBroadcaster::new(monerod_endpoint.clone())
+                                        .unwrap();
+                                broadcaster.submit_exact_before_v24(
+                                    expected_transaction_id,
+                                    transaction,
+                                    deadline,
+                                )
+                            })
+                            .join()
+                            .unwrap()
+                    });
+                    assert!(matches!(
+                        acceptance,
+                        Ok(BroadcastAcceptance::Accepted | BroadcastAcceptance::AlreadyKnown)
+                    ));
+                    Err::<XmrDaemonAdmission, _>("simulated lost XMR daemon response")
+                });
+            assert!(matches!(
+                authority.submit_prepared_xmr(&submission, &mut lost_response),
+                Err(FastHandoffAuthorityError::Port(
+                    "simulated lost XMR daemon response"
+                ))
+            ));
+            assert_eq!(
+                authority.journal().state().unwrap().phase(),
+                FastHandoffPhase::XmrTransactionPrepared
+            );
+            assert!(authority.journal().authorize_refund(u64::MAX).is_err());
+            drop(authority);
+
+            let saved_identity = submission.identity();
+            let saved_transaction = submission.transaction().to_vec();
+            let mut authority_after_loss = FastHandoffAuthority::open(&path, binding).unwrap();
+            let mut restore_port =
+                XmrPaymentFn(|expected_intent, expected: Option<XmrPreparedIdentity>| {
+                    assert_eq!(expected_intent, xmr_payment_intent);
+                    assert_eq!(expected, Some(saved_identity));
+                    Ok::<_, Infallible>(XmrPreparedPayment {
+                        transaction_id: saved_identity.transaction_id,
+                        transaction: saved_transaction.clone(),
+                    })
+                });
+            let restored = authority_after_loss
+                .prepare_committed_xmr(&mut restore_port)
+                .unwrap();
+            assert_eq!(restored, submission);
+            authority = authority_after_loss;
+            restored
+        } else {
+            submission.clone()
+        };
         let monerod_endpoint = url.clone();
         let mut xmr_submission =
             XmrSubmissionFn(|expected_transaction_id, transaction: &[u8], deadline| {
                 assert_eq!(
                     expected_transaction_id,
-                    submission.identity().transaction_id
+                    final_submission.identity().transaction_id
                 );
                 let acceptance = std::thread::scope(|scope| {
                     scope
@@ -1834,7 +1899,7 @@ async fn exercise(
                 })
             });
         authority
-            .submit_prepared_xmr(&submission, &mut xmr_submission)
+            .submit_prepared_xmr(&final_submission, &mut xmr_submission)
             .unwrap();
         let active_handoff_seconds = active_settlement.elapsed().as_secs_f64();
         assert!(authority.journal().completed().unwrap());
@@ -1990,6 +2055,7 @@ async fn exercise(
                 "xmr_exact_transaction_persisted_before_rpc":true,
                 "xmr_daemon_submission_enforced_by_authority":true,
                 "xmr_daemon_absolute_submission_deadline":true,
+                "xmr_ambiguous_response_recovered_after_restart":ambiguous_xmr_response_recovered,
                 "durable_absolute_active_deadline":true,
                 "durable_restart_before_xmr_signing":true,
                 "refund_permanently_forbidden_after_xmr_commitment":true,

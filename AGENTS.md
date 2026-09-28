@@ -987,9 +987,11 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   Resposta divergente falha fechado. O port XMR recebe um deadline absoluto
   menor que a janela restante; sem dois segundos inteiros disponíveis, nenhum
   RPC é iniciado. Um segundo completo fica reservado para validar e sincronizar
-  a admissão, e resposta tardia não conclui o journal.
-  Teste local financiado com reorg, já com a reserva de fsync, passou em
-  18,678 s ativos / 200,861 s total.
+  a admissão, e resposta tardia não conclui o journal. O cenário financiado
+  agora perde de propósito a primeira resposta depois da aceitação pelo
+  `monerod`, reinicia a autoridade, restaura os mesmos bytes e conclui por
+  `AlreadyKnown`, sem reabrir Refund. Com essa recuperação e o reorg DOM, passou
+  em 17,206 s ativos / 152,600 s total.
   Três contêineres isolados passaram em 21,400 s ativos / 174,060 s protocolo /
   210,464 s runner, com namespaces, estados e wrapping
   keys separados. Limite

@@ -52,8 +52,10 @@ O port XMR recebe um deadline absoluto derivado dos 180 s persistidos. Sem ao
 menos dois segundos inteiros, a autoridade não inicia o RPC; um segundo fica
 reservado para validar e sincronizar a admissão. O broadcaster conserva o mesmo
 corte durante verificação, submissão e reconciliação, e uma resposta tardia não
-conclui o journal. Com essa reserva conservadora, o ensaio financiado
-`fast-reorg` passou em **18,678 s** de handoff ativo e **200,861 s** no fixture
+conclui o journal. O ensaio financiado `fast-reorg` aceita a transação no
+`monerod`, perde a primeira resposta de propósito, reinicia a autoridade,
+restaura os mesmos bytes e conclui por `AlreadyKnown`, sem reabrir Refund. Junto
+ao reorg DOM, passou em **17,206 s** de handoff ativo e **152,600 s** no fixture
 completo, que inclui preparação e maturação das reservas em Regtest.
 Ainda falta executá-lo em três hosts físicos.
 Os testes são:

@@ -80,6 +80,8 @@ def verify(result: dict, outcome: str) -> None:
     if type(required_finality) is not int or required_finality <= latest:
         raise RuntimeError("missing DOM finality margin before Refund")
     reorg = outcome == "fast-reorg"
+    if result.get("xmr_ambiguous_response_recovered_after_restart") is not reorg:
+        raise RuntimeError("incorrect DXF1 ambiguous XMR recovery evidence")
     for field in (
         "dom_claim_reorg_exercised",
         "dom_claim_rebroadcast_after_xmr_commitment",

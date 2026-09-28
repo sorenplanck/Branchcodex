@@ -526,6 +526,8 @@ mod tests {
     struct XmrSubmitPort {
         calls: usize,
         wrong_id: bool,
+        lose_response_after_acceptance: bool,
+        submitted: Vec<Vec<u8>>,
     }
 
     impl XmrSubmissionPort for XmrSubmitPort {
@@ -541,6 +543,10 @@ mod tests {
             assert!(deadline > Instant::now());
             assert_eq!(expected_transaction_id, id(7));
             assert_eq!(transaction, b"exact signed XMR transaction");
+            self.submitted.push(transaction.to_vec());
+            if self.lose_response_after_acceptance {
+                return Err("XMR response lost after acceptance");
+            }
             Ok(XmrDaemonAdmission {
                 transaction_id: if self.wrong_id { id(99) } else { id(7) },
             })
@@ -675,6 +681,56 @@ mod tests {
             Err(FastHandoffAuthorityError::MismatchedDaemonTransaction)
         ));
         assert!(!authority.journal().completed().unwrap());
+    }
+
+    #[test]
+    fn ambiguous_xmr_acceptance_restarts_with_the_same_bytes() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("handoff.wal");
+        let binding = binding();
+        let mut authority = FastHandoffAuthority::create_ready(&path, binding, 2, true).unwrap();
+        authority
+            .admit_dom_claim(95, &mut DomPort::default())
+            .unwrap();
+        authority.commit_xmr_release().unwrap();
+        drop(authority);
+
+        let mut payment = XmrPort::default();
+        let mut authority = FastHandoffAuthority::open(&path, binding).unwrap();
+        let prepared = authority.prepare_committed_xmr(&mut payment).unwrap();
+        let mut lost = XmrSubmitPort {
+            lose_response_after_acceptance: true,
+            ..XmrSubmitPort::default()
+        };
+        assert!(matches!(
+            authority.submit_prepared_xmr(&prepared, &mut lost),
+            Err(FastHandoffAuthorityError::Port(
+                "XMR response lost after acceptance"
+            ))
+        ));
+        assert_eq!(lost.submitted, vec![prepared.transaction().to_vec()]);
+        assert_eq!(
+            authority.journal().state().unwrap().phase(),
+            FastHandoffPhase::XmrTransactionPrepared
+        );
+        assert!(matches!(
+            authority.journal().authorize_refund(u64::MAX),
+            Err(FastHandoffJournalError::Denied(
+                FastHandoffError::RefundPermanentlyForbidden
+            ))
+        ));
+        drop(authority);
+
+        let mut authority = FastHandoffAuthority::open(&path, binding).unwrap();
+        let restored = authority.prepare_committed_xmr(&mut payment).unwrap();
+        assert_eq!(restored, prepared);
+        let mut reconciled = XmrSubmitPort::default();
+        authority
+            .submit_prepared_xmr(&restored, &mut reconciled)
+            .unwrap();
+        assert_eq!(reconciled.submitted, vec![prepared.transaction().to_vec()]);
+        assert!(authority.journal().completed().unwrap());
+        assert_eq!(payment.calls, 2);
     }
 
     #[test]

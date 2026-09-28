@@ -235,9 +235,11 @@ persistida. Se não restam ao menos dois segundos inteiros, o RPC irreversível
 nem começa: um segundo completo fica reservado para validar e sincronizar em
 disco a admissão. O broadcaster e a autoridade verificam o prazo depois das
 chamadas de rede e uma resposta tardia não conclui o journal. O ensaio
-financiado `fast-reorg`, repetido depois desse corte conservador, passou com
-**18,678 s** de handoff ativo e **200,861 s** no fixture completo; o tempo total
-inclui preparação e maturação das reservas em Regtest.
+financiado `fast-reorg` agora aceita a transação no `monerod`, perde a primeira
+resposta de propósito, reinicia a autoridade, restaura os mesmos bytes e
+conclui pelo reconhecimento `AlreadyKnown`, sem reabrir Refund. Junto ao reorg
+DOM, passou com **17,206 s** de handoff ativo e **152,600 s** no fixture
+completo; o tempo total inclui preparação e maturação das reservas em Regtest.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
 DOM de no máximo 57 blocos, exige que essa margem termine antes da primeira
