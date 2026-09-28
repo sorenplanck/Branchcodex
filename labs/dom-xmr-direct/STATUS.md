@@ -210,13 +210,13 @@ Um mecanismo novo `DXF1` agora remove a produção de blocos do intervalo ativo.
 As reservas DOM e XMR ficam prontas antes de `Ready`. O Claim DOM exato é
 persistido e aceito pelo daemon; depois a decisão de liberar o pagamento XMR é
 sincronizada, reaberta após restart e submetida ao `monerod`. Os ensaios mais
-recentes completaram o handoff normal em **17,51 s** e o caso com reorg em
-**16,34 s**, sem esperar bloco de nenhuma chain no intervalo ativo. Claim DOM e
+recentes completaram o handoff normal em **16,27 s** e o caso com reorg em
+**16,22 s**, sem esperar bloco de nenhuma chain no intervalo ativo. Claim DOM e
 pagamento XMR foram depois minerados e verificados; os ensaios inteiros levaram
-**153,81 s** e **145,02 s**, respectivamente.
+**117,56 s** e **148,24 s**, respectivamente.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
-DOM de no máximo três blocos, exige que essa margem termine antes da primeira
+DOM de no máximo 57 blocos, exige que essa margem termine antes da primeira
 altura de Refund com espaço para seis confirmações e proíbe Refund
 permanentemente depois do compromisso XMR. Um reorg restaura apenas a obrigação
 de republicar o mesmo Claim. O ensaio concorrente retirou o Claim já incluído
@@ -228,18 +228,23 @@ censurarem o Claim além do limite ou
 um reorg superar a profundidade adotada, a hipótese de segurança foi violada. O
 teste real de rede precisa medir essa hipótese e manter
 monitoramento/republicação durante toda a janela.
+Os 57 blocos ocupam toda a margem segura do contrato atual: no alvo público,
+equivalem nominalmente a 114 minutos de oportunidade de reinclusão, seguidos
+pelas seis confirmações antes de Refund. Essa janela de recuperação não entra
+no cronômetro ativo, mas continua sendo uma hipótese de liveness, não uma
+garantia determinística.
 
 O caminho rápido também passou com os dois participantes em servidores Noise
 persistentes separados do coordenador. O reorg remoto completou o handoff ativo
-em **16,98 s** e todo o ensaio em **159,80 s**; as shares privadas permaneceram
+em **17,33 s** e todo o ensaio em **154,25 s**; as shares privadas permaneceram
 nos endpoints, ambos sobreviveram às reconexões e o coordenador registrou apenas
 provas, ofertas e hashes públicos. Essa execução usou interfaces distintas no
 mesmo host. A execução física em três hosts continua sendo a próxima prova
 operacional.
 
 O cenário DXF1 com reorg também passou em três contêineres isolados. O handoff
-ativo levou **15,85 s**, a execução do protocolo **143,58 s** e o runner completo
-**180,43 s**. Coordenador, dono DOM e dono XMR usaram namespaces, endereços e
+ativo levou **16,95 s**, a execução do protocolo **162,77 s** e o runner completo
+**191,01 s**. Coordenador, dono DOM e dono XMR usaram namespaces, endereços e
 volumes distintos numa rede sem rota externa; o coordenador não montou os
 estados privados, e as chaves de wrapping permaneceram nos provedores externos.
 Essa é a evidência local mais próxima da implantação em três máquinas.

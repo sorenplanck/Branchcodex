@@ -18,21 +18,23 @@ Nenhum bloco é esperado nesse intervalo.
 Depois do compromisso XMR, Refund fica permanentemente proibido e um Claim que
 sair da cadeia volta ao estado obrigatório de republicação. Essa regra é
 durável, mas não transforma mempool em finalidade: a segurança depende da
-hipótese imutável de que o Claim será incluído dentro de três blocos, antes da
+hipótese imutável de que o Claim será incluído dentro de 57 blocos, antes da
 primeira altura de Refund, e acumulará seis confirmações ainda dentro dessa
-janela. O contrato do ensaio mantém uma janela maior para a recuperação. Censura
-além de três blocos ou reorg posterior à profundidade adotada permanece fora da
-garantia; PoW não oferece limite determinístico.
+janela. O contrato do ensaio reserva essa margem para a recuperação. Censura
+além de 57 blocos ou reorg posterior à profundidade adotada permanece fora da
+garantia; PoW não oferece limite determinístico. Com o alvo público de 120 s,
+essa margem de inclusão representa nominalmente 114 minutos, mas não adiciona
+espera ao handoff ativo; ela reserva tempo para republicação antes de Refund.
 
 Os ensaios mais recentes, com journal ligado aos hashes canônicos do nó DOM,
-completaram o handoff ativo normal em **17,51 s** e o handoff seguido de reorg em
-**16,34 s**. No segundo,
+completaram o handoff ativo normal em **16,27 s** e o handoff seguido de reorg em
+**16,22 s**. No segundo,
 uma cadeia concorrente retirou o Claim depois do compromisso XMR; o journal
 manteve Refund proibido, exigiu republicação, e o mesmo Claim voltou à cadeia e
 alcançou seis confirmações. O registro persistiu hashes distintos para o bloco
 órfão, a reinclusão e a ponta de confirmação. Claim DOM e pagamento XMR foram
 minerados e verificados fora do cronômetro ativo. Preparação, handoff e
-comprovação levaram **153,81 s** no caso normal e **145,02 s** no caso com reorg.
+comprovação levaram **117,56 s** no caso normal e **148,24 s** no caso com reorg.
 Os testes são:
 
 ```text

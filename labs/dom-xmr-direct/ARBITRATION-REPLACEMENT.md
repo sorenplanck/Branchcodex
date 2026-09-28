@@ -179,14 +179,14 @@ O novo fluxo DXF1 não reduz silenciosamente as confirmações do DXA1. DOM e XM
 são preparados antes de `Ready`; no intervalo ativo, o Claim DOM exato é
 persistido e aceito pelo daemon. A decisão XMR irreversível é então sincronizada
 antes da assinatura e do RPC Monero. O ensaio normal mais recente fez esse
-handoff em 17,51 s sem minerar novos blocos durante a medição. Um segundo ensaio
-fez o handoff em 16,34 s, removeu o Claim por uma cadeia concorrente depois do
+handoff em 16,27 s sem minerar novos blocos durante a medição. Um segundo ensaio
+fez o handoff em 16,22 s, removeu o Claim por uma cadeia concorrente depois do
 compromisso XMR, manteve Refund proibido, republicou exatamente o mesmo Claim e
 acumulou as seis confirmações exigidas. As transações DOM e XMR foram mineradas
 e verificadas depois do intervalo ativo.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
-em até três blocos e acumular seis confirmações ainda dentro de sua fase
+em até 57 blocos e acumular seis confirmações ainda dentro de sua fase
 exclusiva. Depois do compromisso XMR, o journal nunca autoriza Refund; reorg
 apenas reabre a republicação do mesmo Claim. Isso fornece um caminho rápido sob
 liveness limitada, não finalidade PoW em cerca de 17 segundos. O journal liga a
@@ -194,17 +194,22 @@ inclusão, eventual remoção e confirmação aos hashes de bloco observados pel
 hash trocado ou evento repetido falha fechado. Censura além do limite ou reorg
 posterior à profundidade adotada viola a hipótese e precisa ser medido em teste
 público antes de produção.
+No alvo DOM de 120 s, os 57 blocos representam nominalmente 114 minutos para
+reinclusão. O caminho comum continua em segundos porque não espera essa janela;
+ela é a margem de recuperação antes do Refund de emergência.
 
 Uma campanha adicional executou o mesmo reorg DXF1 com os signers em dois
 servidores Noise persistentes. O coordenador não recebeu shares XMR nem chaves
 DOM; os servidores sobreviveram às reconexões, e o handoff ativo terminou em
 16,98 s. O teste ainda foi realizado em um único host e não substitui a campanha
-física distribuída.
+física distribuída. Com a margem completa de 57 blocos, essa execução levou
+17,33 s no handoff e 154,25 s no ensaio inteiro.
 
 O mesmo caso passou depois em três contêineres com namespaces, endereços e
 volumes separados. A rede interna não tinha saída, o coordenador não montou os
 estados dos signers e as chaves de wrapping vieram de agentes externos. O
-handoff ativo terminou em 15,85 s e a execução do protocolo em 143,58 s.
+handoff ativo terminou em 16,95 s, a execução do protocolo em 162,77 s e o
+runner completo em 191,01 s.
 
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único

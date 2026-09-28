@@ -59,7 +59,7 @@ def verify(result: dict, outcome: str) -> None:
     for field in ("dom_block_wait_in_active_interval", "xmr_block_wait_in_active_interval"):
         if result.get(field) is not False:
             raise RuntimeError(f"active handoff waited for a block: {field}")
-    if result.get("bounded_dom_inclusion_assumption_blocks") != 3:
+    if result.get("bounded_dom_inclusion_assumption_blocks") != 57:
         raise RuntimeError("unexpected DXF1 inclusion assumption")
     if result.get("minimum_dom_claim_confirmations_before_refund") != 6:
         raise RuntimeError("unexpected DXF1 recovery finality depth")

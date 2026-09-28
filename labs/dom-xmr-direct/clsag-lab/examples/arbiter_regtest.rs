@@ -63,6 +63,9 @@ const ARBITER_VALUE: u64 = 100_000_000;
 const FEE: u64 = 1_000_000;
 const MIN_DOM_CONFIRMATIONS: u64 = 2;
 const ACTIVE_SETTLEMENT_BUDGET_SECONDS: u64 = 180;
+const FIXTURE_BUDGET_SECONDS: u64 = 300;
+const FAST_MIN_DOM_CLAIM_CONFIRMATIONS: u64 = 6;
+const EXPECTED_FAST_MAX_DOM_CLAIM_INCLUSION_BLOCKS: u64 = 57;
 
 struct ManagedDaemon(Child);
 
@@ -1680,14 +1683,28 @@ async fn exercise(
             .checked_sub(funding.height)
             .and_then(|depth| depth.checked_add(1))
             .unwrap();
+        let maximum_inclusion_blocks = setup
+            .claim_until
+            .checked_sub(settlement_height)
+            .and_then(|span| span.checked_sub(FAST_MIN_DOM_CLAIM_CONFIRMATIONS - 1))
+            .and_then(|span| span.checked_add(1))
+            .unwrap();
+        assert_eq!(
+            maximum_inclusion_blocks,
+            EXPECTED_FAST_MAX_DOM_CLAIM_INCLUSION_BLOCKS
+        );
         let policy = FastHandoffPolicy::new(
             ACTIVE_SETTLEMENT_BUDGET_SECONDS,
             MIN_DOM_CONFIRMATIONS,
-            3,
-            6,
+            maximum_inclusion_blocks,
+            FAST_MIN_DOM_CLAIM_CONFIRMATIONS,
             setup.claim_until,
         )
         .unwrap();
+        assert_eq!(
+            policy.required_finality_height(settlement_height),
+            Ok(setup.claim_until)
+        );
         let binding = FastHandoffBinding::new(
             SETTLEMENT_ID,
             setup.chain_id,
@@ -2207,15 +2224,16 @@ async fn exercise(
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = env::args_os().skip(1);
-    let monerod = PathBuf::from(
-        args.next()
-            .expect("usage: arbiter_regtest MONEROD claim|refund|punish|reorg-guard"),
-    );
+    let monerod = PathBuf::from(args.next().expect(
+        "usage: arbiter_regtest MONEROD fast-claim|fast-reorg|claim|refund|punish|reorg-guard",
+    ));
     let outcome = args
         .next()
         .and_then(|value| value.into_string().ok())
         .map(|value| Outcome::parse(&value))
-        .expect("usage: arbiter_regtest MONEROD claim|refund|punish|reorg-guard");
+        .expect(
+            "usage: arbiter_regtest MONEROD fast-claim|fast-reorg|claim|refund|punish|reorg-guard",
+        );
     assert!(args.next().is_none(), "too many arguments");
     let party_binary = std::env::current_exe()
         .unwrap()
@@ -2226,9 +2244,9 @@ async fn main() {
     );
     let remote_parties = RemoteParties::from_environment();
     tokio::time::timeout(
-        Duration::from_secs(ACTIVE_SETTLEMENT_BUDGET_SECONDS),
+        Duration::from_secs(FIXTURE_BUDGET_SECONDS),
         exercise(monerod, party_binary, outcome, remote_parties),
     )
     .await
-    .expect("arbiter regtest exceeded 180 seconds");
+    .expect("arbiter regtest fixture exceeded 300 seconds");
 }
