@@ -66,6 +66,26 @@ fn main() -> Result<(), String> {
         )?,
     ];
 
+    // The stream one `dom-interopd run` reads from stdin, one per party. Provisioning is
+    // where these belong: a run must open the same identity authority the ceremony
+    // established, and only this program holds the passphrase that does it.
+    let run_secrets: [PathBuf; 2] = [
+        ceremony::write_run_secrets(
+            &route.parties[0].0,
+            laboratory::IDENTITY_PASSPHRASE,
+            laboratory::WALLET_PASSPHRASE,
+            &ceremony_dir,
+            "run-secrets-party-0.v4",
+        )?,
+        ceremony::write_run_secrets(
+            &route.parties[1].0,
+            laboratory::IDENTITY_PASSPHRASE,
+            laboratory::WALLET_PASSPHRASE,
+            &ceremony_dir,
+            "run-secrets-party-1.v4",
+        )?,
+    ];
+
     // The plan, so the admission step can carry the pins instead of recomputing them:
     // provisioning generates a fresh condition scalar, so a rebuild would freeze different
     // terms with different digests.
@@ -110,6 +130,9 @@ fn main() -> Result<(), String> {
     println!("party_1={}", hex(&route.parties[1].0));
     for (index, path) in plans.paths.iter().enumerate() {
         println!("plan_{index}={}", path.display());
+    }
+    for (index, path) in run_secrets.iter().enumerate() {
+        println!("run_secrets_{index}={}", path.display());
     }
     for (index, path) in secrets.iter().enumerate() {
         println!("secrets_{index}={}", path.display());

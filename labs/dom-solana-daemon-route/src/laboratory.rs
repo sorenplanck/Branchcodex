@@ -75,6 +75,14 @@ pub const DOM_ANCHOR_HEIGHT: u64 = 1;
 /// The laboratory passphrase that opens the Contracts transport identity authority.
 pub const IDENTITY_PASSPHRASE: &str = "a laboratory contracts identity passphrase";
 
+/// The passphrase a run offers for the DOM wallet.
+///
+/// Distinct from [`IDENTITY_PASSPHRASE`] because the secret stream refuses any two secrets
+/// that repeat, and the two passphrases are compared against each other and against every
+/// key. It is laboratory material: the wallet these provisioning steps place is a stand-in,
+/// and replacing both with deployment material is the operator's step.
+pub const WALLET_PASSPHRASE: &str = "a laboratory dom wallet passphrase";
+
 /// The intent both positions of this route execute.
 pub const ROUTE_INTENT: [u8; 32] = [0x49; 32];
 

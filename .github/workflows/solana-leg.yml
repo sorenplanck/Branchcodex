@@ -405,6 +405,35 @@ jobs:
             < "$RUNNER_TEMP/run-inputs/route-services.json"
           ls -l "$RUNNER_TEMP/route/production-route-services.v8.json"
 
+      # Diagnostic, and deliberately NOT part of the gate.
+      #
+      # `run` ends in a bounded activation loop that pairs with the counterparty over the
+      # Relay, so with one party and no peer it cannot reach the settlement loop. What it
+      # CAN do is name, one at a time, every startup input that is still missing, because
+      # its refusals are typed. Exit 124 is the timeout, and it is the good outcome here:
+      # it means every gate before the Relay was passed.
+      #
+      # This step reports and never fails the job. A green here would otherwise mean
+      # nothing, so the outcome is printed rather than asserted.
+      - name: Name what a run still needs
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          secrets="$(sed -n 's/^run_secrets_0=//p' "$RUNNER_TEMP/provisioned.env")"
+          echo "secrets=$secrets"
+          set +e
+          timeout 90 target/release/dom-interopd run \
+            --state-dir "$RUNNER_TEMP/route" \
+            < "$secrets" > "$RUNNER_TEMP/run.out" 2> "$RUNNER_TEMP/run.err"
+          code=$?
+          set -e
+          echo "run_exit=$code"
+          echo "--- stdout ---"; cat "$RUNNER_TEMP/run.out" || true
+          echo "--- stderr ---"; cat "$RUNNER_TEMP/run.err" || true
+          if [ "$code" = "124" ]; then
+            echo "run_reached_relay_activation=true"
+          fi
+
   solana-leg-gate:
     name: Solana leg gate
     runs-on: ubuntu-latest

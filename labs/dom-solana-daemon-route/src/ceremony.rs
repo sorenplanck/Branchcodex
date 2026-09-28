@@ -37,6 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use btc_crypto::SecpContext;
+use sha2::{Digest, Sha256};
 
 use crate::registry::ProvisionedSolanaRegistryV1;
 use crate::roster::ProvisionedRelayRosterV1;
@@ -109,6 +110,76 @@ pub fn write_secrets(
         serde_json::to_vec(&secrets).map_err(|error| format!("ceremony secrets: {error}"))?;
     let path = out_dir.join(file_name);
     crate::owner_only::write(&path, &bytes)?;
+    Ok(path)
+}
+
+/// One laboratory secret for a run, derived so no two are ever equal.
+///
+/// `parse` refuses a stream in which any two secrets repeat -- `ProductionSecretsV4Error::Reused`
+/// -- and it compares the bearer and both passphrases against the keys as well. Deriving every
+/// one from a distinct label makes that property hold by construction rather than by care.
+fn run_secret(party: &[u8; 32], label: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"DOM-SOLANA-DAEMON-ROUTE/RUN-SECRET/V1\0");
+    hasher.update(party);
+    hasher.update(label.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Write the `DOM-INTEROPD-SECRETS-V4` stream one `dom-interopd run` reads from stdin.
+///
+/// Newline-delimited, never JSON, and with NO trailing newline: the reader splits on `\n`
+/// and refuses a stream with one field more than it expects, so a trailing newline is an
+/// empty fifteenth field and the whole run is refused for shape.
+///
+/// Both positions are `SOL`, which is what makes this route the mission: one operation that
+/// begins on Solana and one that ends on it. A `SOL` leg carries TWO credentials, a seed and
+/// a peer authenticator, where `BTC` and `EVM` carry one.
+///
+/// The passphrases are the laboratory's. They are written here because a run must open the
+/// same identity authority the ceremony established; replacing them with deployment material
+/// is the operator's step, not this crate's.
+pub fn write_run_secrets(
+    party: &[u8; 32],
+    identity_passphrase: &str,
+    dom_wallet_passphrase: &str,
+    out_dir: &Path,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    crate::owner_only::directory(out_dir)?;
+    let hex = |bytes: [u8; 32]| -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    };
+    let mut lines = vec![
+        "DOM-INTEROPD-SECRETS-V4".to_owned(),
+        "a laboratory node bearer".to_owned(),
+        hex(crate::roster::participant_relay_secret(
+            party,
+            crate::roster::UPSTREAM_LABEL,
+        )),
+        hex(crate::roster::participant_relay_secret(
+            party,
+            crate::roster::DOWNSTREAM_LABEL,
+        )),
+        identity_passphrase.to_owned(),
+        dom_wallet_passphrase.to_owned(),
+        hex(run_secret(party, "route-seal")),
+        hex(run_secret(party, "refund-credential")),
+    ];
+    for position in ["upstream", "downstream"] {
+        lines.push(format!("{position}_family=SOL"));
+        lines.push(hex(run_secret(party, &format!("{position}-solana-seed"))));
+        lines.push(hex(run_secret(party, &format!("{position}-solana-peer-auth"))));
+    }
+    // One signer descriptor per position. The count must equal the strict bound the F6 V7
+    // bundle declares, so a bundle with a different shape is refused here by name rather
+    // than misread as a shorter credential list.
+    for position in ["upstream", "downstream"] {
+        lines.push(format!("{position}_f6_hsm_credentials=1"));
+        lines.push(hex(run_secret(party, &format!("{position}-f6-hsm-0"))));
+    }
+    let path = out_dir.join(file_name);
+    crate::owner_only::write(&path, lines.join("\n").as_bytes())?;
     Ok(path)
 }
 
