@@ -161,6 +161,13 @@ protocolo, 26,46 s desde `Ready` e 121,78 s incluindo a preparação dos
 contêineres. A imagem Ubuntu é fixada por digest. Esse teste remove o
 compartilhamento de pilha de rede do loopback, mas continua no mesmo host físico.
 
+O runner de contêineres agora também executa o DXF1 com reorg. Nesse caso, o
+handoff ativo terminou em **15,85 s**, o protocolo completo em **143,58 s** e a
+campanha, incluindo preparação e inspeção dos contêineres, em **180,43 s**. Os
+três processos mantiveram namespaces, endereços e volumes distintos; a rede não
+tinha rota externa, as chaves de wrapping vieram de provedores externos e o
+coordenador não montou o estado de nenhum signer.
+
 Essa latência usa mineração Regtest solicitada pelo ensaio. A rede DOM pública
 tem alvo de 120 s por bloco. Duas confirmações consomem nominalmente 240 s antes
 de qualquer trabalho criptográfico e não cabem no teto de 180 s. Mesmo sob um

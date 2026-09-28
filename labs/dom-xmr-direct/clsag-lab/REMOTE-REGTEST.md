@@ -147,7 +147,9 @@ python3 -B scripts/test_arbiter_containers.py \
   --party target/debug/examples/arbiter_party \
   --proxy target/debug/examples/arbiter_party_proxy \
   --monerod /caminho/monerod \
-  --evidence-file /caminho/novo/dxa1-container-participants.json
+  --outcome fast-reorg \
+  --timeout 300 \
+  --evidence-file /caminho/novo/dxf1-container-reorg.json
 ```
 
 O arquivo deve registrar `three_distinct_network_namespaces`,

@@ -237,6 +237,13 @@ provas, ofertas e hashes públicos. Essa execução usou interfaces distintas no
 mesmo host. A execução física em três hosts continua sendo a próxima prova
 operacional.
 
+O cenário DXF1 com reorg também passou em três contêineres isolados. O handoff
+ativo levou **15,85 s**, a execução do protocolo **143,58 s** e o runner completo
+**180,43 s**. Coordenador, dono DOM e dono XMR usaram namespaces, endereços e
+volumes distintos numa rede sem rota externa; o coordenador não montou os
+estados privados, e as chaves de wrapping permaneceram nos provedores externos.
+Essa é a evidência local mais próxima da implantação em três máquinas.
+
 Há também uma incompatibilidade no lado DOM que o Regtest ocultava: o alvo
 público é 120 s por bloco. A política conservadora de duas confirmações consome
 nominalmente **240 s**, antes do restante do protocolo, e portanto não cabe em
@@ -258,12 +265,13 @@ altura do próximo bloco e as conexões diretas, reconstrução de UTXO e reorgs
 repetem a mesma barreira. Ativação pública ainda requer altura e versão de bloco
 coordenadas, deliberadamente ausentes deste candidato.
 
-O workflow `dom-xmr-seconds.yml` executa somente a suíte do mecanismo novo em
-um job com limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256
-oficial, roda formatação, testes, Clippy e build, executa um Claim financiado
-com os participantes em contêineres isolados e então executa Claim, Refund,
-Punish e o reorg concorrente em pares, com limite de 180 s por caso. Limitar a
-dois workers evita
+O workflow `dom-xmr-seconds.yml` valida o mecanismo novo e mantém a matriz DXA1
+como regressão do primitivo compartilhado, em um job com limite total de 20
+minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256 oficial, roda formatação, testes,
+Clippy e build, executa o reorg DXF1 com participantes em contêineres isolados,
+repete os caminhos rápidos normal e com reorg e então executa Claim, Refund,
+Punish e o reorg DXA1 concorrente em pares, com limite de 180 s por caso.
+Limitar a dois workers evita
 que contenção do runner seja confundida com latência do protocolo. Depois da
 barreira de duas
 confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,

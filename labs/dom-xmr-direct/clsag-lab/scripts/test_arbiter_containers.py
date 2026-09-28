@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a funded DXA1 Claim across three isolated Docker containers."""
+"""Run funded DOM/XMR arbiter paths across three isolated containers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,14 @@ import time
 from pathlib import Path
 
 from test_arbiter_party_state import KeyBroker
-from test_arbiter_remote import CONTEXT, SETTLEMENT, result_line, verify
+from test_arbiter_remote import (
+    CONTEXT,
+    SETTLEMENT,
+    result_line as dxa1_result_line,
+    verify as verify_dxa1,
+)
+from test_fast_handoff import result_line as dxf1_result_line, verify as verify_dxf1
+from test_fast_handoff_remote import REMOTE_REQUIRED_TRUE
 
 
 DEFAULT_IMAGE = (
@@ -253,7 +260,11 @@ def main() -> int:
     parser.add_argument("--monerod", required=True, type=executable)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--evidence-file", type=Path)
+    parser.add_argument("--outcome", choices=("claim", "fast-reorg"), default="claim")
+    parser.add_argument("--timeout", type=int, default=300)
     args = parser.parse_args()
+    if not 180 <= args.timeout <= 300:
+        parser.error("--timeout must be between 180 and 300 seconds")
 
     if args.party.parent != args.binary.parent or args.proxy.parent != args.binary.parent:
         parser.error("binary, party and proxy must share one directory")
@@ -267,7 +278,8 @@ def main() -> int:
         run(["docker", "pull", args.image], timeout=180)
     image_id = run(["docker", "image", "inspect", args.image, "--format", "{{.Id}}"])
     image_id = image_id.stdout.strip()
-    prefix = f"dxa1-{secrets.token_hex(6)}"
+    protocol = "dxf1" if args.outcome == "fast-reorg" else "dxa1"
+    prefix = f"{protocol}-{secrets.token_hex(6)}"
     network = prefix
     dom_name = f"{prefix}-dom"
     xmr_name = f"{prefix}-xmr"
@@ -390,25 +402,41 @@ def main() -> int:
                     args.image,
                     "/opt/dxa1/arbiter_regtest",
                     f"/opt/monero/{args.monerod.name}",
-                    "claim",
+                    args.outcome,
                 ]
             )
             created.append(coordinator_name)
             isolation = inspect_isolation(
                 [dom_name, xmr_name, coordinator_name], network
             )
+            wait_timeout = 190 if args.outcome == "claim" else args.timeout
             try:
                 waited = run(
-                    ["docker", "wait", coordinator_name], timeout=190, check=False
+                    ["docker", "wait", coordinator_name],
+                    timeout=wait_timeout,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 run(["docker", "kill", coordinator_name], check=False)
-                raise RuntimeError("containerized Claim exceeded 190 seconds")
+                raise RuntimeError(
+                    f"containerized {args.outcome} exceeded {wait_timeout} seconds"
+                )
             output = container_logs(coordinator_name)
             if waited.returncode != 0 or waited.stdout.strip() != "0":
-                raise RuntimeError(f"containerized Claim failed:\n{output}")
-            result = result_line(output)
-            verify(result)
+                raise RuntimeError(f"containerized {args.outcome} failed:\n{output}")
+            if args.outcome == "claim":
+                result = dxa1_result_line(output)
+                verify_dxa1(result)
+            else:
+                result = dxf1_result_line(output)
+                verify_dxf1(result, args.outcome)
+                for field in REMOTE_REQUIRED_TRUE:
+                    if result.get(field) is not True:
+                        raise RuntimeError(f"missing container DXF1 evidence: {field}")
+            for name in (dom_name, xmr_name):
+                record = json.loads(run(["docker", "inspect", name]).stdout)[0]
+                if record["State"]["Running"] is not True:
+                    raise RuntimeError(f"participant {name} exited during settlement")
             for broker in brokers:
                 if len(broker.requests) < 2 or broker.requests[0][-1] != 0:
                     raise RuntimeError("external key provider did not observe create and restore")
@@ -420,10 +448,17 @@ def main() -> int:
             ):
                 raise RuntimeError("participant wrote a local wrapping key")
             wall = time.monotonic() - started
-            if wall > 180:
-                raise RuntimeError(f"containerized test exceeded 180 seconds: {wall}")
+            wall_limit = 180 if args.outcome == "claim" else args.timeout
+            if wall > wall_limit:
+                raise RuntimeError(
+                    f"containerized test exceeded {wall_limit} seconds: {wall}"
+                )
             evidence = {
-                "schema": "DXA1-CONTAINER-PARTICIPANTS-V2",
+                "schema": (
+                    "DXA1-CONTAINER-PARTICIPANTS-V2"
+                    if args.outcome == "claim"
+                    else "DXF1-CONTAINER-PARTICIPANTS-V1"
+                ),
                 "status": "passed",
                 "container_image": args.image,
                 "container_image_id": image_id,
@@ -431,6 +466,7 @@ def main() -> int:
                 "external_wrapping_key_providers": True,
                 "wrapping_keys_absent_from_participant_filesystems": True,
                 "provider_restart_requests_observed": True,
+                "participant_servers_alive_after_run": True,
                 **isolation,
                 "result": result,
             }
@@ -438,6 +474,7 @@ def main() -> int:
                 path = args.evidence_file.expanduser().resolve()
                 path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+                os.chmod(path, 0o600)
             print(json.dumps(evidence, sort_keys=True))
         except Exception:
             for name in created:

@@ -201,6 +201,11 @@ DOM; os servidores sobreviveram às reconexões, e o handoff ativo terminou em
 16,98 s. O teste ainda foi realizado em um único host e não substitui a campanha
 física distribuída.
 
+O mesmo caso passou depois em três contêineres com namespaces, endereços e
+volumes separados. A rede interna não tinha saída, o coordenador não montou os
+estados dos signers e as chaves de wrapping vieram de agentes externos. O
+handoff ativo terminou em 15,85 s e a execução do protocolo em 143,58 s.
+
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único
 compromisso DOM de arbitragem possui três caminhos: antes de `Ready`, o dono DOM
