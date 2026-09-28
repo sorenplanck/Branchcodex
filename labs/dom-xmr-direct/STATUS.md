@@ -209,12 +209,12 @@ mainnet.
 Um mecanismo novo `DXF1` agora remove a produção de blocos do intervalo ativo.
 As reservas DOM e XMR ficam prontas antes de `Ready`. O Claim DOM exato é
 persistido e aceito pelo daemon; depois a decisão de liberar o pagamento XMR é
-sincronizada, reaberta após restart e submetida ao `monerod`. Os ensaios mais
-recentes completaram o handoff normal em **16,27 s** e o caso com reorg, já pela
-autoridade DXF1 e prazo absoluto durável, em **16,74 s**, sem esperar bloco de nenhuma chain no
-intervalo ativo. Claim DOM e
+sincronizada, reaberta após restart e submetida ao `monerod`. Com a autoridade
+DXF1 atual, o handoff normal passou em **17,063 s**; o caso adversarial, com
+resposta XMR perdida, restart, reorg e observação DOM pelo daemon, passou em
+**16,872 s**, sem esperar bloco de nenhuma chain no intervalo ativo. Claim DOM e
 pagamento XMR foram depois minerados e verificados; os ensaios inteiros levaram
-**117,56 s** e **160,29 s**, respectivamente.
+**129,651 s** e **147,135 s**, respectivamente.
 
 O núcleo DXF1 deixou de ser uma cópia privada do laboratório. O novo crate
 `dom-xmr-fast-handoff` contém estado, journal v4 e ports estreitos para DOM e
@@ -301,23 +301,14 @@ altura do próximo bloco e as conexões diretas, reconstrução de UTXO e reorgs
 repetem a mesma barreira. Ativação pública ainda requer altura e versão de bloco
 coordenadas, deliberadamente ausentes deste candidato.
 
-O workflow `dom-xmr-seconds.yml` valida o mecanismo novo e mantém a matriz DXA1
-como regressão do primitivo compartilhado, em um job com limite total de 20
-minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256 oficial, roda formatação, testes,
-Clippy e build, executa o reorg DXF1 com participantes em contêineres isolados,
-repete os caminhos rápidos normal e com reorg e então executa Claim, Refund,
-Punish e o reorg DXA1 concorrente em pares, com limite de 180 s por caso.
-Limitar a dois workers evita
-que contenção do runner seja confundida com latência do protocolo. Depois da
-barreira de duas
-confirmações DOM, shares XMR e DOM separadas, prova de faixa colaborativa,
-reinício e transporte Noise, uma reprodução local dos mesmos comandos e do
-mesmo arquivo oficial passou em **217,82 s** de parede com dois workers. Claim,
-Refund e Punish completos levaram **105,05 s**, **110,38 s** e **104,78 s**; o
-reorg foi recusado em **107,42 s** totais. Desde `Ready`, os settlements levaram
-**27,47 s**, **32,67 s** e **38,23 s**, e a reorganização foi rejeitada em
-**37,16 s**. A
-evidência é preservada como artefato por 14 dias quando o job roda no GitHub.
+O workflow `dom-xmr-seconds.yml` valida somente o mecanismo novo, em um job com
+limite total de 20 minutos. Ele fixa Monero 0.18.4.0 pelo SHA-256 oficial, roda
+formatação, testes, Clippy e build, executa o caminho normal DXF1 e o cenário
+adversarial com reorg em três contêineres isolados. A repetição local do mesmo
+`fast-reorg` e a matriz histórica DXA1 foram retiradas desse gate; a matriz
+continua disponível em `scripts/run_arbiter_matrix.py` para regressão separada.
+Os dois resultados DXF1 são preservados como artefato por 14 dias quando o job
+roda no GitHub.
 O workflow ainda não foi publicado nem medido em um runner remoto.
 
 ## Evidência obtida

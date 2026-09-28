@@ -26,15 +26,14 @@ garantia; PoW não oferece limite determinístico. Com o alvo público de 120 s,
 essa margem de inclusão representa nominalmente 114 minutos, mas não adiciona
 espera ao handoff ativo; ela reserva tempo para republicação antes de Refund.
 
-Os ensaios mais recentes, com journal ligado aos hashes canônicos do nó DOM,
-completaram o handoff ativo normal em **16,27 s** e, depois da migração para a
-autoridade DXF1 e do prazo absoluto durável, o handoff seguido de reorg em **16,74 s**. No segundo,
-uma cadeia concorrente retirou o Claim depois do compromisso XMR; o journal
-manteve Refund proibido, exigiu republicação, e o mesmo Claim voltou à cadeia e
-alcançou seis confirmações. O registro persistiu hashes distintos para o bloco
-órfão, a reinclusão e a ponta de confirmação. Claim DOM e pagamento XMR foram
-minerados e verificados fora do cronômetro ativo. Preparação, handoff e
-comprovação levaram **117,56 s** no caso normal e **160,29 s** no caso com reorg.
+Os ensaios mais recentes completaram o handoff ativo normal em **17,063 s** e o
+caso adversarial em **16,872 s**. No segundo, o `monerod` aceitou o pagamento,
+a primeira resposta foi perdida, a autoridade reiniciou e restaurou os mesmos
+bytes; depois uma cadeia concorrente retirou o Claim. O journal manteve Refund
+proibido, exigiu republicação, e o port de observação do daemon registrou a
+reinclusão e seis confirmações. Claim DOM e pagamento XMR foram minerados e
+verificados fora do cronômetro ativo. Preparação, handoff e comprovação levaram
+**129,651 s** no caso normal e **147,135 s** no caso adversarial.
 
 A máquina de estados e o journal DXF1 agora pertencem ao crate próprio
 `crates/dom-xmr-fast-handoff`, isolado das demais pernas e do `dom-interopd`;
@@ -204,10 +203,11 @@ modelo Poisson idealizado, a chance de dois blocos chegarem em três minutos é
 `finality_budget` e os verificadores de evidência impedem que o resultado rápido
 do Regtest seja apresentado como cumprimento do prazo em rede pública.
 
-O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o DXF1, o ensaio em
-três contêineres e a matriz DXA1 no GitHub com Monero 0.18.4.0 verificado por
-hash, limite ativo de 180 s e 20 minutos para todo o job. Ele preserva os
-resultados como artefato.
+O workflow `.github/workflows/dom-xmr-seconds.yml` reproduz o caminho normal
+DXF1 e o cenário adversarial em três contêineres no GitHub, com Monero 0.18.4.0
+verificado por hash, limite ativo de 180 s e 20 minutos para todo o job. A
+matriz histórica DXA1 não integra esse gate. Os dois resultados DXF1 são
+preservados como artefato.
 
 ## Construção experimental
 

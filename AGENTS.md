@@ -996,7 +996,9 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   total.
   Três contêineres isolados, já com recuperação XMR ambígua e observação DOM
   pelo daemon, passaram em 16,452 s ativos / 143,719 s protocolo / 180,658 s
-  runner, com namespaces, estados e wrapping keys separados. Limite
+  runner, com namespaces, estados e wrapping keys separados. O workflow DXF1
+  conserva apenas o caminho normal e esse cenário adversarial; a repetição
+  local do reorg e a matriz histórica DXA1 saíram do gate novo. Limite
   condicional atual: Claim em até 57 blocos e seis confirmações antes da altura
   de Refund. Falta testar três hosts físicos e coordenar ativação pública; não
   declarar produção ou finalidade PoW em segundos.

@@ -179,12 +179,13 @@ O novo fluxo DXF1 não reduz silenciosamente as confirmações do DXA1. DOM e XM
 são preparados antes de `Ready`; no intervalo ativo, o Claim DOM exato é
 persistido e aceito pelo daemon. A decisão XMR irreversível é então sincronizada
 antes da assinatura e do RPC Monero. O ensaio normal mais recente fez esse
-handoff em 16,27 s sem minerar novos blocos durante a medição. Um segundo ensaio,
-depois de mover o núcleo para a autoridade DXF1 e fixar o prazo absoluto, fez o handoff em 16,74 s,
-removeu o Claim por uma cadeia concorrente depois do
-compromisso XMR, manteve Refund proibido, republicou exatamente o mesmo Claim e
-acumulou as seis confirmações exigidas. As transações DOM e XMR foram mineradas
-e verificadas depois do intervalo ativo.
+handoff em 17,063 s sem minerar novos blocos durante a medição. O cenário
+adversarial fez o handoff em 16,872 s: perdeu a primeira resposta depois da
+aceitação XMR, reiniciou com os mesmos bytes e removeu o Claim por uma cadeia
+concorrente depois do compromisso XMR. A autoridade manteve Refund proibido,
+republicou exatamente o mesmo Claim e recebeu do port do daemon a reinclusão e
+as seis confirmações exigidas. As transações DOM e XMR foram mineradas e
+verificadas depois do intervalo ativo.
 
 Estado, journal v4 e ordem dos RPCs agora vivem em
 `crates/dom-xmr-fast-handoff`, isolado das demais pernas e do `dom-interopd`.

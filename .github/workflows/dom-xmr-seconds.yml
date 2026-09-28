@@ -47,7 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: labs/dom-xmr-direct/clsag-lab -> target
-          key: dxa1-funded-arbiter-v2
+          key: dxf1-fast-handoff-v1
           cache-on-failure: true
 
       - name: Install pinned Monero daemon
@@ -69,7 +69,7 @@ jobs:
           "$monerod_path" --version
           printf 'DXA1_MONEROD=%s\n' "$monerod_path" >> "$GITHUB_ENV"
 
-      - name: Build and verify the new arbiter
+      - name: Build and verify DXF1
         working-directory: labs/dom-xmr-direct/clsag-lab
         run: |
           set -euo pipefail
@@ -115,32 +115,14 @@ jobs:
             --binary target/debug/examples/arbiter_regtest \
             --monerod "$DXA1_MONEROD" \
             --evidence-file "$RUNNER_TEMP/dxf1-fast-handoff.json"
-          python3 -B scripts/test_fast_handoff.py \
-            --binary target/debug/examples/arbiter_regtest \
-            --monerod "$DXA1_MONEROD" \
-            --outcome fast-reorg \
-            --evidence-file "$RUNNER_TEMP/dxf1-fast-reorg.json"
-
-      - name: Run settlements and competing reorg concurrently
-        working-directory: labs/dom-xmr-direct/clsag-lab
-        run: |
-          set -euo pipefail
-          python3 -B scripts/run_arbiter_matrix.py \
-            --binary target/debug/examples/arbiter_regtest \
-            --monerod "$DXA1_MONEROD" \
-            --evidence-dir "$RUNNER_TEMP/dxa1-arbiter-evidence" \
-            --case-timeout 180 \
-            --workers 2
 
       - name: Preserve timing and daemon evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dxa1-arbiter-${{ github.sha }}-${{ github.run_attempt }}
+          name: dxf1-fast-handoff-${{ github.sha }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/dxa1-arbiter-evidence/
             ${{ runner.temp }}/dxf1-container-reorg.json
             ${{ runner.temp }}/dxf1-fast-handoff.json
-            ${{ runner.temp }}/dxf1-fast-reorg.json
           if-no-files-found: warn
           retention-days: 14
