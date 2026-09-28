@@ -41,6 +41,9 @@ fn xmr_submission_deadline(
         .policy()
         .active_deadline_seconds()
         .checked_sub(elapsed)
+        // Epoch observations are truncated to whole seconds. Reserve the
+        // final complete second for validating and fsyncing daemon admission.
+        .and_then(|remaining| remaining.checked_sub(1))
         .filter(|remaining| *remaining != 0)
         .ok_or(FastHandoffJournalError::Denied(
             FastHandoffError::ActiveDeadlineExceeded,
@@ -365,6 +368,11 @@ impl FastHandoffAuthority {
                 deadline,
             )
             .map_err(FastHandoffAuthorityError::Port)?;
+        if Instant::now() > deadline {
+            return Err(FastHandoffAuthorityError::Journal(
+                FastHandoffJournalError::Denied(FastHandoffError::ActiveDeadlineExceeded),
+            ));
+        }
         if admission.transaction_id != submission.identity.transaction_id {
             return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
         }
@@ -712,10 +720,10 @@ mod tests {
         let binding = binding();
         let now = Instant::now();
         assert!(
-            xmr_submission_deadline(binding, binding.active_window_started_at() + 179, now).is_ok()
+            xmr_submission_deadline(binding, binding.active_window_started_at() + 178, now).is_ok()
         );
         assert!(matches!(
-            xmr_submission_deadline(binding, binding.active_window_started_at() + 180, now),
+            xmr_submission_deadline(binding, binding.active_window_started_at() + 179, now),
             Err(FastHandoffJournalError::Denied(
                 FastHandoffError::ActiveDeadlineExceeded
             ))

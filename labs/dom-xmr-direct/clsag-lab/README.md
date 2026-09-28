@@ -49,8 +49,12 @@ txid exato; o coordenador não possui uma função para registrar essa admissão
 diretamente. Criação e transições do journal são privadas ao crate; a referência
 exposta pela autoridade é somente para leitura e auditoria.
 O port XMR recebe um deadline absoluto derivado dos 180 s persistidos. Sem ao
-menos um segundo útil, a autoridade não inicia o RPC; o broadcaster conserva o
-mesmo corte durante verificação, submissão e reconciliação.
+menos dois segundos inteiros, a autoridade não inicia o RPC; um segundo fica
+reservado para validar e sincronizar a admissão. O broadcaster conserva o mesmo
+corte durante verificação, submissão e reconciliação, e uma resposta tardia não
+conclui o journal. Com essa reserva conservadora, o ensaio financiado
+`fast-reorg` passou em **18,678 s** de handoff ativo e **200,861 s** no fixture
+completo, que inclui preparação e maturação das reservas em Regtest.
 Ainda falta executá-lo em três hosts físicos.
 Os testes são:
 

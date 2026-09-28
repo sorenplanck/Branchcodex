@@ -231,8 +231,13 @@ auditoria. Esta
 etapa prova o protocolo novo com os daemons das duas chains em Regtest, não uma
 implantação pública concluída.
 O port do `monerod` recebe ainda um deadline absoluto derivado da janela
-persistida. Se não resta ao menos um segundo, o RPC irreversível nem começa; o
-broadcaster verifica o prazo antes e depois das chamadas de rede.
+persistida. Se não restam ao menos dois segundos inteiros, o RPC irreversível
+nem começa: um segundo completo fica reservado para validar e sincronizar em
+disco a admissão. O broadcaster e a autoridade verificam o prazo depois das
+chamadas de rede e uma resposta tardia não conclui o journal. O ensaio
+financiado `fast-reorg`, repetido depois desse corte conservador, passou com
+**18,678 s** de handoff ativo e **200,861 s** no fixture completo; o tempo total
+inclui preparação e maturação das reservas em Regtest.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
 DOM de no máximo 57 blocos, exige que essa margem termine antes da primeira

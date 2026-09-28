@@ -199,8 +199,13 @@ pelo coordenador. A escrita do journal também é privada ao crate; consumidores
 externos recebem apenas a visão de auditoria. O ensaio financiado usa esse mesmo núcleo com
 DomNode e monerod reais de Regtest.
 O envio XMR também recebe um deadline absoluto calculado da janela persistida.
-Sem ao menos um segundo restante, a autoridade recusa antes do RPC; o cliente
-Monero conserva esse limite durante verificação, envio e reconciliação.
+Sem ao menos dois segundos inteiros restantes, a autoridade recusa antes do
+RPC; um segundo completo fica reservado para validar e sincronizar a admissão
+em disco. O cliente Monero conserva esse limite durante verificação, envio e
+reconciliação, e uma resposta posterior ao deadline não conclui o journal.
+Depois dessa reserva conservadora, o ensaio financiado `fast-reorg` passou em
+18,678 s de handoff ativo e 200,861 s no fixture completo, incluindo preparação
+e maturação das reservas em Regtest.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
 em até 57 blocos e acumular seis confirmações ainda dentro de sua fase
