@@ -1223,6 +1223,8 @@ dependencies = [
  "snow",
  "tokio",
  "xmr-dleq-sigma",
+ "xmr-rpc-broadcast-blocking",
+ "xmr-spend-port",
  "zeroize",
 ]
 
@@ -3090,6 +3092,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "route-step-deadline"
+version = "0.1.0"
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4468,6 +4474,65 @@ dependencies = [
  "sigma_fun",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "xmr-key-image-proof"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "curve25519-dalek",
+ "monero-ed25519",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
+name = "xmr-live-sidecar-api"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+ "xmr-key-image-proof",
+ "zeroize",
+]
+
+[[package]]
+name = "xmr-raw-tx-verify"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "curve25519-dalek",
+ "monero-address",
+ "monero-ed25519",
+ "monero-oxide",
+ "rand_core 0.6.4",
+ "thiserror 1.0.69",
+ "xmr-key-image-proof",
+ "zeroize",
+]
+
+[[package]]
+name = "xmr-rpc-broadcast-blocking"
+version = "0.2.0"
+dependencies = [
+ "reqwest",
+ "route-step-deadline",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "xmr-raw-tx-verify",
+ "xmr-spend-port",
+ "zeroize",
+]
+
+[[package]]
+name = "xmr-spend-port"
+version = "0.2.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "xmr-live-sidecar-api",
 ]
 
 [[package]]

@@ -36,11 +36,10 @@ pub struct DomClaimAdmission {
 pub trait DomClaimPort {
     type Error;
 
-    /// Submit the exact serialized claim bound by `expected_transaction_id`.
-    fn submit_exact_claim(
+    /// Submit the port-owned durable Claim bound by `expected_transaction_id`.
+    fn submit_bound_claim(
         &mut self,
         expected_transaction_id: [u8; 32],
-        transaction: &[u8],
     ) -> Result<DomClaimAdmission, Self::Error>;
 }
 
@@ -48,16 +47,15 @@ pub struct DomClaimFn<Function>(pub Function);
 
 impl<Function, Error> DomClaimPort for DomClaimFn<Function>
 where
-    Function: FnMut([u8; 32], &[u8]) -> Result<DomClaimAdmission, Error>,
+    Function: FnMut([u8; 32]) -> Result<DomClaimAdmission, Error>,
 {
     type Error = Error;
 
-    fn submit_exact_claim(
+    fn submit_bound_claim(
         &mut self,
         expected_transaction_id: [u8; 32],
-        transaction: &[u8],
     ) -> Result<DomClaimAdmission, Self::Error> {
-        (self.0)(expected_transaction_id, transaction)
+        (self.0)(expected_transaction_id)
     }
 }
 
@@ -98,6 +96,39 @@ where
         expected: Option<XmrPreparedIdentity>,
     ) -> Result<XmrPreparedPayment, Self::Error> {
         (self.0)(expected_payment_intent, expected)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XmrDaemonAdmission {
+    pub transaction_id: [u8; 32],
+}
+
+pub trait XmrSubmissionPort {
+    type Error;
+
+    /// Submit the exact signed bytes already persisted by the authority.
+    fn submit_exact_payment(
+        &mut self,
+        expected_transaction_id: [u8; 32],
+        transaction: &[u8],
+    ) -> Result<XmrDaemonAdmission, Self::Error>;
+}
+
+pub struct XmrSubmissionFn<Function>(pub Function);
+
+impl<Function, Error> XmrSubmissionPort for XmrSubmissionFn<Function>
+where
+    Function: FnMut([u8; 32], &[u8]) -> Result<XmrDaemonAdmission, Error>,
+{
+    type Error = Error;
+
+    fn submit_exact_payment(
+        &mut self,
+        expected_transaction_id: [u8; 32],
+        transaction: &[u8],
+    ) -> Result<XmrDaemonAdmission, Self::Error> {
+        (self.0)(expected_transaction_id, transaction)
     }
 }
 
@@ -198,7 +229,6 @@ impl FastHandoffAuthority {
     /// failure resumes from `DomClaimExposed` and resubmits the same bytes.
     pub fn admit_dom_claim<Port: DomClaimPort>(
         &mut self,
-        transaction: &[u8],
         target_height: u64,
         port: &mut Port,
     ) -> Result<DomClaimAdmission, FastHandoffAuthorityError<Port::Error>> {
@@ -213,7 +243,7 @@ impl FastHandoffAuthority {
             _ => return Err(FastHandoffAuthorityError::WrongPhase),
         }
         let admission = port
-            .submit_exact_claim(binding.dom_claim(), transaction)
+            .submit_bound_claim(binding.dom_claim())
             .map_err(FastHandoffAuthorityError::Port)?;
         if admission.transaction_id != binding.dom_claim() {
             return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
@@ -285,15 +315,14 @@ impl FastHandoffAuthority {
         })
     }
 
-    /// Record only an acknowledgement for the exact bytes prepared above.
-    pub fn record_xmr_daemon_admission(
+    /// Submit the exact persisted XMR bytes through the daemon port and record
+    /// only its acknowledgement. Callers cannot complete the authority by
+    /// supplying a transaction id directly.
+    pub fn submit_prepared_xmr<Port: XmrSubmissionPort>(
         &mut self,
         submission: &PreparedXmrSubmission,
-        admitted_transaction_id: [u8; 32],
-    ) -> Result<(), FastHandoffAuthorityError> {
-        if admitted_transaction_id != submission.identity.transaction_id {
-            return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
-        }
+        port: &mut Port,
+    ) -> Result<XmrDaemonAdmission, FastHandoffAuthorityError<Port::Error>> {
         let state = self.journal.state()?;
         if state.phase() != FastHandoffPhase::XmrTransactionPrepared
             || state.xmr_transaction() != Some(submission.identity.transaction_id)
@@ -301,12 +330,18 @@ impl FastHandoffAuthority {
         {
             return Err(FastHandoffAuthorityError::WrongPhase);
         }
+        let admission = port
+            .submit_exact_payment(submission.identity.transaction_id, submission.transaction())
+            .map_err(FastHandoffAuthorityError::Port)?;
+        if admission.transaction_id != submission.identity.transaction_id {
+            return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
+        }
         self.journal.record_xmr_daemon_admission(
             submission.identity.transaction_id,
             submission.identity.transaction_digest,
             observed_at()?,
         )?;
-        Ok(())
+        Ok(admission)
     }
 
     pub fn record_dom_claim_inclusion(
@@ -334,7 +369,6 @@ impl FastHandoffAuthority {
     /// RPC failure leaves `rebroadcast_required` set for the next restart.
     pub fn rebroadcast_dom_claim<Port: DomClaimPort>(
         &mut self,
-        transaction: &[u8],
         port: &mut Port,
     ) -> Result<DomClaimAdmission, FastHandoffAuthorityError<Port::Error>> {
         if !self.journal.state()?.rebroadcast_required() {
@@ -342,7 +376,7 @@ impl FastHandoffAuthority {
         }
         let expected = self.journal.binding().dom_claim();
         let admission = port
-            .submit_exact_claim(expected, transaction)
+            .submit_bound_claim(expected)
             .map_err(FastHandoffAuthorityError::Port)?;
         if admission.transaction_id != expected {
             return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
@@ -429,13 +463,11 @@ mod tests {
     impl DomClaimPort for DomPort {
         type Error = &'static str;
 
-        fn submit_exact_claim(
+        fn submit_bound_claim(
             &mut self,
             expected_transaction_id: [u8; 32],
-            transaction: &[u8],
         ) -> Result<DomClaimAdmission, Self::Error> {
             self.calls += 1;
-            assert_eq!(transaction, b"exact DOM claim");
             if self.fail {
                 return Err("DOM unavailable");
             }
@@ -446,6 +478,29 @@ mod tests {
                     expected_transaction_id
                 },
                 daemon_next_height: 95,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct XmrSubmitPort {
+        calls: usize,
+        wrong_id: bool,
+    }
+
+    impl XmrSubmissionPort for XmrSubmitPort {
+        type Error = &'static str;
+
+        fn submit_exact_payment(
+            &mut self,
+            expected_transaction_id: [u8; 32],
+            transaction: &[u8],
+        ) -> Result<XmrDaemonAdmission, Self::Error> {
+            self.calls += 1;
+            assert_eq!(expected_transaction_id, id(7));
+            assert_eq!(transaction, b"exact signed XMR transaction");
+            Ok(XmrDaemonAdmission {
+                transaction_id: if self.wrong_id { id(99) } else { id(7) },
             })
         }
     }
@@ -491,7 +546,7 @@ mod tests {
             ..DomPort::default()
         };
         assert!(matches!(
-            authority.admit_dom_claim(b"exact DOM claim", 95, &mut dom),
+            authority.admit_dom_claim(95, &mut dom),
             Err(FastHandoffAuthorityError::Port("DOM unavailable"))
         ));
         assert_eq!(
@@ -502,9 +557,7 @@ mod tests {
 
         dom.fail = false;
         let mut authority = FastHandoffAuthority::open(&path, binding).unwrap();
-        authority
-            .admit_dom_claim(b"exact DOM claim", 95, &mut dom)
-            .unwrap();
+        authority.admit_dom_claim(95, &mut dom).unwrap();
         authority.commit_xmr_release().unwrap();
         let mut premature_xmr = XmrPort::default();
         assert!(matches!(
@@ -530,12 +583,14 @@ mod tests {
         let restored = authority.prepare_committed_xmr(&mut xmr).unwrap();
         assert_eq!(restored.identity(), submission.identity());
         assert_eq!(restored.transaction(), submission.transaction());
+        let mut submit = XmrSubmitPort::default();
         authority
-            .record_xmr_daemon_admission(&restored, id(7))
+            .submit_prepared_xmr(&restored, &mut submit)
             .unwrap();
         assert!(authority.journal().completed().unwrap());
         assert_eq!(dom.calls, 2);
         assert_eq!(xmr.calls, 2);
+        assert_eq!(submit.calls, 1);
     }
 
     #[test]
@@ -549,10 +604,35 @@ mod tests {
             ..DomPort::default()
         };
         assert!(matches!(
-            authority.admit_dom_claim(b"exact DOM claim", 95, &mut dom),
+            authority.admit_dom_claim(95, &mut dom),
             Err(FastHandoffAuthorityError::MismatchedDaemonTransaction)
         ));
         assert!(authority.commit_xmr_release().is_err());
+    }
+
+    #[test]
+    fn mismatched_xmr_daemon_ack_never_completes() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("handoff.wal");
+        let binding = binding();
+        let mut authority = FastHandoffAuthority::create_ready(&path, binding, 2, true).unwrap();
+        let mut dom = DomPort::default();
+        authority.admit_dom_claim(95, &mut dom).unwrap();
+        authority.commit_xmr_release().unwrap();
+        drop(authority);
+        let mut authority = FastHandoffAuthority::open(&path, binding).unwrap();
+        let submission = authority
+            .prepare_committed_xmr(&mut XmrPort::default())
+            .unwrap();
+        let mut submit = XmrSubmitPort {
+            wrong_id: true,
+            ..XmrSubmitPort::default()
+        };
+        assert!(matches!(
+            authority.submit_prepared_xmr(&submission, &mut submit),
+            Err(FastHandoffAuthorityError::MismatchedDaemonTransaction)
+        ));
+        assert!(!authority.journal().completed().unwrap());
     }
 
     #[test]

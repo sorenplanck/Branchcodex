@@ -33,8 +33,8 @@ use dom_scriptless_primitives::scriptless_add_public_points;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_wallet::{Bip39Seed, Network, WalletDir};
 use dom_xmr_fast_handoff::{
-    DomClaimAdmission, DomClaimFn, FastHandoffAuthority, XmrPaymentFn, XmrPreparedIdentity,
-    XmrPreparedPayment,
+    DomClaimAdmission, DomClaimFn, FastHandoffAuthority, XmrDaemonAdmission, XmrPaymentFn,
+    XmrPreparedIdentity, XmrPreparedPayment, XmrSubmissionFn,
 };
 use dxp1_clsag_lab::{
     arbiter_pair::VerifiedArbiterSharesV1,
@@ -59,6 +59,8 @@ use rand_core::{OsRng, RngCore, SeedableRng};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use xmr_dleq_sigma::BoundCrossCurveProofV1;
+use xmr_rpc_broadcast_blocking::BlockingMoneroBroadcaster;
+use xmr_spend_port::{BroadcastAcceptance, ExactBroadcastPort};
 use zeroize::Zeroizing;
 
 const SETTLEMENT_ID: [u8; 32] = [0x72; 32];
@@ -1407,7 +1409,7 @@ async fn exercise(
     }
     // The short transport above is only a startup probe. Mining reserve
     // batches may legitimately take longer on a loaded CI runner.
-    let rpc = SimpleRequestTransport::with_custom_timeout(url, Duration::from_secs(15))
+    let rpc = SimpleRequestTransport::with_custom_timeout(url.clone(), Duration::from_secs(15))
         .await
         .unwrap();
     let info: serde_json::Value =
@@ -1739,12 +1741,12 @@ async fn exercise(
     assert_eq!(released_dom_id, prospective_dom_id);
     let settlement_admission = if let Some((authority, _, _)) = fast_authority.as_mut() {
         let mut observed_admission = None;
-        let mut port = DomClaimFn(|expected_transaction_id, transaction: &[u8]| {
+        let mut port = DomClaimFn(|expected_transaction_id| {
             assert_eq!(
-                *dom_crypto::blake2b_256(transaction).as_bytes(),
+                *dom_crypto::blake2b_256(&settlement_bytes).as_bytes(),
                 expected_transaction_id
             );
-            let admission = handle.submit_tx(transaction.to_vec()).unwrap();
+            let admission = handle.submit_tx(settlement_bytes.clone()).unwrap();
             observed_admission = Some(admission);
             Ok::<_, Infallible>(DomClaimAdmission {
                 transaction_id: admission.tx_hash,
@@ -1752,11 +1754,11 @@ async fn exercise(
             })
         });
         authority
-            .admit_dom_claim(&settlement_bytes, settlement_height, &mut port)
+            .admit_dom_claim(settlement_height, &mut port)
             .unwrap();
         observed_admission.unwrap()
     } else {
-        handle.submit_tx(settlement_bytes).unwrap()
+        handle.submit_tx(settlement_bytes.clone()).unwrap()
     };
     assert_eq!(settlement_admission.state, TxAdmissionState::New);
     if outcome.is_fast() {
@@ -1802,22 +1804,32 @@ async fn exercise(
                 .xmr_transaction_digest(),
             Some(submission.identity().transaction_digest)
         );
-        let tx_as_hex = hex(submission.transaction());
-        let response = rpc
-            .rpc_call(
-                "send_raw_transaction",
-                Some(
-                    json!({"tx_as_hex":tx_as_hex, "do_not_relay":true, "do_sanity_checks":false})
-                        .to_string(),
-                ),
-                16384,
-            )
-            .await
-            .unwrap();
-        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response["status"], "OK", "{response}");
+        let monerod_endpoint = url.clone();
+        let mut xmr_submission = XmrSubmissionFn(|expected_transaction_id, transaction: &[u8]| {
+            assert_eq!(
+                expected_transaction_id,
+                submission.identity().transaction_id
+            );
+            let acceptance = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let mut broadcaster =
+                            BlockingMoneroBroadcaster::new(monerod_endpoint.clone()).unwrap();
+                        broadcaster.submit_exact(expected_transaction_id, transaction)
+                    })
+                    .join()
+                    .unwrap()
+            });
+            assert!(matches!(
+                acceptance,
+                Ok(BroadcastAcceptance::Accepted | BroadcastAcceptance::AlreadyKnown)
+            ));
+            Ok::<_, Infallible>(XmrDaemonAdmission {
+                transaction_id: expected_transaction_id,
+            })
+        });
         authority
-            .record_xmr_daemon_admission(&submission, submission.identity().transaction_id)
+            .submit_prepared_xmr(&submission, &mut xmr_submission)
             .unwrap();
         let active_handoff_seconds = active_settlement.elapsed().as_secs_f64();
         assert!(authority.journal().completed().unwrap());
@@ -1875,12 +1887,12 @@ async fn exercise(
             assert!(authority.journal().state().unwrap().rebroadcast_required());
             assert!(authority.journal().authorize_refund(u64::MAX).is_err());
             let mut observed_readmission = None;
-            let mut rebroadcast_port = DomClaimFn(|expected_transaction_id, transaction: &[u8]| {
+            let mut rebroadcast_port = DomClaimFn(|expected_transaction_id| {
                 assert_eq!(
-                    *dom_crypto::blake2b_256(transaction).as_bytes(),
+                    *dom_crypto::blake2b_256(&settlement_bytes).as_bytes(),
                     expected_transaction_id
                 );
-                let admission = handle.submit_tx(transaction.to_vec()).unwrap();
+                let admission = handle.submit_tx(settlement_bytes.clone()).unwrap();
                 observed_readmission = Some(admission);
                 Ok::<_, Infallible>(DomClaimAdmission {
                     transaction_id: admission.tx_hash,
@@ -1888,7 +1900,7 @@ async fn exercise(
                 })
             });
             authority
-                .rebroadcast_dom_claim(&settlement.to_bytes().unwrap(), &mut rebroadcast_port)
+                .rebroadcast_dom_claim(&mut rebroadcast_port)
                 .unwrap();
             let readmission = observed_readmission.unwrap();
             assert_eq!(readmission.tx_hash, settlement_admission.tx_hash);
@@ -1954,7 +1966,7 @@ async fn exercise(
                 "dom_node":true,
                 "monerod":true,
                 "bitcoin_involved":false,
-                "product_dxf1_authority":true,
+                "dxf1_protocol_authority":true,
                 "remote_participant_servers":setup.remote_participants,
                 "authenticated_noise_transport":true,
                 "bounded_noise_handshake_and_message_deadlines":true,
@@ -1971,6 +1983,7 @@ async fn exercise(
                 "dom_claim_mempool_admitted_before_xmr_release":true,
                 "xmr_release_committed_before_rpc":true,
                 "xmr_exact_transaction_persisted_before_rpc":true,
+                "xmr_daemon_submission_enforced_by_authority":true,
                 "durable_absolute_active_deadline":true,
                 "durable_restart_before_xmr_signing":true,
                 "refund_permanently_forbidden_after_xmr_commitment":true,

@@ -1668,7 +1668,6 @@ dependencies = [
  "dom-store",
  "dom-vault",
  "dom-wallet2",
- "dom-xmr-fast-handoff",
  "ed25519-dalek",
  "evm-actuator",
  "f6-engine",

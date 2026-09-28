@@ -97,7 +97,9 @@ def one_shot(
             "/opt/dxa1/arbiter_party_proxy",
             *arguments,
         ],
-        timeout=30,
+        # Container startup and dynamic linking are preparation work outside
+        # the measured handoff. Loaded CI hosts can exceed the former 30 s.
+        timeout=60,
     )
     return result.stdout.strip()
 
@@ -448,7 +450,10 @@ def main() -> int:
             ):
                 raise RuntimeError("participant wrote a local wrapping key")
             wall = time.monotonic() - started
-            wall_limit = 180 if args.outcome == "claim" else args.timeout
+            # The DXF1 process retains its own `args.timeout` bound above.
+            # Container creation, one-shot identities, external key brokers,
+            # and post-run filesystem inspection are outside the transaction.
+            wall_limit = 180 if args.outcome == "claim" else args.timeout + 120
             if wall > wall_limit:
                 raise RuntimeError(
                     f"containerized test exceeded {wall_limit} seconds: {wall}"
@@ -463,6 +468,7 @@ def main() -> int:
                 "container_image": args.image,
                 "container_image_id": image_id,
                 "container_runner_wall_seconds": wall,
+                "container_runner_wall_budget_seconds": wall_limit,
                 "external_wrapping_key_providers": True,
                 "wrapping_keys_absent_from_participant_filesystems": True,
                 "provider_restart_requests_observed": True,

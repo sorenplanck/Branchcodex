@@ -15,9 +15,8 @@ Instrução explícita do operador, reiterada em 26/09/2026:
   O requisito esclarecido é a composição das pernas por DOM; não confundir
   essa centralidade com apenas encaminhar chamadas por um processo daemon.
   Hoje XMR usa monerod externo próprio; DOM usa DomNode local dentro do
-  executável de teste. A integração do mecanismo novo ao dom-interopd
-  (daemon de interoperabilidade) ainda não está concluída, e a composição
-  XMR↔DOM↔BTC não foi validada ponta a ponta. Não modificar as outras pernas.
+  executável de teste. Correção explícita posterior do operador: esta missão
+  não inclui integração ao `dom-interopd`. Não modificar as outras pernas.
 - Esclarecimento do operador: o protocolo completo terá pernas DOM↔Bitcoin,
   DOM↔Solana, DOM↔EVM e DOM↔Monero. A perna DOM↔Bitcoin está praticamente
   finalizada. Esta missão cuida exclusivamente da nova perna DOM↔Monero;
@@ -973,7 +972,7 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   além da hipótese a reproduz. Não alegar segurança nem meta de 2–3 minutos.
 - DXF1 é o mecanismo novo preparado após essa pesquisa. O núcleo não fica mais
   privado no laboratório: `crates/dom-xmr-fast-handoff` contém estado, journal
-  v4 e a autoridade/ports, e a feature `production` do `dom-interopd` o inclui.
+  v4 e a autoridade/ports, sem dependência do `dom-interopd` ou de outra perna.
   O laboratório reexporta o mesmo código. A autoridade grava exposição DOM
   antes do RPC, exige reabertura após o compromisso XMR, grava txid e SHA-256
   dos bytes XMR assinados antes do RPC e exige restauração byte a byte; reorg
@@ -981,11 +980,15 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   O início absoluto dos 180 s fica no binding durável; a autoridade lê o
   relógio, conserva observações não decrescentes no journal e falha fechado em
   restart vencido ou recuo do relógio, sem aceitar um contador reiniciado.
-  Teste local financiado com reorg e prazo absoluto passou em 17,463 s ativos /
-  163,068 s total. Três contêineres isolados passaram em 17,110 s ativos /
-  158,958 s protocolo / 206,892 s runner, com namespaces, estados e wrapping
+  O DXF1 agora também possui o port de submissão XMR: somente a autoridade
+  chama o `monerod` com os bytes persistidos; o coordenador não pode registrar
+  uma admissão fornecendo apenas um txid. Os construtores e escritores do
+  journal são privados ao crate; fora dele, o journal é somente leitura.
+  Resposta divergente falha fechado.
+  Teste local financiado com reorg passou em 17,073 s ativos / 169,193 s total.
+  Três contêineres isolados passaram em 16,696 s ativos / 148,253 s protocolo /
+  187,471 s runner, com namespaces, estados e wrapping
   keys separados. Limite
   condicional atual: Claim em até 57 blocos e seis confirmações antes da altura
-  de Refund. Falta ligar adapters concretos ao loop principal do processo
-  `dom-interopd`, testar três hosts físicos e coordenar ativação pública; não
+  de Refund. Falta testar três hosts físicos e coordenar ativação pública; não
   declarar produção ou finalidade PoW em segundos.

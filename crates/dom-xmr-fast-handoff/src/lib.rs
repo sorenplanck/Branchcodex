@@ -13,7 +13,8 @@ pub mod state;
 
 pub use authority::{
     DomClaimAdmission, DomClaimFn, DomClaimPort, FastHandoffAuthority, FastHandoffAuthorityError,
-    PreparedXmrSubmission, XmrPaymentFn, XmrPaymentPort, XmrPreparedIdentity, XmrPreparedPayment,
+    PreparedXmrSubmission, XmrDaemonAdmission, XmrPaymentFn, XmrPaymentPort, XmrPreparedIdentity,
+    XmrPreparedPayment, XmrSubmissionFn, XmrSubmissionPort,
 };
 pub use journal::{FastHandoffJournal, FastHandoffJournalError};
 pub use state::{

@@ -223,7 +223,7 @@ fn apply(state: &mut FastHandoff, event: &[u8]) -> Result<(), FastHandoffError> 
 }
 
 impl FastHandoffJournal {
-    pub fn create(
+    pub(crate) fn create(
         path: &Path,
         binding: FastHandoffBinding,
     ) -> Result<Self, FastHandoffJournalError> {
@@ -241,7 +241,10 @@ impl FastHandoffJournal {
         })
     }
 
-    pub fn open(path: &Path, binding: FastHandoffBinding) -> Result<Self, FastHandoffJournalError> {
+    pub(crate) fn open(
+        path: &Path,
+        binding: FastHandoffBinding,
+    ) -> Result<Self, FastHandoffJournalError> {
         let header = header(binding);
         let mut file = open_file(path, false)?;
         let mut bytes = Vec::new();
@@ -309,7 +312,7 @@ impl FastHandoffJournal {
         Ok(())
     }
 
-    pub fn record_ready(
+    pub(crate) fn record_ready(
         &mut self,
         funding: [u8; 32],
         confirmations: u64,
@@ -324,7 +327,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_dom_claim_exposure(
+    pub(crate) fn record_dom_claim_exposure(
         &mut self,
         claim: [u8; 32],
         target: u64,
@@ -337,7 +340,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_dom_daemon_admission(
+    pub(crate) fn record_dom_daemon_admission(
         &mut self,
         claim: [u8; 32],
         next_height: u64,
@@ -350,7 +353,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_xmr_release_commitment(
+    pub(crate) fn record_xmr_release_commitment(
         &mut self,
         payment: [u8; 32],
         elapsed: u64,
@@ -361,7 +364,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_xmr_transaction_prepared(
+    pub(crate) fn record_xmr_transaction_prepared(
         &mut self,
         intent: [u8; 32],
         transaction: [u8; 32],
@@ -376,7 +379,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_xmr_daemon_admission(
+    pub(crate) fn record_xmr_daemon_admission(
         &mut self,
         transaction: [u8; 32],
         transaction_digest: [u8; 32],
@@ -389,7 +392,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_dom_claim_inclusion(
+    pub(crate) fn record_dom_claim_inclusion(
         &mut self,
         claim: [u8; 32],
         height: u64,
@@ -402,7 +405,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_dom_claim_reorg(
+    pub(crate) fn record_dom_claim_reorg(
         &mut self,
         claim: [u8; 32],
         orphaned_block: [u8; 32],
@@ -413,7 +416,7 @@ impl FastHandoffJournal {
         self.append(event)
     }
 
-    pub fn record_dom_claim_finality(
+    pub(crate) fn record_dom_claim_finality(
         &mut self,
         claim: [u8; 32],
         inclusion_height: u64,
