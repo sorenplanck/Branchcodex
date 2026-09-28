@@ -126,6 +126,25 @@ const PLACEHOLDER_DOMAIN: &[u8] = b"DOM-SOLANA-DAEMON-ROUTE/PLACEHOLDER-PIN/V1\0
 /// Deterministic so two runs produce the same manifest; label-distinct because the
 /// daemon refuses several of these fields for being equal to each other, and a
 /// refusal caused by two placeholders colliding would say nothing about the route.
+/// The Relay database ids this manifest declares, as one source.
+///
+/// The network sidecar a run reads must name the SAME ids the manifest pins: the daemon
+/// validates the two remote ids against `remote_relay_database_ids` and the local one
+/// against `relay_authority_pins_v6`, and refuses the pair otherwise. Computing them twice
+/// is how the two drift apart, so both the manifest above and any sidecar written beside it
+/// read them from here.
+///
+/// Returned as `(local, [upstream_remote, downstream_remote])`.
+pub fn relay_database_ids() -> ([u8; 32], [[u8; 32]; 2]) {
+    (
+        placeholder("relay-database"),
+        [
+            placeholder("upstream-remote-relay-database"),
+            placeholder("downstream-remote-relay-database"),
+        ],
+    )
+}
+
 fn placeholder(label: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(PLACEHOLDER_DOMAIN);
@@ -706,7 +725,7 @@ impl SolanaRouteBootstrapPlanV1 {
 
     fn relay_pins() -> ProductionRelayAuthorityPinsV6 {
         ProductionRelayAuthorityPinsV6 {
-            relay_database_id: placeholder("relay-database"),
+            relay_database_id: relay_database_ids().0,
             upstream_sender_store_id: placeholder("upstream-sender-store"),
             upstream_inbox_id: placeholder("upstream-inbox"),
             upstream_reassembler_id: placeholder("upstream-reassembler"),
@@ -801,10 +820,7 @@ impl SolanaRouteBootstrapPlanV1 {
                 .f6_authority_bundle
                 .unwrap_or_else(|| placeholder("f6-authority-bundle")),
             refund_arming_authority_epoch: 1,
-            remote_relay_database_ids: [
-                placeholder("upstream-remote-relay-database"),
-                placeholder("downstream-remote-relay-database"),
-            ],
+            remote_relay_database_ids: relay_database_ids().1,
             shared_relay_peer_v23: false,
             legs: self.legs(),
         })
