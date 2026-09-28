@@ -20,6 +20,7 @@ REQUIRED_TRUE = (
     "prepared_dom_reserve",
     "prepared_mature_xmr_reserve",
     "dom_claim_mempool_admitted_before_xmr_release",
+    "dom_daemon_observation_enforced_by_authority",
     "xmr_release_committed_before_rpc",
     "xmr_exact_transaction_persisted_before_rpc",
     "xmr_daemon_submission_enforced_by_authority",

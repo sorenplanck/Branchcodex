@@ -237,9 +237,12 @@ disco a admissão. O broadcaster e a autoridade verificam o prazo depois das
 chamadas de rede e uma resposta tardia não conclui o journal. O ensaio
 financiado `fast-reorg` agora aceita a transação no `monerod`, perde a primeira
 resposta de propósito, reinicia a autoridade, restaura os mesmos bytes e
-conclui pelo reconhecimento `AlreadyKnown`, sem reabrir Refund. Junto ao reorg
-DOM, passou com **17,206 s** de handoff ativo e **152,600 s** no fixture
-completo; o tempo total inclui preparação e maturação das reservas em Regtest.
+conclui pelo reconhecimento `AlreadyKnown`, sem reabrir Refund. Inclusão, reorg
+e finalidade DOM só podem entrar na autoridade por um port de observação do
+daemon; o coordenador não possui escritores públicos dessas transições. Junto
+ao reorg DOM, passou com **16,872 s** de handoff ativo e **147,135 s** no
+fixture completo; o tempo total inclui preparação e maturação das reservas em
+Regtest.
 
 DXF1 não declara mempool como finalidade. Ele vincula uma hipótese de inclusão
 DOM de no máximo 57 blocos, exige que essa margem termine antes da primeira
@@ -247,7 +250,7 @@ altura de Refund com espaço para seis confirmações e proíbe Refund
 permanentemente depois do compromisso XMR. Um reorg restaura apenas a obrigação
 de republicar o mesmo Claim. O ensaio concorrente retirou o Claim já incluído
 depois do compromisso XMR, confirmou que Refund continuava proibido, republicou
-a transação byte a byte e alcançou as seis confirmações exigidas. O journal v2
+a transação byte a byte e alcançou as seis confirmações exigidas. O journal v4
 liga cada transição ao hash canônico observado: bloco órfão, nova inclusão e
 ponta de confirmação precisam formar a sequência esperada. Se mineradores
 censurarem o Claim além do limite ou

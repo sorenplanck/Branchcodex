@@ -87,6 +87,58 @@ where
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DomClaimCanonicalObservation {
+    Absent {
+        daemon_next_height: u64,
+    },
+    Included {
+        height: u64,
+        canonical_block: [u8; 32],
+        tip_height: u64,
+        tip_block: [u8; 32],
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DomClaimObservation {
+    pub transaction_id: [u8; 32],
+    pub canonical: DomClaimCanonicalObservation,
+}
+
+pub trait DomClaimObservationPort {
+    type Error;
+
+    /// Observe the exact bound Claim through a canonical DOM daemon view.
+    fn observe_bound_claim(
+        &mut self,
+        expected_transaction_id: [u8; 32],
+    ) -> Result<DomClaimObservation, Self::Error>;
+}
+
+pub struct DomClaimObservationFn<Function>(pub Function);
+
+impl<Function, Error> DomClaimObservationPort for DomClaimObservationFn<Function>
+where
+    Function: FnMut([u8; 32]) -> Result<DomClaimObservation, Error>,
+{
+    type Error = Error;
+
+    fn observe_bound_claim(
+        &mut self,
+        expected_transaction_id: [u8; 32],
+    ) -> Result<DomClaimObservation, Self::Error> {
+        (self.0)(expected_transaction_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DomClaimRecovery {
+    RebroadcastRequired { daemon_next_height: u64 },
+    Included { height: u64, confirmations: u64 },
+    Finalized { height: u64, confirmations: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct XmrPreparedIdentity {
     pub transaction_id: [u8; 32],
     pub transaction_digest: [u8; 32],
@@ -384,24 +436,110 @@ impl FastHandoffAuthority {
         Ok(admission)
     }
 
-    pub fn record_dom_claim_inclusion(
+    /// Reconcile canonical Claim state through a daemon-owned observation port.
+    /// Callers cannot record inclusion, reorg, or finality directly.
+    pub fn reconcile_dom_claim<Port: DomClaimObservationPort>(
         &mut self,
-        height: u64,
-        canonical_block: [u8; 32],
-    ) -> Result<(), FastHandoffJournalError> {
-        self.journal.record_dom_claim_inclusion(
-            self.journal.binding().dom_claim(),
-            height,
-            canonical_block,
-        )
-    }
-
-    pub fn record_dom_claim_reorg(
-        &mut self,
-        orphaned_block: [u8; 32],
-    ) -> Result<(), FastHandoffJournalError> {
-        self.journal
-            .record_dom_claim_reorg(self.journal.binding().dom_claim(), orphaned_block)
+        port: &mut Port,
+    ) -> Result<DomClaimRecovery, FastHandoffAuthorityError<Port::Error>> {
+        let expected = self.journal.binding().dom_claim();
+        let observation = port
+            .observe_bound_claim(expected)
+            .map_err(FastHandoffAuthorityError::Port)?;
+        if observation.transaction_id != expected {
+            return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
+        }
+        let state = self.journal.state()?;
+        match observation.canonical {
+            DomClaimCanonicalObservation::Absent { daemon_next_height } => {
+                let latest = state
+                    .latest_assumed_claim_height()
+                    .ok_or(FastHandoffAuthorityError::WrongPhase)?;
+                if daemon_next_height > latest {
+                    return Err(FastHandoffJournalError::Denied(
+                        FastHandoffError::ClaimMarginExhausted,
+                    )
+                    .into());
+                }
+                if let Some(orphaned) = state.dom_claim_canonical_block() {
+                    self.journal.record_dom_claim_reorg(expected, orphaned)?;
+                }
+                if !self.journal.state()?.rebroadcast_required() {
+                    return Err(FastHandoffAuthorityError::WrongPhase);
+                }
+                Ok(DomClaimRecovery::RebroadcastRequired { daemon_next_height })
+            }
+            DomClaimCanonicalObservation::Included {
+                height,
+                canonical_block,
+                tip_height,
+                tip_block,
+            } => {
+                if canonical_block == [0; 32]
+                    || tip_block == [0; 32]
+                    || (tip_height == height && tip_block != canonical_block)
+                {
+                    return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
+                }
+                let confirmations = tip_height
+                    .checked_sub(height)
+                    .and_then(|depth| depth.checked_add(1))
+                    .ok_or(FastHandoffAuthorityError::MismatchedDaemonTransaction)?;
+                let latest = state
+                    .latest_assumed_claim_height()
+                    .ok_or(FastHandoffAuthorityError::WrongPhase)?;
+                if height > latest
+                    || (!state.dom_claim_finalized()
+                        && tip_height > self.journal.binding().policy().claim_until())
+                {
+                    return Err(FastHandoffJournalError::Denied(
+                        FastHandoffError::ClaimMarginExhausted,
+                    )
+                    .into());
+                }
+                if let Some(current) = state.dom_claim_canonical_block() {
+                    if current != canonical_block {
+                        self.journal.record_dom_claim_reorg(expected, current)?;
+                    } else if state.dom_claim_canonical_height() != Some(height) {
+                        return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
+                    }
+                }
+                if self.journal.state()?.dom_claim_canonical_block().is_none() {
+                    self.journal
+                        .record_dom_claim_inclusion(expected, height, canonical_block)?;
+                }
+                let state = self.journal.state()?;
+                if state.dom_claim_finalized() {
+                    return Ok(DomClaimRecovery::Finalized {
+                        height,
+                        confirmations,
+                    });
+                }
+                if confirmations
+                    < self
+                        .journal
+                        .binding()
+                        .policy()
+                        .minimum_dom_claim_confirmations()
+                {
+                    return Ok(DomClaimRecovery::Included {
+                        height,
+                        confirmations,
+                    });
+                }
+                self.journal.record_dom_claim_finality(
+                    expected,
+                    height,
+                    canonical_block,
+                    tip_height,
+                    tip_block,
+                )?;
+                Ok(DomClaimRecovery::Finalized {
+                    height,
+                    confirmations,
+                })
+            }
+        }
     }
 
     /// Re-submit the same bound Claim when canonical monitoring marked it as
@@ -422,22 +560,6 @@ impl FastHandoffAuthority {
             return Err(FastHandoffAuthorityError::MismatchedDaemonTransaction);
         }
         Ok(admission)
-    }
-
-    pub fn record_dom_claim_finality(
-        &mut self,
-        inclusion_height: u64,
-        inclusion_block: [u8; 32],
-        tip_height: u64,
-        tip_block: [u8; 32],
-    ) -> Result<(), FastHandoffJournalError> {
-        self.journal.record_dom_claim_finality(
-            self.journal.binding().dom_claim(),
-            inclusion_height,
-            inclusion_block,
-            tip_height,
-            tip_block,
-        )
     }
 }
 
@@ -519,6 +641,24 @@ mod tests {
                 },
                 daemon_next_height: 95,
             })
+        }
+    }
+
+    struct DomObservationPort {
+        calls: usize,
+        observation: DomClaimObservation,
+    }
+
+    impl DomClaimObservationPort for DomObservationPort {
+        type Error = &'static str;
+
+        fn observe_bound_claim(
+            &mut self,
+            expected_transaction_id: [u8; 32],
+        ) -> Result<DomClaimObservation, Self::Error> {
+            self.calls += 1;
+            assert_eq!(expected_transaction_id, id(5));
+            Ok(self.observation)
         }
     }
 
@@ -731,6 +871,183 @@ mod tests {
         assert_eq!(reconciled.submitted, vec![prepared.transaction().to_vec()]);
         assert!(authority.journal().completed().unwrap());
         assert_eq!(payment.calls, 2);
+    }
+
+    #[test]
+    fn daemon_observation_drives_reorg_rebroadcast_and_finality() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("handoff.wal");
+        let binding = binding();
+        let mut authority = FastHandoffAuthority::create_ready(&path, binding, 2, true).unwrap();
+        authority
+            .admit_dom_claim(95, &mut DomPort::default())
+            .unwrap();
+
+        let mut first_inclusion = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(5),
+                canonical: DomClaimCanonicalObservation::Included {
+                    height: 96,
+                    canonical_block: id(8),
+                    tip_height: 96,
+                    tip_block: id(8),
+                },
+            },
+        };
+        assert_eq!(
+            authority.reconcile_dom_claim(&mut first_inclusion).unwrap(),
+            DomClaimRecovery::Included {
+                height: 96,
+                confirmations: 1
+            }
+        );
+        assert_eq!(first_inclusion.calls, 1);
+
+        let mut absent_after_reorg = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(5),
+                canonical: DomClaimCanonicalObservation::Absent {
+                    daemon_next_height: 97,
+                },
+            },
+        };
+        assert_eq!(
+            authority
+                .reconcile_dom_claim(&mut absent_after_reorg)
+                .unwrap(),
+            DomClaimRecovery::RebroadcastRequired {
+                daemon_next_height: 97
+            }
+        );
+        assert_eq!(
+            authority
+                .journal()
+                .state()
+                .unwrap()
+                .dom_claim_canonical_block(),
+            None
+        );
+        authority
+            .rebroadcast_dom_claim(&mut DomPort::default())
+            .unwrap();
+
+        let mut final_inclusion = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(5),
+                canonical: DomClaimCanonicalObservation::Included {
+                    height: 96,
+                    canonical_block: id(9),
+                    tip_height: 97,
+                    tip_block: id(10),
+                },
+            },
+        };
+        assert_eq!(
+            authority.reconcile_dom_claim(&mut final_inclusion).unwrap(),
+            DomClaimRecovery::Finalized {
+                height: 96,
+                confirmations: 2
+            }
+        );
+        let state = authority.journal().state().unwrap();
+        assert!(state.dom_claim_finalized());
+        assert_eq!(state.dom_claim_canonical_block(), Some(id(9)));
+        assert_eq!(state.dom_claim_finality_tip(), Some(id(10)));
+    }
+
+    #[test]
+    fn daemon_observation_cannot_substitute_claim_or_exhausted_height() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("handoff.wal");
+        let binding = binding();
+        let mut authority = FastHandoffAuthority::create_ready(&path, binding, 2, true).unwrap();
+        authority
+            .admit_dom_claim(95, &mut DomPort::default())
+            .unwrap();
+        let mut substituted = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(99),
+                canonical: DomClaimCanonicalObservation::Absent {
+                    daemon_next_height: 96,
+                },
+            },
+        };
+        assert!(matches!(
+            authority.reconcile_dom_claim(&mut substituted),
+            Err(FastHandoffAuthorityError::MismatchedDaemonTransaction)
+        ));
+
+        let mut malformed = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(5),
+                canonical: DomClaimCanonicalObservation::Included {
+                    height: 96,
+                    canonical_block: id(8),
+                    tip_height: 96,
+                    tip_block: id(9),
+                },
+            },
+        };
+        assert!(matches!(
+            authority.reconcile_dom_claim(&mut malformed),
+            Err(FastHandoffAuthorityError::MismatchedDaemonTransaction)
+        ));
+        assert_eq!(
+            authority
+                .journal()
+                .state()
+                .unwrap()
+                .dom_claim_canonical_block(),
+            None
+        );
+
+        let mut late_inclusion = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(5),
+                canonical: DomClaimCanonicalObservation::Included {
+                    height: 98,
+                    canonical_block: id(8),
+                    tip_height: 98,
+                    tip_block: id(8),
+                },
+            },
+        };
+        assert!(matches!(
+            authority.reconcile_dom_claim(&mut late_inclusion),
+            Err(FastHandoffAuthorityError::Journal(
+                FastHandoffJournalError::Denied(FastHandoffError::ClaimMarginExhausted)
+            ))
+        ));
+        assert_eq!(
+            authority
+                .journal()
+                .state()
+                .unwrap()
+                .dom_claim_canonical_block(),
+            None
+        );
+
+        let mut exhausted = DomObservationPort {
+            calls: 0,
+            observation: DomClaimObservation {
+                transaction_id: id(5),
+                canonical: DomClaimCanonicalObservation::Absent {
+                    daemon_next_height: 98,
+                },
+            },
+        };
+        assert!(matches!(
+            authority.reconcile_dom_claim(&mut exhausted),
+            Err(FastHandoffAuthorityError::Journal(
+                FastHandoffJournalError::Denied(FastHandoffError::ClaimMarginExhausted)
+            ))
+        ));
     }
 
     #[test]

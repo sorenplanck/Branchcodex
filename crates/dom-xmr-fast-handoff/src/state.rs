@@ -284,6 +284,10 @@ impl FastHandoff {
         self.dom_claim_canonical_block
     }
 
+    pub const fn dom_claim_canonical_height(self) -> Option<u64> {
+        self.dom_claim_canonical_height
+    }
+
     pub const fn dom_claim_finality_tip(self) -> Option<[u8; 32]> {
         self.dom_claim_finality_tip
     }

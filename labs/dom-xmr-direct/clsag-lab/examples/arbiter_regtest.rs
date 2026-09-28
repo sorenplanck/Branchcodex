@@ -33,7 +33,8 @@ use dom_scriptless_primitives::scriptless_add_public_points;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_wallet::{Bip39Seed, Network, WalletDir};
 use dom_xmr_fast_handoff::{
-    DomClaimAdmission, DomClaimFn, FastHandoffAuthority, FastHandoffAuthorityError,
+    DomClaimAdmission, DomClaimCanonicalObservation, DomClaimFn, DomClaimObservation,
+    DomClaimObservationFn, DomClaimRecovery, FastHandoffAuthority, FastHandoffAuthorityError,
     FastHandoffPhase, XmrDaemonAdmission, XmrPaymentFn, XmrPreparedIdentity, XmrPreparedPayment,
     XmrSubmissionFn,
 };
@@ -1914,9 +1915,26 @@ async fn exercise(
         let observed = observed_transaction(&setup, settlement_height, &settlement).await;
         assert_eq!(observed, settlement);
         let initial_claim_block = handle.get_block_hash_at_height(settlement_height).unwrap();
-        authority
-            .record_dom_claim_inclusion(settlement_height, initial_claim_block)
-            .unwrap();
+        let mut initial_observation = DomClaimObservationFn(|expected_transaction_id| {
+            Ok::<_, Infallible>(DomClaimObservation {
+                transaction_id: expected_transaction_id,
+                canonical: DomClaimCanonicalObservation::Included {
+                    height: settlement_height,
+                    canonical_block: initial_claim_block,
+                    tip_height: settlement_height,
+                    tip_block: initial_claim_block,
+                },
+            })
+        });
+        assert_eq!(
+            authority
+                .reconcile_dom_claim(&mut initial_observation)
+                .unwrap(),
+            DomClaimRecovery::Included {
+                height: settlement_height,
+                confirmations: 1,
+            }
+        );
         let mut recovery_inclusion_height = settlement_height;
         let mut recovery_inclusion_block = initial_claim_block;
         let mut orphaned_claim_block = None;
@@ -1950,9 +1968,20 @@ async fn exercise(
                 .transactions
                 .iter()
                 .any(|transaction| transaction == &settlement));
-            authority
-                .record_dom_claim_reorg(original_claim_block)
-                .unwrap();
+            let mut absent_observation = DomClaimObservationFn(|expected_transaction_id| {
+                Ok::<_, Infallible>(DomClaimObservation {
+                    transaction_id: expected_transaction_id,
+                    canonical: DomClaimCanonicalObservation::Absent {
+                        daemon_next_height: handle.chain_height() + 1,
+                    },
+                })
+            });
+            assert!(matches!(
+                authority
+                    .reconcile_dom_claim(&mut absent_observation)
+                    .unwrap(),
+                DomClaimRecovery::RebroadcastRequired { .. }
+            ));
             orphaned_claim_block = Some(original_claim_block);
             assert!(authority.journal().state().unwrap().rebroadcast_required());
             assert!(authority.journal().authorize_refund(u64::MAX).is_err());
@@ -1988,9 +2017,26 @@ async fn exercise(
                 observed_transaction(&setup, recovery_inclusion_height, &settlement).await,
                 settlement
             );
-            authority
-                .record_dom_claim_inclusion(recovery_inclusion_height, recovery_inclusion_block)
-                .unwrap();
+            let mut recovery_observation = DomClaimObservationFn(|expected_transaction_id| {
+                Ok::<_, Infallible>(DomClaimObservation {
+                    transaction_id: expected_transaction_id,
+                    canonical: DomClaimCanonicalObservation::Included {
+                        height: recovery_inclusion_height,
+                        canonical_block: recovery_inclusion_block,
+                        tip_height: recovery_inclusion_height,
+                        tip_block: recovery_inclusion_block,
+                    },
+                })
+            });
+            assert_eq!(
+                authority
+                    .reconcile_dom_claim(&mut recovery_observation)
+                    .unwrap(),
+                DomClaimRecovery::Included {
+                    height: recovery_inclusion_height,
+                    confirmations: 1,
+                }
+            );
         }
         let mut dom_finality_height = recovery_inclusion_height;
         for _ in 1..binding.policy().minimum_dom_claim_confirmations() {
@@ -1999,14 +2045,26 @@ async fn exercise(
         let dom_finality_block = handle
             .get_block_hash_at_height(dom_finality_height)
             .unwrap();
-        authority
-            .record_dom_claim_finality(
-                recovery_inclusion_height,
-                recovery_inclusion_block,
-                dom_finality_height,
-                dom_finality_block,
-            )
-            .unwrap();
+        let mut final_observation = DomClaimObservationFn(|expected_transaction_id| {
+            Ok::<_, Infallible>(DomClaimObservation {
+                transaction_id: expected_transaction_id,
+                canonical: DomClaimCanonicalObservation::Included {
+                    height: recovery_inclusion_height,
+                    canonical_block: recovery_inclusion_block,
+                    tip_height: dom_finality_height,
+                    tip_block: dom_finality_block,
+                },
+            })
+        });
+        assert_eq!(
+            authority
+                .reconcile_dom_claim(&mut final_observation)
+                .unwrap(),
+            DomClaimRecovery::Finalized {
+                height: recovery_inclusion_height,
+                confirmations: binding.policy().minimum_dom_claim_confirmations(),
+            }
+        );
         let (blocks, _) = rpc.generate_blocks(&recipient_address, 1).await.unwrap();
         let payment_block = rpc.scannable_block(blocks[0]).await.unwrap();
         assert!(payment_block
@@ -2051,6 +2109,7 @@ async fn exercise(
                 "prepared_dom_reserve":true,
                 "prepared_mature_xmr_reserve":true,
                 "dom_claim_mempool_admitted_before_xmr_release":true,
+                "dom_daemon_observation_enforced_by_authority":true,
                 "xmr_release_committed_before_rpc":true,
                 "xmr_exact_transaction_persisted_before_rpc":true,
                 "xmr_daemon_submission_enforced_by_authority":true,

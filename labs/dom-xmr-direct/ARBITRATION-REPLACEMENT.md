@@ -205,9 +205,11 @@ em disco. O cliente Monero conserva esse limite durante verificação, envio e
 reconciliação, e uma resposta posterior ao deadline não conclui o journal. O
 ensaio financiado `fast-reorg` aceita a transação no `monerod`, perde a primeira
 resposta de propósito, reinicia a autoridade, restaura os mesmos bytes e
-conclui por `AlreadyKnown`, sem reabrir Refund. Junto ao reorg DOM, passou em
-17,206 s de handoff ativo e 152,600 s no fixture completo, incluindo preparação
-e maturação das reservas em Regtest.
+conclui por `AlreadyKnown`, sem reabrir Refund. Inclusão, reorg e finalidade DOM
+só entram por um port de observação do daemon; o coordenador não possui
+escritores públicos dessas transições. Junto ao reorg DOM, passou em 16,872 s
+de handoff ativo e 147,135 s no fixture completo, incluindo preparação e
+maturação das reservas em Regtest.
 
 A segurança continua tendo uma premissa explícita: o Claim deve ser incluído
 em até 57 blocos e acumular seis confirmações ainda dentro de sua fase

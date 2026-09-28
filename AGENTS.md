@@ -990,8 +990,10 @@ inclusive controle de escopo, verificações finais e identidade de publicação
   a admissão, e resposta tardia não conclui o journal. O cenário financiado
   agora perde de propósito a primeira resposta depois da aceitação pelo
   `monerod`, reinicia a autoridade, restaura os mesmos bytes e conclui por
-  `AlreadyKnown`, sem reabrir Refund. Com essa recuperação e o reorg DOM, passou
-  em 17,206 s ativos / 152,600 s total.
+  `AlreadyKnown`, sem reabrir Refund. Inclusão, reorg e finalidade DOM agora só
+  entram por um port de observação do daemon; não há escritores públicos para o
+  coordenador. Com essas recuperações, passou em 16,872 s ativos / 147,135 s
+  total.
   Três contêineres isolados passaram em 21,400 s ativos / 174,060 s protocolo /
   210,464 s runner, com namespaces, estados e wrapping
   keys separados. Limite

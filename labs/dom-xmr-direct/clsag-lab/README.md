@@ -54,9 +54,11 @@ reservado para validar e sincronizar a admissão. O broadcaster conserva o mesmo
 corte durante verificação, submissão e reconciliação, e uma resposta tardia não
 conclui o journal. O ensaio financiado `fast-reorg` aceita a transação no
 `monerod`, perde a primeira resposta de propósito, reinicia a autoridade,
-restaura os mesmos bytes e conclui por `AlreadyKnown`, sem reabrir Refund. Junto
-ao reorg DOM, passou em **17,206 s** de handoff ativo e **152,600 s** no fixture
-completo, que inclui preparação e maturação das reservas em Regtest.
+restaura os mesmos bytes e conclui por `AlreadyKnown`, sem reabrir Refund.
+Inclusão, reorg e finalidade DOM só entram por um port de observação do daemon;
+o coordenador não possui escritores públicos dessas transições. Junto ao reorg
+DOM, passou em **16,872 s** de handoff ativo e **147,135 s** no fixture completo,
+que inclui preparação e maturação das reservas em Regtest.
 Ainda falta executá-lo em três hosts físicos.
 Os testes são:
 
