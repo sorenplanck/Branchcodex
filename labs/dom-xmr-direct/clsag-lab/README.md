@@ -118,6 +118,14 @@ reconexão dos dois participantes, usando servidores independentes em loopback.
 O procedimento para repetir em máquinas distintas está em
 [`REMOTE-REGTEST.md`](REMOTE-REGTEST.md).
 
+O mesmo limite remoto agora cobre o DXF1. O runner
+`scripts/test_fast_handoff_remote.py` mantém as shares em dois servidores
+persistentes, executa o reorg depois do compromisso XMR e exige que ambos
+continuem vivos. O ensaio passou em **16,98 s** de handoff ativo e **159,80 s**
+no total, com hashes distintos para bloco órfão, reinclusão e ponta final. Os
+endpoints usados nessa execução estavam no mesmo host; o roteiro de três hosts
+usa o mesmo arquivo de configuração.
+
 Após compilar o exemplo, a matriz paralela é executada assim:
 
 ```text

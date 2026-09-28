@@ -195,6 +195,12 @@ hash trocado ou evento repetido falha fechado. Censura além do limite ou reorg
 posterior à profundidade adotada viola a hipótese e precisa ser medido em teste
 público antes de produção.
 
+Uma campanha adicional executou o mesmo reorg DXF1 com os signers em dois
+servidores Noise persistentes. O coordenador não recebeu shares XMR nem chaves
+DOM; os servidores sobreviveram às reconexões, e o handoff ativo terminou em
+16,98 s. O teste ainda foi realizado em um único host e não substitui a campanha
+física distribuída.
+
 A construção usa uma reserva XMR com chave combinada de duas shares, sem
 devolução XMR pré-assinada que possa vencer antecipadamente. Um único
 compromisso DOM de arbitragem possui três caminhos: antes de `Ready`, o dono DOM

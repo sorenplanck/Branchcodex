@@ -114,6 +114,18 @@ jobs:
             --outcome fast-reorg \
             --evidence-file "$RUNNER_TEMP/dxf1-fast-reorg.json"
 
+      - name: Run DXF1 through persistent remote participants
+        working-directory: labs/dom-xmr-direct/clsag-lab
+        run: |
+          set -euo pipefail
+          python3 -B scripts/test_fast_handoff_remote.py \
+            --binary target/debug/examples/arbiter_regtest \
+            --party target/debug/examples/arbiter_party \
+            --proxy target/debug/examples/arbiter_party_proxy \
+            --monerod "$DXA1_MONEROD" \
+            --outcome fast-reorg \
+            --evidence-file "$RUNNER_TEMP/dxf1-fast-remote-reorg.json"
+
       - name: Run settlements and competing reorg concurrently
         working-directory: labs/dom-xmr-direct/clsag-lab
         run: |
@@ -135,5 +147,6 @@ jobs:
             ${{ runner.temp }}/dxa1-container-participants.json
             ${{ runner.temp }}/dxf1-fast-handoff.json
             ${{ runner.temp }}/dxf1-fast-reorg.json
+            ${{ runner.temp }}/dxf1-fast-remote-reorg.json
           if-no-files-found: warn
           retention-days: 14

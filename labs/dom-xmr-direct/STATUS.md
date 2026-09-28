@@ -229,6 +229,14 @@ um reorg superar a profundidade adotada, a hipótese de segurança foi violada. 
 teste real de rede precisa medir essa hipótese e manter
 monitoramento/republicação durante toda a janela.
 
+O caminho rápido também passou com os dois participantes em servidores Noise
+persistentes separados do coordenador. O reorg remoto completou o handoff ativo
+em **16,98 s** e todo o ensaio em **159,80 s**; as shares privadas permaneceram
+nos endpoints, ambos sobreviveram às reconexões e o coordenador registrou apenas
+provas, ofertas e hashes públicos. Essa execução usou interfaces distintas no
+mesmo host. A execução física em três hosts continua sendo a próxima prova
+operacional.
+
 Há também uma incompatibilidade no lado DOM que o Regtest ocultava: o alvo
 público é 120 s por bloco. A política conservadora de duas confirmações consome
 nominalmente **240 s**, antes do restante do protocolo, e portanto não cabe em

@@ -1,7 +1,7 @@
 # Participantes DOM↔XMR em hosts separados — Regtest
 
-Este roteiro executa somente a perna DOM↔XMR do candidato DXA1. BTC não
-participa. Os comandos usam Regtest, moedas sem valor e os identificadores
+Este roteiro executa somente a perna DOM↔XMR dos candidatos DXA1 e DXF1. BTC
+não participa. Os comandos usam Regtest, moedas sem valor e os identificadores
 fixos do exemplo; eles não ativam o candidato em uma rede pública.
 
 São necessários três hosts: coordenador, dono DOM e dono XMR. Instale em todos
@@ -98,7 +98,16 @@ DXA1_REMOTE_PARTIES=/secure/dxa1/remote-parties.json \
   ./arbiter_regtest /caminho/monerod claim
 ```
 
-O resultado final deve conter `"remote_participant_servers":true`,
+Para o mecanismo rápido novo, use `fast-reorg`. Esse caso faz o compromisso
+XMR, retira o Claim por uma cadeia DOM concorrente e exige a republicação do
+mesmo Claim sem liberar Refund:
+
+```sh
+DXA1_REMOTE_PARTIES=/secure/dxa1/remote-parties.json \
+  ./arbiter_regtest /caminho/monerod fast-reorg
+```
+
+Para o DXA1, o resultado final deve conter `"remote_participant_servers":true`,
 `"participant_restart_restored_bound_shares":true` e um tempo positivo de
 `ready_to_complete_seconds` de no máximo 180 segundos. Ele também deve registrar
 `"bounded_noise_handshake_and_message_deadlines":true`, alvo DOM de 120 s,
@@ -113,6 +122,19 @@ python3 -B scripts/test_arbiter_remote.py \
   --party target/debug/examples/arbiter_party \
   --proxy target/debug/examples/arbiter_party_proxy \
   --monerod /caminho/monerod
+```
+
+O runner específico do DXF1 também valida os hashes do bloco órfão, da nova
+inclusão e da ponta final, além da continuidade dos servidores:
+
+```sh
+python3 -B scripts/test_fast_handoff_remote.py \
+  --binary target/debug/examples/arbiter_regtest \
+  --party target/debug/examples/arbiter_party \
+  --proxy target/debug/examples/arbiter_party_proxy \
+  --monerod /caminho/monerod \
+  --outcome fast-reorg \
+  --evidence-file /caminho/novo/dxf1-fast-remote-reorg.json
 ```
 
 Se Docker estiver disponível, o ensaio mais forte coloca coordenador e os dois
