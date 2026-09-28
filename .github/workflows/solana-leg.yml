@@ -387,7 +387,23 @@ jobs:
           plan="$(sed -n 's/^bootstrap_plan=//p' "$RUNNER_TEMP/provisioned.env")"
           now="$(sed -n 's/^now_seconds=//p' "$RUNNER_TEMP/provisioned.env")"
           cargo run --release --manifest-path labs/dom-solana-daemon-route/Cargo.toml \
-            --example admit_route -- "$RUNNER_TEMP/route" "$plan" "$now" "$commit" "$reveal"
+            --example admit_route -- "$RUNNER_TEMP/route" "$plan" "$now" "$commit" "$reveal" \
+            "http://127.0.0.1:8899" "$RUNNER_TEMP/run-inputs"
+
+      # First step toward the daemon DRIVING this route rather than only admitting it.
+      # `run` reads one live-services document from the state directory, and this is the
+      # command that publishes it. It performs no RPC and grants no authority, so it is
+      # safe to reach here before a validator exists; the endpoint is only recorded.
+      #
+      # Its refusals are typed and redacted, so a failure here names the next missing
+      # input rather than requiring a long run to discover it.
+      - name: Publish the route's live services
+        run: |
+          set -euo pipefail
+          target/release/dom-interopd prepare-route-services-v11 \
+            --state-dir "$RUNNER_TEMP/route" \
+            < "$RUNNER_TEMP/run-inputs/route-services.json"
+          ls -l "$RUNNER_TEMP/route/production-route-services.v8.json"
 
   solana-leg-gate:
     name: Solana leg gate

@@ -30,12 +30,22 @@ use route_executor::LegIdV1;
 
 fn main() -> Result<(), String> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let [state_dir, plan_json, now_seconds, commit_hex, reveal_hex] = arguments.as_slice() else {
-        return Err(
-            "usage: admit_route <state-dir> <plan-json> <now-seconds> <commit-hex> <reveal-hex>"
-                .to_owned(),
-        );
-    };
+    let ([state_dir, plan_json, now_seconds, commit_hex, reveal_hex], run_inputs) =
+        match arguments.as_slice() {
+            [a, b, c, d, e] => ([a, b, c, d, e], None),
+            // The two extra arguments turn admission into admission PLUS the inputs a run
+            // needs: one Solana RPC endpoint the daemon should talk to, and a directory to
+            // leave them in. Admission itself is unchanged, so the proof above still stands
+            // on its own when they are absent.
+            [a, b, c, d, e, endpoint, out_dir] => {
+                ([a, b, c, d, e], Some((endpoint.clone(), PathBuf::from(out_dir))))
+            }
+            _ => {
+                return Err("usage: admit_route <state-dir> <plan-json> <now-seconds> \
+                            <commit-hex> <reveal-hex> [<solana-rpc-endpoint> <run-inputs-dir>]"
+                    .to_owned())
+            }
+        };
     // The same second the route was provisioned around. The registry's validity window, the
     // time policy's window and both schedules are all relative to it, so a different one
     // here would authenticate a route against a clock it was not built for.
@@ -109,7 +119,58 @@ fn main() -> Result<(), String> {
     }
     println!("route_id={}", hex(&inputs.admission().route_id()));
     println!("admitted=true");
+
+    if let Some((endpoint, out_dir)) = run_inputs {
+        // Everything below is public: the two digests `production-route-services.v8.json`
+        // must carry are the ones the daemon recomputes from this same admission, and both
+        // accessors that produce them are part of `dom-interopd`'s public surface. Nothing
+        // here is a second opinion about the route -- it is the route, restated in the one
+        // document the run reads.
+        let route_services = route_services_document(&inputs, &endpoint)?;
+        dom_solana_daemon_route::owner_only::directory(&out_dir)?;
+        dom_solana_daemon_route::owner_only::write(
+            &out_dir.join("route-services.json"),
+            route_services.as_bytes(),
+        )?;
+        println!("route_services={}", out_dir.join("route-services.json").display());
+    }
     Ok(())
+}
+
+/// The `prepare-route-services-v11` document, built from the admitted route.
+///
+/// `chain_id` is the COUNTERPARTY leg's, not the DOM leg's: this document names the service
+/// the daemon must reach for that position's own chain, and for both positions of this route
+/// that chain is Solana.
+fn route_services_document(
+    inputs: &dom_interopd::AuthenticatedProductionInputsV1,
+    endpoint: &str,
+) -> Result<String, String> {
+    let leg = |terms: &kaystra_core::terms::SettlementTermsV1| {
+        serde_json::json!({
+            "settlement_id": terms.settlement_id.0,
+            "chain_id": terms.counterparty_leg.chain_id.0,
+            "service": {
+                "family": "SOL",
+                "endpoints": [endpoint],
+                // One endpoint is one vote. A quorum above the number of endpoints would be
+                // unreachable by construction, and the daemon refuses it rather than
+                // silently settling for fewer confirmations than it was told to require.
+                "quorum": 1,
+            },
+        })
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "version": 8,
+        "route_id": inputs.admission().route_id(),
+        "composition_digest": inputs.composition().binding_digest(),
+        "registry_digest": inputs.admission().registry_digest(),
+        "legs": [
+            leg(inputs.composition().upstream()),
+            leg(inputs.composition().downstream()),
+        ],
+    }))
+    .map_err(|error| format!("encode the route services document: {error}"))
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
